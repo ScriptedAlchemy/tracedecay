@@ -25,6 +25,16 @@ use super::read_model::{
     DashboardFreshnessV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1, scope_from_state,
 };
 
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIndexLifecycleStateV1 {
+    Queued,
+    Indexing,
+    Stalled,
+    Failed,
+    Ready,
+}
+
 /// Freshness/generation state for one mounted worktree.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct CodeIndexWorktreeFreshnessV1 {
@@ -38,12 +48,28 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub source_reference: Option<String>,
     /// Latest sealed generation identity, when a complete generation exists.
     pub latest_generation_id: Option<String>,
+    /// Published project-graph watermark for the latest immutable generation.
+    pub graph_watermark: Option<String>,
     /// Content identity of the complete source snapshot.
     pub snapshot_content_identity: Option<String>,
     /// Time the complete generation was durably sealed.
     pub sealed_at_micros: Option<i64>,
     /// Last reconcile observation time (microseconds since the Unix epoch).
     pub last_reconcile_micros: Option<i64>,
+    /// Typed scheduler lifecycle state.
+    pub lifecycle_state: CodeIndexLifecycleStateV1,
+    /// File work completed in the active generation build.
+    pub processed_files: Option<u64>,
+    /// Total file work admitted for the active generation build.
+    pub total_files: Option<u64>,
+    /// Remaining admitted file work.
+    pub remaining_files: Option<u64>,
+    /// Observed file throughput; absent until enough elapsed evidence exists.
+    pub throughput_files_per_second: Option<f64>,
+    /// Evidence-based ETA lower bound, in microseconds.
+    pub eta_lower_micros: Option<u64>,
+    /// Evidence-based ETA upper bound, in microseconds.
+    pub eta_upper_micros: Option<u64>,
     /// Staleness-ladder state label (e.g. `fresh`, `stale`, `reresolving`).
     pub staleness_state: Option<String>,
     /// Pending hook-hint count, when cheaply available.
@@ -93,7 +119,7 @@ pub async fn freshness(
         Some(worktree)
             if worktree.latest_generation_id.is_some()
                 && worktree.coverage == "complete"
-                && worktree.staleness_state.as_deref() == Some("fresh") =>
+                && worktree.lifecycle_state == CodeIndexLifecycleStateV1::Ready =>
         {
             DashboardEnvelopeV1::ready(
                 scope_from_state(&state),
@@ -103,7 +129,12 @@ pub async fn freshness(
         }
         Some(worktree) if worktree.latest_generation_id.is_none() => DashboardEnvelopeV1::new(
             scope_from_state(&state),
-            if worktree.staleness_state.as_deref() == Some("indexing") {
+            if matches!(
+                worktree.lifecycle_state,
+                CodeIndexLifecycleStateV1::Queued
+                    | CodeIndexLifecycleStateV1::Indexing
+                    | CodeIndexLifecycleStateV1::Stalled
+            ) {
                 DashboardDomainStateV1::Loading
             } else {
                 DashboardDomainStateV1::Unknown
@@ -178,9 +209,17 @@ mod tests {
                     worktree_id: Some("worktree.fixture".to_owned()),
                     source_reference: Some("refs/heads/main".to_owned()),
                     latest_generation_id: Some("generation.fixture".to_owned()),
+                    graph_watermark: Some("graph-watermark.fixture".to_owned()),
                     snapshot_content_identity: Some("sha256:fixture".to_owned()),
                     sealed_at_micros: Some(41),
                     last_reconcile_micros: Some(42),
+                    lifecycle_state: CodeIndexLifecycleStateV1::Ready,
+                    processed_files: Some(12),
+                    total_files: Some(12),
+                    remaining_files: Some(0),
+                    throughput_files_per_second: None,
+                    eta_lower_micros: None,
+                    eta_upper_micros: None,
                     staleness_state: Some("fresh".to_owned()),
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),
@@ -214,9 +253,17 @@ mod tests {
                     worktree_id: None,
                     source_reference: None,
                     latest_generation_id: None,
+                    graph_watermark: None,
                     snapshot_content_identity: None,
                     sealed_at_micros: None,
                     last_reconcile_micros: Some(42),
+                    lifecycle_state: CodeIndexLifecycleStateV1::Indexing,
+                    processed_files: Some(2),
+                    total_files: Some(12),
+                    remaining_files: Some(10),
+                    throughput_files_per_second: Some(2.0),
+                    eta_lower_micros: Some(4_000_000),
+                    eta_upper_micros: Some(6_000_000),
                     staleness_state: Some("indexing".to_owned()),
                     hook_hint_count: Some(0),
                     coverage: "complete".to_owned(),

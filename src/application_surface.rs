@@ -25,8 +25,9 @@ use tracedecay_api::{
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
-    CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
-    CodeQueryScope, CodeRelationRequest, CodeTimelineRequest, ExactOccurrenceRequest,
+    CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest, CodeImplementationsRequest,
+    CodeLexicalFieldFilter, CodeNavigationRequest, CodeQueryScope, CodeRelationRequest,
+    CodeSignatureRequest, CodeSymbolSearchRequest, CodeTimelineRequest, ExactOccurrenceRequest,
     GraphRelationRequest, HealthDeltaRequest, ImplementationSelector, ImplementationsRequest,
     PhraseSearchRequest, SignatureSearchRequest, SymbolGraphScope, SymbolSearchPrimitiveRequest,
     TypeHierarchyRequest,
@@ -36,21 +37,19 @@ use tracedecay_application::{
     AdmitExecutionCommand, ApplicationContractError, ApplicationEnvelope, ApplicationOperation,
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
     AttachRuntimeEvidenceCommand, CancellationContext, CancellationSignal, CreateWorkCommand,
-    Deadline, HealthReadRequest, IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination,
-    PageRequest, ProblemOwningLayer, ReplanDependenciesCommand, RequestContext, RequestId,
-    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
-    RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
-    SourceLinesRequest, StreamEvent, StreamEventKind, WorkAttemptAcquireLeaseRequestV1,
+    Deadline, GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
+    GitHistorySurfaceRequest, GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadRequestV1,
+    GitReadSurfaceRequest, GitStatusSurfaceRequest, GitSurfaceDiffScopeV1, HealthReadRequest,
+    LegalAction, OpaqueCursor, OperationTermination, PageRequest, ProblemOwningLayer,
+    ReplanDependenciesCommand, RequestContext, RequestId, ResultContractRef, ResultProjection,
+    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, ReviewProposalRequestV1,
+    SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
+    UNPINNED_LATEST_GENERATION_SENTINEL, WorkAttemptAcquireLeaseRequestV1,
     WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
     WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
     WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
     WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
-};
-use tracedecay_application::{
-    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
-    GitHistorySurfaceRequest, GitHunksSurfaceRequest, GitPreviewSurfaceRequest,
-    GitReadRequestV1, GitReadSurfaceRequest, GitStatusSurfaceRequest, GitSurfaceDiffScopeV1,
 };
 use tracedecay_domain::configuration::{
     ConfigurationAuditEventId, ConfigurationLayerIdV1, ConfigurationRevisionId,
@@ -58,10 +57,9 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_domain::{
-    ExactTechnicalTermKindV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexTransactionOperationV1, HunkRefV1, ManifestDigest, ProjectId,
-    QueryNormalizationRevision, RepositoryStateSnapshotV1, SanitizerRevision, UtcMicros,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, canonical_sha256,
+    CodeGenerationId, ExactTechnicalTermKindV1, ManifestDigest, ProjectId,
+    QueryNormalizationRevision, SanitizerRevision, UtcMicros, WorkProjection,
+    WorkProjectionDeltaV1, WorkProjectionSnapshotV1, canonical_sha256,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, CatalogValidationError, FeatureId,
@@ -107,6 +105,65 @@ const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 const MAX_REQUEST_HANDLE_BYTES: usize = 256;
+
+fn deadline_duration_micros(
+    deadline: &tracedecay_tool_catalog::DeadlineContract,
+) -> Result<i64, ApplicationSurfaceAdapterError> {
+    i64::try_from(deadline.maximum_millis())
+        .ok()
+        .and_then(|millis| millis.checked_mul(1_000))
+        .ok_or(ApplicationSurfaceAdapterError::DeadlineOutOfRange)
+}
+
+fn catalog_capability_for_operation(
+    operation: ApplicationSurfaceOperation,
+) -> Result<&'static tracedecay_tool_catalog::CapabilityManifestV1, ApplicationSurfaceAdapterError>
+{
+    let catalog = application_surface_catalog_ref()?;
+    catalog
+        .capabilities()
+        .find(|capability| {
+            capability.binding_ids().iter().any(|binding_id| {
+                catalog
+                    .binding(binding_id)
+                    .is_some_and(|binding| binding.operation().as_str() == operation.as_str())
+            })
+        })
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)
+}
+
+fn http_default_deadline_micros(path: &str) -> Result<i64, ApplicationSurfaceAdapterError> {
+    let operation = path
+        .rsplit_once("/code/")
+        .and_then(|(_, operation)| (!operation.contains('/')).then_some(operation))
+        .and_then(ApplicationSurfaceOperation::from_catalog_name)
+        .filter(|operation| operation.is_callable_code_route());
+    match operation {
+        Some(operation) => {
+            deadline_duration_micros(catalog_capability_for_operation(operation)?.deadline())
+        }
+        None => Ok(DEFAULT_DEADLINE_MICROS),
+    }
+}
+
+fn catalog_deadline_for_binding(
+    binding_id: &BindingId,
+    observed_at: UtcMicros,
+) -> Result<Deadline, ApplicationSurfaceAdapterError> {
+    let catalog = application_surface_catalog_ref()?;
+    let binding = catalog
+        .binding(binding_id)
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    let capability = catalog
+        .capability(binding.capability_id())
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    let duration = deadline_duration_micros(capability.deadline())?;
+    let expires_at = observed_at
+        .0
+        .checked_add(duration)
+        .ok_or(ApplicationSurfaceAdapterError::DeadlineOutOfRange)?;
+    Ok(Deadline::new(UtcMicros(expires_at))?)
+}
 
 /// Canonical operation identity shared by HTTP, MCP, CLI, LSP, SSE, and
 /// dashboard adapters. The API crate owns the names and complete operation
@@ -316,6 +373,24 @@ pub struct CodeSymbolSearchSurfaceRequest {
 }
 
 impl CodeSymbolSearchSurfaceRequest {
+    pub fn into_application_request(
+        self,
+        sanitizer_revision: SanitizerRevision,
+        normalization_revision: QueryNormalizationRevision,
+        page: PageRequest,
+    ) -> Result<CodeSymbolSearchRequest, ApplicationContractError> {
+        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
+            self.query,
+            sanitizer_revision,
+            normalization_revision,
+        )?;
+        Ok(CodeSymbolSearchRequest {
+            query,
+            scope: unpinned_code_query_scope(self.scope)?,
+            meta: self.meta.into_application(page),
+        })
+    }
+
     pub(crate) fn into_primitive_request(
         self,
         sanitizer_revision: SanitizerRevision,
@@ -334,6 +409,17 @@ impl CodeSymbolSearchSurfaceRequest {
             meta: self.meta.into_application(page),
         })
     }
+}
+
+fn unpinned_code_query_scope(
+    scope: SymbolGraphScope,
+) -> Result<CodeQueryScope, ApplicationContractError> {
+    let generation = CodeGenerationId::new(UNPINNED_LATEST_GENERATION_SENTINEL).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "callable code generation sentinel",
+        }
+    })?;
+    CodeQueryScope::new(generation, scope.path_prefix)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -371,6 +457,63 @@ pub struct CodeCallersSurfaceRequest {
     pub resolve_trait_dispatch: bool,
     pub scope: SymbolGraphScope,
     pub meta: CallableCodeSurfaceMeta,
+}
+
+impl CodeSignatureSearchSurfaceRequest {
+    pub fn into_application_request(
+        self,
+        page: PageRequest,
+    ) -> Result<CodeSignatureRequest, ApplicationContractError> {
+        Ok(CodeSignatureRequest {
+            returns: self.returns,
+            params: self.params,
+            is_async: self.is_async,
+            scope: unpinned_code_query_scope(self.scope)?,
+            meta: self.meta.into_application(page),
+        })
+    }
+}
+
+impl CodeImplementationsSurfaceRequest {
+    pub fn into_application_request(
+        self,
+        page: PageRequest,
+    ) -> Result<CodeImplementationsRequest, ApplicationContractError> {
+        Ok(CodeImplementationsRequest {
+            selector: self.selector,
+            scope: unpinned_code_query_scope(self.scope)?,
+            meta: self.meta.into_application(page),
+        })
+    }
+}
+
+impl CodeTypeHierarchySurfaceRequest {
+    pub fn into_application_request(
+        self,
+        page: PageRequest,
+    ) -> Result<CodeHierarchyRequest, ApplicationContractError> {
+        Ok(CodeHierarchyRequest {
+            node_id: self.node_id,
+            maximum_depth: self.maximum_depth,
+            scope: unpinned_code_query_scope(self.scope)?,
+            meta: self.meta.into_application(page),
+        })
+    }
+}
+
+impl CodeCallersSurfaceRequest {
+    pub fn into_application_request(
+        self,
+        page: PageRequest,
+    ) -> Result<CodeRelationRequest, ApplicationContractError> {
+        Ok(CodeRelationRequest {
+            node_id: self.node_id,
+            maximum_depth: self.maximum_depth,
+            resolve_trait_dispatch: self.resolve_trait_dispatch,
+            scope: unpinned_code_query_scope(self.scope)?,
+            meta: self.meta.into_application(page),
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -529,6 +672,11 @@ impl CodeCalleesSurfaceRequest {
 pub enum CallableCodeSurfaceRequest {
     ExactOccurrence(CodeExactOccurrenceSurfaceRequest),
     PhraseSearch(CodePhraseSearchSurfaceRequest),
+    SymbolSearch(CodeSymbolSearchSurfaceRequest),
+    SignatureSearch(CodeSignatureSearchSurfaceRequest),
+    Implementations(CodeImplementationsSurfaceRequest),
+    TypeHierarchy(CodeTypeHierarchySurfaceRequest),
+    Callers(CodeCallersSurfaceRequest),
     Callees(CodeCalleesSurfaceRequest),
     Facets(CodeFacetSurfaceRequest),
     Timeline(CodeTimelineSurfaceRequest),
@@ -1540,14 +1688,19 @@ async fn application_http_context(
     let Ok(observed_at) = current_micros() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    let default_expires_at = observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS);
+    let Ok(default_duration) = http_default_deadline_micros(request.uri().path()) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Some(default_expires_at) = observed_at.0.checked_add(default_duration) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     let caller_expires_at = match request.headers().get(HTTP_DEADLINE_HEADER) {
         Some(value) => match value
             .to_str()
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
         {
-            Some(expires_at) => expires_at,
+            Some(expires_at) => expires_at.min(default_expires_at),
             None => return StatusCode::BAD_REQUEST.into_response(),
         },
         None => default_expires_at,
@@ -1746,6 +1899,7 @@ fn plan26_sse_stream_event<T>(event: &StreamEvent<T>) -> Option<(Plan26SseLifecy
                 OperationTermination::Completed => Plan26SseLifecycleV1::Completed,
                 OperationTermination::Cancelled => Plan26SseLifecycleV1::Cancelled,
                 OperationTermination::TimedOut => Plan26SseLifecycleV1::TimedOut,
+                OperationTermination::Unavailable => Plan26SseLifecycleV1::Unavailable,
                 OperationTermination::Failed | OperationTermination::EffectUnknown => {
                     Plan26SseLifecycleV1::Failed
                 }
@@ -2390,6 +2544,8 @@ pub enum ApplicationSurfaceAdapterError {
     InvalidRequestHandle,
     #[error("application surface request does not match its reviewed schema")]
     InvalidSurfaceRequest,
+    #[error("application surface deadline is out of range")]
+    DeadlineOutOfRange,
     #[error("owning daemon application service is unavailable")]
     DaemonUnavailable,
     #[error("application surface was not found or is not authorized")]
@@ -2545,23 +2701,23 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::CodeReferences
                 )
                 | (
-                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(_)),
+                    Self::CallableCode(CallableCodeSurfaceRequest::SymbolSearch(_)),
                     ApplicationSurfaceOperation::CodeSymbolSearch
                 )
                 | (
-                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::SignatureSearch(_)),
+                    Self::CallableCode(CallableCodeSurfaceRequest::SignatureSearch(_)),
                     ApplicationSurfaceOperation::CodeSignatureSearch
                 )
                 | (
-                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::Implementations(_)),
+                    Self::CallableCode(CallableCodeSurfaceRequest::Implementations(_)),
                     ApplicationSurfaceOperation::CodeImplementations
                 )
                 | (
-                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::TypeHierarchy(_)),
+                    Self::CallableCode(CallableCodeSurfaceRequest::TypeHierarchy(_)),
                     ApplicationSurfaceOperation::CodeTypeHierarchy
                 )
                 | (
-                    Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::Callers(_)),
+                    Self::CallableCode(CallableCodeSurfaceRequest::Callers(_)),
                     ApplicationSurfaceOperation::CodeCallers
                 )
                 | (
@@ -2885,32 +3041,32 @@ pub fn parse_application_surface_request(
         }
         ApplicationSurfaceOperation::CodeSymbolSearch => {
             serde_json::from_value::<CodeSymbolSearchSurfaceRequest>(value)
-                .map(PrimitiveCodeSurfaceRequest::SymbolSearch)
-                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map(CallableCodeSurfaceRequest::SymbolSearch)
+                .map(ApplicationSurfaceRequest::CallableCode)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::CodeSignatureSearch => {
             serde_json::from_value::<CodeSignatureSearchSurfaceRequest>(value)
-                .map(PrimitiveCodeSurfaceRequest::SignatureSearch)
-                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map(CallableCodeSurfaceRequest::SignatureSearch)
+                .map(ApplicationSurfaceRequest::CallableCode)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::CodeImplementations => {
             serde_json::from_value::<CodeImplementationsSurfaceRequest>(value)
-                .map(PrimitiveCodeSurfaceRequest::Implementations)
-                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map(CallableCodeSurfaceRequest::Implementations)
+                .map(ApplicationSurfaceRequest::CallableCode)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::CodeTypeHierarchy => {
             serde_json::from_value::<CodeTypeHierarchySurfaceRequest>(value)
-                .map(PrimitiveCodeSurfaceRequest::TypeHierarchy)
-                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map(CallableCodeSurfaceRequest::TypeHierarchy)
+                .map(ApplicationSurfaceRequest::CallableCode)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::CodeCallers => {
             serde_json::from_value::<CodeCallersSurfaceRequest>(value)
-                .map(PrimitiveCodeSurfaceRequest::Callers)
-                .map(ApplicationSurfaceRequest::PrimitiveCode)
+                .map(CallableCodeSurfaceRequest::Callers)
+                .map(ApplicationSurfaceRequest::CallableCode)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::CodeCallees => {
@@ -3162,9 +3318,10 @@ pub async fn execute_application_surface(
     let delivery_route = plan26_delivery_route(dispatched.surface);
     let (invocation, requested_format) = dispatched.invocation.into_application_invocation();
     let observed_at = current_micros()?;
-    let deadline = invocation.deadline.unwrap_or(Deadline::new(UtcMicros(
-        observed_at.0.saturating_add(DEFAULT_DEADLINE_MICROS),
-    ))?);
+    let deadline = match invocation.deadline {
+        Some(deadline) => deadline,
+        None => catalog_deadline_for_binding(&binding_id, observed_at)?,
+    };
     let cancellation = invocation.cancellation;
     let cancellation_context = cancellation.context();
     let request_deadline = deadline.clone();

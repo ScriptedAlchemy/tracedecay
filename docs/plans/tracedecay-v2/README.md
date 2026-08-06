@@ -13,20 +13,21 @@ These are contributor documents only and never product runtime input.
 Numbered plans define component behavior and boundaries, not separate
 crate-first work queues.
 
-`TraceDecay V2` is the product-roadmap name, not evidence that every contract
-or schema needs a V2 shape. A compatibility alias, deprecation path, dual
-reader/writer, contract/schema V2 or V3, or migration is required when the
-predecessor exists on `origin/master`, in a published package/release, an
-independently deployed client, a live host installation, or a live persisted
-format. Branch-local shapes, PR order, historical type names, tests, and future
-consumers are not publication evidence. Pure source-only/internal contracts
-change to their final shape in place. Wire-visible revisions remain negotiated
-until an authorized installed-client/host census proves absence. Anything
-potentially installed or written to a store, spool, file, or persisted
-projection fail-closes as live and preserves compatibility, backward-read, and
-migration/recovery until the applicable authorized census proves absence. A
-`V1` suffix may name an initial final wire format without requiring a sibling
-version by itself.
+`TraceDecay V2` is the product-roadmap name. V2 persistence is reset-only:
+old TraceDecay stores, spools, projections, sidecars, branch-local fact shards,
+and compatibility receipts are not read, migrated, backfilled, repaired,
+dual-written, or censused. They return typed `ResetRequired`. Historical
+agent-host transcripts/logs may still be ingested into final V2 stores as
+ordinary authorized V2 capture; that is not database migration.
+
+Durable facts are project-wide. Branches, refs, worktrees, commits, PRs,
+sessions, and agents may appear as provenance on a project fact, but they never
+own, shard, copy, merge, retire, or retain facts.
+
+Hosts, hooks, MCP, CLI, LSP, dashboard, SDKs, workers, and automation are
+clients of the daemon/application authority. LCM compression, live-turn
+projection, and session-boundary mutation are daemon hook-runtime effects.
+Doctor is read-only diagnostics/retention.
 
 ## Current product foundation
 
@@ -65,8 +66,10 @@ version by itself.
   authority; PR16 preserves exactly one fenced daemon authority per mutable
   shard. Hooks, clients, workers, MCP servers, dashboard handlers, and remote
   nodes send typed operations to the owning authority.
-- Project facts and project session/LCM data live in one canonical project-wide
-  store shared across branches and worktrees.
+- Project facts and project session/LCM data live in one canonical
+  project-wide store shared across branches and worktrees.
+- Branch, ref, worktree, commit, PR, session, and agent identifiers are
+  provenance, not fact-storage ownership boundaries.
 - Profile-wide user activity lives in the user/profile store.
 - Only code indexes are branch/worktree/snapshot scoped.
 - Worktrees resolve their project through the project registry and Git common
@@ -140,13 +143,13 @@ The authoritative acceptance rule in
 [00-plan-set-index.md](00-plan-set-index.md) applies to every active and
 historical plan.
 
-PR12 transport and PR18 SDK contracts prove structural, semantic, and lifecycle
-compatibility against supported old and current consumers evidenced by
-`origin/master`, a published package/release, an independently deployed client,
-or a live host installation. Potentially installed branch-era consumers remain
-in the compatibility set until an authorized installed-client/host census
-proves absence. Direct fault, restart, concurrency, cross-platform, migration,
-recovery, and deletion tests remain part of the product journey they protect.
+PR12 transport and PR18 SDK contracts preserve only independently released
+wire/API compatibility evidenced by a published package/release or a live
+deployed client. Branch history, `origin/master`, test fixtures, and merely
+possible installations do not justify compatibility code or a client census.
+This exception never extends to persisted TraceDecay stores. Direct fault,
+restart, concurrency, cross-platform, reset-required, recovery, and deletion
+tests remain part of the product journey they protect.
 
 Product, contributor, CI, release, and publication behavior preserves stock
 Cargo semantics. A slice that materially changes crate boundaries, dependency

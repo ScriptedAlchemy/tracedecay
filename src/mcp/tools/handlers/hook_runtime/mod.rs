@@ -40,7 +40,52 @@ use context_scout::{
 };
 use errors::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
-use ingest::{accounting_receipt, codex_compact};
+use ingest::{accounting_receipt, codex_compact, lcm_compact, lcm_preflight, lcm_session_boundary};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HookRuntimeTemporalScope {
+    Project,
+    User,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HookRuntimeTemporalRefresh {
+    pub(crate) scope: HookRuntimeTemporalScope,
+    pub(crate) wait_until_idle: bool,
+}
+
+/// The post-commit temporal refresh owned by each hook-runtime action.
+///
+/// Hook actions are the write boundary. Public LCM reads never acquire a
+/// refresh directive, and callers use this single action classification rather
+/// than reconstructing mutation rules from public tool names.
+pub(crate) fn temporal_refresh_after_success(args: &Value) -> Option<HookRuntimeTemporalRefresh> {
+    let action = args.get("action").and_then(Value::as_str)?;
+    let scope = if args.get("storage_scope").and_then(Value::as_str) == Some("user")
+        || (action == "ingest_transcript"
+            && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+    {
+        HookRuntimeTemporalScope::User
+    } else {
+        HookRuntimeTemporalScope::Project
+    };
+    let (mutates_temporal_state, wait_until_idle) = match action {
+        "lcm_preflight" => (
+            args.get("transcript_projection").and_then(Value::as_bool) == Some(true),
+            true,
+        ),
+        "ingest_transcript"
+        | "codex_compact"
+        | "cursor_compact"
+        | "lcm_compact"
+        | "lcm_session_boundary" => (true, false),
+        _ => (false, false),
+    };
+    mutates_temporal_state.then_some(HookRuntimeTemporalRefresh {
+        scope,
+        wait_until_idle,
+    })
+}
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -97,6 +142,18 @@ pub async fn handle_hook_runtime(
         }
         "codex_compact" => codex_compact(cg, &args, session_authorities).await?,
         "cursor_compact" => cursor_compact(cg, &args, session_authorities).await?,
+        "lcm_preflight" => {
+            lcm_preflight(
+                &args,
+                required_project_db(session_authorities)?,
+                Some(cg.project_root()),
+            )
+            .await?
+        }
+        "lcm_compact" => lcm_compact(&args, required_project_db(session_authorities)?).await?,
+        "lcm_session_boundary" => {
+            lcm_session_boundary(&args, required_project_db(session_authorities)?).await?
+        }
         other => {
             return Err(config_error(format!(
                 "unknown hook runtime action: {other}"
@@ -171,7 +228,18 @@ pub(crate) async fn handle_projectless_hook_runtime(
             )
             .await?
         }
-        _ => unreachable!("projectless hook action validated above"),
+        "lcm_compact" => lcm_compact(&args, required_user_db(session_authorities)?).await?,
+        "lcm_preflight" => {
+            lcm_preflight(&args, required_user_db(session_authorities)?, None).await?
+        }
+        "lcm_session_boundary" => {
+            lcm_session_boundary(&args, required_user_db(session_authorities)?).await?
+        }
+        other => {
+            return Err(config_error(format!(
+                "projectless hook runtime action `{other}` is forbidden"
+            )));
+        }
     };
     Ok(tool_json(None, &args, &output))
 }
@@ -180,6 +248,10 @@ fn projectless_action_allowed(action: &str, args: &Value) -> bool {
     matches!(action, "user_review" | "hermes_receipt")
         || (action == "ingest_transcript"
             && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+        || (matches!(
+            action,
+            "lcm_preflight" | "lcm_compact" | "lcm_session_boundary"
+        ) && args.get("storage_scope").and_then(Value::as_str) == Some("user"))
 }
 
 fn required_value(args: &Value, key: &str) -> Result<Value> {

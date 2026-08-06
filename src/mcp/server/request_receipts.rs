@@ -1,6 +1,7 @@
 //! Canonical execution-receipt finalization for every MCP transport.
 
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use super::request_lifecycle::McpWorkerReconciliationReceipt;
 use super::{McpRequestStart, McpToolDispatchControl, tool_errors::tool_error_response};
@@ -8,6 +9,11 @@ use crate::errors::TraceDecayError;
 use crate::mcp::transport::{ErrorCode, JsonRpcResponse};
 
 pub(super) const EXECUTION_RECEIPT_KEY: &str = "tracedecay/execution_receipt";
+pub(crate) const APPLICATION_TERMINAL_KEY: &str = "tracedecay/application_terminal";
+
+fn checked_elapsed_micros(elapsed: Duration) -> Option<u64> {
+    u64::try_from(elapsed.as_micros()).ok()
+}
 
 pub(crate) fn is_project_retirement_reason_code(reason_code: Option<&str>) -> bool {
     matches!(
@@ -17,7 +23,7 @@ pub(crate) fn is_project_retirement_reason_code(reason_code: Option<&str>) -> bo
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum McpToolCallTerminal {
+pub(crate) enum McpToolCallTerminal {
     Completed,
     Failed,
     Denied,
@@ -28,7 +34,7 @@ pub(super) enum McpToolCallTerminal {
 }
 
 impl McpToolCallTerminal {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -71,12 +77,20 @@ impl McpToolCallTiming {
         worker_settlement: &str,
         worker_reconciliation: Option<McpWorkerReconciliationReceipt>,
     ) -> Value {
-        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let elapsed_us = checked_elapsed_micros(self.started.elapsed());
         let mut receipt = json!({
             "total_us": elapsed_us,
             "terminal": terminal.as_str(),
             "worker_settlement": worker_settlement,
         });
+        if elapsed_us.is_none()
+            && let Some(object) = receipt.as_object_mut()
+        {
+            object.insert(
+                "timing_state".to_owned(),
+                Value::String("elapsed_microseconds_overflow".to_owned()),
+            );
+        }
         if let Some(reconciliation) = worker_reconciliation
             && let Some(object) = receipt.as_object_mut()
         {
@@ -94,6 +108,22 @@ impl McpToolCallTiming {
 
 fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal {
     let Some(error) = response.error.as_ref() else {
+        if let Some(terminal) = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("_meta"))
+            .and_then(|meta| meta.get(APPLICATION_TERMINAL_KEY))
+            .and_then(Value::as_str)
+        {
+            return match terminal {
+                "cancelled" => McpToolCallTerminal::Cancelled,
+                "deadline_exceeded" | "timed_out" => McpToolCallTerminal::DeadlineExceeded,
+                "denied" => McpToolCallTerminal::Denied,
+                "unavailable" => McpToolCallTerminal::Unavailable,
+                "failed" | "effect_unknown" => McpToolCallTerminal::Failed,
+                _ => McpToolCallTerminal::Completed,
+            };
+        }
         return if response
             .result
             .as_ref()
@@ -120,6 +150,7 @@ fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal
             | "catalog_binding_unavailable"
             | "daemon_draining"
             | "mcp_dispatch_effect_journey_unverified"
+            | "mcp_dispatch_surface_not_mounted"
             | "message_search_unavailable"
             | "project_route_unavailable"
             | "project_server_health_revoked"
@@ -184,10 +215,11 @@ pub(crate) fn finish_transport_cancelled_tool_call_response(
     id: Value,
     tool_name: &str,
     started: McpRequestStart,
+    control: Option<&McpToolDispatchControl>,
 ) -> JsonRpcResponse {
     let mut response = JsonRpcResponse::error_with_data(
         id,
-        ErrorCode::InternalError,
+        ErrorCode::RequestCancelled,
         format!("tool '{tool_name}' was cancelled by the MCP client"),
         Some(json!({
             "tool": tool_name,
@@ -197,11 +229,7 @@ pub(crate) fn finish_transport_cancelled_tool_call_response(
     );
     response = attach_execution_receipt(
         response,
-        McpToolCallTiming::new(started).receipt_with_worker_settlement(
-            McpToolCallTerminal::Cancelled,
-            "indeterminate",
-            None,
-        ),
+        McpToolCallTiming::new(started).receipt(McpToolCallTerminal::Cancelled, control),
     );
     response
 }
@@ -244,6 +272,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn elapsed_timing_overflow_is_explicit_instead_of_fabricated() {
+        assert_eq!(checked_elapsed_micros(Duration::MAX), None);
+    }
+
+    #[test]
     fn early_failure_receipt_does_not_fabricate_a_worker_join() {
         let response = JsonRpcResponse::error(
             json!(1),
@@ -283,6 +316,23 @@ mod tests {
         assert_eq!(
             response.result.expect("tool result")["_meta"][EXECUTION_RECEIPT_KEY]["terminal"],
             "failed"
+        );
+    }
+
+    #[test]
+    fn application_unavailable_metadata_is_an_unavailable_terminal() {
+        let response = JsonRpcResponse::success(
+            json!(1),
+            json!({
+                "content": [{"type": "text", "text": "temporarily unavailable"}],
+                "isError": true,
+                "_meta": {(APPLICATION_TERMINAL_KEY): "unavailable"},
+            }),
+        );
+        let response = finish_early_tool_call_response(response, McpRequestStart::now());
+        assert_eq!(
+            response.result.expect("tool result")["_meta"][EXECUTION_RECEIPT_KEY]["terminal"],
+            "unavailable"
         );
     }
 

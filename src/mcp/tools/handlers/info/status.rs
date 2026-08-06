@@ -42,66 +42,26 @@ fn status_arg_flag(args: &Value, key: &str, default: bool) -> bool {
 }
 
 fn attach_compact_branch_summary(cg: &TraceDecay, output: &mut Value) {
-    // Avoid `branch_diagnostics()` — it walks tracked-branch metadata, git
-    // ancestry, and per-branch filesystem stats. Compact CLI status only needs
-    // the already-resolved serving identity retained on TraceDecay.
-    // Do not alias open/active into current/live: those are distinct under drift.
     if let Some(active) = cg.active_branch() {
         output["active_branch"] = json!(active);
-    }
-    if let Some(serving) = cg.serving_branch() {
-        output["serving_branch"] = json!(serving);
-    }
-    if let Some(warning) = cg.fallback_warning() {
-        output["branch_fallback"] = json!(true);
-        output["branch_warning"] = json!(warning);
     }
 }
 
 fn attach_full_branch_status(cg: &TraceDecay, args: &Value, output: &mut Value) {
     let branch_diagnostics = cg.branch_diagnostics();
-    if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
-        output["active_branch"] = json!(open_branch);
+    if let Some(selected_branch) = branch_diagnostics.selected_branch.as_deref() {
+        output["selected_branch"] = json!(selected_branch);
     }
     if let Some(current_branch) = branch_diagnostics.current_branch.as_deref() {
         output["current_branch"] = json!(current_branch);
         output["live_branch"] = json!(current_branch);
     }
-    if let Some(serving_branch) = branch_diagnostics.serving_branch.as_deref() {
-        output["serving_branch"] = json!(serving_branch);
-    }
-    if let Some(parent) = branch_diagnostics
-        .branches
-        .iter()
-        .find(|entry| entry.is_serving)
-        .and_then(|entry| entry.parent.as_deref())
-    {
-        output["parent_branch"] = json!(parent);
-    }
-    output["branch_drifted"] = json!(branch_diagnostics.branch_drifted);
-    output["branch_resolution"] = json!(branch_diagnostics.branch_resolution.clone());
-    output["tracked_branch_count"] = json!(branch_diagnostics.tracked_branch_count);
-    output["serving_db_path"] = json!(branch_diagnostics.serving_db_path);
-    output["serving_db_exists"] = json!(branch_diagnostics.serving_db_exists);
+    output["branch_snapshot_count"] = json!(branch_diagnostics.snapshot_count);
+    output["project_store_path"] = json!(branch_diagnostics.project_store_path);
+    output["project_store_exists"] = json!(branch_diagnostics.project_store_exists);
     if status_arg_flag(args, "include_branch_diagnostics", true) {
         output["branch_diagnostics"] =
             serde_json::to_value(&branch_diagnostics).unwrap_or(json!({}));
-    }
-    if branch_diagnostics.branch_drifted {
-        output["branch_mismatch"] = json!({
-            "git_branch": branch_diagnostics.current_branch,
-            "indexed_branch": branch_diagnostics.open_active_branch,
-            "serving_branch": branch_diagnostics.serving_branch,
-        });
-    }
-    if branch_diagnostics.is_fallback {
-        output["branch_fallback"] = json!(true);
-        if let Some(target) = branch_diagnostics.fallback_target.as_deref() {
-            output["branch_fallback_target"] = json!(target);
-        }
-        if let Some(warning) = branch_diagnostics.fallback_warning.as_deref() {
-            output["branch_warning"] = json!(warning);
-        }
     }
     if !branch_diagnostics.warnings.is_empty() {
         output["branch_warnings"] = json!(branch_diagnostics.warnings);
@@ -359,16 +319,10 @@ fn active_project_context(
         },
         "branch": {
             "current_branch": branch.current_branch.clone(),
-            "open_active_branch": branch.open_active_branch.clone(),
-            "serving_branch": branch.serving_branch.clone(),
-            "serving_db_path": display_path(&branch.serving_db_path),
-            "serving_db_exists": branch.serving_db_exists,
-            "branch_resolution": branch.branch_resolution.clone(),
-            "branch_drifted": branch.branch_drifted,
-            "is_fallback": branch.is_fallback,
-            "fallback_target": branch.fallback_target.clone(),
-            "fallback_warning": branch.fallback_warning.clone(),
-            "tracked_branch_count": branch.tracked_branch_count,
+            "selected_branch": branch.selected_branch.clone(),
+            "project_store_path": display_path(&branch.project_store_path),
+            "project_store_exists": branch.project_store_exists,
+            "snapshot_count": branch.snapshot_count,
             "warnings": branch.warnings.clone(),
         }
     });

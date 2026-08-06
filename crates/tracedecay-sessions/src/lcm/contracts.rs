@@ -157,35 +157,29 @@ pub enum LcmExpandTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LcmExpandRequest {
     pub provider: String,
     pub session_id: String,
     pub target: LcmExpandTarget,
     pub content_slice: Option<LcmContentSlice>,
-    /// Zero-based offset into a summary node's immediate source list
-    /// (summary-node targets only). Mirrors hermes-lcm `lcm_expand`
-    /// `source_offset`.
-    #[serde(default)]
+    /// Internal renderer position resolved from an authenticated continuation
+    /// boundary. This field is never accepted from a public request.
+    #[serde(skip)]
     pub source_offset: usize,
-    /// Maximum number of immediate sources returned from `source_offset`
-    /// (summary-node targets only). `None` returns all remaining sources,
-    /// mirroring hermes-lcm `lcm_expand` `source_limit`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Internal bounded page size selected by the canonical route.
+    #[serde(skip)]
     pub source_limit: Option<usize>,
 }
 
-/// Pagination metadata for a summary node's immediate source list, mirroring
-/// the hermes-lcm `lcm_expand` pagination payload (`_pagination_payload` in
-/// `tools.py`). `TraceDecay` slices each returned source by characters via
-/// `content_slice` instead of sharing a token budget across sources, so the
-/// resume cursor is `next_source_offset` alone.
+/// Public pagination metadata for a summary node's immediate source list.
+/// Continuation position is exposed only through the authenticated opaque
+/// temporal cursor returned alongside the expansion.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LcmExpandSourcePagination {
-    pub source_offset: usize,
-    pub source_limit: usize,
     pub returned_sources: usize,
     pub total_sources: usize,
-    pub next_source_offset: Option<usize>,
     pub has_more: bool,
     pub remaining_sources: usize,
 }

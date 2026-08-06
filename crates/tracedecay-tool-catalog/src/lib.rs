@@ -41,10 +41,10 @@ pub use manifest::{
     TerminalStateContract, UnavailabilityReason,
 };
 pub use mcp::{
-    MCP_DISPATCH_CONTRACT_VERSION, McpDeadlineContractV1, McpDispatchAvailability,
-    McpDispatchCatalogError, McpDispatchCatalogV1, McpDispatchContractInputV1,
-    McpDispatchContractV1, McpDispatchUnavailableReason, McpIdempotencyContract,
-    McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
+    MCP_DISPATCH_CONTRACT_VERSION, McpDispatchAvailability, McpDispatchCatalogError,
+    McpDispatchCatalogV1, McpDispatchContractInputV1, McpDispatchContractV1,
+    McpDispatchUnavailableReason, McpIdempotencyContract, McpInverseContract,
+    McpInverseUnavailableReason, McpTerminalState,
 };
 pub use profile::{
     ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,

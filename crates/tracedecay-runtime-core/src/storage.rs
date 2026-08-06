@@ -17,11 +17,7 @@ pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const PROFILE_IDENTITY_FILENAME: &str = "profile-identity.json";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
-pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
 pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
-/// Filename prefix for corrupt `branch-meta.json` files renamed out of the
-/// way by the post-update health pass (`branch-meta.json.corrupt-<timestamp>`).
-pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -121,7 +117,6 @@ pub struct StoreLayout {
     pub data_root: PathBuf,
     pub graph_db_path: PathBuf,
     pub config_path: PathBuf,
-    pub branch_meta_path: PathBuf,
     pub sessions_db_path: PathBuf,
     pub response_handle_root: PathBuf,
     pub lcm_payload_root: PathBuf,
@@ -129,7 +124,6 @@ pub struct StoreLayout {
     pub manifest_path: Option<PathBuf>,
     pub dirty_path: PathBuf,
     pub sync_lock_path: PathBuf,
-    pub branch_add_lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,7 +302,6 @@ pub struct StoreManifest {
     pub data_root: PathBuf,
     pub graph_db_relpath: PathBuf,
     pub sessions_db_relpath: PathBuf,
-    pub branch_meta_relpath: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,13 +442,8 @@ pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result
 /// The repository-wide identity marker shared by every checkout of a
 /// repository, including detached linked worktrees.
 ///
-/// Detached worktrees were once excluded here so they could not be served
-/// another checkout's index. That protection belongs to the graph-scope axis,
-/// not the identity axis: a detached HEAD in the *primary* checkout already
-/// shares the repository store and is served the default-branch index with an
-/// explicit fallback warning (see `TraceDecay::resolve_db_for_branch`).
-/// Excluding only the worktree case bought no extra safety and cost a
-/// duplicate project store per detached worktree.
+/// Graph scope is separate from project identity, so a detached worktree still
+/// resolves the same project store while retaining its exact checkout scope.
 pub fn repository_identity_path(project_root: &Path) -> Option<PathBuf> {
     crate::worktree::git_common_dir(project_root)
         .map(|common_dir| common_dir.join(REPOSITORY_IDENTITY_FILENAME))
@@ -729,14 +717,15 @@ pub fn resolve_persisted_layout(
 ) -> Result<Option<StoreLayout>> {
     if let Some(marker) = read_enrollment_marker(project_root)? {
         if marker.storage_mode != StorageMode::ProfileSharded {
-            return Err(TraceDecayError::Config {
-                message: format!(
+            return Err(TraceDecayError::reset_required(
+                "project-storage",
+                format!(
                     "unsupported storage_mode={:?} in enrollment marker for '{}'; \
-                     run TraceDecay migration to move this project into the user profile store",
+                     remove the marker and project store, then let TraceDecay enroll it again",
                     marker.storage_mode,
                     project_root.display()
                 ),
-            });
+            ));
         }
         return profile_sharded_layout(project_root, profile_root, &marker).map(Some);
     }
@@ -1030,7 +1019,6 @@ impl StoreManifest {
             data_root: layout.data_root.clone(),
             graph_db_relpath: relative_to_data_root(&layout.graph_db_path, &layout.data_root),
             sessions_db_relpath: relative_to_data_root(&layout.sessions_db_path, &layout.data_root),
-            branch_meta_relpath: relative_to_data_root(&layout.branch_meta_path, &layout.data_root),
         }
     }
 }
@@ -1392,7 +1380,7 @@ pub fn append_lock_path(path: &Path) -> PathBuf {
 //      mmap/config file where readers must never see a torn write and a crashed
 //      holder must not leave a stale marker (the OS drops the lock on process
 //      death). Callers: private-store appends, the automation run ledger, the
-//      monitor ring buffer and single-instance guard, the structured-backfill
+//      monitor ring buffer and single-instance guard, the transcript acquisition
 //      sweep, and the user-config save.
 //   2. Atomic rename + hash ownership (see `write_file_atomically` and the
 //      dashboard curation writers). Write a sibling temp file and `rename` it
@@ -1547,7 +1535,6 @@ impl StoreLayout {
     ) -> Self {
         let graph_db_path = data_root.join(config::db_filename(&data_root));
         let config_path = data_root.join("config.json");
-        let branch_meta_path = data_root.join(BRANCH_META_FILENAME);
         let sessions_db_path = data_root.join(SESSIONS_DB_FILENAME);
         let response_handle_root = data_root.join("response-handles");
         let lcm_payload_root = data_root.join("lcm-payloads");
@@ -1555,7 +1542,6 @@ impl StoreLayout {
         let manifest_path = manifest_filename.map(|filename| data_root.join(filename));
         let dirty_path = data_root.join("dirty");
         let sync_lock_path = data_root.join("sync.lock");
-        let branch_add_lock_path = data_root.join(".branch-add.lock");
         Self {
             identity,
             store_kind,
@@ -1564,7 +1550,6 @@ impl StoreLayout {
             data_root,
             graph_db_path,
             config_path,
-            branch_meta_path,
             sessions_db_path,
             response_handle_root,
             lcm_payload_root,
@@ -1572,7 +1557,6 @@ impl StoreLayout {
             manifest_path,
             dirty_path,
             sync_lock_path,
-            branch_add_lock_path,
         }
     }
 }

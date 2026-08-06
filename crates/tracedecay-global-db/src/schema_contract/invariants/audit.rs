@@ -8,14 +8,10 @@ use tracedecay_store::{
 };
 
 use crate::global_db_operation_error;
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::rows::{authority_violation, decode_authority_json};
-use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, OPERATION, projection_checkpoint};
-const AUDIT_NAME: &str = "observation-authority";
-
-const AUDIT_VERSION: i64 = 2;
-pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
+use super::{AUDIT_PAGE_ROWS, OPERATION};
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
 const DETAILED_TAIL_CONCURRENCY: usize = 1;
 // Amortize the page query across several bounded validation chunks while
@@ -23,311 +19,13 @@ const DETAILED_TAIL_CONCURRENCY: usize = 1;
 const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 3;
 const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize =
     DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE;
-const PROJECTION_PROGRESS_PAGE_INTERVAL: i64 = 1;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct AuditCheckpoint {
-    pub(super) receipt_rowid: i64,
-    pub(super) observation_sequence: i64,
-    pub(super) source_cursor_rowid: i64,
-    pub(super) source_advance_rowid: i64,
     pub(super) provenance_rowid: i64,
     pub(super) disposition_rowid: i64,
     pub(super) alias_rowid: i64,
     pub(super) projection_checkpoint: i64,
-    pub(super) bounded_passes_since_exhaustive: i64,
-}
-
-pub(super) struct AuditProgress {
-    pub(super) checkpoint: AuditCheckpoint,
-    pub(super) receipts_audited: i64,
-    pub(super) observations_audited: i64,
-    pub(super) provenance_audited: i64,
-    pub(super) dispositions_audited: i64,
-    pub(super) aliases_audited: i64,
-}
-
-pub(super) async fn ensure_audit_checkpoint_schema(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    validate_existing_audit_checkpoint_baseline(conn).await?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS authority_audit_checkpoints (
-            audit_name TEXT PRIMARY KEY,
-            audit_version INTEGER NOT NULL,
-            receipt_rowid INTEGER NOT NULL,
-            observation_sequence INTEGER NOT NULL,
-            source_cursor_rowid INTEGER NOT NULL DEFAULT 0,
-            source_advance_rowid INTEGER NOT NULL DEFAULT 0,
-            provenance_rowid INTEGER NOT NULL,
-            disposition_rowid INTEGER NOT NULL,
-            alias_rowid INTEGER NOT NULL,
-            projection_checkpoint INTEGER NOT NULL,
-            last_receipts_audited INTEGER NOT NULL,
-            last_observations_audited INTEGER NOT NULL,
-            last_provenance_audited INTEGER NOT NULL,
-            last_dispositions_audited INTEGER NOT NULL,
-            last_aliases_audited INTEGER NOT NULL,
-            bounded_passes_since_exhaustive INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS authority_foreign_key_audit_progress (
-            audit_name TEXT PRIMARY KEY,
-            last_table TEXT NOT NULL
-        );",
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM pragma_table_xinfo('authority_audit_checkpoints')
-             WHERE name = 'bounded_passes_since_exhaustive'",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let has_bounded_passes = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .is_some();
-    drop(rows);
-    if !has_bounded_passes {
-        conn.execute(
-            "ALTER TABLE authority_audit_checkpoints
-             ADD COLUMN bounded_passes_since_exhaustive INTEGER NOT NULL DEFAULT 0",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    }
-    let mut rows = conn
-        .query(
-            "SELECT name FROM pragma_table_xinfo('authority_audit_checkpoints')
-             WHERE name IN ('source_cursor_rowid', 'source_advance_rowid')",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let mut has_source_cursor_rowid = false;
-    let mut has_source_advance_rowid = false;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        match row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .as_str()
-        {
-            "source_cursor_rowid" => has_source_cursor_rowid = true,
-            "source_advance_rowid" => has_source_advance_rowid = true,
-            _ => {}
-        }
-    }
-    drop(rows);
-    if !has_source_cursor_rowid {
-        conn.execute(
-            "ALTER TABLE authority_audit_checkpoints
-             ADD COLUMN source_cursor_rowid INTEGER NOT NULL DEFAULT 0",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    }
-    if !has_source_advance_rowid {
-        conn.execute(
-            "ALTER TABLE authority_audit_checkpoints
-             ADD COLUMN source_advance_rowid INTEGER NOT NULL DEFAULT 0",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    }
-    Ok(())
-}
-
-async fn validate_existing_audit_checkpoint_baseline(
-    conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM sqlite_schema
-             WHERE type = 'table' AND name = 'authority_audit_checkpoints'",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let exists = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| authority_violation("audit checkpoint catalog query returned no row"))?
-        .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        != 0;
-    drop(rows);
-    if !exists {
-        return Ok(());
-    }
-
-    const REQUIRED_BASELINE_COLUMNS: i64 = 13;
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*) FROM pragma_table_xinfo('authority_audit_checkpoints')
-             WHERE name IN (
-                'audit_name', 'audit_version', 'receipt_rowid',
-                'observation_sequence', 'provenance_rowid', 'disposition_rowid',
-                'alias_rowid', 'projection_checkpoint', 'last_receipts_audited',
-                'last_observations_audited', 'last_provenance_audited',
-                'last_dispositions_audited', 'last_aliases_audited'
-             )",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let found = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| authority_violation("audit checkpoint shape query returned no row"))?
-        .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if found != REQUIRED_BASELINE_COLUMNS {
-        return Err(authority_violation(
-            "authority audit checkpoint table is missing required baseline columns",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) async fn read_audit_checkpoint(
-    conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<Option<AuditCheckpoint>> {
-    let mut rows = conn
-        .query(
-            "SELECT receipt_rowid, observation_sequence,
-                    source_cursor_rowid, source_advance_rowid,
-                    provenance_rowid, disposition_rowid, alias_rowid, projection_checkpoint,
-                    bounded_passes_since_exhaustive
-             FROM authority_audit_checkpoints
-             WHERE audit_name = ?1 AND audit_version = ?2",
-            params![AUDIT_NAME, AUDIT_VERSION],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(AuditCheckpoint {
-        receipt_rowid: row
-            .get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        observation_sequence: row
-            .get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_cursor_rowid: row
-            .get(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_advance_rowid: row
-            .get(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
-            .get(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
-            .get(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
-            .get(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
-            .get(7)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        bounded_passes_since_exhaustive: row
-            .get(8)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-    }))
-}
-
-pub(super) async fn audit_checkpoint_is_plausible(
-    conn: &impl QueryExecutor,
-    checkpoint: AuditCheckpoint,
-) -> tracedecay_runtime_core::errors::Result<bool> {
-    if checkpoint.receipt_rowid < 0
-        || checkpoint.observation_sequence < 0
-        || checkpoint.source_cursor_rowid < 0
-        || checkpoint.source_advance_rowid < 0
-        || checkpoint.provenance_rowid < 0
-        || checkpoint.disposition_rowid < 0
-        || checkpoint.alias_rowid < 0
-        || checkpoint.projection_checkpoint < 0
-        || !(-1..MAX_BOUNDED_AUDIT_PASSES).contains(&checkpoint.bounded_passes_since_exhaustive)
-    {
-        return Ok(false);
-    }
-    let mut rows = conn
-        .query(
-            "SELECT
-                COALESCE((SELECT MAX(rowid) FROM sanitization_receipts), 0),
-                COALESCE((SELECT MAX(sequence) FROM observations), 0),
-                COALESCE((SELECT MAX(rowid) FROM source_cursors), 0),
-                COALESCE((SELECT MAX(rowid) FROM source_cursor_advances), 0),
-                COALESCE((SELECT MAX(rowid) FROM observation_projection_provenance), 0),
-                COALESCE((SELECT MAX(rowid) FROM observation_projection_dispositions), 0),
-                COALESCE((SELECT MAX(rowid) FROM observation_projection_aliases), 0),
-                COALESCE((
-                    SELECT last_sequence FROM observation_projection_checkpoints
-                    WHERE projector_version = ?1
-                ), 0)",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .ok_or_else(|| authority_violation("audit checkpoint frontier query returned no row"))?;
-    let frontiers = AuditCheckpoint {
-        receipt_rowid: row
-            .get(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        observation_sequence: row
-            .get(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_cursor_rowid: row
-            .get(2)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        source_advance_rowid: row
-            .get(3)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
-            .get(4)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
-            .get(5)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
-            .get(6)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
-            .get(7)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        ..AuditCheckpoint::default()
-    };
-    Ok(checkpoint.receipt_rowid <= frontiers.receipt_rowid
-        && checkpoint.observation_sequence <= frontiers.observation_sequence
-        && checkpoint.source_cursor_rowid <= frontiers.source_cursor_rowid
-        && checkpoint.source_advance_rowid <= frontiers.source_advance_rowid
-        && checkpoint.provenance_rowid <= frontiers.provenance_rowid
-        && checkpoint.disposition_rowid <= frontiers.disposition_rowid
-        && checkpoint.alias_rowid <= frontiers.alias_rowid
-        && checkpoint.projection_checkpoint <= frontiers.projection_checkpoint)
 }
 
 #[derive(Clone, Copy)]
@@ -1005,17 +703,31 @@ async fn projection_rowid_through_sequence(
         .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
+async fn projection_checkpoint(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<i64> {
+    let mut rows = conn
+        .query(
+            "SELECT COALESCE((
+                SELECT last_sequence FROM observation_projection_checkpoints
+                WHERE projector_version = ?1
+             ), 0)",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .ok_or_else(|| authority_violation("projection checkpoint query returned no row"))?
+        .get(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))
+}
+
 async fn projection_audit_checkpoint_through_sequence(
     conn: &impl QueryExecutor,
-    checkpoint: AuditCheckpoint,
     observation_sequence: i64,
 ) -> tracedecay_runtime_core::errors::Result<AuditCheckpoint> {
-    if checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS {
-        return Ok(AuditCheckpoint {
-            projection_checkpoint: observation_sequence,
-            ..checkpoint
-        });
-    }
     Ok(AuditCheckpoint {
         provenance_rowid: projection_rowid_through_sequence(
             conn,
@@ -1036,12 +748,11 @@ async fn projection_audit_checkpoint_through_sequence(
         )
         .await?,
         projection_checkpoint: observation_sequence,
-        ..checkpoint
     })
 }
 
-fn historical_projection_delta_required(checkpoint: AuditCheckpoint) -> bool {
-    checkpoint.bounded_passes_since_exhaustive != INCOMPLETE_EXHAUSTIVE_PASS
+fn historical_projection_delta_required(_checkpoint: AuditCheckpoint) -> bool {
+    true
 }
 
 async fn validate_projection_authority_suffix_pages(
@@ -1240,16 +951,14 @@ async fn validate_projection_authority_suffix_pages(
             .await?;
             let validated_through = chunk.last().map_or(scan_cursor, |(sequence, _)| *sequence);
             checkpoint =
-                projection_audit_checkpoint_through_sequence(conn, checkpoint, validated_through)
-                    .await?;
+                projection_audit_checkpoint_through_sequence(conn, validated_through).await?;
         }
         pages_audited += 1;
         if page_rows < AUDIT_PAGE_ROWS && !detailed_limit_reached {
             break;
         }
         if page_limit.is_some_and(|limit| pages_audited >= limit) {
-            checkpoint =
-                projection_audit_checkpoint_through_sequence(conn, checkpoint, scan_cursor).await?;
+            checkpoint = projection_audit_checkpoint_through_sequence(conn, scan_cursor).await?;
             return Ok((
                 checkpoint,
                 provenance_audited,
@@ -1327,75 +1036,6 @@ pub(super) async fn validate_projection_authority_suffix(
     Ok((checkpoint, provenance, dispositions, aliases))
 }
 
-pub(super) async fn validate_projection_authority_chunk(
-    conn: &impl QueryExecutor,
-    checkpoint: AuditCheckpoint,
-) -> tracedecay_runtime_core::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
-    validate_projection_authority_suffix_pages(
-        conn,
-        checkpoint,
-        Some(PROJECTION_PROGRESS_PAGE_INTERVAL),
-    )
-    .await
-}
-
-pub(super) async fn write_audit_checkpoint(
-    conn: &impl Executor,
-    progress: AuditProgress,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let checkpoint = progress.checkpoint;
-    conn.execute(
-        "INSERT INTO authority_audit_checkpoints (
-            audit_name, audit_version, receipt_rowid, observation_sequence,
-            source_cursor_rowid, source_advance_rowid,
-            provenance_rowid, disposition_rowid, alias_rowid, projection_checkpoint,
-            last_receipts_audited, last_observations_audited,
-            last_provenance_audited, last_dispositions_audited, last_aliases_audited,
-            bounded_passes_since_exhaustive
-         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-            ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
-         )
-         ON CONFLICT(audit_name) DO UPDATE SET
-            audit_version = excluded.audit_version,
-            receipt_rowid = excluded.receipt_rowid,
-            observation_sequence = excluded.observation_sequence,
-            source_cursor_rowid = excluded.source_cursor_rowid,
-            source_advance_rowid = excluded.source_advance_rowid,
-            provenance_rowid = excluded.provenance_rowid,
-            disposition_rowid = excluded.disposition_rowid,
-            alias_rowid = excluded.alias_rowid,
-            projection_checkpoint = excluded.projection_checkpoint,
-            last_receipts_audited = excluded.last_receipts_audited,
-            last_observations_audited = excluded.last_observations_audited,
-            last_provenance_audited = excluded.last_provenance_audited,
-            last_dispositions_audited = excluded.last_dispositions_audited,
-            last_aliases_audited = excluded.last_aliases_audited,
-            bounded_passes_since_exhaustive = excluded.bounded_passes_since_exhaustive",
-        params![
-            AUDIT_NAME,
-            AUDIT_VERSION,
-            checkpoint.receipt_rowid,
-            checkpoint.observation_sequence,
-            checkpoint.source_cursor_rowid,
-            checkpoint.source_advance_rowid,
-            checkpoint.provenance_rowid,
-            checkpoint.disposition_rowid,
-            checkpoint.alias_rowid,
-            checkpoint.projection_checkpoint,
-            progress.receipts_audited,
-            progress.observations_audited,
-            progress.provenance_audited,
-            progress.dispositions_audited,
-            progress.aliases_audited,
-            checkpoint.bounded_passes_since_exhaustive
-        ],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| global_db_operation_error(OPERATION, error))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1414,8 +1054,6 @@ mod tests {
     use super::{
         AuditCheckpoint, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
         DETAILED_TAIL_CONCURRENCY, MAX_DETAILED_OBSERVATIONS_PER_PAGE,
-        PROJECTION_PROGRESS_PAGE_INTERVAL, ensure_audit_checkpoint_schema,
-        historical_projection_delta_required, projection_audit_checkpoint_through_sequence,
         validate_projection_authority_suffix,
     };
     use crate::ensure_registered_schema;
@@ -1458,55 +1096,6 @@ mod tests {
             DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
         );
         assert!(std::hint::black_box(DETAILED_TAIL_CONCURRENCY) < DETAILED_AUDIT_CONCURRENCY);
-        assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
-    }
-
-    #[tokio::test]
-    async fn audit_checkpoint_schema_tracks_source_cursor_progress() {
-        let directory = TempDir::new().unwrap();
-        let connection = TestConnection::open(&directory.path().join("sessions.db"));
-        connection
-            .execute_batch(
-                "CREATE TABLE authority_audit_checkpoints (
-                    audit_name TEXT PRIMARY KEY,
-                    audit_version INTEGER NOT NULL,
-                    receipt_rowid INTEGER NOT NULL,
-                    observation_sequence INTEGER NOT NULL,
-                    provenance_rowid INTEGER NOT NULL,
-                    disposition_rowid INTEGER NOT NULL,
-                    alias_rowid INTEGER NOT NULL,
-                    projection_checkpoint INTEGER NOT NULL,
-                    last_receipts_audited INTEGER NOT NULL,
-                    last_observations_audited INTEGER NOT NULL,
-                    last_provenance_audited INTEGER NOT NULL,
-                    last_dispositions_audited INTEGER NOT NULL,
-                    last_aliases_audited INTEGER NOT NULL,
-                    bounded_passes_since_exhaustive INTEGER NOT NULL DEFAULT 0
-                );",
-            )
-            .await
-            .unwrap();
-        ensure_audit_checkpoint_schema(&connection).await.unwrap();
-
-        let mut rows = connection
-            .query(
-                "SELECT name FROM pragma_table_xinfo('authority_audit_checkpoints')
-                 WHERE name IN ('source_cursor_rowid', 'source_advance_rowid')
-                 ORDER BY name",
-                (),
-            )
-            .await
-            .unwrap();
-        let mut columns = Vec::new();
-        while let Some(row) = rows.next().await.unwrap() {
-            columns.push(row.get::<String>(0).unwrap());
-        }
-
-        assert_eq!(
-            columns,
-            ["source_advance_rowid", "source_cursor_rowid"],
-            "source authority scans need durable seek positions"
-        );
     }
 
     #[tokio::test]
@@ -1540,45 +1129,6 @@ mod tests {
                 "idx_projection_dispositions_observation_receipt"
             ]
         );
-    }
-
-    #[test]
-    fn incomplete_exhaustive_pass_does_not_repeat_historical_projection_audit() {
-        assert!(!historical_projection_delta_required(AuditCheckpoint {
-            bounded_passes_since_exhaustive: -1,
-            ..AuditCheckpoint::default()
-        }));
-        assert!(historical_projection_delta_required(
-            AuditCheckpoint::default()
-        ));
-    }
-
-    #[tokio::test]
-    async fn incomplete_exhaustive_checkpoint_does_not_rescan_projection_tables() {
-        let directory = TempDir::new().unwrap();
-        let connection = TestConnection::open(&directory.path().join("sessions.db"));
-        ensure_registered_schema(&connection).await.unwrap();
-        let counting = CountingQuery {
-            inner: &connection,
-            queries: AtomicUsize::new(0),
-        };
-        let checkpoint = AuditCheckpoint {
-            provenance_rowid: 11,
-            disposition_rowid: 22,
-            alias_rowid: 33,
-            bounded_passes_since_exhaustive: -1,
-            ..AuditCheckpoint::default()
-        };
-
-        let checkpoint = projection_audit_checkpoint_through_sequence(&counting, checkpoint, 44)
-            .await
-            .unwrap();
-
-        assert_eq!(checkpoint.provenance_rowid, 11);
-        assert_eq!(checkpoint.disposition_rowid, 22);
-        assert_eq!(checkpoint.alias_rowid, 33);
-        assert_eq!(checkpoint.projection_checkpoint, 44);
-        assert_eq!(counting.queries.load(Ordering::Relaxed), 0);
     }
 
     fn skipped_observation(index: usize) -> DurableObservationV1 {

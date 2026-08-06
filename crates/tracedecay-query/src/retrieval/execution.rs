@@ -63,7 +63,7 @@ pub struct NativeLexicalRecordV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct NativeSymbolRecordV1 {
+pub struct NativeSymbolRecord {
     pub occurrence: SymbolOccurrenceId,
     pub name: String,
     pub qualified_name: String,
@@ -77,7 +77,7 @@ pub struct NativeSymbolRecordV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeGraphRecordV1 {
-    pub symbol: NativeSymbolRecordV1,
+    pub symbol: NativeSymbolRecord,
     pub edge_kind: Option<tracedecay_domain::RelationEdgeKindV1>,
     pub depth: u32,
 }
@@ -137,7 +137,7 @@ pub trait NativeRecordReadPortV1 {
         &self,
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
-    ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1>;
+    ) -> Result<NativeSymbolRecord, QueryExecutionContractErrorV1>;
 }
 
 /// One generation checked against its native record authority.
@@ -539,8 +539,8 @@ mod tests {
             &self,
             symbol: &SymbolOccurrenceId,
             _: &FileOccurrenceId,
-        ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
-            Ok(NativeSymbolRecordV1 {
+        ) -> Result<NativeSymbolRecord, QueryExecutionContractErrorV1> {
+            Ok(NativeSymbolRecord {
                 occurrence: symbol.clone(),
                 name: "callee".to_owned(),
                 qualified_name: "fixture::callee".to_owned(),

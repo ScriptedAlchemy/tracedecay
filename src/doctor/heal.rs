@@ -9,10 +9,6 @@
 //! prints a warning but never fails the update itself. Only remedies that
 //! are safe to automate are applied:
 //!
-//! - corrupt `branch-meta.json` paths (non-regular files or anything
-//!   [`crate::branch_meta::parse`] rejects) are quarantined — renamed to
-//!   `branch-meta.json.corrupt-<timestamp>`, never deleted — preserving the
-//!   evidence while restoring the silent single-DB fallback,
 //! - registry rows whose project root no longer exists AND lives under the
 //!   system temp directory are purged (the automated equivalent of the
 //!   daemon's `registry_gc` admin action), and only when BOTH the canonical
@@ -31,19 +27,10 @@ use std::{
 };
 
 use crate::global_db::{CodeProjectRecord, RegisteredGlobalDb};
-use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_project_contexts};
-use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
-
+use crate::global_db::{StaleRootScope, code_project_root_exists, stale_project_contexts};
 mod report;
 
 use report::{render_health_pass_report, render_missing_profile_report, render_warnings};
-
-/// A corrupt `branch-meta.json` that was renamed out of the way.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BranchMetaQuarantine {
-    pub original: PathBuf,
-    pub quarantined: PathBuf,
-}
 
 /// One warning surfaced by the post-update health pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +55,6 @@ impl std::fmt::Display for HealthPassWarning {
 /// Outcome of one post-update health pass.
 #[derive(Debug, Default)]
 pub struct HealthPassReport {
-    pub quarantined_branch_meta: Vec<BranchMetaQuarantine>,
     /// `None` when the global DB could not be opened, so the GC never ran.
     pub purged_temp_registry_rows: Option<usize>,
     /// Stale store manifests reconciled to the registry canonical path.
@@ -126,11 +112,6 @@ pub async fn run_post_update_health_pass_under_lease(
             return report;
         }
     };
-    // Post-update needs admission-critical schema and a durable repair
-    // checkpoint, not inline historical convergence over multi-gigabyte
-    // session stores. Use the daemon admission path; the restarted daemon
-    // resumes the checkpointed maintenance after service restoration.
-    crate::daemon::mark_process_long_lived_for_session_maintenance();
     let runtime_registry =
         match crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             profile_identity,
@@ -189,12 +170,6 @@ async fn compute_health_pass_report(
 ) -> HealthPassReport {
     let mut report = HealthPassReport::default();
 
-    let (quarantined, warnings) = quarantine_corrupt_branch_meta(profile_root);
-    report.quarantined_branch_meta = quarantined;
-    report
-        .warnings
-        .extend(warnings.into_iter().map(HealthPassWarning::new));
-
     let global_db = match runtime_registry.profile_database().await {
         Ok(global_db) => global_db,
         Err(error) => {
@@ -240,79 +215,13 @@ async fn compute_health_pass_report(
         .warnings
         .extend(reconcile_warnings.into_iter().map(HealthPassWarning::new));
 
-    let (findings, warnings) = collect_remaining_findings(
-        &global_db,
-        profile_root,
-        &projects,
-        &purged_ids,
-        remaining_registry_drift_count,
-    )
-    .await;
+    let (findings, warnings) =
+        collect_remaining_findings(&projects, &purged_ids, remaining_registry_drift_count).await;
     report.remaining_findings = findings;
     report
         .warnings
         .extend(warnings.into_iter().map(HealthPassWarning::new));
     report
-}
-
-/// Renames every `branch-meta.json` under `<profile_root>/projects/*` that is
-/// not a regular file or that [`crate::branch_meta::parse`] rejects. This is
-/// the runtime's own definition of corrupt, covering invalid JSON, schema
-/// mismatches, and non-regular paths. Quarantine preserves the original path
-/// as evidence while restoring the single-DB fallback.
-///
-/// Returns the performed quarantines and any warnings.
-fn quarantine_corrupt_branch_meta(profile_root: &Path) -> (Vec<BranchMetaQuarantine>, Vec<String>) {
-    let mut quarantines = Vec::new();
-    let mut warnings = Vec::new();
-    let projects_root = profile_root.join("projects");
-    let Ok(entries) = std::fs::read_dir(&projects_root) else {
-        return (quarantines, warnings);
-    };
-    let mut meta_paths: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.path().join(BRANCH_META_FILENAME))
-        .collect();
-    meta_paths.sort();
-
-    let now = crate::tracedecay::current_timestamp();
-    for path in meta_paths {
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                warnings.push(format!("could not inspect '{}': {error}", path.display()));
-                continue;
-            }
-        };
-        let corrupt = if metadata.file_type().is_file() {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => crate::branch_meta::parse(&content).is_err(),
-                Err(error) => {
-                    warnings.push(format!("could not read '{}': {error}", path.display()));
-                    continue;
-                }
-            }
-        } else {
-            true
-        };
-        if !corrupt {
-            continue;
-        }
-        let quarantined = path.with_file_name(format!("{BRANCH_META_QUARANTINE_PREFIX}{now}"));
-        match std::fs::rename(&path, &quarantined) {
-            Ok(()) => quarantines.push(BranchMetaQuarantine {
-                original: path,
-                quarantined,
-            }),
-            Err(err) => warnings.push(format!(
-                "could not quarantine corrupt '{}': {err}",
-                path.display()
-            )),
-        }
-    }
-    (quarantines, warnings)
 }
 
 /// Purges registry rows in the auto-GC scope: canonical root under the
@@ -389,20 +298,12 @@ fn temp_dir_prefixes() -> Vec<PathBuf> {
 ///
 /// Returns the findings and any warnings.
 async fn collect_remaining_findings(
-    global_db: &Arc<RegisteredGlobalDb>,
-    profile_root: &Path,
     projects: &[CodeProjectRecord],
     purged_ids: &[String],
     remaining_registry_drift_count: usize,
 ) -> (Vec<String>, Vec<String>) {
     let mut findings = Vec::new();
-    let (orphan_count, warnings) =
-        super::orphan_store_manifest_report(global_db, profile_root).await;
-    if orphan_count > 0 {
-        findings.push(format!(
-            "{orphan_count} orphan profile store manifest(s) can reconstruct registry rows"
-        ));
-    }
+    let warnings = Vec::new();
 
     let stale_rows = projects
         .iter()
@@ -469,164 +370,6 @@ mod tests {
                 unsafe { std::env::remove_var(crate::config::USER_DATA_DIR_ENV) };
             }
         }
-    }
-
-    fn write_branch_meta(projects_root: &Path, project_id: &str, content: &str) -> PathBuf {
-        let shard = projects_root.join(project_id);
-        std::fs::create_dir_all(&shard).unwrap();
-        let path = shard.join(BRANCH_META_FILENAME);
-        std::fs::write(&path, content).unwrap();
-        path
-    }
-
-    #[test]
-    fn quarantine_renames_only_corrupt_branch_meta() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let projects_root = dir.path().join("projects");
-        let syntax_corrupt =
-            write_branch_meta(&projects_root, "proj_syntax_corrupt", "{not valid json");
-        let semantic_corrupt = write_branch_meta(
-            &projects_root,
-            "proj_semantic_corrupt",
-            r#"{"default_branch":"main","branches":{}}"#,
-        );
-        let valid_content =
-            serde_json::to_string(&crate::branch_meta::BranchMeta::new("main")).unwrap();
-        let valid = write_branch_meta(&projects_root, "proj_valid", &valid_content);
-
-        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
-
-        assert_eq!(quarantines.len(), 2);
-        assert!(warnings.is_empty());
-        for (original, content) in [
-            (&syntax_corrupt, "{not valid json"),
-            (
-                &semantic_corrupt,
-                r#"{"default_branch":"main","branches":{}}"#,
-            ),
-        ] {
-            let quarantine = quarantines
-                .iter()
-                .find(|quarantine| &quarantine.original == original)
-                .unwrap();
-            assert!(!original.exists(), "corrupt file should be renamed away");
-            assert_eq!(
-                std::fs::read_to_string(&quarantine.quarantined).unwrap(),
-                content,
-                "quarantined file must preserve the corrupt content as evidence"
-            );
-            assert!(
-                quarantine
-                    .quarantined
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(BRANCH_META_QUARANTINE_PREFIX),
-                "quarantine name should be branch-meta.json.corrupt-<timestamp>: {quarantine:?}"
-            );
-        }
-        assert!(valid.exists(), "valid branch-meta must be left untouched");
-    }
-
-    #[test]
-    fn quarantine_treats_schema_mismatch_as_corrupt() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let projects_root = dir.path().join("projects");
-        // Valid JSON, but not a valid BranchMeta — the runtime warns
-        // "corrupt" on every open, so the health pass must agree.
-        let schema_corrupt =
-            write_branch_meta(&projects_root, "proj_schema", r#"{"default_branch": 5}"#);
-
-        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
-
-        assert!(warnings.is_empty());
-        assert_eq!(
-            quarantines.len(),
-            1,
-            "schema-corrupt branch-meta must be quarantined: {quarantines:?}"
-        );
-        assert_eq!(quarantines[0].original, schema_corrupt);
-        assert!(!schema_corrupt.exists());
-        assert_eq!(
-            std::fs::read_to_string(&quarantines[0].quarantined).unwrap(),
-            r#"{"default_branch": 5}"#,
-            "quarantined file must preserve the corrupt content as evidence"
-        );
-    }
-
-    #[test]
-    fn quarantine_ignores_non_directory_project_entries() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let projects_root = dir.path().join("projects");
-        std::fs::create_dir_all(&projects_root).unwrap();
-        let shared_store = projects_root.join("sessions.db");
-        std::fs::write(&shared_store, b"not a project shard").unwrap();
-
-        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
-
-        assert!(quarantines.is_empty());
-        assert!(warnings.is_empty());
-        assert_eq!(
-            std::fs::read(&shared_store).unwrap(),
-            b"not a project shard"
-        );
-    }
-
-    #[test]
-    fn quarantine_renames_non_regular_branch_meta() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir
-            .path()
-            .join("projects")
-            .join("proj_directory")
-            .join(BRANCH_META_FILENAME);
-        std::fs::create_dir_all(&path).unwrap();
-
-        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
-
-        assert!(warnings.is_empty());
-        assert_eq!(quarantines.len(), 1);
-        assert_eq!(quarantines[0].original, path);
-        assert!(!path.exists());
-        assert!(quarantines[0].quarantined.is_dir());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn quarantine_renames_symlinked_valid_branch_meta() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let outside = dir.path().join("outside.json");
-        std::fs::write(
-            &outside,
-            serde_json::to_vec_pretty(&crate::branch_meta::BranchMeta::new("main")).unwrap(),
-        )
-        .unwrap();
-        let shard = dir.path().join("projects").join("proj_symlink");
-        std::fs::create_dir_all(&shard).unwrap();
-        let path = shard.join(BRANCH_META_FILENAME);
-        std::os::unix::fs::symlink(&outside, &path).unwrap();
-
-        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
-
-        assert!(warnings.is_empty());
-        assert_eq!(quarantines.len(), 1);
-        assert_eq!(quarantines[0].original, path);
-        assert!(!path.exists());
-        assert!(outside.exists());
-        assert!(
-            std::fs::symlink_metadata(&quarantines[0].quarantined)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-    }
-
-    #[test]
-    fn quarantine_is_a_no_op_without_a_projects_dir() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let (quarantines, warnings) = quarantine_corrupt_branch_meta(dir.path());
-        assert!(quarantines.is_empty());
-        assert!(warnings.is_empty());
     }
 
     #[test]

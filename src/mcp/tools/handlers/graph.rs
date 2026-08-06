@@ -193,21 +193,6 @@ fn generic_tool_result(
     support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
 }
 
-async fn unique_graph_node_id_for_search_display(
-    cg: &TraceDecay,
-    display: &crate::mcp::server::CodeIndexSearchDisplayV1,
-) -> Option<String> {
-    let nodes = cg
-        .get_nodes_by_qualified_name(&display.qualified_name)
-        .await
-        .ok()?;
-    let mut matches = nodes
-        .into_iter()
-        .filter(|node| node.kind.as_str() == display.kind.as_str());
-    let node = matches.next()?;
-    matches.next().is_none().then_some(node.id)
-}
-
 fn rendered_context_tool_result(
     cg: &TraceDecay,
     args: &Value,
@@ -232,108 +217,6 @@ fn rendered_context_tool_result(
     } else {
         result
     }
-}
-
-async fn legacy_search_fallback(
-    cg: &TraceDecay,
-    args: &Value,
-    query: &str,
-    limit: usize,
-    scope_prefix: Option<&str>,
-    semantic_reason: &'static str,
-) -> Result<ToolResult> {
-    let mut legacy_results =
-        filter_by_scope(cg.search(query, limit).await?, scope_prefix, |result| {
-            &result.node.file_path
-        });
-    let mut lazy_indexed_files = Vec::new();
-    if dependency_hints::lazy_indexing_requested(args)
-        && dependency_hints::should_check_ignored_dependency_hint(legacy_results.len(), limit)
-    {
-        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
-            cg,
-            query,
-            limit,
-            scope_prefix,
-        )
-        .await?;
-        if !lazy_indexed_files.is_empty() {
-            legacy_results =
-                filter_by_scope(cg.search(query, limit).await?, scope_prefix, |result| {
-                    &result.node.file_path
-                });
-        }
-    }
-    let coverage_hint = cg.index_coverage_hint(legacy_results.len());
-    let lazy_match_visible = legacy_results
-        .iter()
-        .any(|result| lazy_indexed_files.contains(&result.node.file_path));
-    let ignored_dependency_hint = if !lazy_match_visible
-        && dependency_hints::should_check_ignored_dependency_hint(legacy_results.len(), limit)
-    {
-        dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
-    } else {
-        None
-    };
-    let touched_files = unique_file_paths(
-        legacy_results
-            .iter()
-            .map(|result| result.node.file_path.as_str())
-            .chain(lazy_indexed_files.iter().map(String::as_str)),
-    );
-    let results = legacy_results
-        .into_iter()
-        .map(|result| {
-            let node_id = result.node.id;
-            json!({
-                "id": node_id.clone(),
-                "node_id": node_id,
-                "name": result.node.name,
-                "kind": result.node.kind.as_str(),
-                "file": result.node.file_path,
-                "line": user_line(result.node.start_line),
-                "signature": result.node.signature,
-                "score": result.score,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut output = json!({
-        "results": results,
-        "code_generation": Value::Null,
-        "query_fallback_digest": Value::Null,
-        "semantic": {
-            "mode": "fallback_allowed",
-            "status": "unavailable",
-            "reason": semantic_reason,
-        },
-        "status": "lexical_fallback",
-        // The generation-bound lanes are down, but the retained store still
-        // answers lexically. Say so explicitly rather than returning a short
-        // list that reads like a complete one.
-        "coverage": coverage_value(
-            &crate::mcp::server::CodeIndexSearchCoverageV1::retained_lexical_only(semantic_reason),
-        ),
-    });
-    if let Some(scope) = scope_prefix {
-        output["scope_prefix"] = json!(scope);
-        output["scope_prefix_applied"] = json!(true);
-    }
-    if !lazy_indexed_files.is_empty() {
-        output["lazy_indexed_ignored_dependency_files"] = json!(lazy_indexed_files);
-    }
-    if let Some(hint) = coverage_hint {
-        output["index_coverage_hint"] = json!(hint);
-    }
-    if let Some(hint) = ignored_dependency_hint {
-        output["ignored_dependency_hint"] = hint;
-    }
-    Ok(rendered_tool_result(
-        cg,
-        args,
-        &output,
-        touched_files,
-        || render_search_md(&output),
-    ))
 }
 
 /// Handles `tracedecay_search` tool calls.
@@ -366,24 +249,12 @@ pub(super) async fn handle_search(
     // the tool return nothing for the whole session (any serve launched from a
     // subdirectory sets a scope), so run the search and report below that the
     // scope was not honored rather than silently implying it was.
-    if search_executor.is_none()
-        && semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed
-    {
-        return legacy_search_fallback(
-            cg,
-            &args,
-            query,
-            limit,
-            scope_prefix,
-            "retained semantic search authority was not constructed",
-        )
-        .await;
-    }
     let outcome = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
             project_root: cg.project_root().to_path_buf(),
             query: query.to_owned(),
+            source_revision: None,
             limit,
             cursor,
             mode: semantic_mode,
@@ -404,16 +275,12 @@ pub(super) async fn handle_search(
                         "qualified_name": display.qualified_name,
                         "kind": display.kind,
                     });
-                    if include_graph_node_ids
-                        && let Some(node_id) =
-                            unique_graph_node_id_for_search_display(cg, display).await
-                    {
+                    if include_graph_node_ids && let Some(node_id) = display.node_id.as_ref() {
                         result["node_id"] = json!(node_id);
                     }
                 }
                 results.push(result);
             }
-            let result_count = results.len();
             let mut output = json!({
                 "results": results,
                 "code_generation": complete.code_generation,
@@ -429,13 +296,6 @@ pub(super) async fn handle_search(
                 output["scope_prefix"] = json!(scope);
                 output["scope_prefix_applied"] = json!(false);
             }
-            if dependency_hints::should_check_ignored_dependency_hint(result_count, limit)
-                && let Some(hint) =
-                    dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix)
-                        .await?
-            {
-                output["ignored_dependency_hint"] = hint;
-            }
             let output = output;
             Ok(rendered_tool_result(cg, &args, &output, Vec::new(), || {
                 render_search_md(&output)
@@ -443,21 +303,6 @@ pub(super) async fn handle_search(
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
-            // Progressive degradation: the generation-bound lanes are down,
-            // but the retained lexical/graph store is a ready lane, so serve
-            // it instead of failing the whole query. Strict-semantic callers
-            // asked for a lane that cannot degrade, so they still fail fast.
-            if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed {
-                return legacy_search_fallback(
-                    cg,
-                    &args,
-                    query,
-                    limit,
-                    scope_prefix,
-                    retained_fallback_reason(&unavailable),
-                )
-                .await;
-            }
             let output = json!({
                 "results": [],
                 "code_generation": unavailable.code_generation,
@@ -1121,11 +966,9 @@ pub(super) async fn handle_callees(cg: &TraceDecay, args: Value) -> Result<ToolR
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
-/// Handles `tracedecay_find_exact_symbol` tool calls. Bare-name lookup against
-/// `idx_nodes_name` — no BM25 scoring, no fuzzy match, no qualified-name
-/// suffix walk. Returns every node whose `name` column equals the query
-/// exactly. Useful when you already know the symbol and want the apples-to-
-/// apples cost of an index hit instead of `tracedecay_search`'s ranked query.
+/// Handles `tracedecay_find_exact_symbol` tool calls. This retained adapter is
+/// read-only: a miss cannot index ignored files or otherwise mutate source
+/// state.
 pub(super) async fn handle_find_exact_symbol(
     cg: &TraceDecay,
     args: Value,
@@ -1144,31 +987,11 @@ pub(super) async fn handle_find_exact_symbol(
 
     let mut nodes = cg.get_nodes_by_name(name).await?;
     nodes = filter_by_scope(nodes, scope_prefix, |n| &n.file_path);
-    let mut lazy_indexed_files = Vec::new();
-    if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
-        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
-            cg,
-            name,
-            limit,
-            scope_prefix,
-        )
-        .await?;
-        if !lazy_indexed_files.is_empty() {
-            nodes = filter_by_scope(cg.get_nodes_by_name(name).await?, scope_prefix, |n| {
-                &n.file_path
-            });
-        }
-    }
     if nodes.len() > limit {
         nodes.truncate(limit);
     }
 
-    let touched_files = unique_file_paths(
-        nodes
-            .iter()
-            .map(|n| n.file_path.as_str())
-            .chain(lazy_indexed_files.iter().map(String::as_str)),
-    );
+    let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
 
     let items: Vec<Value> = nodes
         .iter()
@@ -1189,7 +1012,6 @@ pub(super) async fn handle_find_exact_symbol(
         "name": name,
         "count": items.len(),
         "matches": items,
-        "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
     });
     Ok(generic_tool_result(cg, &args, &body, touched_files))
 }
@@ -2052,6 +1874,7 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_revision: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
@@ -2081,6 +1904,7 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_revision: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,

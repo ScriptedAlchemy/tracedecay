@@ -3,13 +3,12 @@
 //! The crate split left several capabilities inverted behind `OnceLock` slots
 //! in the extracted crates: `tracedecay_sessions::host_ports`,
 //! `tracedecay_agent_hosts::ports`, and
-//! `tracedecay_runtime_core::ports::branch_admin_recovery`. Each slot has a
-//! conservative default so an unwired process still runs — it just does less
+//! Each slot has a conservative default so an unwired process still runs — it just does less
 //! (no LCM redaction, no memory injection, zero turn costs, a daemon that
 //! reports itself unavailable).
 //!
 //! Only the composition root can fill them, and it must do so before any
-//! transcript ingest, host installer, hook, or branch lock runs. That is what
+//! transcript ingest, host installer, or hook runs. That is what
 //! [`register_runtime_ports`] is: the single, idempotent, root-owned wiring
 //! call. Both process entry paths invoke it — `src/main.rs` for every CLI and
 //! daemon invocation, and the daemon session-registry constructor for embedded
@@ -29,7 +28,7 @@ use crate::errors::Result;
 /// Installs every root-owned runtime port. Idempotent; first call wins.
 ///
 /// Call this as early as possible in a process: the slots below are read by
-/// transcript ingest, agent-host installers, hooks, and branch locking, all of
+/// transcript ingest, agent-host installers, and hooks, all of
 /// which fail quietly (or fail closed) when the root never registered.
 pub fn register_runtime_ports() {
     register_session_ports();
@@ -37,7 +36,6 @@ pub fn register_runtime_ports() {
     crate::agents::register_mcp_tool_catalog_ports();
     crate::automation::register_runtime_ports();
     crate::dashboard::register_runtime_ports();
-    crate::branch::register_branch_admin_recovery_gate();
 }
 
 // ---------------------------------------------------------------------------

@@ -68,38 +68,30 @@ indexing, stale, failed, cancelled, or incompatible. The result retains the
 selected generation plus provider freshness and coverage so every transport
 can render the same partial-but-usable outcome.
 
-## PR14 Doctor implementation slice
+## Doctor application behavior
 
-Plan 09 is the implementation and use-case composition authority for the one
-Doctor application kernel. Plan 14 supplies the historical regression and
-observable-behavior contract; Plan 20 supplies desired/effective configuration;
-Plans 27, 32, and the owning runtime/storage/query components supply typed
-health evidence and legal remediation operations; Plan 26 supplies
-denominator-safe observations; and Plan 11 renders the resulting findings,
-coverage, evidence, and owner-supplied actions without evaluating health.
+Plan 09 owns one read-only Doctor application kernel. Plan 20 supplies
+desired/effective configuration; Plans 27 and 32 and the owning runtime,
+storage, and query components supply typed observations; Plan 26 supplies
+denominator-safe metrics; and Plan 11 renders the resulting findings and
+coverage without evaluating health.
 
-The PR14 slice composes those inputs into stable Doctor finding families,
-distinguishes unsupported, absent, stale, degraded, partial, unknown, denied,
-and healthy-with-complete-coverage states, and returns only remediation
-previews/actions owned by the responsible application operation. Doctor never
-repairs directly, invents a generic health score, treats dispatch as recovery,
-or collapses unknown/partial evidence into healthy or clean.
+Doctor distinguishes unsupported, absent, stale, degraded, partial, unknown,
+denied, and healthy-with-complete-coverage states. It never opens a write
+transaction, acquires a writer lane, repairs, retries, refreshes, compacts,
+reclaims, changes configuration, fabricates an action registry, or treats
+dispatch as recovery. A finding may name the separately authorized product
+operation a user can choose, but Doctor neither constructs nor invokes that
+operation.
 
-**Doctor catalog correction (2026-07-26).** The default remediation registry
-contains nine dispatchable owning operations. Advisory feedback findings no
-longer advertise `feedback_get_finding` as remediation: that read requires a
-handle a generic Doctor action cannot construct. Removing the tenth
-advertisement is truthful narrowing, not a missing remediation implementation.
-
-Direct tests start from a real PR13 finding, inject source disagreements and
-operational failures, call the canonical Doctor use case, execute one
-authorized owner-supplied remediation through its normal operation, resume its
-receipt across restart, and independently re-observe the result. Focused cases
-cover unavailable providers, executable/protocol/configuration drift, invalid
-fallback, sandbox/capability mismatch, stuck or unknown runtime state,
-incomplete telemetry, authorization loss, cancellation, failed remediation,
-and truthful no-change/reconciliation outcomes. They prove Plan 11 performs no
-Doctor evaluation and Plan 14 contributes no runtime kernel.
+Behavioral tests inject source disagreement and operational failures, call the
+canonical Doctor use case while the writer lane is occupied, and independently
+observe that no state changed. They cover unavailable providers,
+executable/protocol/configuration drift, invalid fallback,
+sandbox/capability mismatch, stuck or unknown runtime state, incomplete
+telemetry, authorization loss, cancellation, and truthful no-change outcomes.
+Remediation operations are tested through their own application journeys, not
+through Doctor.
 
 PR17 adds all Plan 24/32 semantic operations to the same layer: graph and
 history commands; Kanban, DAG, timeline, causal, critical-path, workload,

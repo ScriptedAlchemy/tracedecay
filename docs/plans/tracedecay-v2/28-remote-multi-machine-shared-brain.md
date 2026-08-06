@@ -71,9 +71,10 @@ writers or losing deletion state.
    The LSP gateway and analyzers stay on the enrolled node that owns the live
    workspace; they reach remote clean-generation authority only through these
    APIs. Clean durable diagnostics publish through the owning fenced shard.
-4. **Back up and stage restore.** The current authority creates a consistent,
-   authenticated backup manifest over the required database families,
-   payloads, generations, repository identities, checkpoints, source
+4. **Back up and stage restore.** The current authority fences one matching
+   SQLite snapshot and Grafeo checkpoint and creates an authenticated manifest
+   over both authorities, payloads, generations, repository identities,
+   checkpoints, source
    frontier, artifact inventory, byte/count totals, lineage, and typed
    stale/partial coverage. Restore writes
    only to a non-serving isolated staging location, verifies destination bytes,
@@ -157,8 +158,9 @@ finding and remediation identities.
 
 ## PR16 implementation defaults
 
-- Build the first delivery on existing HTTP/SSE, rustls, and the daemon-owned
-  rusqlite runtime path. The retired libSQL compatibility/runtime path is not a
+- Build the delivery on existing HTTP/SSE, rustls, the daemon-owned rusqlite
+  runtime, and the canonical embedded Grafeo checkpoint/snapshot APIs. The
+  retired libSQL compatibility/runtime path is not a
   remote seam to revive. These foundations replace no semantics: TraceDecay
   still owns authentication, revocation, authority fencing, single-writer
   admission, replay identity, coverage, backup/restore verification, and

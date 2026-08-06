@@ -58,7 +58,10 @@ pub(super) fn execute_work_application(
             );
         }
     };
-    let services = match registered.database.work_application_services() {
+    let services = match registered
+        .database
+        .work_application_services(registered.graph.as_ref().clone())
+    {
         Ok(services) => services,
         Err(_) => {
             return DaemonInvocationResponse::problem(
@@ -238,7 +241,10 @@ pub(super) async fn execute_workflow_application(
             );
         }
     };
-    let services = match registered.database.workflow_application_services() {
+    let services = match registered
+        .database
+        .workflow_application_services(registered.graph.as_ref().clone())
+    {
         Ok(services) => services,
         Err(_) => {
             return DaemonInvocationResponse::problem(
@@ -295,6 +301,7 @@ pub(super) async fn execute_workflow_application(
             }
             let result = execute_canonical_workflow(
                 &registered.database,
+                &registered.graph,
                 &registered.runtime,
                 &context,
                 project_root,

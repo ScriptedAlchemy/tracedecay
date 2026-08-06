@@ -212,7 +212,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
     def(
         "tracedecay_message_search",
         "Message Search",
-        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted catch_up is false; explicit catch_up=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional. project_scope=all_registered is accepted but returns a typed deferred result: multi-root retrieval is not implemented.",
+        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted catch_up is false; explicit catch_up=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional. project_scope=all_registered returns typed unavailable until the daemon mounts a canonical multi-root retrieval authority.",
         json!({
             "type": "object",
             "additionalProperties": false,
@@ -250,6 +250,18 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "type": "string",
                     "minLength": 1,
                     "description": "Opaque session-temporal continuation cursor returned by a prior compatible request."
+                },
+                "temporal_mode": {
+                    "type": "string",
+                    "enum": ["current", "evolution", "forensic"],
+                    "default": "current",
+                    "description": "Canonical temporal interpretation. as_of requires a typed cutoff and is not exposed by this route."
+                },
+                "grain": {
+                    "type": "string",
+                    "enum": ["occurrence", "logical_message", "turn", "session", "thread", "agent", "summary"],
+                    "default": "logical_message",
+                    "description": "Canonical retrieval grain."
                 },
                 "parent_session_id": {
                     "type": "string",
@@ -292,7 +304,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 },
                 "project_scope": {
                     "type": "string",
-                    "description": "Accepted compatibility selector. all_registered returns a typed deferred result without opening the registry or any project store. Cannot be combined with project_id, project_path, or project_selector.",
+                    "description": "all_registered requests the canonical multi-root authority and returns typed unavailable when that authority is not mounted. Cannot be combined with project_id, project_path, or project_selector.",
                     "enum": ["all_registered"]
                 },
                 "branch": git_scope::branch_schema("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
@@ -524,7 +536,7 @@ mod lcm_definition_compatibility_tests {
     }
 
     #[test]
-    fn describe_and_expand_keep_closed_string_id_compatibility() {
+    fn describe_and_expand_use_closed_string_identity_and_cursor_only_pagination() {
         let describe = def_lcm_describe();
         let expand = def_lcm_expand();
 
@@ -538,16 +550,23 @@ mod lcm_definition_compatibility_tests {
             expand.input_schema["properties"]["target"]["oneOf"][1]["properties"]["node_id"]["type"],
             "string"
         );
-        assert_eq!(
-            expand.input_schema["properties"]["source_offset"]["minimum"],
-            0
+        assert!(
+            expand.input_schema["properties"]
+                .get("source_offset")
+                .is_none()
         );
-        assert_eq!(
-            expand.input_schema["properties"]["source_limit"]["maximum"],
-            100
+        assert!(
+            expand.input_schema["properties"]
+                .get("source_limit")
+                .is_none()
         );
         assert_eq!(
             expand.input_schema["properties"]["cursor"]["type"],
+            "string"
+        );
+        let expand_query = def_lcm_expand_query();
+        assert_eq!(
+            expand_query.input_schema["properties"]["node_ids"]["items"]["type"],
             "string"
         );
     }

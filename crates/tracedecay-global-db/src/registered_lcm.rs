@@ -1,6 +1,8 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::Value as JsonValue;
+use tracedecay_domain::SessionId;
 
 use tracedecay_runtime_core::db::engine::{
     Executor, IntoParams, QueryExecutor, Rows, Value, params,
@@ -9,15 +11,15 @@ use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord,
     lcm::{
-        LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
-        LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
-        LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
-        LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-        LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-        LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-        LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-        compression, dag, doctor, gc, payload, query, raw, schema,
+        LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
+        LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest,
+        LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters, LcmGrepOutcome,
+        LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
+        LcmPreflightResponse, LcmRawMessage, LcmRecentSession, LcmSessionBoundaryRequest,
+        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
+        LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+        LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
+        query, raw, schema,
     },
 };
 
@@ -184,6 +186,69 @@ impl RegisteredGlobalDb {
             .ok_or_else(|| LcmError::Db("registered session database has no parent".to_string()))
     }
 
+    async fn lcm_relation_projection_seed(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::session_temporal::relations::SessionRelationProjection, LcmError> {
+        let binding_project_id = self.binding().shard_id.scope.project_id().ok_or_else(|| {
+            LcmError::Db("LCM relation authority requires a registered project shard".to_owned())
+        })?;
+        let (project_id, graph) = self
+            .session_relation_graph()
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        if project_id != binding_project_id {
+            return Err(LcmError::Db(
+                "session relation graph binding does not match the project shard".to_owned(),
+            ));
+        }
+        let session_id =
+            SessionId::new(session_id).map_err(|error| LcmError::Db(error.to_string()))?;
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT generation FROM session_temporal_generations
+                 WHERE session_id = ?1 AND state = 'active'
+                 ORDER BY generation",
+                params![session_id.as_str()],
+            )
+            .await?;
+        let active = rows
+            .next()
+            .await?
+            .map(|row| row.get::<i64>(0))
+            .transpose()?;
+        if rows.next().await?.is_some() {
+            return Err(LcmError::Db(
+                "session has multiple active generations".to_owned(),
+            ));
+        }
+        drop(rows);
+        drop(snapshot);
+        let Some(active) = active else {
+            return Ok(
+                crate::session_temporal::relation_publication::empty_projection(
+                    project_id.clone(),
+                    session_id,
+                    0,
+                ),
+            );
+        };
+        let active = u64::try_from(active)
+            .map_err(|error| LcmError::Db(format!("invalid active generation: {error}")))?;
+        crate::session_temporal::relations::SessionRelationGraphStore::new(Arc::clone(graph))
+            .load_projection(project_id, &session_id, active)
+            .map_err(|error| LcmError::Db(error.to_string()))
+    }
+
+    /// Replays bounded, durably staged LCM graph publications after a daemon
+    /// restart. Graph replacement is idempotent and SQL activation remains an
+    /// exact compare-and-swap against the staged active generation.
+    pub async fn recover_lcm_relation_publications(&self, limit: usize) -> Result<usize, LcmError> {
+        crate::session_temporal::relation_publication::recover_ready_lcm_intents(self, limit)
+            .await
+            .map_err(|error| LcmError::Db(format!("{error:?}")))
+    }
+
     pub async fn lcm_status(
         &self,
         provider: &str,
@@ -299,6 +364,38 @@ impl RegisteredGlobalDb {
     ) -> Result<Vec<PendingCodexCompactionSummary>, LcmError> {
         let snapshot = self.read_snapshot().await?;
         let limit = limit.clamp(1, 100) as i64;
+        let mut active_sql = String::from(
+            "SELECT session_id, generation
+             FROM session_temporal_generations
+             WHERE state = 'active'",
+        );
+        let active_params = if let Some(session_id) = session_id {
+            active_sql.push_str(" AND session_id = ?1 ORDER BY session_id");
+            vec![Value::Text(session_id.to_owned())]
+        } else {
+            active_sql.push_str(" ORDER BY session_id");
+            Vec::new()
+        };
+        let mut active_rows = snapshot.query(&active_sql, active_params).await?;
+        let mut successor_predecessors = std::collections::BTreeSet::new();
+        while let Some(row) = active_rows.next().await? {
+            let relation_session_id = SessionId::new(row.get::<String>(0)?)
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            let generation = u64::try_from(row.get::<i64>(1)?)
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            let projection = self
+                .session_relation_projection(&relation_session_id, generation)
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            successor_predecessors.extend(
+                projection
+                    .summaries
+                    .into_iter()
+                    .filter_map(|summary| summary.predecessor_summary_id),
+            );
+        }
+        drop(active_rows);
+        let successor_predecessors = serde_json::to_string(&successor_predecessors)
+            .map_err(|error| LcmError::Db(error.to_string()))?;
         let mut sql = String::from(
             "SELECT candidate.node_id, candidate.session_id
              FROM lcm_summary_nodes AS candidate
@@ -319,10 +416,8 @@ impl RegisteredGlobalDb {
                            ) <> 'codex_app_server'
                      ELSE 0
                    END = 1
-               AND NOT EXISTS (
-                     SELECT 1
-                     FROM session_summary_successors AS lineage
-                     WHERE lineage.predecessor_summary_id = candidate.node_id
+               AND candidate.node_id NOT IN (
+                     SELECT value FROM json_each(?2)
                    )
                AND EXISTS (
                      SELECT 1
@@ -335,10 +430,13 @@ impl RegisteredGlobalDb {
                      WHERE source.node_id = candidate.node_id
                    )",
         );
-        let mut query_params = vec![Value::Integer(limit)];
+        let mut query_params = vec![
+            Value::Integer(limit),
+            Value::Text(successor_predecessors),
+        ];
         if let Some(session_id) = session_id {
             sql.push_str(
-                " AND candidate.session_id = ?2
+                " AND candidate.session_id = ?3
                   ORDER BY candidate.depth DESC, candidate.created_at DESC, candidate.node_id
                   LIMIT ?1",
             );
@@ -401,6 +499,8 @@ impl RegisteredGlobalDb {
             );
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
+        let relation_projection = self.lcm_relation_projection_seed(&draft.session_id).await?;
+        let relation_session_id = draft.session_id.clone();
         drop(snapshot);
 
         let transaction = self
@@ -424,16 +524,32 @@ impl RegisteredGlobalDb {
                 ))
             );
         }
-        let receipt = session_temporal_operations::publish_immutable_summary(
-            &transaction,
+        let publication =
             tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
                 summary_id: successor_id,
                 predecessor_summary_id: Some(node_id.to_string()),
                 draft,
-            },
-        )
-        .await?;
+            };
+        let publisher =
+            session_temporal_operations::GlobalDbLcmSummaryPublication::for_project(
+                &transaction,
+                relation_projection,
+            );
+        let receipt =
+            tracedecay_sessions::runtime::lcm::dag::LcmSummaryPublicationPort::publish_immutable_summary(
+                &publisher,
+                publication,
+            )
+            .await?;
         transaction.commit().await?;
+        let session_id = SessionId::new(relation_session_id)
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        crate::session_temporal::relation_publication::apply_and_activate_latest_lcm_intent(
+            self,
+            &session_id,
+        )
+        .await
+        .map_err(|error| LcmError::Db(format!("{error:?}")))?;
         Ok(receipt.summary)
     }
 
@@ -442,68 +558,22 @@ impl RegisteredGlobalDb {
         provider: &str,
         session_id: Option<&str>,
         mode: &str,
-        apply: bool,
-        clean_config: LcmCleanConfig,
-        gc_config: LcmGcConfig,
     ) -> Result<serde_json::Value, LcmError> {
+        if !matches!(mode, "diagnose" | "retention") {
+            return Err(LcmError::Db(
+                "LCM Doctor only supports read-only diagnose and retention modes".to_string(),
+            ));
+        }
         let storage_root = self.lcm_storage_root()?;
+        let snapshot = self.read_snapshot().await?;
         let request = doctor::DoctorRequest {
             storage_root,
-            db_path: self.db_path(),
             provider,
             session_id,
             mode,
-            apply,
-            clean_config,
-            gc_config,
+            gc_config: LcmGcConfig::default(),
         };
-        if !doctor::request_mutates(&request) {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let result = doctor::doctor(&transaction, request).await?;
-            transaction.rollback().await?;
-            return Ok(result);
-        }
-
-        let applies_payload_gc = apply && mode == "gc";
-        let mut gc_drain = if applies_payload_gc {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let drain =
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?;
-            transaction.commit().await?;
-            Some(drain)
-        } else {
-            None
-        };
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut result = doctor::doctor(&transaction, request).await?;
-        transaction.commit().await?;
-
-        if let Some(drain) = gc_drain.as_mut() {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            drain.merge(
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?,
-            );
-            if let Some(report) = result.pointer_mut("/repairs/gc_report") {
-                gc::finalize_gc_report_value(&transaction, report, std::mem::take(drain)).await?;
-            }
-            transaction.commit().await?;
-        }
-        Ok(result)
+        doctor::doctor(&snapshot, request).await
     }
 
     pub async fn lcm_session_boundary(
@@ -542,6 +612,10 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
+        let relation_projection = self
+            .lcm_relation_projection_seed(&request.session_id)
+            .await?;
+        let relation_session_id = request.session_id.clone();
         let storage_root = self.lcm_storage_root()?;
         let transaction = self
             .begin_write_transaction()
@@ -550,7 +624,10 @@ impl RegisteredGlobalDb {
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
         let publisher =
-            session_temporal_operations::GlobalDbLcmSummaryPublication::new(&transaction);
+            session_temporal_operations::GlobalDbLcmSummaryPublication::for_project(
+                &transaction,
+                relation_projection,
+            );
         let response = compression::compress(
             &transaction,
             &publisher,
@@ -561,6 +638,16 @@ impl RegisteredGlobalDb {
         .await?;
         transaction.commit().await?;
         payload_rollback.disarm();
+        if response.summary_nodes_created > 0 {
+            let session_id = SessionId::new(relation_session_id)
+                .map_err(|error| LcmError::Db(error.to_string()))?;
+            crate::session_temporal::relation_publication::apply_and_activate_latest_lcm_intent(
+                self,
+                &session_id,
+            )
+            .await
+            .map_err(|error| LcmError::Db(format!("{error:?}")))?;
+        }
         Ok(response)
     }
 
@@ -598,50 +685,6 @@ impl RegisteredGlobalDb {
         gc::run_payload_gc(&snapshot, storage_root, provider, session_id, cfg, now).await
     }
 
-    pub async fn lcm_run_payload_gc_apply(
-        &self,
-        storage_root: &Path,
-        provider: &str,
-        session_id: Option<&str>,
-        cfg: &LcmGcConfig,
-        now: i64,
-    ) -> Result<LcmGcReport, LcmError> {
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut drain =
-            gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root).await?;
-        transaction.commit().await?;
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut report = gc::run_payload_gc_in_transaction(
-            &transaction,
-            storage_root,
-            provider,
-            session_id,
-            cfg,
-            true,
-            now,
-        )
-        .await?;
-        transaction.commit().await?;
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let post_commit_drain =
-            gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root).await?;
-        drain.merge(post_commit_drain);
-        gc::finalize_gc_report(&transaction, &mut report, drain).await?;
-        transaction.commit().await?;
-        Ok(report)
-    }
-
     pub async fn lcm_ingest_raw_message(
         &self,
         storage_root: &Path,
@@ -663,5 +706,113 @@ impl RegisteredGlobalDb {
         transaction.commit().await?;
         payload_rollback.disarm();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::harness::RegisteredGlobalDbHarness;
+
+    #[tokio::test]
+    async fn read_only_doctor_does_not_acquire_the_registered_writer_lane() {
+        let harness = RegisteredGlobalDbHarness::open("lcm-doctor-read-only").await;
+        let writer = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("hold registered writer lane");
+        let storage_root = harness
+            .registered
+            .db_path()
+            .parent()
+            .expect("registered database storage root");
+        let entries_before = directory_entries(storage_root);
+
+        for mode in ["diagnose", "retention"] {
+            let started = std::time::Instant::now();
+            let report = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                harness.registered.lcm_doctor("cursor", None, mode),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{mode} Doctor blocked on the registered writer lane"))
+            .unwrap_or_else(|error| {
+                panic!("{mode} Doctor must not acquire the writer lane: {error}")
+            });
+            assert_eq!(report["mode"], mode);
+            assert!(
+                report.get("apply").is_none()
+                    && report.get("dry_run").is_none()
+                    && report.get("repairs").is_none(),
+                "read-only Doctor must not expose legacy mutation state: {report}"
+            );
+            eprintln!(
+                "registered read-only Doctor ({mode}) warm latency: {:?}",
+                started.elapsed()
+            );
+        }
+        let started = std::time::Instant::now();
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            harness.registered.lcm_status("cursor", None),
+        )
+        .await
+        .expect("LCM status blocked on the registered writer lane")
+        .expect("LCM status must remain available while the writer lane is occupied");
+        assert_eq!(
+            status.schema_version,
+            tracedecay_sessions::runtime::lcm::LCM_SCHEMA_VERSION
+        );
+        eprintln!(
+            "registered read-only status warm latency: {:?}",
+            started.elapsed()
+        );
+
+        let started = std::time::Instant::now();
+        let grep = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            harness.registered.lcm_grep(LcmGrepRequest {
+                provider: "cursor".to_string(),
+                query: "read-only-warm-probe".to_string(),
+                scope: tracedecay_sessions::runtime::lcm::LcmScope::All,
+                session_id: None,
+                include_summaries: false,
+                limit: 10,
+                sort: tracedecay_sessions::runtime::lcm::LcmGrepSort::Relevance,
+                source: None,
+                role: None,
+                start_time: None,
+                end_time: None,
+                git_filter: Default::default(),
+            }),
+        )
+        .await
+        .expect("LCM grep blocked on the registered writer lane")
+        .expect("LCM grep must remain available while the writer lane is occupied");
+        assert!(grep.hits.is_empty());
+        eprintln!(
+            "registered read-only grep warm latency: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            directory_entries(storage_root),
+            entries_before,
+            "read-only Doctor must not create storage artifacts"
+        );
+
+        writer
+            .rollback()
+            .await
+            .expect("release registered writer lane");
+    }
+
+    fn directory_entries(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+        let mut entries = std::fs::read_dir(path)
+            .expect("read registered database storage root")
+            .map(|entry| entry.expect("read storage-root entry").file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
     }
 }

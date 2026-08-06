@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use tokio::sync::Mutex;
@@ -33,25 +32,6 @@ mod code_reads;
 mod maintenance;
 mod mounts;
 
-use maintenance::RegisteredSchemaConvergenceMaintenance;
-
-static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
-
-pub(crate) fn mark_process_long_lived_for_session_maintenance() {
-    LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
-}
-
-pub(crate) fn release_process_allocator_memory() {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc allocator
-        // maintenance operation. It does not invalidate live allocations.
-        unsafe {
-            libc::malloc_trim(0);
-        }
-    }
-}
-
 impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) fn runtime_telemetry(
         &self,
@@ -75,9 +55,6 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
     code_graph_open_gates: Mutex<BTreeMap<StoreShardIdV1, Weak<Mutex<()>>>>,
-    registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
-    #[cfg(test)]
-    long_lived_session_maintenance_for_test: AtomicBool,
 }
 
 impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {

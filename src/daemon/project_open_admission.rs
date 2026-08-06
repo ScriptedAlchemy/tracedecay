@@ -126,6 +126,7 @@ fn is_database_read_failure(message: &str) -> bool {
 /// failure may clear on its own.
 pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
     match error {
+        TraceDecayError::ResetRequired { .. } => Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
         TraceDecayError::Config { message } => (message.contains("identity cutover conflict")
             || message.contains("ambiguous legacy profile stores")
             || message.contains("enrollment marker did not resolve a profile store"))

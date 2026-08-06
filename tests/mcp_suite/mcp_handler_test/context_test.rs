@@ -221,7 +221,7 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
 }
 
 #[tokio::test]
-async fn context_memory_matches_use_project_store_when_serving_branch_db() {
+async fn context_memory_matches_remain_project_wide_across_branch_selectors() {
     fn git(project: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)
@@ -256,10 +256,10 @@ async fn context_memory_matches_use_project_store_when_serving_branch_db() {
     index_all_retrying_sync_lock(&cg).await;
     git(&project, &["checkout", "-b", "feature"]);
     let cg = TestTraceDecay::new(TraceDecay::open(&project).await.unwrap());
-    assert_ne!(
+    assert_eq!(
         cg.db_path(),
         cg.store_layout().graph_db_path,
-        "test must serve a branch DB distinct from the shared project store"
+        "branch selection must retain the shared project store"
     );
 
     let added = handle_tool_call(
@@ -285,10 +285,10 @@ async fn context_memory_matches_use_project_store_when_serving_branch_db() {
 
     let read_only_cg = TestTraceDecay::new(TraceDecay::open_read_only(&project).await.unwrap());
     assert!(read_only_cg.is_read_only());
-    assert_ne!(
+    assert_eq!(
         read_only_cg.db_path(),
         read_only_cg.store_layout().graph_db_path,
-        "test must serve a read-only branch DB distinct from the shared project store"
+        "read-only branch selection must retain the shared project store"
     );
 
     let result = handle_tool_call(

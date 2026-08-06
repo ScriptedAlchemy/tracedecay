@@ -224,11 +224,9 @@ pub trait AgentIntegration {
     /// Optional hook run after a successful [`AgentIntegration::install`] or
     /// [`AgentIntegration::install_local`]. The default is a no-op.
     ///
-    /// Agents that need to react to their own installation override this — for
-    /// example, Cursor registers the project's current git branch for
-    /// tracedecay indexing. Keeping per-agent post-install behavior behind the
-    /// trait means the `install` / `reinstall` command flow never has to
-    /// special-case individual agents by id.
+    /// Keeping per-agent post-install behavior behind the trait means the
+    /// `install` / `reinstall` command flow never has to special-case
+    /// individual agents by id.
     fn post_install<'a>(
         &'a self,
         _project_path: Option<&'a Path>,

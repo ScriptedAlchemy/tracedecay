@@ -5,19 +5,13 @@
 //! state machine.
 
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use crate::branch::BranchAdminAction;
 use crate::config::{CompactionThresholdConfig, RetentionConfig};
 use crate::tracedecay::TraceDecay;
 
 #[cfg(unix)]
 use super::branch_admin::{StoreAdministration, StoreWriterClass};
-#[cfg(unix)]
-use super::git_watch::GitWatcherInner;
 use super::log_daemon_event;
 
 /// Opens the project store and runs a diff-scoped incremental sync (or a full
@@ -65,26 +59,40 @@ pub(super) async fn sync_project(
         .await
 }
 
-/// Proactively tracks a linked worktree's branch. Returns the
-/// [`crate::branch::BranchAddOutcome`] name for logging, or `None` on error.
+/// Proactively mounts a linked worktree in the daemon code-index registry.
+/// Every mounted generation publishes into the retained project's one Grafeo
+/// handle; no branch database or branch metadata is created.
 #[cfg(unix)]
-pub(super) async fn track_worktree_branch(
-    administration: &StoreAdministration,
+pub(super) async fn mount_linked_worktree_code_index(
+    code_index: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     cg: &TraceDecay,
     wt_root: PathBuf,
-    branch: String,
 ) -> Option<String> {
-    administration
-        .with_writer_in(
-            crate::daemon::branch_admin::graph_writer_scope(cg, StoreWriterClass::Owner),
-            || async {
-                cg.track_worktree_branch(&wt_root, &branch)
-                    .await
-                    .ok()
-                    .map(|outcome| format!("{outcome:?}"))
-            },
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_ref()
+        .and_then(|project_id| tracedecay_domain::ProjectId::new(project_id.clone()).ok())?;
+    let mounted = code_index
+        .mount_project_worktree(
+            project_id.clone(),
+            &wt_root,
+            cg.store_layout().data_root.clone(),
+            cg.store_layout().data_root.join("code-index-v1"),
+            None,
         )
         .await
+        .ok()?;
+    code_index
+        .enqueue_git_convergence(&project_id, &cg.store_layout().data_root, &wt_root)
+        .await
+        .ok()?;
+    Some(if mounted {
+        "Mounted".to_owned()
+    } else {
+        "AlreadyMounted".to_owned()
+    })
 }
 
 /// Resolves a `worktrees/<name>` leaf to `(worktree_root, branch)` by reading
@@ -117,61 +125,6 @@ pub(super) fn linked_worktree_names(common: &Path) -> std::collections::HashSet<
         .collect()
 }
 
-/// Runs branch-store GC for a project through the daemon administration
-/// coordinator, logging what it removed. Returns `false` when layout resolution
-/// or administration fails so the backstop keeps the GC cadence eligible for a
-/// retry.
-#[cfg(unix)]
-pub(super) async fn run_gc(inner: &Arc<GitWatcherInner>, cg: &TraceDecay) -> bool {
-    let root = cg.project_root();
-    let data_root = &cg.store_layout().data_root;
-
-    // Preserve the sync-semaphore → administration-gate acquisition order used
-    // by sync and worktree tracking. The coordinator owns the writer gate and
-    // its process/store-holder safety checks.
-    let _permit = inner.sync_semaphore.acquire().await;
-    let report = inner
-        .administration
-        .execute_branch_admin_in_layout(
-            root,
-            data_root,
-            BranchAdminAction::Gc,
-            inner.config.branch_gc_days,
-            inner.config.orphan_db_gc_days,
-        )
-        .await;
-    let report = match report {
-        Ok(report) => report,
-        Err(_) => {
-            log_daemon_event(
-                "git_watch_degraded",
-                &[
-                    ("scope", "project".to_string()),
-                    ("reason", "branch_gc_deferred".to_string()),
-                    ("failure", "branch_administration_failed".to_string()),
-                ],
-            );
-            return false;
-        }
-    };
-
-    if !report.removed_branches.is_empty() || !report.removed_orphan_dbs.is_empty() {
-        log_daemon_event(
-            "git_watch_synced",
-            &[
-                ("scope", "project".to_string()),
-                ("action", "gc".to_string()),
-                ("removed_tracked", report.removed_branches.len().to_string()),
-                (
-                    "removed_orphans",
-                    report.removed_orphan_dbs.len().to_string(),
-                ),
-            ],
-        );
-    }
-    true
-}
-
 /// Current unix time in whole seconds, as the `i64` the retention engines
 /// compare row timestamps against.
 fn now_secs_i64() -> i64 {
@@ -184,26 +137,27 @@ fn now_secs_i64() -> i64 {
 ///
 /// Sealed generations are ordinary files, so no database retention or
 /// compaction pass reclaims them. This runs on the ordinary maintenance cadence
-/// and is independent of the semantic projection lane: the only previous caller
-/// sat inside legacy vector migration, so a profile with semantic search
-/// disabled never collected anything and grew without bound.
+/// and remains independent of semantic projection scheduling so every mounted
+/// profile receives bounded code-generation retention.
 ///
-/// Vector-readable source generations are pinned, so the inventory read is
-/// required before any sweep. When the inventory cannot be read this pass
-/// reports failure and collects nothing rather than sweeping with an empty
-/// protection set, which would delete generations vectors still read from.
-pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
+/// Semantic-vector-readable source generations are pinned, so the generation
+/// read is required before any sweep. When it cannot be read this pass reports
+/// failure and collects nothing rather than sweeping with an empty protection
+/// set, which would delete code evidence still referenced by active vectors.
+pub(super) async fn run_code_generation_retention(
+    graph: &TraceDecay,
+    vector_graph: &tracedecay_graph_db::GraphDb,
+) -> bool {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         run_code_generation_retention as run_retention,
     };
-    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
     use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
 
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
     // No published generation means nothing has been sealed for this project.
-    if !store_root.join("active-code-generation-v1.json").is_file() {
+    if !store_root.join("active-code-generation.json").is_file() {
         return true;
     }
 
@@ -221,25 +175,16 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
             return false;
         }
     };
-    let vector_readable_sources = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
-        Ok(store) => match store.read_legacy_inventory().await {
-            Ok(inventory) => match inventory.read_only_inventory() {
-                Ok(inventory) => inventory.retained_readable_sources(),
-                Err(_) => {
-                    log_code_generation_retention_degraded("vector_inventory_unreadable");
-                    return false;
-                }
-            },
+    let vector_readable_sources =
+        match DatabaseVectorGenerationStoreV1::readable_source_generations(graph.db(), vector_graph)
+            .await
+        {
+            Ok(sources) => sources,
             Err(_) => {
-                log_code_generation_retention_degraded("vector_inventory_read_failed");
+                log_code_generation_retention_degraded("vector_projection_telemetry_unavailable");
                 return false;
             }
-        },
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_generation_store_unavailable");
-            return false;
-        }
-    };
+        };
 
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
     let report = tokio::task::spawn_blocking(move || {
@@ -753,81 +698,4 @@ fn log_compaction(store_name: &'static str, freelist_before: u64, freelist_after
             ),
         ],
     );
-}
-
-/// Runs bounded incremental-vacuum compaction over every tracked branch
-/// database other than the one `cg` currently has mounted (that store already
-/// goes through [`run_project_compaction`]). Best-effort and independent per
-/// file: a busy or failing branch database never blocks the rest, but keeps
-/// the maintenance cadence retry-eligible — see
-/// `src/retention/branch_compaction.rs` for the compaction policy itself.
-pub(super) async fn run_branch_compaction(
-    cg: &TraceDecay,
-    config: &CompactionThresholdConfig,
-) -> bool {
-    let layout = cg.store_layout();
-    let Some(meta) = crate::branch_meta::load_branch_meta(&layout.data_root) else {
-        return true;
-    };
-    let active_db_path = cg.db_path();
-    let candidates = crate::retention::branch_compaction::select_branch_db_candidates(
-        &layout.data_root,
-        &meta,
-        &active_db_path,
-    );
-    if candidates.is_empty() {
-        return true;
-    }
-    let report = crate::retention::branch_compaction::compact_branch_databases(&candidates, config);
-    if report.policy_invalid {
-        // Never silent: an out-of-range threshold disables the pass entirely
-        // and would otherwise be indistinguishable from "nothing to compact".
-        log_daemon_event(
-            "retention_degraded",
-            &[
-                ("pass", "branch_compaction".to_string()),
-                ("failure", "invalid_compaction_policy".to_string()),
-                (
-                    "free_page_ratio_threshold",
-                    config.free_page_ratio_threshold.to_string(),
-                ),
-            ],
-        );
-        return false;
-    }
-    if report.compacted.is_empty() && report.skipped.is_empty() {
-        return true;
-    }
-    let freed_pages: u64 = report
-        .compacted
-        .iter()
-        .map(|outcome| outcome.freed_pages)
-        .sum();
-    let unreclaimable = report
-        .skipped
-        .iter()
-        .filter(|skip| {
-            skip.reason
-                == crate::retention::branch_compaction::BranchCompactionSkipReason::IncrementalVacuumUnavailable
-        })
-        .count();
-    log_daemon_event(
-        "retention_branch_compaction",
-        &[
-            ("project", cg.project_root().display().to_string()),
-            ("compacted", report.compacted.len().to_string()),
-            ("freed_pages", freed_pages.to_string()),
-            ("skipped", report.skipped.len().to_string()),
-            // Branch databases predating `auto_vacuum = INCREMENTAL`: their
-            // free pages need a full VACUUM this pass deliberately avoids.
-            ("unreclaimable", unreclaimable.to_string()),
-        ],
-    );
-    branch_compaction_succeeded(&report)
-}
-
-pub(super) fn branch_compaction_succeeded(
-    report: &crate::retention::branch_compaction::BranchCompactionReport,
-) -> bool {
-    !report.policy_invalid && report.skipped.is_empty()
 }

@@ -1,9 +1,9 @@
-# PR20: End-to-End Performance Optimization
+# End-to-end performance
 
 ## Status and authority
 
-PR20 follows V2 convergence. It optimizes demonstrated bottlenecks in shipped
-product journeys and retains only changes that improve the same journey on the
+Performance is part of the final V2 product, not a later rollout stage. Every
+production journey retains only changes that improve the same journey on the
 same host without changing semantics, safety, or recovery.
 
 `00-plan-set-index.md` owns acceptance. Historical benchmark packets,
@@ -21,8 +21,8 @@ Users experience materially faster or less resource-intensive:
 - remote capture, synchronization, query, backup, restore, and failover;
 - task/work updates, admitted provider execution, cancellation, and resume;
 - public SDK operations; and
-- startup, package installation, migration, recovery, and common developer
-  feedback loops.
+- startup, package installation, fresh-store creation, historical host-data
+  intake, recovery, and common developer feedback loops.
 
 An inconclusive or noisy comparison reports `pending`; it never justifies
 shipping a speculative optimization.
@@ -68,6 +68,14 @@ committed evidence packet, attestation, or fixed test inventory is required.
 - **Git operations:** faster status, diff, preview, and explicit apply while
   preserving `HunkRef` freshness, native Git compare-and-swap, atomic runtime
   receipts, and refusal of autonomous history or ref mutation.
+- **Git convergence:** admission limited to exact identity and ref-tip reads;
+  durable per-batch ref/OID frontiers; native commit-graph/object-cache reuse;
+  delta-only continuation batches that yield to foreground work; independent
+  coalesced dirty snapshots; and restart without replaying completed history.
+- **Session/Git evidence:** repository identity, HEAD, index, and worktree
+  observations are reused by exact watermarks rather than rescanned for every
+  message. Historical correlation performs bounded Git reads outside database
+  writer transactions, then publishes a short compare-and-swap batch.
 - **Build and developer feedback:** portable dependency, feature, target, and
   build-script changes retained only when the same common edit/check journey
   improves on the same host and normal contributor, CI, release, and package
@@ -86,8 +94,15 @@ faster synthetic substitute are not product performance evidence.
 - Cache, process, analyzer, connection, or generation sharing requires complete
   store, scope, authorization, configuration, provider/protocol, model, and
   overlay identity as applicable.
-- Batching never weakens atomic cursor, projection, migration, Git, workflow, or
-  product-runtime receipt commits.
+- Batching never weakens atomic cursor, projection, fresh-store publication,
+  Git, workflow, or product-runtime receipt commits.
+- Background convergence is preemptible and bounded. It never holds the daemon
+  request executor, Git writer lane, GraphDb writer, or a blocking worker for an
+  unbounded history walk. Completed batch progress is durable before yielding.
+- Reads and hooks never start reconciliation inline. They return the latest
+  complete generation plus typed freshness and wake one coalescing owner. Git
+  subprocesses have operation deadlines, cancellation, output caps, sanitized
+  noninteractive environments, and typed timeout/overflow outcomes.
 - Partial, denied, stale, timed-out, failed, cancelled, and unavailable states
   never become successful zero or complete output.
 - Production telemetry stays bounded and redacted. It records no credentials,
@@ -106,7 +121,7 @@ faster synthetic substitute are not product performance evidence.
   produce `pending`.
 - Direct journey tests preserve semantic equivalence and exercise the relevant
   cancellation, overload, restart, recovery, cache-loss, provider-failure,
-  migration, or storage interruption behavior.
+  reset-required, or storage interruption behavior.
 - Default-feature product behavior passes ordinary Linux, macOS, and Windows CI.
   Developer performance comparisons may remain Linux-only.
 - Semantic divergence, authority or scope violation, hidden fallback,
@@ -121,7 +136,7 @@ instrumentation nor a reproducible local comparison. Keep the ordinary
 operational measurements needed to diagnose product health and explain a
 truthful failed or pending outcome.
 
-## Not in PR20
+## Not part of this design
 
 - New product semantics or benchmark-only APIs.
 - A telemetry database, benchmark daemon, leaderboard, acceptance packet, or

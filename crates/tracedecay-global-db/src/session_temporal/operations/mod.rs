@@ -12,7 +12,7 @@ use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 
-pub use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
+pub use publication::GlobalDbLcmSummaryPublication;
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
 pub const SANITIZER_VERSION: &str = "tracedecay.lcm-summary-publication.v1";

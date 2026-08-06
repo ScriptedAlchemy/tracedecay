@@ -2,16 +2,15 @@
 
 ## Status / Role
 
-PR5 production **session-observation** persistence is complete. External-source
-persistence is split (status corrected again 2026-07-26): host observations
-reach the daemon-owned `RuntimeExternalSourceStore`, dispatch a
-`RepositoryWritePayloadV1::ExternalSource`, and execute `apply_source_commit`
-through `ExternalSourceExecutor` before persisting `external_source_states_v1`.
-`EXTERNAL_SOURCE_SCHEMA_V1` is installed by the database migration path. The
-earlier claim that this reducer had no production caller, adapter, or migration
-was wrong for the host-observation specialization. The broader acquisition and
-canonical-refetch surface remains without production composition and is still
-a retained future seam, not PR8–PR14 work to duplicate.
+The final store boundary is daemon-owned and born at its final V2 shape.
+External-source observations reach the daemon-owned
+`RuntimeExternalSourceStore`, dispatch a typed repository write, and commit
+through the application executor before publication. Historical type names in
+the implementation are not compatibility contracts. No prior TraceDecay
+database is opened, converted, backfilled, censused, or dual-written.
+Acquisition, canonical refetch, and historical host-transcript intake are
+ordinary V2 capture journeys and must be production-composed rather than left
+as future seams.
 
 `tracedecay-store` owns persistence contracts and DTOs; the daemon-owned
 `GlobalDb` adapter owns live connections and transactions. This boundary
@@ -131,20 +130,21 @@ declarations or file layout.
 - Representation families own immutable typed generations and checkpoints. The
   store must not create a generic or monolithic embeddings authority.
 
-An audit of this completed slice must map these behaviors to the current store
-ports, daemon adapter, migration, and direct regressions. A missing historical
-name or reorganized schema is not a gap if callable behavior and regression
-coverage remain.
+An audit of this completed slice maps these behaviors to the current store
+ports, daemon adapter, fresh-store creation, and direct regressions. A missing
+historical name or reorganized schema is not a gap if callable behavior and
+regression coverage remain.
 
-## Migration and regression evidence
+## Fresh-store and regression evidence
 
-The migration remains additive: create required state and invariants; publish
-definitions; create or backfill only provable bindings; seed each binding's
-empty or proven partition and aggregate frontier; mark ambiguous scope or
-cursor history blocked/unknown rather than guessing; record one idempotent
-migration receipt; then enable the writer. Definitions precede bindings,
-bindings precede frontiers, source commit precedes projection commit, and
-projection cutover precedes old-state retirement.
+A newly created V2 store installs the complete required state and invariants
+before enabling its writer. Definitions precede bindings, bindings precede
+frontiers, source commit precedes projection commit, and no partially created
+store is published. An incompatible or prior-shape store returns the typed
+reset-required state; it is never input to store creation. Historical provider
+and host data may then enter through the normal capture and projection
+pipeline, with the same sanitization, authorization, idempotency, and frontier
+rules as newly produced data.
 
 Checked-in native Plan 27 acquisition bytes and recorded origin/version/digest
 are the fixture authority. Store expectations reference those same bytes after
@@ -181,8 +181,9 @@ those authorities.
 - Diagnostic persistence rejects dirty overlays, mismatched content digests,
   and client-local authority while preserving explicit clears and supersession
   across restart.
-- Doctor diagnosis is read-only; every repair is authority-fenced, idempotent,
-  and receipt-bearing.
+- Doctor diagnosis is read-only; any remediation is a separate
+  authority-fenced, idempotent, receipt-bearing daemon operation, not a Doctor
+  apply mode.
 - External-source kill-point/restart regressions prove observation, receipt,
   lineage, partition frontier, aggregate digest, and projection effects commit
   completely or not at all under at-least-once replay.

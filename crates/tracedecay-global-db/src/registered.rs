@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
@@ -17,11 +18,22 @@ use tracedecay_runtime_core::{
     store_runtime::registry::StoreRuntimeHandle,
 };
 
+/// Retained daemon wake used after a source transaction durably stages new
+/// session↔Git graph evidence. The callback performs no graph I/O inline.
+pub trait SessionGitGraphPublicationWake: Send + Sync {
+    fn wake(&self);
+}
+
 pub struct RegisteredGlobalDb {
     read_connection: ReadConnection,
     write_connection: Connection,
     runtime: StoreRuntimeHandle,
     authority: DatabaseAuthority,
+    session_relation_graph: OnceLock<(
+        tracedecay_domain::ProjectId,
+        Arc<tracedecay_graph_db::GraphDb>,
+    )>,
+    session_git_graph_publication_wake: OnceLock<Arc<dyn SessionGitGraphPublicationWake>>,
 }
 
 pub struct RegisteredWorkApplicationServicesV1 {
@@ -88,7 +100,7 @@ impl RegisteredGlobalDb {
     /// registered global database facade. No path is reopened, and no store is
     /// stepped forward from an older shape: a store at any other shape is a
     /// typed refusal from [`super::ensure_registered_schema`].
-    pub async fn migrate_and_attach(
+    pub async fn install_and_attach(
         runtime: StoreRuntimeHandle,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
         expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
@@ -96,42 +108,10 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         let write_connection =
             registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
-        if !runtime.schema_migrated() {
+        if !runtime.schema_installed() {
             super::ensure_registered_schema(&write_connection).await?;
         }
         Self::finish_attach(runtime, write_connection, authority).await
-    }
-
-    /// Installs only admission-critical schema before publishing a daemon
-    /// runtime. The returned plan owns resumable historical convergence.
-    pub async fn migrate_and_attach_for_daemon(
-        runtime: StoreRuntimeHandle,
-        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
-        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
-        authority: DatabaseAuthority,
-    ) -> tracedecay_runtime_core::errors::Result<(
-        Self,
-        Option<super::schema_stages::RegisteredSchemaConvergence>,
-    )> {
-        let write_connection =
-            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
-        let convergence = if runtime.schema_migrated() {
-            None
-        } else {
-            Some(
-                super::schema_stages::ensure_registered_schema_for_admission(&write_connection)
-                    .await?,
-            )
-        };
-        let database = Self::finish_attach(runtime, write_connection, authority).await?;
-        Ok((database, convergence))
-    }
-
-    pub async fn converge_schema(
-        &self,
-        convergence: super::schema_stages::RegisteredSchemaConvergence,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
-        super::schema_stages::converge_registered_schema(&self.write_connection, convergence).await
     }
 
     pub async fn release_connection_memory(&self) -> tracedecay_runtime_core::errors::Result<()> {
@@ -152,6 +132,8 @@ impl RegisteredGlobalDb {
             write_connection,
             runtime,
             authority,
+            session_relation_graph: OnceLock::new(),
+            session_git_graph_publication_wake: OnceLock::new(),
         };
         database.validate_authority_schema_contract().await?;
         Ok(database)
@@ -287,6 +269,7 @@ impl RegisteredGlobalDb {
 
     pub fn work_storage(
         &self,
+        graph: tracedecay_graph_db::GraphDb,
     ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
     {
         let handle = self
@@ -301,7 +284,7 @@ impl RegisteredGlobalDb {
             self.runtime.binding(),
             self.runtime.locator().verified(),
         )?;
-        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
+        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle, graph))
     }
 
     pub fn authorized_scope_set_storage(
@@ -333,8 +316,9 @@ impl RegisteredGlobalDb {
 
     pub fn work_application_services(
         &self,
+        graph: tracedecay_graph_db::GraphDb,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkApplicationServicesV1> {
-        let storage = self.work_storage()?;
+        let storage = self.work_storage(graph)?;
         Ok(RegisteredWorkApplicationServicesV1 {
             commands: tracedecay_application::WorkService::new(storage.clone()),
             projections: tracedecay_application::WorkProjectionReadService::new(storage),
@@ -346,10 +330,11 @@ impl RegisteredGlobalDb {
     /// idempotently through the same handle `work_storage` validates.
     pub fn workflow_storage(
         &self,
+        graph: tracedecay_graph_db::GraphDb,
     ) -> tracedecay_runtime_core::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
-        let storage = self.work_storage()?;
+        let storage = self.work_storage(graph)?;
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_work_storage(&storage)
             .map_err(|error| {
                 registered_error("attach registered workflow storage", format!("{error:?}"))
@@ -358,8 +343,9 @@ impl RegisteredGlobalDb {
 
     pub fn workflow_application_services(
         &self,
+        graph: tracedecay_graph_db::GraphDb,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkflowApplicationServicesV1> {
-        let authority = self.workflow_storage()?;
+        let authority = self.workflow_storage(graph)?;
         Ok(RegisteredWorkflowApplicationServicesV1 {
             definitions: tracedecay_application::WorkflowDefinitionService::new(authority.clone()),
             handoffs: tracedecay_application::TaskHandoffService::new(authority),
@@ -481,6 +467,84 @@ impl RegisteredGlobalDb {
 
     pub fn db_path(&self) -> &Path {
         self.authority.canonical_database_path()
+    }
+
+    /// Binds this exact registered project-session shard to the daemon's one
+    /// mounted graph handle. Rebinding is accepted only for the same project
+    /// identity and the same allocation.
+    pub fn bind_session_relation_graph(
+        &self,
+        project_id: tracedecay_domain::ProjectId,
+        graph: Arc<tracedecay_graph_db::GraphDb>,
+    ) -> Result<(), crate::session_temporal::relations::SessionRelationError> {
+        if let Some((bound_project, bound_graph)) = self.session_relation_graph.get() {
+            return if bound_project == &project_id && Arc::ptr_eq(bound_graph, &graph) {
+                Ok(())
+            } else {
+                Err(crate::session_temporal::relations::SessionRelationError::Unavailable)
+            };
+        }
+        self.session_relation_graph
+            .set((project_id, graph))
+            .map_err(|_| crate::session_temporal::relations::SessionRelationError::Unavailable)
+    }
+
+    pub fn session_relation_graph(
+        &self,
+    ) -> Result<
+        (
+            &tracedecay_domain::ProjectId,
+            &Arc<tracedecay_graph_db::GraphDb>,
+        ),
+        crate::session_temporal::relations::SessionRelationError,
+    > {
+        self.session_relation_graph
+            .get()
+            .map(|(project_id, graph)| (project_id, graph))
+            .ok_or(crate::session_temporal::relations::SessionRelationError::Unavailable)
+    }
+
+    pub fn session_relation_projection(
+        &self,
+        session_id: &tracedecay_domain::SessionId,
+        generation: u64,
+    ) -> Result<
+        crate::session_temporal::relations::SessionRelationProjection,
+        crate::session_temporal::relations::SessionRelationError,
+    > {
+        let (project_id, graph) = self.session_relation_graph()?;
+        crate::session_temporal::relations::SessionRelationGraphStore::new(Arc::clone(graph))
+            .load_projection(project_id, session_id, generation)
+    }
+
+    pub fn bind_session_git_graph_publication_wake(
+        &self,
+        wake: Arc<dyn SessionGitGraphPublicationWake>,
+    ) -> Result<(), tracedecay_runtime_core::errors::TraceDecayError> {
+        if let Some(bound) = self.session_git_graph_publication_wake.get() {
+            return if Arc::ptr_eq(bound, &wake) {
+                Ok(())
+            } else {
+                Err(registered_error(
+                    "bind session git graph publication wake",
+                    "a different daemon wake is already bound",
+                ))
+            };
+        }
+        self.session_git_graph_publication_wake
+            .set(wake)
+            .map_err(|_| {
+                registered_error(
+                    "bind session git graph publication wake",
+                    "daemon wake binding raced with another owner",
+                )
+            })
+    }
+
+    pub(crate) fn wake_session_git_graph_publications(&self) {
+        if let Some(wake) = self.session_git_graph_publication_wake.get() {
+            wake.wake();
+        }
     }
 
     pub fn git_index_transaction_store(

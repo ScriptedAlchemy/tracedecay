@@ -14,19 +14,19 @@ repository `NOTICE` file.
 
 Every scenario follows the same shape:
 
-1. **Fixture** — a throwaway project directory is created, `tracedecay init`
-   builds a real `.tracedecay/` store, and the scenario's setup block seeds
-   facts (through the real `fact_store` write path, so HRR vectors and FTS
-   stay consistent) plus optional workspace files. Trust scores,
-   retrieval counts, and source labels are then pinned with SQL.
+1. **Fixture** — isolated home, profile, project, and session roots are created,
+   and `tracedecay init` enrolls the project with the same production identity
+   authorities. Scenario setup seeds project-wide facts through the real memory
+   application operation plus optional workspace files.
 2. **Drive** — either a scripted tool-call sequence (deterministic layer) or a
    real agent prompted over the generated tracedecay integration (real-model
    layer) exercises the memory write/recall/curation paths.
-3. **Assert** — end-state is checked with plain SQL against the fixture's
-   `.tracedecay/tracedecay.db` (plus structured checks of the
-   `tracedecay memory curate` dry-run report for curation scenarios).
-4. **Cleanup** — the fixture directory is deleted; nothing touches the host
-   project's stores.
+3. **Assert** — end-state is checked through the same read-only memory/status
+   application operations used by product surfaces, including typed
+   fact/provenance/trust/curation results. Tests do not inspect SQLite or
+   Grafeo directly.
+4. **Cleanup** — the isolated fixture roots are deleted; nothing reads or
+   mutates the operator's profile or project stores.
 
 Scenario declarations live in [`eval/scenarios/*.json`](../eval/scenarios/)
 and are shared by both layers, so prompts, setup, and assertions can never

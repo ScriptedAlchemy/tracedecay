@@ -3129,9 +3129,6 @@ function memoryStatusPayload(): Record<string, unknown> {
     path: '/fast/projects/tracedecay/.tracedecay/memory.db',
     largest_bank_fact_count: 169,
     largest_bank_utilization_pct: 0.0477,
-    // A store past its legacy backfill with no outstanding feedback repair —
-    // the steady state, and the one the Brain readout is designed against.
-    feedback_history_repair: { state: 'not_required', processed: 0, remaining: null },
     memory: {
       algebra_name: 'amari_fhrr',
       bank_count: 7,

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::common::{
     GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent, pick_free_port,
-    response_to_json, wait_for_dashboard,
+    wait_for_dashboard,
 };
 use crate::dashboard_api_support::{MessageDetails, message};
 
@@ -18,9 +18,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::dashboard;
-use tracedecay::sessions::lcm::{
-    LcmCleanConfig, LcmError, LcmGcConfig, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft,
-};
+use tracedecay::sessions::lcm::{LcmError, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecayOpenOptions;
 use tracedecay_domain::ProjectId;
@@ -278,14 +276,7 @@ async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
     let seeded_doctor = if payload_seed.is_some() {
         Some(
             runtime
-                .lcm_doctor_for_test(
-                    "cursor",
-                    Some(&session_id),
-                    "diagnose",
-                    false,
-                    LcmCleanConfig::default(),
-                    LcmGcConfig::default(),
-                )
+                .lcm_doctor_for_test("cursor", Some(&session_id), "diagnose")
                 .await
                 .expect("seeded doctor"),
         )
@@ -463,17 +454,18 @@ fn lcm_session_and_node_routes_expand_sources() {
     });
 }
 
-fn post_json(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
-    let response = agent
+fn post_status(agent: &ureq::Agent, url: &str, body: &Value) -> u16 {
+    agent
         .post(url)
         .content_type("application/json")
         .send(body.to_string())
-        .expect("POST should succeed");
-    response_to_json(response)
+        .expect("POST should return an HTTP response")
+        .status()
+        .as_u16()
 }
 
 #[test]
-fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
+fn lcm_payload_health_and_gc_routes_are_read_only() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -508,19 +500,6 @@ fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
         assert!(!health_text.contains("dashboard payload secret"));
         assert!(!health_text.contains("dashboard orphan body that must not leak"));
 
-        let (status, denied) = post_json(
-            &agent,
-            &format!("{}/api/plugins/hermes-lcm/payloads/gc", fixture.base_url),
-            &json!({
-                "provider": "cursor",
-                "session_id": fixture.session_id,
-                "confirm": true
-            }),
-        );
-        assert_eq!(status, 400);
-        assert!(orphan_path.exists());
-        assert_eq!(denied["status"], "error");
-
         let (status, preview) = get_json(
             &agent,
             &format!(
@@ -529,26 +508,22 @@ fn lcm_payload_health_and_gc_routes_require_preview_then_apply() {
             ),
         );
         assert_eq!(status, 200);
-        let token = preview["dry_run_token"].as_str().expect("preview token");
         assert_eq!(preview["gc_report"]["orphans"]["count"], 1);
+        assert!(preview.get("dry_run_token").is_none());
+        assert!(preview.get("dry_run").is_none());
         assert!(orphan_path.exists());
 
-        let (status, applied) = post_json(
+        let status = post_status(
             &agent,
             &format!("{}/api/plugins/hermes-lcm/payloads/gc", fixture.base_url),
             &json!({
                 "provider": "cursor",
                 "session_id": fixture.session_id,
-                "confirm": true,
-                "dry_run_token": token
+                "confirm": true
             }),
         );
-        assert_eq!(status, 200);
-        assert_eq!(applied["gc_report"]["orphans"]["count"], 1);
-        assert!(!orphan_path.exists());
-        let applied_text = serde_json::to_string(&applied).unwrap();
-        assert!(!applied_text.contains("dashboard payload secret"));
-        assert!(!applied_text.contains("dashboard orphan body that must not leak"));
+        assert_eq!(status, 405);
+        assert!(orphan_path.exists());
     });
 }
 

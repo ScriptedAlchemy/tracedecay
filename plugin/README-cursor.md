@@ -18,8 +18,10 @@ tracedecay serve --path ${workspaceFolder}
 ```
 
 Cursor Settings surfaces that MCP server key literally, so the Cursor bundle
-uses `tracedecay` (not the Claude/Codex `graph` key). Each Cursor workspace
-gets its own `.tracedecay/` index. Cursor's MCP runner resolves
+uses `tracedecay` (not the Claude/Codex `graph` key). The workspace marker
+identifies the project but contains no database. Linked worktrees resolve
+through the daemon to one canonical project store while retaining exact
+worktree snapshot and generation identity. Cursor's MCP runner resolves
 `${workspaceFolder}` in normal editor windows.
 
 Some Cursor contexts (headless agent-session MCP scopes) pass the literal,

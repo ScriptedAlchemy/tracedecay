@@ -35,10 +35,12 @@ cd /path/to/your/project
 tracedecay init
 ```
 
-This creates a `.tracedecay/` directory and indexes all supported files. The
-default `full` feature set covers 50+ languages; `Cargo.toml` is the source of
-truth for exact membership of the `lite` / `medium` / `full` tiers. After the
-initial index, `tracedecay sync` picks up only changed files. To force a full re-index, use `tracedecay sync --force`.
+This enrolls the project and indexes all supported files. `.tracedecay/` is an
+enrollment/config marker only; durable state lives in the daemon-owned profile
+store. The default `full` feature set covers 50+ languages; `Cargo.toml` is the
+source of truth for exact membership of the `lite` / `medium` / `full` tiers.
+After the initial index, `tracedecay sync` picks up only changed files. To
+discard and recreate the current index explicitly, use `tracedecay sync --force`.
 
 Check what was indexed:
 
@@ -108,12 +110,9 @@ tracedecay sync
 
 The MCP server reads from the database on each request, so it picks up synced changes without restarting.
 
-## Multi-branch (optional)
+## Worktrees and branches
 
-If you work on multiple branches, TraceDecay can keep a separate graph per branch so switching never causes stale results:
-
-```bash
-tracedecay branch add          # track the current branch
-```
-
-This copies the nearest ancestor's database and syncs only the changed files. See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for the full guide.
+Linked git worktrees share the same project enrollment through the repository
+common directory. TraceDecay records exact branch/ref/worktree snapshot
+provenance for code generations; it does not copy branch databases or shard
+facts by branch.

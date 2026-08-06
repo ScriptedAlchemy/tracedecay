@@ -69,9 +69,10 @@ the same rows, order, provenance, coverage, and checkpoint.
 - Project facts and sessions are project-wide. Code projections require the
   exact repository, checkout, worktree, ref, snapshot, and generation and never
   fall back to an active branch.
-- PR14 Doctor/operations projections expose real health, lag, corruption,
-  recovery, and repair receipts; they do not manufacture findings from source
-  code or documentation metadata.
+- Doctor/operations projections expose real health, lag, corruption, recovery
+  state, and receipts produced by separately authorized daemon operations.
+  Doctor itself is read-only and never manufactures findings from source code
+  or documentation metadata.
 
 ## External-source projection behavior
 
@@ -132,16 +133,16 @@ these requirements, not future rebuild obligations. Later audits must locate
 the current projection and store owners and direct regressions before declaring
 an old artifact missing.
 
-## Migration and regression evidence
+## Fresh projection and regression evidence
 
-The additive migration preserves versioned partition and aggregate frontiers,
-lineage, and commit receipts. It freezes the old scalar checkpoint, replays
-immutable observations into a staged generation with real source partitions,
-validates rows, ordering, anchors, lineage, coverage, and digests, catches up a
-bounded suffix, and atomically publishes the new aggregate frontier. Failed
-validation leaves the old generation active. Old writes stop only at cutover;
-the owning view's Plan 09 behavior alone rebuilds, validates, publishes, rolls
-back, and later retires generations, with idempotent receipts.
+The final V2 projection shape is installed only in a newly created V2 store.
+No old TraceDecay checkpoint, generation, or row is replayed or converted.
+Within a V2 store, an authorized rebuild may replay that store's immutable V2
+observations into a staged generation, validate rows, ordering, anchors,
+lineage, coverage, and digests, catch up a bounded suffix, and atomically
+publish the new frontier. Failed validation leaves the prior valid V2
+generation active. Historical host transcripts are admitted as new V2 capture
+input, never as database backfill.
 
 Direct regression evidence covers canonical frontier encoding and
 partition-order-independent digests; every content-state transition plus
@@ -180,10 +181,12 @@ typed generations and their own checkpoints.
   clears and supersession without reviving stale findings.
 - Scope tests prove user/project ownership and reject base-checkout fallback for
   branch/worktree code graphs.
-- PR14 tests prove Doctor diagnosis remains read-only and repair views reflect
-  only authoritative, receipt-bearing operations.
-- Host-surface parity and restart tests must pass before any superseded V1
-  projection path is removed.
+- PR14 tests prove Doctor diagnosis remains read-only and remediation views
+  reflect only authoritative, receipt-bearing operations outside Doctor apply
+  modes.
+- Host-surface parity and restart tests exercise only the final V2 projection
+  path; superseded projection paths are deleted rather than retained behind a
+  cutover.
 - Incremental and rebuild output is byte-identical at the same aggregate
   frontier; every duplicate/reordered partition permutation converges.
 - Output, lineage, partition frontier, aggregate digest, and receipt commit

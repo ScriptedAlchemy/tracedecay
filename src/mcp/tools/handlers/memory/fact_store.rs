@@ -17,7 +17,6 @@ use super::args::{
     MAX_FACT_LIMIT, fact_id, limit, metadata_with_tags, optional_category, optional_f64,
     request_entities, required_str, update_trust,
 };
-use super::status::feedback_history_repair_payload;
 use super::{
     TargetMemoryDb, config_error, memory_application, memory_application_error,
     memory_operation_context, open_target_memory_db, refresh_target_memory_digest,
@@ -138,14 +137,13 @@ pub(super) async fn handle_fact_store_for_target(
                 .map_err(memory_application_error)?
                 .ok_or_else(|| config_error(format!("fact {id} not found")))?;
             let trust_history = memory
-                .fact_trust_history_with_progress_v1(id, MAX_FACT_LIMIT)
+                .fact_trust_history_v1(id, MAX_FACT_LIMIT)
                 .await
                 .map_err(memory_application_error)?;
             json!({
                 "action": action,
                 "fact": fact,
-                "trust_history": trust_history.entries,
-                "trust_history_availability": feedback_history_repair_payload(trust_history.repair_progress),
+                "trust_history": trust_history,
                 "count": 1,
             })
         }

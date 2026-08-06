@@ -283,14 +283,33 @@ pub(super) async fn dispatch_git_tools(
         )
     })?;
     match tool_name {
-        "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
         "tracedecay_affected" => git::handle_affected(cg, args).await,
         "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
         "tracedecay_changelog" => git::handle_changelog(cg, args, control).await,
         "tracedecay_commit_context" => git::handle_commit_context(cg, args, control).await,
         "tracedecay_pr_context" => git::handle_pr_context(cg, args, control).await,
-        "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
-        "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
+        "tracedecay_branch_search" => {
+            git::handle_branch_search(
+                cg,
+                args,
+                options.code_index_search_executor.as_ref(),
+                options.code_index_search_authority.as_ref(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
+        "tracedecay_branch_diff" => {
+            git::handle_branch_diff(
+                cg,
+                args,
+                options.code_index_branch_diff_executor.as_ref(),
+                options.code_index_search_authority.as_ref(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
         "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
         _ => Err(unknown_tool_error(tool_name)),
     }
@@ -471,9 +490,7 @@ pub(super) async fn execute_project_retained_application_tool(
         | RetainedSurfaceOperation::LcmDescribe
         | RetainedSurfaceOperation::LcmExpand
         | RetainedSurfaceOperation::LcmExpandQuery
-        | RetainedSurfaceOperation::LcmPreflight
-        | RetainedSurfaceOperation::LcmCompress
-        | RetainedSurfaceOperation::LcmSessionBoundary => {
+        | RetainedSurfaceOperation::LcmPreflight => {
             dispatch_lcm_tool(request.operation, request.arguments, active_lcm_context).await
         }
         RetainedSurfaceOperation::SessionStart => {

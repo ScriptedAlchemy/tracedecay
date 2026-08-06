@@ -84,12 +84,13 @@ cargo nextest run --no-default-features --features lite
    cargo clippy --workspace --all-targets
    ```
 
-### Rebrand compatibility changes
+### Compatibility changes
 
-For changes touching naming, legacy env vars, storage paths, generated agent
-config, plugin paths, or cleanup behavior, follow
-[`docs/REBRAND-COMPATIBILITY-POLICY.md`](docs/REBRAND-COMPATIBILITY-POLICY.md).
-Update compatibility warnings, migration cleanup, and docs together.
+Retain a compatibility alias only when an independently released public
+CLI/API/SDK/configuration contract proves it is required. Branch-local,
+unreleased, and persisted internal V2 shapes change in place. Final-V2 stores
+start fresh and must not gain readers, migrations, backfills, dual writes, or
+cleanup paths for older TraceDecay databases.
 
 ### Clippy policy
 

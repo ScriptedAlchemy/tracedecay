@@ -31,8 +31,7 @@ use crate::mcp::tools::{
     get_catalog_filtered_tool_definitions_with_warming_budget, project_catalog_discovery_scope,
 };
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
-use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
-use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
+use branch_admin::StoreAdministration;
 #[cfg(all(unix, test))]
 use memory_repair_scheduler::{
     MemoryRepairPassDecision, MemoryRepairSchedulerHandle, run_memory_repair_scheduler_tick,
@@ -135,13 +134,12 @@ use bootstrap_route::{
     apply_daemon_initialize_route, attach_initialize_route_metadata, cached_project_node_count,
     daemon_bootstrap_response,
 };
-mod branch_add;
 mod branch_admin;
 mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
 mod code_index_executor;
-use code_index_executor::code_index_search_executor;
+use code_index_executor::{code_index_branch_diff_executor, code_index_search_executor};
 #[cfg(test)]
 use code_index_executor::{
     code_index_scope_unavailable, code_index_search_display_binding,
@@ -150,6 +148,7 @@ use code_index_executor::{
 pub(crate) mod code_index_scheduler;
 mod connection_serving;
 pub(crate) mod context_scout_lifecycle;
+pub(crate) mod embedded_graph_runtime;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
 #[cfg(not(unix))]
@@ -178,6 +177,7 @@ mod core_logging;
 mod core_proxy;
 mod database_owner_registry;
 use database_owner_registry::{DatabaseOwnerRegistry, settle_deferred_post_open_health};
+mod advisory_post_open;
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod project_open_owners;
@@ -222,6 +222,7 @@ mod invocation_state;
 use invocation_state::DaemonInvocationState;
 mod lsp_sessions;
 mod request_cancellation;
+mod session_git_evidence;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
     cleanup_connection_lsp_sessions, invocation_lsp_session_transition,
@@ -229,7 +230,6 @@ use lsp_sessions::{
 };
 mod maintenance;
 mod maintenance_tasks;
-pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
 use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
 #[cfg(unix)]
 mod memory_repair_scheduler;
@@ -250,6 +250,8 @@ use projectless::{
     projectless_tool_call, projectless_user_session_request, serve_projectless_client,
 };
 pub(crate) mod profile_identity;
+mod profile_registry_maintenance;
+pub use profile_registry_maintenance::ProfileRegistryMaintenance;
 mod project_composition;
 #[cfg(test)]
 use project_composition::daemon_transcript_source_home;
@@ -295,7 +297,6 @@ use project_open_orchestration::{
 // The portable reconciler only exists off-unix (or under test transports), so
 // its import carries the same gate as its definition.
 #[cfg(any(not(unix), test, feature = "test-transport"))]
-use project_routing::portable_database_owner_reconciler;
 #[cfg(unix)]
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
@@ -319,6 +320,7 @@ pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;
+pub(crate) mod work_git_evidence;
 pub(crate) mod work_runtime;
 pub(crate) mod workflow_runtime;
 use wire_io::{

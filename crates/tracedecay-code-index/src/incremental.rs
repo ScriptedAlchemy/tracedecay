@@ -20,7 +20,7 @@ use tracedecay_domain::{
 use super::chunks::{ChunkingFailureV1, CodeFileChunksV1};
 use super::generations::{FileExtractionActionV1, GenerationIncrementPlanV1};
 use super::lineage::{
-    GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecordV1, SymbolLineageResolver,
+    GenerationSymbolIndexV1, LineageResolutionErrorV1, LineageSymbolRecord, SymbolLineageResolver,
 };
 
 /// Chunk-manifest construction and comparison failures.
@@ -138,7 +138,7 @@ pub fn materialize_generation_increment(
     prior_files: &[CodeFileChunksV1],
     reextracted_files: Vec<CodeFileChunksV1>,
     prior_symbols: &GenerationSymbolIndexV1,
-    reextracted_symbols: Vec<LineageSymbolRecordV1>,
+    reextracted_symbols: Vec<LineageSymbolRecord>,
 ) -> Result<GenerationIncrementMaterializationV1, ChunkIncrementErrorV1> {
     if prior_symbols.generation_id != plan.prior_generation
         || prior_files

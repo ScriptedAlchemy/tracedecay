@@ -159,10 +159,7 @@ impl McpServer {
         self.spawn_observed_ledger_write(std::future::pending::<()>());
     }
 
-    /// Re-read the file-to-token-count map from the DB and swap it into the
-    /// cached `file_token_map`. Called after each lazy sync triggered by
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so the accounting
-    /// tracks newly indexed / removed files.
+    /// Re-read the file-to-token-count map from the project graph.
     pub async fn refresh_file_token_map(&self) {
         // best-effort; leave stale map in place if the DB read fails
         let Ok(fresh) = self.cg_snapshot().await.get_file_token_map().await else {
@@ -384,8 +381,8 @@ impl McpServer {
         // Route-provided worktree/branch strings are hints, not authority.
         let worktree_raw =
             crate::worktree::git_worktree_root(cwd).unwrap_or_else(|| project_root.clone());
-        let Ok(worktree_raw) =
-            hook_events::authorize_add_branch_at_root(&worktree_raw, &active_project_root)
+        let Some(worktree_raw) =
+            hook_events::authorize_observation_worktree_root(&worktree_raw, &active_project_root)
         else {
             return;
         };

@@ -21,6 +21,11 @@ use tracedecay_domain::{
     SemanticSearchIndexProfileV1, SourceOccurrenceId, VectorGenerationIdV1, WorktreeId,
     canonical_sha256,
 };
+use tracedecay_graph_db::GraphDb;
+use tracedecay_graph_db::{
+    GraphDbError, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
+    MAX_VECTOR_SEARCH_LIMIT, NeverCancelled, VectorMetric, VectorSearchRequest,
+};
 use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
 };
@@ -45,8 +50,9 @@ use tracedecay_query::retrieval::semantic::{
     SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
     SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
     SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
-    SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
-    SemanticVectorScanSummaryV1,
+    SemanticVectorMatchV1, SemanticVectorReadPort, SemanticVectorReadRequestV1,
+    SemanticVectorRecordV1, SemanticVectorScanSummaryV1, SemanticVectorSearchPageV1,
+    SemanticVectorSearchRequestV1,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_search_eval::candidate_output::ProductionCandidateSemanticProjectionSourcesV1;
@@ -92,11 +98,11 @@ use super::{
 /// not semantics: the generation a run publishes is identical at any value.
 ///
 /// Smaller values bound memory harder but make each commit re-encode a growing
-/// staged build more often; 4,096 keeps a 150K-chunk corpus at a few dozen
+/// pending build more often; 4,096 keeps a 150K-chunk corpus at a few dozen
 /// commits while holding roughly 12MB of floats in flight at 768 dimensions.
 const SEMANTIC_EMBEDS_PER_COMMIT: usize = 4_096;
 
-/// Staged-build identity shared by the resume, commit, and publish boundaries
+/// Pending-build identity shared by the resume, commit, and publish boundaries
 /// of one incremental run.
 #[derive(Default)]
 struct BatchCommitStateV1 {
@@ -120,6 +126,10 @@ pub fn application_status_from_projection(
                 .degraded_reason
                 .unwrap_or(SemanticFallbackReasonV1::RuntimeUnavailable),
         },
+        SemanticRuntimeScheduleStatusV1::Queued { .. } => SemanticRuntimeStateV1::Degraded {
+            active_generation: projection.prior_generation.clone(),
+            reason: SemanticFallbackReasonV1::Indexing,
+        },
         SemanticRuntimeScheduleStatusV1::Indexing {
             target_generation,
             completed_units,
@@ -129,6 +139,14 @@ pub fn application_status_from_projection(
             target_generation: provisional_vector_generation(target_generation),
             completed_units: *completed_units,
             total_units: *total_units,
+        },
+        SemanticRuntimeScheduleStatusV1::Stalled {
+            prior_generation, ..
+        } => SemanticRuntimeStateV1::Degraded {
+            active_generation: prior_generation
+                .clone()
+                .or_else(|| projection.prior_generation.clone()),
+            reason: SemanticFallbackReasonV1::RuntimeFailure,
         },
         SemanticRuntimeScheduleStatusV1::Failed {
             reason,
@@ -159,6 +177,7 @@ pub fn application_status_from_projection(
         }
     };
     SemanticRuntimeStatusV1::new(configuration, state)
+        .with_runtime_evidence(projection.status.clone(), None)
 }
 
 /// Schedule `FastEmbed` projection for one published code generation.
@@ -186,7 +205,7 @@ where
         generation.chunks().chunks().to_vec(),
         SEMANTIC_EMBEDS_PER_COMMIT,
         load_artifact,
-        // This helper owns no staged build, so it never resumes and its
+        // This helper owns no pending build, so it never resumes and its
         // batches commit nowhere; callers that need durability go through
         // `ProductionSemanticRuntimeV1`.
         || async { Ok(0) },
@@ -205,6 +224,7 @@ where
 pub struct ProductionSemanticRuntimeV1 {
     handle: DaemonSemanticRuntimeHandleV1,
     database: Arc<Database>,
+    graph: Arc<GraphDb>,
     code_index_store_root: PathBuf,
     lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     resources: SemanticResourceCeilings,
@@ -225,6 +245,7 @@ impl ProductionSemanticRuntimeV1 {
     pub fn new(
         handle: DaemonSemanticRuntimeHandleV1,
         database: Arc<Database>,
+        graph: Arc<GraphDb>,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
         resources: SemanticResourceCeilings,
     ) -> Self {
@@ -236,6 +257,7 @@ impl ProductionSemanticRuntimeV1 {
         Self::new_with_code_index_store_root(
             handle,
             database,
+            graph,
             code_index_store_root,
             lifecycle,
             resources,
@@ -245,6 +267,7 @@ impl ProductionSemanticRuntimeV1 {
     fn new_with_code_index_store_root(
         handle: DaemonSemanticRuntimeHandleV1,
         database: Arc<Database>,
+        graph: Arc<GraphDb>,
         code_index_store_root: PathBuf,
         lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
         resources: SemanticResourceCeilings,
@@ -252,6 +275,7 @@ impl ProductionSemanticRuntimeV1 {
         Self {
             handle,
             database,
+            graph,
             code_index_store_root,
             lifecycle,
             resources,
@@ -263,9 +287,10 @@ impl ProductionSemanticRuntimeV1 {
         &self,
         generation: &CodeIndexPublishedGenerationV1,
     ) -> Result<bool, SemanticRuntimeScheduleFailureV1> {
-        let store = DatabaseVectorGenerationStoreV1::open(self.database.as_ref())
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let store =
+            DatabaseVectorGenerationStoreV1::open(self.database.as_ref(), Arc::clone(&self.graph))
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         let projection = LoadedSemanticArtifactV1::lifecycle_projection(
             &self.lifecycle,
             generation.manifest(),
@@ -333,7 +358,7 @@ impl ProductionSemanticRuntimeV1 {
         self.schedule_saved_generation_inner(generation, None)
     }
 
-    /// Build an evaluator-only exact-flat lane from the checked-in sanitized
+    /// Build an evaluator-only bounded vector lane from the checked-in sanitized
     /// corpus. The verified production artifact/runtime are reused, while the
     /// resulting vectors remain process-local and cannot replace the project's
     /// active vector generation.
@@ -459,10 +484,13 @@ impl ProductionSemanticRuntimeV1 {
         BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
         SemanticRuntimeScheduleFailureV1,
     > {
-        let store =
-            DatabaseVectorEvaluationStoreV1::open(self.database.as_ref(), evaluation_state_id())
-                .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let store = DatabaseVectorEvaluationStoreV1::open(
+            self.database.as_ref(),
+            Arc::clone(&self.graph),
+            evaluation_state_id(),
+        )
+        .await
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         let measured = self
             .measure_evaluation_projection_cases_in_store(&store, clean, sources)
             .await;
@@ -776,6 +804,7 @@ impl ProductionSemanticRuntimeV1 {
     ) -> Result<SemanticCompatibleCurrentGenerationSnapshotV1, SemanticRuntimeBackendErrorV1> {
         let active = DatabaseVectorGenerationStoreV1::read_active_generation_snapshot_for(
             self.database.as_ref(),
+            self.graph.as_ref(),
             &required.projection,
             source_generation,
             source_manifest_digest,
@@ -929,6 +958,7 @@ impl ProductionSemanticRuntimeV1 {
         });
         let expected_active = base_generation.clone();
         let database = Arc::clone(&self.database);
+        let graph = Arc::clone(&self.graph);
         let lifecycle_for_load = Arc::clone(&self.lifecycle);
         let lifecycle_for_stage = Arc::clone(&self.lifecycle);
         let lifecycle_for_commit = Arc::clone(&self.lifecycle);
@@ -952,8 +982,11 @@ impl ProductionSemanticRuntimeV1 {
         let fair_lease = fair_lease.map(Arc::new);
         let resume_state = Arc::clone(&commit_state);
         let resume_database = Arc::clone(&database);
+        let resume_graph = Arc::clone(&graph);
         let commit_lease = fair_lease.clone();
         let commit_database = Arc::clone(&database);
+        let commit_graph = Arc::clone(&graph);
+        let publish_graph = Arc::clone(&graph);
         let stage_state = Arc::clone(&commit_state);
         let _ = self.lifecycle.mark_loading();
         let _ = self.lifecycle.mark_indexing(0, total_units);
@@ -966,18 +999,19 @@ impl ProductionSemanticRuntimeV1 {
                 LoadedSemanticArtifactV1::from_lifecycle(&lifecycle_for_load, &manifest, resources)
             },
             move || async move {
-                let store = DatabaseVectorGenerationStoreV1::open(resume_database.as_ref())
-                    .await
-                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                let store =
+                    DatabaseVectorGenerationStoreV1::open(resume_database.as_ref(), resume_graph)
+                        .await
+                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                 // The build identity is a digest of the plan, so reopening the
-                // same plan re-adopts the same staged build rather than
+                // same plan re-adopts the same pending build rather than
                 // starting a second one.
                 let build = store
                     .begin_generation(plan)
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                 let checkpoint = store
-                    .staged_checkpoint(&build)
+                    .pending_checkpoint(&build)
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
                     .filter(|checkpoint| checkpoint.completed_batches > 0);
@@ -990,6 +1024,7 @@ impl ProductionSemanticRuntimeV1 {
             move |prepared| {
                 let state = Arc::clone(&commit_state);
                 let database = Arc::clone(&commit_database);
+                let graph = Arc::clone(&commit_graph);
                 let lease = commit_lease.clone();
                 async move {
                     if lease
@@ -1003,7 +1038,7 @@ impl ProductionSemanticRuntimeV1 {
                         .build
                         .clone()
                         .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
-                    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
+                    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref(), graph)
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let next = store
@@ -1028,9 +1063,10 @@ impl ProductionSemanticRuntimeV1 {
                         .map(SemanticProjectionLeaseV1::try_begin_publication)
                         .transpose()
                         .map_err(fair_schedule_failure)?;
-                    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
-                        .await
-                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let store =
+                        DatabaseVectorGenerationStoreV1::open(database.as_ref(), publish_graph)
+                            .await
+                            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let publication = store
                         .publish_generation(&build, expected_active.as_ref())
                         .await
@@ -1060,6 +1096,14 @@ impl ProductionSemanticRuntimeV1 {
                             ..
                         } => {
                             let _ = lifecycle.mark_indexing(completed_units, total_units);
+                        }
+                        SemanticRuntimeScheduleStatusV1::Queued { .. } => {}
+                        SemanticRuntimeScheduleStatusV1::Stalled { .. } => {
+                            let _ = lifecycle.mark_runtime_failed(
+                                "semantic projection stalled without progress".to_owned(),
+                                true,
+                            );
+                            break;
                         }
                         SemanticRuntimeScheduleStatusV1::Current { .. } => {
                             super::semantic_publish_failure_memo().record_success(&failure_key);
@@ -1108,7 +1152,7 @@ impl ProductionSemanticRuntimeV1 {
     {
         let source_manifest_digest =
             semantic_source_manifest_digest(code_generation.projection().request());
-        let mut active = match DatabaseVectorGenerationStoreV1::read_active_generation_for(
+        let mut active = match DatabaseVectorGenerationStoreV1::read_active_generation_metadata_for(
             self.database.as_ref(),
             request.projection,
             &code_generation.manifest().generation_id,
@@ -1133,7 +1177,7 @@ impl ProductionSemanticRuntimeV1 {
                     .changes
                     .manifest_digest;
             if &replay_digest != source_manifest_digest {
-                active = DatabaseVectorGenerationStoreV1::read_active_generation_for(
+                active = DatabaseVectorGenerationStoreV1::read_active_generation_metadata_for(
                     self.database.as_ref(),
                     request.projection,
                     &code_generation.manifest().generation_id,
@@ -1159,8 +1203,17 @@ impl ProductionSemanticRuntimeV1 {
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+        let lineage = DatabaseVectorGenerationStoreV1::read_generation_lineage(
+            self.database.as_ref(),
+            self.graph.as_ref(),
+            active.generation_id(),
+        )
+        .await
+        .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
         let vectors = PublishedSemanticVectorReadPortV1::new(
             active,
+            lineage,
+            Arc::clone(&self.graph),
             request.search_index_key.clone(),
             code_generation,
         )
@@ -1182,14 +1235,18 @@ impl ProductionSemanticRuntimeV1 {
         target: &VectorGenerationIdV1,
         expected_active: &VectorGenerationIdV1,
     ) -> Result<SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1> {
-        let store = DatabaseVectorGenerationStoreV1::open(self.database.as_ref())
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let generation =
-            DatabaseVectorGenerationStoreV1::read_generation(self.database.as_ref(), target)
+        let store =
+            DatabaseVectorGenerationStoreV1::open(self.database.as_ref(), Arc::clone(&self.graph))
                 .await
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
-                .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let generation = DatabaseVectorGenerationStoreV1::read_generation(
+            self.database.as_ref(),
+            self.graph.as_ref(),
+            target,
+        )
+        .await
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
+        .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
         let lifecycle = Arc::clone(&self.lifecycle);
         let projection = generation.embedding_key().clone();
         let resources = self.resources;
@@ -1470,6 +1527,7 @@ impl SemanticRuntimeGenerationInspectorV1 for ProductionSemanticRuntimeV1 {
         Box::pin(async move {
             let generation = DatabaseVectorGenerationStoreV1::read_generation(
                 self.database.as_ref(),
+                self.graph.as_ref(),
                 &required.vector_generation_id,
             )
             .await
@@ -1593,7 +1651,13 @@ struct PublishedSemanticVectorReadPortV1 {
     search_index_key: SemanticSearchIndexKeyV1,
     source_generation: CodeGenerationId,
     capability_manifest_digest: ManifestDigest,
-    rows: Vec<SemanticVectorRecordV1>,
+    metric: tracedecay_domain::EmbeddingMetricV1,
+    rows: BTreeMap<tracedecay_domain::CodeSearchChunkId, SemanticVectorRecordV1>,
+    owner_by_chunk: BTreeMap<tracedecay_domain::CodeSearchChunkId, GraphProjectionId>,
+    output_digest_by_chunk: BTreeMap<tracedecay_domain::CodeSearchChunkId, ManifestDigest>,
+    graph_projections: Vec<(GraphProjectionId, usize)>,
+    prepared_values: Option<BTreeMap<tracedecay_domain::CodeSearchChunkId, Vec<f32>>>,
+    graph: Option<Arc<GraphDb>>,
 }
 
 fn semantic_candidate_identity(
@@ -1620,25 +1684,30 @@ struct ScopedSemanticEvaluationVectorReadPortV1<'a> {
 }
 
 impl SemanticVectorReadPort for ScopedSemanticEvaluationVectorReadPortV1<'_> {
-    fn scan_exact_flat(
+    fn search_bounded(
         &self,
-        request: SemanticVectorReadRequestV1<'_>,
-        visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
-    ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
-        let mut eligible = 0_u64;
-        let mut scoped_visit = |row: &SemanticVectorRecordV1| {
-            if self.allowed_chunks.contains(&row.chunk_id) {
-                eligible = eligible.saturating_add(1);
-                visit(row)?;
-            }
-            Ok(())
-        };
-        let summary = self.inner.scan_exact_flat(request, &mut scoped_visit)?;
-        Ok(SemanticVectorScanSummaryV1 {
-            examined: summary.examined,
-            eligible,
-            excluded: summary.examined.saturating_sub(eligible),
-            unknown: summary.unknown,
+        request: SemanticVectorSearchRequestV1<'_>,
+    ) -> Result<SemanticVectorSearchPageV1, RetrievalPortError> {
+        let page = self.inner.search_bounded(SemanticVectorSearchRequestV1 {
+            identity: request.identity,
+            query: request.query,
+            limit: self.inner.rows.len(),
+        })?;
+        let mut matches = page
+            .matches
+            .into_iter()
+            .filter(|matched| self.allowed_chunks.contains(&matched.record.chunk_id))
+            .collect::<Vec<_>>();
+        let eligible = matches.len() as u64;
+        matches.truncate(request.limit);
+        Ok(SemanticVectorSearchPageV1 {
+            matches,
+            summary: SemanticVectorScanSummaryV1 {
+                examined: page.summary.examined,
+                eligible,
+                excluded: page.summary.examined.saturating_sub(eligible),
+                unknown: page.summary.unknown,
+            },
         })
     }
 }
@@ -1664,7 +1733,8 @@ impl PublishedSemanticVectorReadPortV1 {
             .iter()
             .map(|chunk| (&chunk.id, chunk))
             .collect::<BTreeMap<_, _>>();
-        let mut rows = Vec::with_capacity(prepared.vectors.len());
+        let mut rows = BTreeMap::new();
+        let mut prepared_values = BTreeMap::new();
         for (ordinal, vector) in prepared.vectors.iter().enumerate() {
             let chunk = chunks
                 .get(&vector.chunk_id)
@@ -1698,26 +1768,29 @@ impl PublishedSemanticVectorReadPortV1 {
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
                 freshness: freshness.clone(),
             };
-            rows.push(SemanticVectorRecordV1 {
-                vector_generation: generation.clone(),
-                projection_key: prepared.request.target_projection_key.clone(),
-                source_generation: prepared.request.changes.to_generation.clone(),
-                chunk_id: chunk_id.clone(),
-                candidate,
-                binding: CodeCandidateBindingV1 {
-                    candidate_anchor: anchor_id,
-                    occurrence: CodeOccurrenceRefV1 {
-                        generation: chunk.anchor.generation_id.clone(),
-                        file: chunk.anchor.file_occurrence_id.clone(),
-                        symbol: chunk.anchor.symbol_occurrence_id.clone(),
-                        chunk: Some(chunk_id.clone()),
+            prepared_values.insert(chunk_id.clone(), vector.values.clone());
+            rows.insert(
+                chunk_id.clone(),
+                SemanticVectorRecordV1 {
+                    vector_generation: generation.clone(),
+                    projection_key: prepared.request.target_projection_key.clone(),
+                    source_generation: prepared.request.changes.to_generation.clone(),
+                    chunk_id: chunk_id.clone(),
+                    candidate,
+                    binding: CodeCandidateBindingV1 {
+                        candidate_anchor: anchor_id,
+                        occurrence: CodeOccurrenceRefV1 {
+                            generation: chunk.anchor.generation_id.clone(),
+                            file: chunk.anchor.file_occurrence_id.clone(),
+                            symbol: chunk.anchor.symbol_occurrence_id.clone(),
+                            chunk: Some(chunk_id.clone()),
+                        },
+                        language_descriptor_revision: chunk.language_descriptor_revision.clone(),
+                        matched_term_kinds: Vec::new(),
+                        source_occurrence,
                     },
-                    language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-                    matched_term_kinds: Vec::new(),
-                    source_occurrence,
                 },
-                values: vector.values.clone(),
-            });
+            );
         }
         Ok(Self {
             generation,
@@ -1725,17 +1798,56 @@ impl PublishedSemanticVectorReadPortV1 {
             search_index_key,
             source_generation: prepared.request.changes.to_generation.clone(),
             capability_manifest_digest: code.capability().manifest_digest.clone(),
+            metric: prepared.embedding_key.embedding_key().metric,
             rows,
+            owner_by_chunk: BTreeMap::new(),
+            output_digest_by_chunk: BTreeMap::new(),
+            graph_projections: Vec::new(),
+            prepared_values: Some(prepared_values),
+            graph: None,
         })
     }
 
     fn new(
         vectors: PublishedVectorGenerationV1,
+        lineage: Vec<PublishedVectorGenerationV1>,
+        graph: Arc<GraphDb>,
         search_index_key: SemanticSearchIndexKeyV1,
         code: &CodeIndexPublishedGenerationV1,
     ) -> Result<Self, RetrievalPortError> {
         if vectors.source_generation() != &code.manifest().generation_id {
             return Err(RetrievalPortError::GenerationMismatch);
+        }
+        if lineage
+            .first()
+            .map(PublishedVectorGenerationV1::generation_id)
+            != Some(vectors.generation_id())
+        {
+            return Err(RetrievalPortError::GenerationMismatch);
+        }
+        let mut owner_by_chunk = BTreeMap::new();
+        let mut delta_chunks_by_projection =
+            BTreeMap::<GraphProjectionId, BTreeSet<tracedecay_domain::CodeSearchChunkId>>::new();
+        for generation in &lineage {
+            for receipt in generation
+                .receipts()
+                .iter()
+                .flat_map(|batch| &batch.receipts)
+                .filter(|receipt| {
+                    matches!(
+                        receipt.operation,
+                        ProjectionOperationV1::Added | ProjectionOperationV1::Updated
+                    )
+                })
+            {
+                delta_chunks_by_projection
+                    .entry(generation.graph_projection().clone())
+                    .or_default()
+                    .insert(receipt.chunk_id.clone());
+                owner_by_chunk
+                    .entry(receipt.chunk_id.clone())
+                    .or_insert_with(|| generation.graph_projection().clone());
+            }
         }
         let freshness = production_code_index_freshness(
             code.manifest().seal.sealed_at,
@@ -1748,7 +1860,7 @@ impl PublishedSemanticVectorReadPortV1 {
             .iter()
             .map(|chunk| (&chunk.id, chunk))
             .collect::<BTreeMap<_, _>>();
-        let mut rows = Vec::with_capacity(vectors.vectors().len());
+        let mut rows = BTreeMap::new();
         for (ordinal, (chunk_id, vector)) in vectors.vectors().iter().enumerate() {
             let chunk = chunks
                 .get(chunk_id)
@@ -1767,9 +1879,9 @@ impl PublishedSemanticVectorReadPortV1 {
                 logical_copy_evidence_anchor: None,
                 evidence_role: EvidenceRole::Primary,
                 retriever: RetrieverKind::Semantic,
-                retriever_revision: ComponentRevision::new("retriever.semantic-flat.daemon.v1")
+                retriever_revision: ComponentRevision::new("retriever.semantic-index.daemon")
                     .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-                score_domain: ScoreDomainId::new("score.semantic-distance.daemon.v1")
+                score_domain: ScoreDomainId::new("score.semantic-distance.daemon")
                     .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
                 raw_score: FixedPointScore::ZERO,
                 ordinal_rank: ordinal as u32,
@@ -1781,62 +1893,297 @@ impl PublishedSemanticVectorReadPortV1 {
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
                 freshness: freshness.clone(),
             };
-            rows.push(SemanticVectorRecordV1 {
-                vector_generation: vectors.generation_id().clone(),
-                projection_key: vectors.projection_key().clone(),
-                source_generation: vectors.source_generation().clone(),
-                chunk_id: chunk_id.clone(),
-                candidate,
-                binding: CodeCandidateBindingV1 {
-                    candidate_anchor: anchor_id,
-                    occurrence: CodeOccurrenceRefV1 {
-                        generation: chunk.anchor.generation_id.clone(),
-                        file: chunk.anchor.file_occurrence_id.clone(),
-                        symbol: chunk.anchor.symbol_occurrence_id.clone(),
-                        chunk: Some(chunk_id.clone()),
+            if !owner_by_chunk.contains_key(chunk_id) {
+                return Err(RetrievalPortError::GenerationMismatch);
+            }
+            rows.insert(
+                chunk_id.clone(),
+                SemanticVectorRecordV1 {
+                    vector_generation: vectors.generation_id().clone(),
+                    projection_key: vectors.projection_key().clone(),
+                    source_generation: vectors.source_generation().clone(),
+                    chunk_id: chunk_id.clone(),
+                    candidate,
+                    binding: CodeCandidateBindingV1 {
+                        candidate_anchor: anchor_id,
+                        occurrence: CodeOccurrenceRefV1 {
+                            generation: chunk.anchor.generation_id.clone(),
+                            file: chunk.anchor.file_occurrence_id.clone(),
+                            symbol: chunk.anchor.symbol_occurrence_id.clone(),
+                            chunk: Some(chunk_id.clone()),
+                        },
+                        language_descriptor_revision: chunk.language_descriptor_revision.clone(),
+                        matched_term_kinds: Vec::new(),
+                        source_occurrence,
                     },
-                    language_descriptor_revision: chunk.language_descriptor_revision.clone(),
-                    matched_term_kinds: Vec::new(),
-                    source_occurrence,
                 },
-                values: vector.values.clone(),
-            });
+            );
         }
+        let graph_projections = lineage
+            .iter()
+            .map(|generation| {
+                let projection = generation.graph_projection().clone();
+                let stale = delta_chunks_by_projection
+                    .get(&projection)
+                    .map(|chunks| {
+                        chunks
+                            .iter()
+                            .filter(|chunk| owner_by_chunk.get(*chunk) != Some(&projection))
+                            .count()
+                    })
+                    .unwrap_or_default();
+                (projection, stale)
+            })
+            .collect();
+        let output_digest_by_chunk = vectors
+            .vectors()
+            .iter()
+            .map(|(chunk, vector)| (chunk.clone(), vector.output_digest.clone()))
+            .collect();
         Ok(Self {
             generation: vectors.generation_id().clone(),
             projection_key: vectors.projection_key().clone(),
             search_index_key,
             source_generation: vectors.source_generation().clone(),
             capability_manifest_digest: code.capability().manifest_digest.clone(),
+            metric: vectors.embedding_key().embedding_key().metric,
             rows,
+            owner_by_chunk,
+            output_digest_by_chunk,
+            graph_projections,
+            prepared_values: None,
+            graph: Some(graph),
         })
     }
 }
 
 impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
-    fn scan_exact_flat(
+    fn search_bounded(
         &self,
-        request: SemanticVectorReadRequestV1<'_>,
-        visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
-    ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
-        if request.search_kind != SemanticSearchKindV1::ExactFlat
-            || request.vector_generation != &self.generation
-            || request.projection_key != &self.projection_key
-            || request.search_index_key != &self.search_index_key
-            || request.source_generation != &self.source_generation
-            || request.capability_manifest_digest != &self.capability_manifest_digest
+        request: SemanticVectorSearchRequestV1<'_>,
+    ) -> Result<SemanticVectorSearchPageV1, RetrievalPortError> {
+        if request.identity.search_kind != SemanticSearchKindV1::EmbeddedVectorIndex
+            || request.identity.vector_generation != &self.generation
+            || request.identity.projection_key != &self.projection_key
+            || request.identity.search_index_key != &self.search_index_key
+            || request.identity.source_generation != &self.source_generation
+            || request.identity.capability_manifest_digest != &self.capability_manifest_digest
         {
             return Err(RetrievalPortError::IncompatibleProjection);
         }
-        for row in &self.rows {
-            visit(row)?;
+        if request.limit == 0 {
+            return Ok(SemanticVectorSearchPageV1 {
+                matches: Vec::new(),
+                summary: SemanticVectorScanSummaryV1 {
+                    examined: 0,
+                    eligible: 0,
+                    excluded: 0,
+                    unknown: 0,
+                },
+            });
         }
-        Ok(SemanticVectorScanSummaryV1 {
-            examined: self.rows.len() as u64,
-            eligible: self.rows.len() as u64,
-            excluded: 0,
-            unknown: 0,
+        let (matches, examined, excluded) = if let Some(graph) = &self.graph {
+            let namespace =
+                GraphNamespace::new("semantic-code-vectors").map_err(map_graph_retrieval_error)?;
+            let property =
+                GraphPropertyName::new("embedding").map_err(map_graph_retrieval_error)?;
+            let chunk_property =
+                GraphPropertyName::new("chunk-id").map_err(map_graph_retrieval_error)?;
+            let digest_property =
+                GraphPropertyName::new("output-digest").map_err(map_graph_retrieval_error)?;
+            let mut matches = Vec::new();
+            let mut examined = 0_u64;
+            let mut excluded = 0_u64;
+            for (projection, stale) in &self.graph_projections {
+                let candidate_limit = request.limit.checked_add(*stale).ok_or_else(|| {
+                    RetrievalPortError::AuthorityUnavailable(
+                        "semantic vector delta candidate bound overflowed".to_owned(),
+                    )
+                })?;
+                if candidate_limit > MAX_VECTOR_SEARCH_LIMIT {
+                    return Err(RetrievalPortError::AuthorityUnavailable(format!(
+                        "semantic vector delta needs {candidate_limit} candidates; compact it below \
+                         the {MAX_VECTOR_SEARCH_LIMIT}-candidate native index bound"
+                    )));
+                }
+                let result = graph
+                    .vector_search(VectorSearchRequest {
+                        namespace: namespace.clone(),
+                        projection: projection.clone(),
+                        property: property.clone(),
+                        query: request.query.to_vec(),
+                        dimension: request.query.len(),
+                        metric: graph_metric(self.metric),
+                        limit: candidate_limit,
+                        cancellation: Arc::new(NeverCancelled),
+                    })
+                    .map_err(map_graph_retrieval_error)?;
+                examined = examined.saturating_add(result.matches.len() as u64);
+                let identities = result
+                    .matches
+                    .iter()
+                    .map(|matched| matched.entity.clone())
+                    .collect::<Vec<_>>();
+                let entities = graph
+                    .projection_entities(
+                        &namespace,
+                        projection,
+                        &identities,
+                        Arc::new(NeverCancelled),
+                    )
+                    .map_err(map_graph_retrieval_error)?;
+                for (matched, entity) in result.matches.into_iter().zip(entities) {
+                    let entity = entity.ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "Grafeo vector result disappeared before hydration".to_owned(),
+                        )
+                    })?;
+                    let Some(GraphProperty::String(chunk_id)) =
+                        entity.properties.get(&chunk_property)
+                    else {
+                        return Err(RetrievalPortError::Contract(
+                            "Grafeo vector result has no chunk identity".to_owned(),
+                        ));
+                    };
+                    let chunk_id = tracedecay_domain::CodeSearchChunkId::try_from(chunk_id.clone())
+                        .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+                    if self.owner_by_chunk.get(&chunk_id) != Some(projection) {
+                        excluded = excluded.saturating_add(1);
+                        continue;
+                    }
+                    let row = self.rows.get(&chunk_id).ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "Grafeo returned a vector without relational chunk metadata".to_owned(),
+                        )
+                    })?;
+                    let Some(GraphProperty::String(output_digest)) =
+                        entity.properties.get(&digest_property)
+                    else {
+                        return Err(RetrievalPortError::Contract(
+                            "Grafeo vector result has no output digest".to_owned(),
+                        ));
+                    };
+                    if self
+                        .output_digest_by_chunk
+                        .get(&chunk_id)
+                        .is_none_or(|expected| expected.as_str() != output_digest)
+                    {
+                        return Err(RetrievalPortError::Contract(
+                            "Grafeo vector result has incompatible output identity".to_owned(),
+                        ));
+                    }
+                    matches.push(SemanticVectorMatchV1 {
+                        record: row.clone(),
+                        distance: matched.distance,
+                    });
+                }
+            }
+            matches.sort_by(|left, right| {
+                left.distance
+                    .total_cmp(&right.distance)
+                    .then_with(|| left.record.chunk_id.cmp(&right.record.chunk_id))
+            });
+            matches.truncate(request.limit);
+            (matches, examined, excluded)
+        } else {
+            let values = self.prepared_values.as_ref().ok_or_else(|| {
+                RetrievalPortError::AuthorityUnavailable(
+                    "semantic vector authority is unavailable".to_owned(),
+                )
+            })?;
+            let mut matches = self
+                .rows
+                .values()
+                .map(|row| {
+                    let values = values.get(&row.chunk_id).ok_or_else(|| {
+                        RetrievalPortError::Contract(
+                            "evaluation vector metadata has no vector".to_owned(),
+                        )
+                    })?;
+                    Ok(SemanticVectorMatchV1 {
+                        record: row.clone(),
+                        distance: evaluation_distance(self.metric, request.query, values),
+                    })
+                })
+                .collect::<Result<Vec<_>, RetrievalPortError>>()?;
+            matches.sort_by(|left, right| {
+                left.distance
+                    .total_cmp(&right.distance)
+                    .then_with(|| left.record.chunk_id.cmp(&right.record.chunk_id))
+            });
+            matches.truncate(request.limit);
+            let examined = matches.len() as u64;
+            (matches, examined, 0)
+        };
+        let eligible = examined.saturating_sub(excluded);
+        Ok(SemanticVectorSearchPageV1 {
+            matches,
+            summary: SemanticVectorScanSummaryV1 {
+                examined,
+                eligible,
+                excluded,
+                unknown: 0,
+            },
         })
+    }
+}
+
+fn graph_metric(metric: tracedecay_domain::EmbeddingMetricV1) -> VectorMetric {
+    match metric {
+        tracedecay_domain::EmbeddingMetricV1::Cosine => VectorMetric::Cosine,
+        tracedecay_domain::EmbeddingMetricV1::DotProduct => VectorMetric::DotProduct,
+        tracedecay_domain::EmbeddingMetricV1::EuclideanL2 => VectorMetric::Euclidean,
+    }
+}
+
+fn evaluation_distance(
+    metric: tracedecay_domain::EmbeddingMetricV1,
+    query: &[f32],
+    vector: &[f32],
+) -> f64 {
+    match metric {
+        tracedecay_domain::EmbeddingMetricV1::Cosine => {
+            let (mut dot, mut query_norm, mut vector_norm) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for (&left, &right) in query.iter().zip(vector) {
+                dot += f64::from(left) * f64::from(right);
+                query_norm += f64::from(left) * f64::from(left);
+                vector_norm += f64::from(right) * f64::from(right);
+            }
+            1.0 - (dot / (query_norm.sqrt() * vector_norm.sqrt())).clamp(-1.0, 1.0)
+        }
+        tracedecay_domain::EmbeddingMetricV1::DotProduct => -query
+            .iter()
+            .zip(vector)
+            .map(|(&left, &right)| f64::from(left) * f64::from(right))
+            .sum::<f64>(),
+        tracedecay_domain::EmbeddingMetricV1::EuclideanL2 => query
+            .iter()
+            .zip(vector)
+            .map(|(&left, &right)| {
+                let delta = f64::from(left) - f64::from(right);
+                delta * delta
+            })
+            .sum::<f64>()
+            .sqrt(),
+    }
+}
+
+fn map_graph_retrieval_error(error: GraphDbError) -> RetrievalPortError {
+    match error {
+        GraphDbError::Cancelled => RetrievalPortError::Cancelled,
+        GraphDbError::BudgetExhausted => RetrievalPortError::BudgetExceeded,
+        GraphDbError::Unavailable { message }
+        | GraphDbError::ResetRequired { message }
+        | GraphDbError::DurabilityUncertain { message } => {
+            RetrievalPortError::AuthorityUnavailable(message)
+        }
+        GraphDbError::Closed => {
+            RetrievalPortError::AuthorityUnavailable("Grafeo vector authority is closed".to_owned())
+        }
+        GraphDbError::Conflict => RetrievalPortError::StaleEvidence,
+        GraphDbError::InvalidRequest { message } | GraphDbError::Corrupt { message } => {
+            RetrievalPortError::Contract(message)
+        }
     }
 }
 
@@ -2278,7 +2625,13 @@ impl DaemonSemanticRuntimeBackendV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        application_status_from_projection(&self.handle.status_projection(), configuration)
+        let status =
+            application_status_from_projection(&self.handle.status_projection(), configuration);
+        let model = self
+            .production
+            .as_ref()
+            .map(|runtime| runtime.lifecycle.status());
+        status.with_runtime_evidence(status.convergence.clone(), model)
     }
 }
 
@@ -2344,7 +2697,9 @@ impl SemanticRuntimeBackendV1 for DaemonSemanticRuntimeBackendV1 {
 fn index_state_from_status(status: SemanticRuntimeScheduleStatusV1) -> SemanticIndexStateV1 {
     match status {
         SemanticRuntimeScheduleStatusV1::Unavailable => SemanticIndexStateV1::Unavailable,
-        SemanticRuntimeScheduleStatusV1::Indexing { .. } => SemanticIndexStateV1::Indexing,
+        SemanticRuntimeScheduleStatusV1::Queued { .. }
+        | SemanticRuntimeScheduleStatusV1::Indexing { .. }
+        | SemanticRuntimeScheduleStatusV1::Stalled { .. } => SemanticIndexStateV1::Indexing,
         SemanticRuntimeScheduleStatusV1::Failed { .. } => SemanticIndexStateV1::Failed,
         SemanticRuntimeScheduleStatusV1::Current { .. } => SemanticIndexStateV1::Incompatible,
     }
@@ -2463,6 +2818,7 @@ pub struct SavedGenerationScheduleHookParametersV1 {
     pub worktree_id: WorktreeId,
     pub handle: DaemonSemanticRuntimeHandleV1,
     pub database: Arc<Database>,
+    pub graph: Arc<GraphDb>,
     pub lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
     pub resources: SemanticResourceCeilings,
     pub fair_scheduler: DaemonGlobalSemanticProjectionSchedulerV1,
@@ -2482,13 +2838,18 @@ pub fn production_saved_generation_schedule_hook(
         worktree_id,
         handle,
         database,
+        graph,
         lifecycle,
         resources,
         fair_scheduler,
     } = parameters;
+    let redundancy_database = Arc::clone(&database);
+    let redundancy_graph = Arc::clone(&graph);
+    let queue_status_handle = handle.clone();
     let runtime = Arc::new(ProductionSemanticRuntimeV1::new_with_code_index_store_root(
         handle,
         database,
+        graph,
         code_index_store_root,
         lifecycle,
         resources,
@@ -2504,6 +2865,8 @@ pub fn production_saved_generation_schedule_hook(
         super::register_project_semantic_redundancy_generation(
             project_root.clone(),
             generation.clone(),
+            Arc::clone(&redundancy_database),
+            Arc::clone(&redundancy_graph),
         );
         let runtime = Arc::clone(&runtime);
         let generation = generation.clone();
@@ -2525,7 +2888,22 @@ pub fn production_saved_generation_schedule_hook(
             queued_bytes,
             resources.max_resident_bytes,
         );
-        fair_scheduler
+        let target_generation = generation.manifest().generation_id.clone();
+        let total_units =
+            u64::try_from(generation.chunks().chunks().len().max(1)).unwrap_or(u64::MAX);
+        let total_batches = u64::try_from(
+            generation
+                .chunks()
+                .chunks()
+                .len()
+                .div_ceil(SEMANTIC_EMBEDS_PER_COMMIT)
+                .max(1),
+        )
+        .unwrap_or(u64::MAX);
+        if !queue_status_handle.mark_queued(target_generation.clone(), total_units, total_batches) {
+            return false;
+        }
+        let enqueued = fair_scheduler
             .enqueue_work(
                 batch,
                 Box::new(move |lease| {
@@ -2546,7 +2924,14 @@ pub fn production_saved_generation_schedule_hook(
                     });
                 }),
             )
-            .is_ok()
+            .is_ok();
+        if !enqueued {
+            queue_status_handle.fail_queued(
+                &target_generation,
+                SemanticRuntimeScheduleFailureV1::Publication,
+            );
+        }
+        enqueued
     })
 }
 
@@ -2621,7 +3006,7 @@ mod tests {
         KEY.get_or_init(|| {
             SemanticSearchIndexProfileV1::exact_flat_v1()
                 .and_then(|profile| profile.index_key())
-                .expect("exact-flat search index key")
+                .expect("semantic vector search index key")
         })
     }
 
@@ -3042,12 +3427,11 @@ mod tests {
         struct PanicVectors;
 
         impl SemanticVectorReadPort for PanicVectors {
-            fn scan_exact_flat(
+            fn search_bounded(
                 &self,
-                _request: SemanticVectorReadRequestV1<'_>,
-                _visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
-            ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
-                panic!("cancelled query runtime must not scan vectors")
+                _request: SemanticVectorSearchRequestV1<'_>,
+            ) -> Result<SemanticVectorSearchPageV1, RetrievalPortError> {
+                panic!("cancelled query runtime must not search vectors")
             }
         }
 
@@ -3234,17 +3618,11 @@ mod tests {
 
         struct PanicVectors;
         impl SemanticVectorReadPort for PanicVectors {
-            fn scan_exact_flat(
+            fn search_bounded(
                 &self,
-                _request: tracedecay_query::retrieval::semantic::SemanticVectorReadRequestV1<'_>,
-                _visit: &mut dyn FnMut(
-                    &tracedecay_query::retrieval::semantic::SemanticVectorRecordV1,
-                ) -> Result<(), RetrievalPortError>,
-            ) -> Result<
-                tracedecay_query::retrieval::semantic::SemanticVectorScanSummaryV1,
-                RetrievalPortError,
-            > {
-                panic!("indexing composition must not scan vectors")
+                _request: SemanticVectorSearchRequestV1<'_>,
+            ) -> Result<SemanticVectorSearchPageV1, RetrievalPortError> {
+                panic!("indexing composition must not search vectors")
             }
         }
         struct IdleControl;

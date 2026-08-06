@@ -11,10 +11,10 @@ passes every persisted observation receipt through
 `RuntimeExternalSourceStore::capture_host_observation`; that path authorizes
 and invokes `SourceCaptureApplicationV1`, then commits through the retained
 external-source reducer and SQLite adapter. The earlier claim that
-`SourceCaptureApplicationV1` had no production caller, adapter, or migration
-was wrong for this specialization. Broader acquisition, scheduled refresh, and
-canonical-refetch adapters remain dormant and are not certified as delivered
-PR5/PR6 behavior or PR8–PR14 work to rebuild.
+`SourceCaptureApplicationV1` had no production caller or adapter was wrong for
+this specialization. Broader acquisition, scheduled refresh, and
+canonical-refetch adapters remain unfinished final-V2 product work, not legacy
+database migration/backfill work.
 
 This boundary records the deterministic privacy and admission behavior retained
 by current product ingestion; it is not a crate-first framework project. Shared
@@ -43,7 +43,8 @@ never skip a suffix.
 - Database connections, paths, transactions, writer recovery, or fallback
   persistence. Capture calls the daemon-owned store adapter.
 - Canonical projection, query/ranking, policy decisions after capture, public
-  transport semantics, dashboard views, or Doctor repair execution.
+  transport semantics, dashboard views, or remediation execution outside
+  read-only Doctor diagnostics.
 - Hook-side database access or workflow execution. Hooks emit bounded events or
   signals to the daemon.
 - Documentation-driven orchestration, generated adapter matrices, or a

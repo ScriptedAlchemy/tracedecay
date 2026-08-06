@@ -3192,17 +3192,17 @@ mod affected_tests_tests {
     }
 
     #[test]
-    fn storage_status_history_paths_are_store_scope_isolated() {
+    fn storage_status_history_paths_are_project_store_scope_isolated() {
         let root = Path::new("/profile/projects/project.storage-status");
         let first = storage_status_history_path(
             root,
             Some("project.storage-status"),
-            "/project/branches/main/graph.db",
+            "/project-a/tracedecay.db",
         );
         let second = storage_status_history_path(
             root,
             Some("project.storage-status"),
-            "/project/branches/topic/graph.db",
+            "/project-b/tracedecay.db",
         );
 
         assert_ne!(first, second);

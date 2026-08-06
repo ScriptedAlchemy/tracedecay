@@ -13,18 +13,6 @@ pub(super) fn render_missing_profile_report() -> HealthPassReport {
 
 /// Prints the doctor-style summary for a computed report.
 pub(super) fn render_health_pass_report(report: &HealthPassReport) {
-    if report.quarantined_branch_meta.is_empty() {
-        eprintln!("  \x1b[32m✔\x1b[0m No corrupt branch metadata files");
-    } else {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Quarantined {} corrupt branch metadata file(s):",
-            report.quarantined_branch_meta.len()
-        );
-        for quarantine in &report.quarantined_branch_meta {
-            eprintln!("      • {}", quarantine.quarantined.display());
-        }
-    }
-
     match report.purged_temp_registry_rows {
         Some(0) => eprintln!("  \x1b[32m✔\x1b[0m No stale temp-root registry rows"),
         Some(purged) => {
@@ -42,9 +30,6 @@ pub(super) fn render_health_pass_report(report: &HealthPassReport) {
         );
         for reconciled in &report.reconciled_store_roots {
             eprintln!("      • {}", reconciled.manifest_path.display());
-            if let Some(config_path) = &reconciled.config_path {
-                eprintln!("        (config: {})", config_path.display());
-            }
         }
     }
 

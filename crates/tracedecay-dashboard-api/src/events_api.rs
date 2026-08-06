@@ -941,7 +941,7 @@ mod tests {
             .database_authority("attach dashboard registry fixture")
             .expect("registered runtime authority");
         std::sync::Arc::new(
-            tracedecay_global_db::RegisteredGlobalDb::migrate_and_attach(
+            tracedecay_global_db::RegisteredGlobalDb::install_and_attach(
                 runtime, binding, locator, authority,
             )
             .await

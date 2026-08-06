@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::Result;
@@ -18,22 +17,6 @@ use super::{
     open_target_memory_db, open_user_memory_target,
 };
 
-pub(super) fn feedback_history_repair_payload(
-    progress: CompatibilityFeedbackRepairProgressV1,
-) -> Value {
-    let state = match progress {
-        CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-        CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
-        CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
-        CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
-    };
-    json!({
-        "state": state,
-        "processed": progress.processed(),
-        "remaining": progress.remaining(),
-    })
-}
-
 pub(in crate::mcp::tools::handlers) async fn handle_memory_status(
     cg: &TraceDecay,
     args: Value,
@@ -41,13 +24,12 @@ pub(in crate::mcp::tools::handlers) async fn handle_memory_status(
 ) -> Result<ToolResult> {
     let target_memory = open_target_memory_db(cg, &args, global_db).await?;
     let status = memory_application(&target_memory)?
-        .memory_status_with_repair_v1()
+        .memory_status_v1()
         .await
         .map_err(memory_application_error)?;
     let value = json!({
         "status": "ok",
-        "memory": status.status,
-        "feedback_history_repair": feedback_history_repair_payload(status.feedback_history_repair),
+        "memory": status,
     });
     Ok(tool_json(
         (!target_memory.user_scope).then_some(target_memory.project_root.as_path()),
@@ -108,7 +90,7 @@ pub(crate) async fn handle_user_memory_tool(
         }
         "tracedecay_memory_status" => {
             let status = memory_application(&target_memory)?
-                .memory_status_with_repair_v1()
+                .memory_status_v1()
                 .await
                 .map_err(memory_application_error)?;
             Ok(tool_json(
@@ -116,8 +98,7 @@ pub(crate) async fn handle_user_memory_tool(
                 &args,
                 &json!({
                     "status": "ok",
-                    "memory": status.status,
-                    "feedback_history_repair": feedback_history_repair_payload(status.feedback_history_repair),
+                    "memory": status,
                 }),
             ))
         }

@@ -1322,7 +1322,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route(
             "/api/plugins/hermes-lcm/payloads/gc",
-            get(lcm_api::payloads_gc_preview).post(lcm_api::payloads_gc_apply),
+            get(lcm_api::payloads_gc_preview),
         )
         // Code graph explorer API (project-local nodes / edges / files tables)
         .route("/api/plugins/graph/overview", get(graph_api::overview))

@@ -86,20 +86,27 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
             "{} has a registered concrete feedback handler",
             capability.capability_id()
         );
-        assert!(
-            capability.availability().is_callable(),
-            "{} is callable after its production owner was registered",
-            capability.capability_id()
-        );
         let provider_contribution = [
             GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
             CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
             PROXIMITY_CAPABILITY_ID_V1,
         ]
         .contains(&capability.capability_id().as_str());
+        let mounted = !provider_contribution
+            && ![
+                "capability.application.feedback.test-results",
+                "capability.application.feedback.advisory-cycle",
+            ]
+            .contains(&capability.capability_id().as_str());
+        assert_eq!(
+            capability.availability().is_callable(),
+            mounted,
+            "{} availability reflects its mounted production journey",
+            capability.capability_id()
+        );
         assert_eq!(
             capability.binding_ids().is_empty(),
-            provider_contribution,
+            !mounted,
             "{} must use the combined advisory transport",
             capability.capability_id()
         );

@@ -55,7 +55,7 @@ pub struct ProcessSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseSnapshot {
     pub project_root: PathBuf,
-    /// `<root>/.tracedecay/<branch>.db` or whichever DB is being served.
+    /// The project-wide database being served.
     pub db_path: PathBuf,
     /// Canonical identity of the file owned by this process, when resolvable.
     pub canonical_db_path: PathBuf,

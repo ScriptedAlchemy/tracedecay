@@ -114,7 +114,7 @@ pub struct Cli {
     /// Verify and print the exact signed lifecycle plan without mutating.
     /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
     /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `migrate storage-report`).
+    /// from unrelated subcommands (for example `branch list` and `storage report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
     /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
@@ -655,7 +655,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: ProjectsAction,
     },
-    /// Manage multi-branch indexing
+    /// Inspect Git branch snapshots and configure PR worktree tracking
     #[command(long_about = BRANCH_LONG_ABOUT, after_help = BRANCH_AFTER_HELP)]
     Branch {
         #[command(subcommand)]
@@ -673,11 +673,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: AutomationAction,
     },
-    /// Inspect stores before profile-storage migration
-    #[command(long_about = MIGRATE_LONG_ABOUT, after_help = MIGRATE_AFTER_HELP)]
-    Migrate {
+    /// Inspect final-V2 storage health
+    #[command(long_about = STORAGE_LONG_ABOUT, after_help = STORAGE_AFTER_HELP)]
+    Storage {
         #[command(subcommand)]
-        action: MigrateAction,
+        action: StorageAction,
     },
     /// Wipe local tracedecay DBs (current folder, parents, and children)
     #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
@@ -834,6 +834,33 @@ pub(crate) struct SessionsSearchArgs {
     /// Registered project root path or alias whose session store should be searched
     #[arg(long, conflicts_with = "project_id")]
     pub(crate) project_path: Option<String>,
+    /// Search scope across registered projects. all_registered returns a typed unavailable result until multi-root retrieval is mounted.
+    #[arg(
+        long,
+        value_parser = ["all_registered"],
+        conflicts_with_all = ["project_id", "project_path"]
+    )]
+    pub(crate) project_scope: Option<String>,
+    /// Authenticated opaque continuation cursor from a prior compatible result.
+    #[arg(long)]
+    pub(crate) cursor: Option<String>,
+    /// Temporal interpretation for the canonical session query.
+    #[arg(
+        long,
+        default_value = "current",
+        value_parser = ["current", "evolution", "forensic"]
+    )]
+    pub(crate) temporal_mode: String,
+    /// Retrieval grain for the canonical session query.
+    #[arg(
+        long,
+        default_value = "logical_message",
+        value_parser = ["occurrence", "logical_message", "turn", "session", "thread", "agent", "summary"]
+    )]
+    pub(crate) grain: String,
+    /// Emit the complete canonical JSON envelope.
+    #[arg(long)]
+    pub(crate) json: bool,
     /// Only sessions correlated with this git branch
     #[arg(long)]
     pub(crate) branch: Option<String>,
@@ -1025,12 +1052,10 @@ pub enum MemoryAction {
 }
 
 #[derive(Subcommand)]
-pub enum MigrateAction {
+pub enum StorageAction {
     /// Read-only per-store size, free-page ratio, and retention-backlog report
-    /// (plan 38 §7). Never mutates anything; use `branch gc` and the daemon's
-    /// automatic sweeps to reclaim what this reports.
-    #[command(name = "storage-report")]
-    StorageReport {
+    /// (plan 38 §7). Never mutates anything.
+    Report {
         /// Profile root to inspect (defaults to the resolved user data dir).
         #[arg(long = "profile-root")]
         profile_root: Option<String>,
@@ -1044,60 +1069,12 @@ pub enum MigrateAction {
         #[arg(long)]
         json: bool,
     },
-    /// Create a complete checksummed profile backup under a quiesced exclusive lease.
-    #[command(name = "backup-profile")]
-    BackupProfile {
-        /// Backup parent outside the TraceDecay profile.
-        #[arg(long)]
-        to: String,
-        /// Stable backup directory name.
-        #[arg(long = "backup-id")]
-        backup_id: String,
-    },
-    /// Restore and verify a complete backup in an isolated destination.
-    #[command(name = "rehearse-profile-backup")]
-    RehearseProfileBackup {
-        /// Complete backup directory containing `backup-manifest.json`.
-        #[arg(long)]
-        backup: String,
-        /// New isolated restore directory.
-        #[arg(long)]
-        restore: String,
-    },
 }
 
 #[derive(Subcommand)]
 pub enum BranchAction {
-    /// List tracked branches and their DB sizes
+    /// List local branches and their exact commit snapshots
     List {
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Track a new branch (copies nearest ancestor DB + incremental sync)
-    Add {
-        /// Branch name to track (default: current branch)
-        name: Option<String>,
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Remove a tracked branch and delete its DB
-    Remove {
-        /// Branch name to remove
-        name: String,
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Remove all tracked branches (keeps only the default branch)
-    Removeall {
-        /// Project path (default: current directory)
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Remove DBs for branches that no longer exist in git
-    Gc {
         /// Project path (default: current directory)
         #[arg(short, long)]
         path: Option<String>,

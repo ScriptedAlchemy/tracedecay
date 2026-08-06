@@ -7,7 +7,7 @@ const PROJECT_SCOPE: &[ScopeDimension] = &[ScopeDimension::Project];
 const PROJECT_SESSION_SCOPE: &[ScopeDimension] =
     &[ScopeDimension::Project, ScopeDimension::Session];
 
-pub(super) const SPECS: [RetainedSurfaceSpec; 15] = [
+pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::SessionRefresh,
         summary: "Control session refresh",
@@ -78,7 +78,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 15] = [
         example: "Describe this retained session target",
         effect: EffectClass::Read,
         scope: SESSION_SCOPE,
-        paginated: true,
+        paginated: false,
     },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::LcmExpand,
@@ -104,24 +104,6 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 15] = [
         description: "Measure one bounded temporal assembly against the mounted authority.",
         example: "Preflight this retained context request",
         effect: EffectClass::Read,
-        scope: SESSION_SCOPE,
-        paginated: false,
-    },
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::LcmCompress,
-        summary: "Compress retained temporal context",
-        description: "Commit bounded temporal compression through the mounted authority.",
-        example: "Compress this retained session context",
-        effect: EffectClass::Administrative,
-        scope: SESSION_SCOPE,
-        paginated: false,
-    },
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::LcmSessionBoundary,
-        summary: "Record a retained session boundary",
-        description: "Commit an exact temporal boundary through the mounted authority.",
-        example: "Record this retained session boundary",
-        effect: EffectClass::Administrative,
         scope: SESSION_SCOPE,
         paginated: false,
     },

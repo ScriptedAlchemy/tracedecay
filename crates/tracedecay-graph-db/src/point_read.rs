@@ -3,8 +3,10 @@ use std::sync::Arc;
 use crate::state::{StateCache, stable_key};
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
-    GraphRelation, GraphRelationId, GraphSnapshot,
+    GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
 };
+
+const MAX_BATCH_POINT_READ_ENTITIES: usize = 100_000;
 
 impl GraphDb {
     pub fn entity(
@@ -15,6 +17,41 @@ impl GraphDb {
     ) -> Result<Option<GraphEntity>, GraphDbError> {
         let state = self.point_read_state(cancellation.as_ref())?;
         read_entity(&state, namespace, identity)
+    }
+
+    pub fn projection_entity(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        identity: &GraphEntityId,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
+        let state = self.point_read_state(cancellation.as_ref())?;
+        read_projection_entity(&state, namespace, projection, identity)
+    }
+
+    /// Reads projection-scoped entities in input order under one state lock.
+    ///
+    /// Missing or foreign-projection identities retain their input position as
+    /// `None`, so callers can safely correlate bounded batch results.
+    pub fn projection_entities(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        identities: &[GraphEntityId],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Option<GraphEntity>>, GraphDbError> {
+        if identities.len() > MAX_BATCH_POINT_READ_ENTITIES {
+            return Err(GraphDbError::BudgetExhausted);
+        }
+        let state = self.point_read_state(cancellation.as_ref())?;
+        read_projection_entities(
+            &state,
+            namespace,
+            projection,
+            identities,
+            cancellation.as_ref(),
+        )
     }
 
     pub fn relation(
@@ -39,6 +76,38 @@ impl GraphSnapshot {
             return Err(GraphDbError::Cancelled);
         }
         read_entity(&self.state, namespace, identity)
+    }
+
+    pub fn projection_entity(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        identity: &GraphEntityId,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<GraphEntity>, GraphDbError> {
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        read_projection_entity(&self.state, namespace, projection, identity)
+    }
+
+    pub fn projection_entities(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        identities: &[GraphEntityId],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Option<GraphEntity>>, GraphDbError> {
+        if identities.len() > MAX_BATCH_POINT_READ_ENTITIES {
+            return Err(GraphDbError::BudgetExhausted);
+        }
+        read_projection_entities(
+            &self.state,
+            namespace,
+            projection,
+            identities,
+            cancellation.as_ref(),
+        )
     }
 
     pub fn relation(
@@ -71,6 +140,51 @@ fn read_entity(
         });
     }
     Ok(Some(stored.entity.clone()))
+}
+
+fn read_projection_entity(
+    state: &StateCache,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    identity: &GraphEntityId,
+) -> Result<Option<GraphEntity>, GraphDbError> {
+    let Some((_, stored)) = state
+        .entities
+        .get(&stable_key(namespace, identity.as_str()))
+    else {
+        return Ok(None);
+    };
+    if stored.namespace != *namespace || stored.entity.identity != *identity {
+        return Err(GraphDbError::Corrupt {
+            message: "entity point-read index does not match its payload".to_owned(),
+        });
+    }
+    if stored.projection != *projection {
+        return Ok(None);
+    }
+    Ok(Some(stored.entity.clone()))
+}
+
+fn read_projection_entities(
+    state: &StateCache,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    identities: &[GraphEntityId],
+    cancellation: &dyn GraphCancellation,
+) -> Result<Vec<Option<GraphEntity>>, GraphDbError> {
+    if cancellation.is_cancelled() {
+        return Err(GraphDbError::Cancelled);
+    }
+    let mut entities = Vec::with_capacity(identities.len());
+    for identity in identities {
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        entities.push(read_projection_entity(
+            state, namespace, projection, identity,
+        )?);
+    }
+    Ok(entities)
 }
 
 fn read_relation(

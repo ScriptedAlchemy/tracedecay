@@ -184,18 +184,6 @@ impl DaemonEngine {
         maintenance_transition_gate(&self.maintenance_transition_gates, key).await
     }
 
-    /// Runs destructive branch administration before any project server is
-    /// opened for the request, under the daemon-wide store administration gate.
-    pub(super) async fn execute_branch_admin(
-        &self,
-        handshake: &DaemonHandshake,
-        action: crate::branch::BranchAdminAction,
-    ) -> Result<crate::branch::BranchAdminReport> {
-        self.store_administration
-            .execute_branch_admin_for_handshake(handshake, action)
-            .await
-    }
-
     /// Returns the client version to log for this handshake, once per distinct
     /// skewed version; repeat connections from the same client return `None`.
     pub(super) async fn client_version_skew_to_log(
@@ -677,115 +665,6 @@ impl DaemonEngine {
         } else {
             MaintenanceRekeyOutcome::Completed
         }
-    }
-
-    pub(super) fn database_owner_reconciler(
-        &self,
-        current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
-        route_registered: Arc<AtomicBool>,
-        handshake: DaemonHandshake,
-    ) -> crate::mcp::DatabaseOwnerReconciler {
-        let engine = self.clone();
-        Arc::new(move |fresh| {
-            let engine = engine.clone();
-            let current_key = Arc::clone(&current_key);
-            let current_project_path = Arc::clone(&current_project_path);
-            let route_registered = Arc::clone(&route_registered);
-            let handshake = handshake.clone();
-            Box::pin(async move {
-                let scope = crate::daemon::branch_admin::graph_writer_scope(
-                    &fresh,
-                    crate::daemon::branch_admin::StoreWriterClass::Owner,
-                );
-                let transition = engine
-                    .store_administration
-                    .with_writer_in(scope, || async {
-                        if !route_registered.load(Ordering::Acquire) {
-                            return None;
-                        }
-                        let new_key = match ProjectServerKey::from_open_project(&fresh, &handshake)
-                        {
-                            Ok(key) => key,
-                            Err(error) => {
-                                eprintln!(
-                                    "[tracedecay] failed to rekey daemon database owner: {error}"
-                                );
-                                return None;
-                            }
-                        };
-                        let mut current = current_key.lock().await;
-                        if *current == new_key {
-                            return None;
-                        }
-                        let old_key = current.clone();
-                        let rekeyed = engine
-                            .store_administration
-                            .project_servers()
-                            .lock()
-                            .await
-                            .rekey(&old_key, &new_key);
-                        if !rekeyed {
-                            route_registered.store(false, Ordering::Release);
-                        }
-                        let project_path = fresh.project_root().to_path_buf();
-                        let new_session_db = match new_key.owner.project_id.as_deref() {
-                            Some(_) => engine
-                                .store_administration
-                                .registered_project_session_database(
-                                    fresh.project_root(),
-                                    fresh.store_layout(),
-                                )
-                                .await
-                                .ok(),
-                            None => None,
-                        };
-                        *current_project_path.lock().await = project_path;
-                        *current = new_key.clone();
-                        Some((
-                            old_key,
-                            new_key,
-                            new_session_db,
-                            fresh.project_root().to_path_buf(),
-                            rekeyed,
-                        ))
-                    })
-                    .await;
-                if let Some((old_key, new_key, new_session_db, project_path, acquire_new)) =
-                    transition
-                {
-                    let old_owner = old_key.owner.clone();
-                    let new_owner = new_key.owner.clone();
-                    let outcome = engine
-                        .rekey_project_maintenance(
-                            &old_key,
-                            new_key,
-                            project_path,
-                            handshake,
-                            acquire_new,
-                        )
-                        .await;
-                    if outcome == MaintenanceRekeyOutcome::Completed {
-                        if acquire_new
-                            && engine.lifecycle.accepting()
-                            && let Some(new_session_db) = new_session_db
-                        {
-                            engine
-                                .store_administration
-                                .session_temporal_refresh_schedulers()
-                                .rekey_project(&old_owner, new_owner, new_session_db)
-                                .await;
-                        } else {
-                            engine
-                                .store_administration
-                                .session_temporal_refresh_schedulers()
-                                .retire_project(&old_owner)
-                                .await;
-                        }
-                    }
-                }
-            })
-        })
     }
 
     pub(super) async fn shutdown_background_tasks(&self) {

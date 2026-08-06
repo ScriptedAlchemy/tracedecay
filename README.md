@@ -24,8 +24,11 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 - 70+ MCP tools for discovery, call graphs, impact analysis, code health, test mapping, PR context, and anchored edits.
 - 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
 - Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
-- Local SQLite storage through the `rusqlite` runtime. Your code and project memory stay on your machine.
-- On-demand freshness checks, optional per-branch databases, and linked git worktree support.
+- Local daemon-owned storage. Graph/vector state uses embedded Grafeo through
+  `tracedecay-graph-db`; relational/content state uses SQLite. Your code and
+  project memory stay on your machine.
+- On-demand freshness checks and linked git worktree support with shared
+  project identity.
 - Local dashboard for code graph, memory, LCM sessions, savings, and cost analytics.
 
 ## Install
@@ -126,16 +129,8 @@ TraceDecay does not run a filesystem watcher. MCP calls check for stale indexed 
 
 Linked git worktrees share the same project enrollment through the repository common directory. Initialize once from any checkout; do not copy `.tracedecay/` into worktrees.
 
-Optional branch databases:
-
-```bash
-tracedecay branch add
-tracedecay branch list
-tracedecay branch remove <name>
-tracedecay branch gc
-```
-
-See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for full branch behavior and recovery.
+Branch, ref, and worktree identity is recorded as snapshot provenance for code
+generations. Branches/worktrees do not own databases or facts.
 
 ## Dashboard
 
@@ -199,7 +194,6 @@ cargo clippy --workspace --all-targets
 ## Docs
 
 - [User guide](docs/USER-GUIDE.md)
-- [Comparable tools](docs/COMPARABLE-TOOLS.md)
 - [Dashboard](docs/dashboard.md)
 - [Branching](docs/BRANCHING-USER-GUIDE.md)
 - [MCP extensions](docs/MCP-extensions.md)

@@ -268,17 +268,6 @@ impl HostIntegrationIdV1 {
             _ => None,
         }
     }
-
-    /// Marker used to debounce this host's incremental project syncs.
-    pub const fn sync_marker_file(self) -> &'static str {
-        match self {
-            Self::Claude => ".claude_post_tool_sync_at",
-            Self::Codex => ".codex_shell_sync_at",
-            Self::Cursor => ".cursor_shell_sync_at",
-            Self::Hermes => ".hermes_terminal_receipt_at",
-            Self::Kiro => ".kiro_post_tool_sync_at",
-        }
-    }
 }
 
 /// Every host integration, including every Hermes profile, binds this one

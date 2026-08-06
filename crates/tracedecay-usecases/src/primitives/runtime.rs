@@ -1265,8 +1265,9 @@ fn retrieval_outcome<T: Serialize>(
         RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
         RetrievalPortOutcome::Cancelled(evidence) => (OperationTermination::Cancelled, evidence),
         RetrievalPortOutcome::TimedOut(evidence) => (OperationTermination::TimedOut, evidence),
-        RetrievalPortOutcome::Failed(evidence) | RetrievalPortOutcome::Unavailable(evidence) => {
-            (OperationTermination::Failed, evidence)
+        RetrievalPortOutcome::Failed(evidence) => (OperationTermination::Failed, evidence),
+        RetrievalPortOutcome::Unavailable(evidence) => {
+            (OperationTermination::Unavailable, evidence)
         }
     };
     if evidence.cancellation.is_none()

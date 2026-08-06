@@ -578,8 +578,14 @@ impl ConfigurationDaemonClient for ProductionConfigurationDaemonClient {
 }
 
 fn runtime_configuration_error(error: ConfigurationError) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("configuration control-plane mutation failed: {error}"),
+    match error {
+        ConfigurationError::ResetRequired => TraceDecayError::reset_required(
+            "configuration",
+            "stored snapshot is missing, invalid, ambiguous, or not the exact final shape",
+        ),
+        error => TraceDecayError::Config {
+            message: format!("configuration control-plane operation failed: {error}"),
+        },
     }
 }
 
@@ -1022,6 +1028,18 @@ mod tests {
             authorities.installed_mutation_authorization(),
             Err(ConfigurationError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn runtime_configuration_reset_is_not_erased_to_config_error() {
+        let error = runtime_configuration_error(ConfigurationError::ResetRequired);
+
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _)| authority),
+            Some("configuration")
+        );
     }
 
     #[test]

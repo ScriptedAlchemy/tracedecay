@@ -26,6 +26,9 @@ pub(super) struct DaemonInvocationState {
     pub(super) service: DaemonInvocationService,
     pub(super) github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
+    pub(super) advisory_post_open_owners: advisory_post_open::ProjectOpenAdvisoryPostOpenRegistryV1,
+    pub(super) embedded_graph_runtime: embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
+    session_git_evidence: session_git_evidence::SessionGitEvidenceDrainRegistry,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
     semantic_projection_scheduler:
@@ -34,8 +37,13 @@ pub(super) struct DaemonInvocationState {
 
 impl Default for DaemonInvocationState {
     fn default() -> Self {
+        let embedded_graph_runtime =
+            embedded_graph_runtime::EmbeddedGraphRuntimeRegistry::default();
         let code_index_schedulers =
-            code_index_scheduler::CodeIndexSchedulerRegistryV1::new(MAX_CACHED_PROJECT_SERVERS);
+            code_index_scheduler::CodeIndexSchedulerRegistryV1::with_graph_runtime(
+                MAX_CACHED_PROJECT_SERVERS,
+                embedded_graph_runtime.clone(),
+            );
         let service =
             DaemonInvocationService::with_code_index_schedulers(code_index_schedulers.clone());
         Self {
@@ -45,6 +53,10 @@ impl Default for DaemonInvocationState {
             service,
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
+            advisory_post_open_owners:
+                advisory_post_open::ProjectOpenAdvisoryPostOpenRegistryV1::default(),
+            embedded_graph_runtime,
+            session_git_evidence: session_git_evidence::SessionGitEvidenceDrainRegistry::default(),
             code_index_schedulers,
             query_authority_provider:
                 query_authority_provider::DaemonQueryAuthorityProviderV1::default(),
@@ -55,6 +67,75 @@ impl Default for DaemonInvocationState {
 }
 
 impl DaemonInvocationState {
+    pub(super) async fn mounted_project_graph(
+        &self,
+        project_id: &tracedecay_domain::ProjectId,
+        project_store_root: &Path,
+    ) -> Result<Option<Arc<tracedecay_graph_db::GraphDb>>> {
+        self.embedded_graph_runtime
+            .mounted_project(project_id, project_store_root)
+            .map_err(|error| embedded_graph_error(project_id, error))
+    }
+
+    pub(super) async fn resolve_project_graph(
+        &self,
+        project_id: &tracedecay_domain::ProjectId,
+        project_store_root: &Path,
+    ) -> Result<Arc<tracedecay_graph_db::GraphDb>> {
+        let graph_runtime = self.embedded_graph_runtime.clone();
+        let graph_project_id = project_id.clone();
+        let graph_project_store_root = project_store_root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            graph_runtime.resolve_project(&graph_project_id, &graph_project_store_root)
+        })
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("embedded project graph mount task failed: {error}"),
+        })?
+        .map_err(|error| embedded_graph_error(project_id, error))
+    }
+
+    /// Admit one exact project/worktree root to the daemon-owned Git topology
+    /// convergence owner. Repository I/O and history traversal remain entirely
+    /// in the coalescing background owner.
+    pub(super) async fn enqueue_git_convergence(
+        &self,
+        project_id: &tracedecay_domain::ProjectId,
+        project_store_root: &Path,
+        project_root: &Path,
+    ) -> Result<()> {
+        let database = self
+            .resolve_project_graph(project_id, project_store_root)
+            .await?;
+        self.embedded_graph_runtime
+            .enqueue_git_convergence(project_id, project_store_root, project_root, database)
+            .await
+            .map_err(|error| embedded_graph_error(project_id, error))?;
+        Ok(())
+    }
+
+    pub(super) fn bind_session_git_evidence(
+        &self,
+        project_id: &tracedecay_domain::ProjectId,
+        project_store_root: &Path,
+        project_root: &Path,
+        session_db: Arc<crate::global_db::RegisteredGlobalDb>,
+        database: Arc<tracedecay_graph_db::GraphDb>,
+    ) -> Result<()> {
+        self.session_git_evidence
+            .bind(
+                project_id,
+                project_store_root,
+                project_root,
+                database,
+                session_db,
+                self.embedded_graph_runtime.clone(),
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("session Git graph evidence owner is unavailable: {error}"),
+            })
+    }
+
     pub(super) fn configure_github_read_only_credentials(
         &self,
         identity: &profile_identity::LocalProfileIdentityAuthorityV1,
@@ -152,7 +233,7 @@ impl DaemonInvocationState {
         &self,
         project_id: tracedecay_domain::ProjectId,
         project_root: &Path,
-        store_root: PathBuf,
+        project_store_root: PathBuf,
         semantic_runtime: Option<&crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
         semantic_database: Option<Arc<crate::db::Database>>,
         semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
@@ -177,8 +258,12 @@ impl DaemonInvocationState {
         let canonical_project_root = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
+        let graph = self
+            .resolve_project_graph(&project_id, &project_store_root)
+            .await?;
+        let code_index_store_root = project_store_root.join("code-index-v1");
         let scoped_code_index_store_root = code_index_scheduler::scoped_code_index_store_root(
-            &store_root,
+            &code_index_store_root,
             &canonical_project_root,
         );
         let semantic_schedule = semantic_runtime
@@ -195,6 +280,7 @@ impl DaemonInvocationState {
                             worktree_id,
                             handle: handle.clone(),
                             database,
+                            graph: Arc::clone(&graph),
                             lifecycle,
                             resources,
                             fair_scheduler: self.semantic_projection_scheduler.clone(),
@@ -203,7 +289,13 @@ impl DaemonInvocationState {
                 },
             );
         self.code_index_schedulers
-            .mount_worktree(project_id, project_root, store_root, semantic_schedule)
+            .mount_project_worktree(
+                project_id,
+                project_root,
+                project_store_root,
+                code_index_store_root,
+                semantic_schedule,
+            )
             .await
             .map(|_| ())
             .map_err(|error| {
@@ -583,10 +675,25 @@ impl DaemonInvocationState {
     }
 
     pub(super) async fn shutdown(&self) {
+        self.advisory_post_open_owners.shutdown().await;
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         self.service.expire_all().await;
+        for error in self.session_git_evidence.shutdown().await {
+            tracing::warn!(
+                event = "session_git_evidence_shutdown_failed",
+                error = %error,
+                "daemon session Git evidence owner did not close cleanly"
+            );
+        }
+        for error in self.embedded_graph_runtime.close_all().await {
+            tracing::warn!(
+                event = "embedded_graph_close_failed",
+                error = %error,
+                "daemon embedded graph runtime did not close cleanly"
+            );
+        }
     }
 
     pub(super) async fn invoke_for_project(
@@ -782,5 +889,22 @@ impl DaemonInvocationState {
                 request,
             )
             .await
+    }
+}
+
+fn embedded_graph_error(
+    project_id: &tracedecay_domain::ProjectId,
+    error: embedded_graph_runtime::EmbeddedGraphRuntimeError,
+) -> TraceDecayError {
+    match error {
+        embedded_graph_runtime::EmbeddedGraphRuntimeError::ResetRequired(message) => {
+            TraceDecayError::reset_required(
+                format!("embedded-project-graph:{}", project_id.as_str()),
+                message,
+            )
+        }
+        error => TraceDecayError::Config {
+            message: format!("embedded project graph is unavailable: {error}"),
+        },
     }
 }

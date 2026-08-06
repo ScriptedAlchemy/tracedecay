@@ -886,7 +886,7 @@ impl McpServer {
                     continue;
                 }
             };
-            let cg = self.reopen_if_branch_drifted().await;
+            let cg = self.cg_snapshot().await;
             let root = cg.project_root().to_path_buf();
             let canonical_outcome = Box::pin(self.run_hook_event_plan(cg, &root, plan)).await;
             let outcome = if canonical_outcome.reason_code == Some("stale_branch_authorization")

@@ -30,6 +30,11 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
         until,
         project_id: _,
         project_path: _,
+        project_scope,
+        cursor,
+        temporal_mode,
+        grain,
+        json: _,
         branch,
         worktree,
         commit,
@@ -39,6 +44,8 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
         ("scope".to_string(), Value::String(scope)),
         ("message_type".to_string(), Value::String(message_type)),
         ("limit".to_string(), json!(limit)),
+        ("temporal_mode".to_string(), Value::String(temporal_mode)),
+        ("grain".to_string(), Value::String(grain)),
         ("format".to_string(), Value::String("json".to_string())),
     ]);
     for (key, value) in [
@@ -49,12 +56,31 @@ fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
         ("branch", branch),
         ("worktree", worktree),
         ("commit", commit),
+        ("project_scope", project_scope),
+        ("cursor", cursor),
     ] {
         if let Some(value) = value {
             arguments.insert(key.to_string(), Value::String(value));
         }
     }
     Value::Object(arguments)
+}
+
+fn require_message_search_human_success(payload: &Value) -> tracedecay::errors::Result<()> {
+    let status = payload
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+    if matches!(status, "ok" | "partial" | "stale") {
+        return Ok(());
+    }
+    let message = payload
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("session retrieval failed");
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!("{status}: {message}"),
+    })
 }
 
 pub(crate) async fn handle_sessions_action(
@@ -86,13 +112,24 @@ pub(crate) async fn handle_sessions_action(
         SessionsAction::Search(args) => {
             let project_id = args.project_id.clone();
             let project_path = args.project_path.clone();
-            let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            let payload = call_daemon_tool(
-                &project_path,
+            let multi_root = args.project_scope.as_deref() == Some("all_registered");
+            let json_output = args.json;
+            let project_path = if multi_root {
+                None
+            } else {
+                Some(resolve_cli_project_root(None, project_id, project_path).await?)
+            };
+            let payload = call_daemon_tool_for_scope(
+                project_path.as_deref(),
                 "tracedecay_message_search",
                 message_search_rpc_args(*args),
             )
             .await?;
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+            require_message_search_human_success(&payload)?;
             for result in payload["results"].as_array().into_iter().flatten() {
                 println!(
                     "[{}] {} {}: {}",
@@ -114,6 +151,13 @@ pub(crate) async fn handle_sessions_action(
                         .unwrap_or("")
                         .replace('\n', " ")
                 );
+            }
+            if let Some(cursor) = payload
+                .pointer("/temporal/cursor")
+                .or_else(|| payload.get("next_cursor"))
+                .and_then(Value::as_str)
+            {
+                println!("next_cursor: {cursor}");
             }
         }
         SessionsAction::Refresh { action } => {
@@ -856,7 +900,8 @@ mod tests {
     use super::{
         SessionRefreshDaemonFuture, SessionRefreshDaemonTransport, SessionRefreshMode,
         SessionRefreshOutcome, SessionRefreshSelectors, dispatch_session_refresh,
-        execute_session_refresh, message_search_rpc_args, session_refresh_human_outcome,
+        execute_session_refresh, message_search_rpc_args, require_message_search_human_success,
+        session_refresh_human_outcome,
     };
     use crate::cli::{Cli, SessionsSearchArgs};
 
@@ -873,6 +918,11 @@ mod tests {
             until: None,
             project_id: None,
             project_path: None,
+            project_scope: None,
+            cursor: None,
+            temporal_mode: "current".to_string(),
+            grain: "logical_message".to_string(),
+            json: false,
             branch: None,
             worktree: None,
             commit: None,
@@ -885,6 +935,8 @@ mod tests {
                 "scope": "all",
                 "message_type": "all",
                 "limit": 3,
+                "temporal_mode": "current",
+                "grain": "logical_message",
                 "format": "json",
             })
         );
@@ -903,6 +955,11 @@ mod tests {
             until: Some("2026-07-28T00:00:00Z".to_string()),
             project_id: None,
             project_path: None,
+            project_scope: Some("all_registered".to_string()),
+            cursor: Some("opaque.cursor".to_string()),
+            temporal_mode: "forensic".to_string(),
+            grain: "occurrence".to_string(),
+            json: true,
             branch: Some("master".to_string()),
             worktree: Some("/repos/worktree".to_string()),
             commit: Some("abc123".to_string()),
@@ -917,14 +974,33 @@ mod tests {
                 "message_type": "direct_user",
                 "parent_session_id": "parent-1",
                 "limit": 5,
+                "temporal_mode": "forensic",
+                "grain": "occurrence",
                 "since": "last hour",
                 "until": "2026-07-28T00:00:00Z",
                 "branch": "master",
                 "worktree": "/repos/worktree",
                 "commit": "abc123",
+                "project_scope": "all_registered",
+                "cursor": "opaque.cursor",
                 "format": "json",
             })
         );
+    }
+
+    #[test]
+    fn message_search_human_output_never_collapses_typed_terminals_to_success() {
+        for status in ["unavailable", "cancelled", "timed_out"] {
+            let payload = json!({
+                "status": status,
+                "error": {"message": "bounded terminal"}
+            });
+            let error = require_message_search_human_success(&payload).unwrap_err();
+            assert!(error.to_string().contains(status), "{error}");
+        }
+        for status in ["ok", "partial", "stale"] {
+            assert!(require_message_search_human_success(&json!({"status": status})).is_ok());
+        }
     }
 
     fn project_selectors() -> SessionRefreshSelectors {
@@ -991,10 +1067,7 @@ mod tests {
             "resolution_source": "active_project",
             "branch": {
                 "current_branch": "feature/selected",
-                "open_active_branch": "feature/selected",
-                "serving_branch": "feature/selected",
-                "branch_drifted": false,
-                "is_fallback": false
+                "selected_branch": "feature/selected"
             }
         })
     }

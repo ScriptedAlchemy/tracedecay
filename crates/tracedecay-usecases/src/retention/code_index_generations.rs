@@ -1,11 +1,11 @@
 //! Liveness-based retention for immutable code-index generations.
 //!
 //! The code-index store is derived, but a generation can still be live while
-//! the active code pointer or a readable vector inventory names it. Collection
+//! the active code pointer or a readable semantic vector generation names it. Collection
 //! therefore uses conservative mark-and-sweep rather than refcounts: a missed
 //! mark costs disk space, while a miscount could silently remove readable code
-//! evidence. The mark set is the active generation, every vector-readable source,
-//! and a small newest-superseded rollback floor.
+//! evidence. The mark set is the active generation, every semantic-vector-readable
+//! source, and a small newest-superseded rollback floor.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -23,7 +23,10 @@ use tracedecay_application::{DirectorySyncPolicy, atomic_write};
 // demanded 1: every real sealed file was refused as "incompatible" and the store
 // became uncollectable.
 use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
-use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    CodeGenerationId, GitGraphEvidenceIntent, GitGraphEvidencePublicationReceipt, UtcMicros,
+    canonical_sha256,
+};
 
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
 
@@ -33,8 +36,8 @@ pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
 /// treated as abandoned rather than idle.
 pub const DEFAULT_STRANDED_SCOPE_MINIMUM_AGE_SECS: i64 = 7 * 24 * 60 * 60;
 
-const ACTIVE_POINTER_FILE: &str = "active-code-generation-v1.json";
-const GENERATIONS_DIRECTORY: &str = "code-generations-v1";
+const ACTIVE_POINTER_FILE: &str = "active-code-generation.json";
+const GENERATIONS_DIRECTORY: &str = "code-generations";
 const RECEIPTS_DIRECTORY: &str = "code-generation-retention-receipts-v1";
 const QUARANTINE_DIRECTORY: &str = ".code-generation-retention-quarantine-v1";
 const STORE_LOCK_FILE: &str = ".code-generation-retention.lock";
@@ -71,6 +74,14 @@ struct SealedGenerationSealMetadataV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct GitGraphEvidenceJournalEntry {
+    pub source_sequence: u64,
+    pub intent: GitGraphEvidenceIntent,
+    pub receipt: Option<GitGraphEvidencePublicationReceipt>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DurablePublicationPointerV1 {
     pub generation_id: String,
     pub snapshot_content_identity: String,
@@ -78,6 +89,10 @@ pub struct DurablePublicationPointerV1 {
     pub sealed_at_micros: i64,
     pub generation_file: String,
     pub state_digest: String,
+    #[serde(default)]
+    pub git_graph_evidence_next_sequence: u64,
+    #[serde(default)]
+    pub git_graph_evidence: Vec<GitGraphEvidenceJournalEntry>,
 }
 
 #[derive(Debug, Error)]
@@ -2074,6 +2089,8 @@ mod tests {
             sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
             generation_file: active.file.clone(),
             state_digest: active.state_digest.clone(),
+            git_graph_evidence_next_sequence: 0,
+            git_graph_evidence: Vec::new(),
         };
         std::fs::write(
             store.path().join(ACTIVE_POINTER_FILE),

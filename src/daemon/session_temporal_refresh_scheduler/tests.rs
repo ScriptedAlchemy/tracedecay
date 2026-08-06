@@ -1275,6 +1275,35 @@ async fn profile_database_has_one_scheduler_and_equivalent_kicks_coalesce() {
 }
 
 #[tokio::test]
+async fn retained_profile_lookup_neither_creates_nor_wakes_a_scheduler() {
+    let temp = TempDir::new().unwrap();
+    let authority =
+        registered_test_database(&temp, "profile-read-only", HostAdmissionScope::Profile).await;
+    let db = authority.database();
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+
+    assert!(registry.retained_profile_wake(db.db_path()).await.is_none());
+    assert_eq!(registry.profile_worker_count().await, 0);
+
+    let active = authority.ensure_profile(&registry).await;
+    assert!(
+        registry
+            .wait_profile_idle(db.db_path(), Duration::from_secs(2))
+            .await
+    );
+    let pass_count = registry.profile_pass_count(db.db_path()).await;
+    let retained = registry
+        .retained_profile_wake(db.db_path())
+        .await
+        .expect("retained profile scheduler route");
+    assert!(active.same_route(&retained));
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(registry.profile_pass_count(db.db_path()).await, pass_count);
+
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn project_rekey_retires_old_owner_before_rebinding_wake() {
     let temp = TempDir::new().unwrap();
     let old_authority =

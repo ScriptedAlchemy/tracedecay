@@ -141,8 +141,8 @@ const SESSION_TABLES: &[SessionTableSpec] = &[
     },
     SessionTableSpec {
         family: "temporal",
-        table: "session_temporal_schema_migrations",
-        order_columns: &["name"],
+        table: "session_temporal_schema_state",
+        order_columns: &["domain"],
     },
     SessionTableSpec {
         family: "temporal",
@@ -980,8 +980,8 @@ fn assert_session_store_schema_contract(helper: &HelperProbe) {
             ],
         ),
         (
-            "session_temporal_schema_migrations",
-            &["name", "version", "applied_at"],
+            "session_temporal_schema_state",
+            &["domain", "version", "installed_at"],
         ),
         (
             "session_temporal_generations",
@@ -1042,7 +1042,7 @@ fn assert_session_store_schema_contract(helper: &HelperProbe) {
             "session_id->sessions.session_id",
         ],
     );
-    assert_foreign_key_contract(helper, "session_temporal_schema_migrations", &[]);
+    assert_foreign_key_contract(helper, "session_temporal_schema_state", &[]);
     assert_foreign_key_contract(helper, "session_temporal_generations", &[]);
     assert_foreign_key_contract(
         helper,
@@ -1111,7 +1111,7 @@ fn probe_with_rusqlite_helper(copied: &CopiedStore, label: &str) -> HelperProbe 
         "session_messages",
         "session_schema_migrations",
         "lcm_raw_messages",
-        "session_temporal_schema_migrations",
+        "session_temporal_schema_state",
         "session_temporal_generations",
         "session_temporal_observation_effects",
     ] {

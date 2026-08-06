@@ -38,19 +38,14 @@ pub(super) use status::handle_memory_status;
 pub(crate) use status::handle_user_memory_tool;
 
 #[cfg(test)]
-use serde_json::json;
-#[cfg(test)]
-use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
-
-#[cfg(test)]
 use crate::memory::types::{AddFactRequest, MemoryCategory};
+#[cfg(test)]
+use serde_json::json;
 
 #[cfg(test)]
 use args::MAX_FACT_LIMIT;
 #[cfg(test)]
 use fact_store::handle_fact_store_for_target;
-#[cfg(test)]
-use status::feedback_history_repair_payload;
 
 pub(super) struct TargetMemoryDb<'a> {
     db: ProjectMemoryDbHandle<'a>,
@@ -120,10 +115,8 @@ pub(super) async fn open_target_memory_db<'a>(
         });
     };
     let selected_project_id = context.project.project_id.as_str();
-    // The selector may name the project this instance already serves — by id,
-    // by an alias, or through a branch shard. That is the active project's own
-    // memory, so resolve it through the active resolver, which routes a
-    // branch-serving instance back to the shared project store.
+    // The selector may name the project this instance already serves, by ID or
+    // alias. Branch/ref/worktree provenance does not change its store.
     if cg.store_layout().identity.project_id.as_deref() == Some(selected_project_id) {
         return Ok(TargetMemoryDb {
             db: cg.project_memory_db().await?,
@@ -314,10 +307,9 @@ mod tests {
     async fn fact_count(target: &TargetMemoryDb<'_>) -> usize {
         memory_application(target)
             .unwrap()
-            .memory_status_with_repair_v1()
+            .memory_status_v1()
             .await
             .unwrap()
-            .status
             .fact_count
     }
 
@@ -549,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn branch_serving_selector_resolves_the_project_wide_memory_store() {
+    async fn branch_selector_retains_the_project_wide_memory_store() {
         fn git(project: &Path, args: &[&str]) {
             let status = std::process::Command::new("git")
                 .args(args)
@@ -582,22 +574,14 @@ mod tests {
         main.close();
 
         git(&project_root, &["checkout", "-b", "feature"]);
-        TraceDecay::add_branch_tracking_with_options(
-            &project_root,
-            "feature",
-            open_options(&profile_root),
-        )
-        .await
-        .unwrap();
-
         let branch = TraceDecay::open_with_options(&project_root, open_options(&profile_root))
             .await
             .unwrap();
-        assert_eq!(branch.serving_branch(), Some("feature"));
-        assert_ne!(
+        assert_eq!(branch.active_branch(), Some("feature"));
+        assert_eq!(
             branch.db_path(),
             project_db_path,
-            "fixture must serve a branch shard distinct from the project store"
+            "every branch selector must retain the project-wide store"
         );
         register_project(&branch, &project_id, &project_root).await;
         add_project_fact(&branch, "durable facts stay project-wide across branches").await;
@@ -611,8 +595,8 @@ mod tests {
         .unwrap();
 
         assert!(
-            !std::ptr::eq(selected.db(), branch.db()),
-            "a branch-serving graph must resolve memory to the project store, not its shard"
+            std::ptr::eq(selected.db(), branch.db()),
+            "a branch selector must retain the already-mounted project store"
         );
         assert_eq!(fact_count(&selected).await, 1);
         drop(selected);
@@ -644,7 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fact_feedback_without_source_keeps_legacy_mcp_history() {
+    async fn fact_feedback_without_source_defaults_history_source_to_mcp() {
         let (_tmp, cg, fact_id) = seeded_memory().await;
 
         handle_fact_feedback(
@@ -768,21 +752,6 @@ mod tests {
                 .unwrap()
                 .len(),
             1
-        );
-    }
-
-    #[test]
-    fn incomplete_feedback_history_repair_is_explicit() {
-        assert_eq!(
-            feedback_history_repair_payload(CompatibilityFeedbackRepairProgressV1::Incomplete {
-                processed: 1,
-                remaining: Some(2),
-            }),
-            json!({
-                "state": "incomplete",
-                "processed": 1,
-                "remaining": 2,
-            })
         );
     }
 

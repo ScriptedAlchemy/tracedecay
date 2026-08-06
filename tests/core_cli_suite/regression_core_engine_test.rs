@@ -286,48 +286,6 @@ async fn noop_sync_eagerly_heals_unstamped_index() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Finding #3 (MEDIUM): branch-name sanitization collisions.
-//
-// "feature/foo" and "feature_foo" both sanitize to "feature_foo". The empty
-// case (".." -> "") would yield a hidden `branches/.db`. add_branch_tracking
-// must refuse empty names rather than silently mapping them.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn add_branch_tracking_refuses_empty_sanitized_name() {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
-
-    let cg = TraceDecay::init(project).await.unwrap();
-    cg.index_all().await.unwrap();
-
-    // ".." sanitizes to "" — must be refused, never mapped to branches/.db.
-    let profile_root = cg
-        .store_layout()
-        .data_root
-        .parent()
-        .and_then(std::path::Path::parent)
-        .unwrap()
-        .to_path_buf();
-    let result = TraceDecay::add_branch_tracking_with_options(
-        project,
-        "..",
-        TraceDecayOpenOptions {
-            profile_root: Some(profile_root),
-            global_db_path: None,
-        },
-    )
-    .await;
-    assert!(
-        result.is_err(),
-        "a branch name that sanitizes to empty must be refused, got: {result:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Finding #4 (LOW): unresolved_refs must stay bounded across repeated edits.
 //
 // Per-file refs are pruned on re-index (delete_nodes_by_file), so repeatedly

@@ -257,6 +257,7 @@ fn code_query_capability(
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::Partial,
         ])?,

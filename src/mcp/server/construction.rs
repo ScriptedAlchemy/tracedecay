@@ -2,27 +2,12 @@
 //! the construction context, daemon-provided database/authority bundles, and
 //! the injectable writer boundaries they carry.
 
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
-
-use super::hook_writes::{
-    BackgroundRefreshWriter, HookBranchWriter, direct_background_refresh_writer,
-    direct_hook_branch_writer,
-};
-
-/// Updates daemon ownership routing after this server changes physical graph DB.
-/// Implementations must not call back into this `McpServer`: reconciliation is
-/// awaited while the graph write guard is held so readers see the swap and
-/// registry rekey atomically.
-pub(crate) type DatabaseOwnerReconciler = Arc<
-    dyn Fn(Arc<TraceDecay>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
->;
 
 /// Cohesive dependencies used to construct an MCP server.
 pub(crate) struct McpServerConstructionContext {
@@ -51,7 +36,6 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) startup_catch_up_enabled: bool,
     pub(crate) automation_scheduler_reconciler:
         Option<crate::dashboard::AutomationSchedulerReconciler>,
-    pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) dashboard_doctor_remediation_dispatcher:
@@ -62,11 +46,10 @@ pub(crate) struct McpServerConstructionContext {
         Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
-    pub(crate) hook_branch_writer: HookBranchWriter,
-    pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
+    pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
@@ -80,8 +63,6 @@ pub(crate) struct McpServerConstructionContext {
 
 pub(crate) struct McpServerWriters {
     dashboard_automation: crate::dashboard::DashboardAutomationWriter,
-    hook_branch: HookBranchWriter,
-    background_refresh: BackgroundRefreshWriter,
 }
 
 pub(crate) struct McpServerDaemonDatabases {
@@ -103,7 +84,6 @@ pub(crate) struct McpServerDaemonAuthority {
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) user_session_refresh_wake:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
-    pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) writers: McpServerWriters,
 }
@@ -113,7 +93,6 @@ pub(crate) struct McpServerDaemonCoreAuthority {
     pub(crate) transcript_source_home: Option<PathBuf>,
     pub(crate) accounting: Option<Arc<RegisteredGlobalDb>>,
     pub(crate) registry: Arc<RegisteredGlobalDb>,
-    pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) writers: McpServerWriters,
 }
@@ -121,13 +100,9 @@ pub(crate) struct McpServerDaemonCoreAuthority {
 impl McpServerWriters {
     pub(crate) fn daemon_owned(
         dashboard_automation: crate::dashboard::DashboardAutomationWriter,
-        hook_branch: HookBranchWriter,
-        background_refresh: BackgroundRefreshWriter,
     ) -> Self {
         Self {
             dashboard_automation,
-            hook_branch,
-            background_refresh,
         }
     }
 }
@@ -153,18 +128,16 @@ impl McpServerConstructionContext {
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
-            database_owner_reconciler: None,
             dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
-            hook_branch_writer: direct_hook_branch_writer(),
-            background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
@@ -205,7 +178,6 @@ impl McpServerConstructionContext {
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
-            database_owner_reconciler,
             project_routes,
             writers,
         } = authority;
@@ -230,18 +202,16 @@ impl McpServerConstructionContext {
             own_project_host_admission_replay: true,
             startup_catch_up_enabled: true,
             automation_scheduler_reconciler: None,
-            database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
-            hook_branch_writer: writers.hook_branch,
-            background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             project_routes,
@@ -262,7 +232,6 @@ impl McpServerConstructionContext {
             transcript_source_home,
             accounting,
             registry,
-            database_owner_reconciler,
             project_routes,
             writers,
         } = authority;
@@ -286,18 +255,16 @@ impl McpServerConstructionContext {
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: false,
             automation_scheduler_reconciler: None,
-            database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
-            hook_branch_writer: writers.hook_branch,
-            background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             project_routes,
@@ -330,6 +297,14 @@ impl McpServerConstructionContext {
         executor: super::CodeIndexSearchExecutor,
     ) -> Self {
         self.code_index_search_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_code_index_branch_diff_executor(
+        mut self,
+        executor: super::CodeIndexBranchDiffExecutor,
+    ) -> Self {
+        self.code_index_branch_diff_executor = Some(executor);
         self
     }
 
@@ -420,30 +395,6 @@ impl McpServerConstructionContext {
     #[cfg(test)]
     pub(crate) fn with_owned_project_host_admission_replay(mut self) -> Self {
         self.own_project_host_admission_replay = true;
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_database_owner_reconciler(
-        mut self,
-        reconciler: DatabaseOwnerReconciler,
-    ) -> Self {
-        self.database_owner_reconciler = Some(reconciler);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_hook_branch_writer(mut self, writer: HookBranchWriter) -> Self {
-        self.hook_branch_writer = writer;
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_background_refresh_writer(
-        mut self,
-        writer: BackgroundRefreshWriter,
-    ) -> Self {
-        self.background_refresh_writer = writer;
         self
     }
 }

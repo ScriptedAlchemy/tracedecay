@@ -203,7 +203,7 @@ impl PhysicalRuntimeAttachment for EmptyPhysicalRuntimeAttachment {
 pub struct PublishedShardRuntime {
     runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
-    schema_migrated: bool,
+    schema_installed: bool,
 }
 
 impl PublishedShardRuntime {
@@ -214,19 +214,19 @@ impl PublishedShardRuntime {
         Self {
             runtime,
             attachment,
-            schema_migrated: false,
+            schema_installed: false,
         }
     }
 
-    pub(crate) fn new_with_schema_migration(
+    pub(crate) fn new_with_schema_installation(
         runtime: Arc<crate::store_runtime::shard::ShardRuntime>,
         attachment: Arc<dyn PhysicalRuntimeAttachment>,
-        schema_migrated: bool,
+        schema_installed: bool,
     ) -> Self {
         Self {
             runtime,
             attachment,
-            schema_migrated,
+            schema_installed,
         }
     }
 
@@ -238,8 +238,8 @@ impl PublishedShardRuntime {
         self.attachment.opened_file_identity()
     }
 
-    pub const fn schema_migrated(&self) -> bool {
-        self.schema_migrated
+    pub const fn schema_installed(&self) -> bool {
+        self.schema_installed
     }
 
     pub(super) fn into_parts(

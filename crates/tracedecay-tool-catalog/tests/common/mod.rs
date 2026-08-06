@@ -83,6 +83,7 @@ pub fn read_manifest(
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::Partial,
         ])

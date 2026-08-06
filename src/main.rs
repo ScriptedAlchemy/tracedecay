@@ -554,7 +554,7 @@ impl CommandFamily {
             | Commands::Projects { .. }
             | Commands::Branch { .. }
             | Commands::Memory { .. }
-            | Commands::Migrate { .. }
+            | Commands::Storage { .. }
             | Commands::Wipe { .. }
             | Commands::List { .. } => Self::Project,
             Commands::Tool { .. }
@@ -645,7 +645,7 @@ fn validate_host_bundle_options(
     // meaningful for the agent-lifecycle commands. Enforcing that scope here
     // (rather than via a global clap `requires = "component"`) keeps the flags
     // from leaking a spurious `--component` requirement onto unrelated verbs
-    // such as `branch gc` and `migrate storage-report`.
+    // such as `branch list` and `storage report`.
     if !matches!(family, CommandFamily::Agent)
         && (host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes)
     {
@@ -728,8 +728,8 @@ async fn dispatch_project_command(
         Commands::Memory { action } => {
             dispatch_memory_command(action).await?;
         }
-        Commands::Migrate { action } => {
-            commands::handle_migrate_action(action).await?;
+        Commands::Storage { action } => {
+            commands::handle_storage_action(action).await?;
         }
         Commands::Wipe { all } => {
             commands::handle_wipe(all, assume_yes).await?;
@@ -858,10 +858,6 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
                 // host does not retry.
                 return Ok(());
             }
-            // The MCP server is long-lived, so it may run the detached
-            // structured-row backfill sweep; one-shot CLI/hook processes never
-            // do (they would drop the sweep mid-parse on exit).
-            tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
             serve::run_serve(path, timings).await?;
         }
         Commands::Daemon { action } => {
@@ -878,8 +874,6 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
             socket,
             profile_root: _,
         } => {
-            // Long-lived host: allowed to run the structured-row sweep.
-            tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
             let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
             tracedecay::daemon::run_foreground(socket_path).await?;
         }
@@ -1351,7 +1345,7 @@ impl CommandStartupPolicy {
             | Commands::Sessions {
                 action: SessionsAction::Unfinished { .. },
             }
-            | Commands::Migrate { .. }
+            | Commands::Storage { .. }
             | Commands::Projects { .. }
             | Commands::Daemon { .. }
             | Commands::Serve { .. } => Self::SkipAll,

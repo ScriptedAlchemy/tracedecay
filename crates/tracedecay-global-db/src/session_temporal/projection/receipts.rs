@@ -641,28 +641,13 @@ pub(super) async fn projection_coverage(
             UNION ALL
             SELECT 'member:' || json_array(turn_id, occurrence_id, ordinal)
             FROM session_turn_members WHERE session_id = ?1 AND generation = ?2
-            UNION ALL
-            SELECT 'agent-edge:' || json_array(parent_agent_id, child_agent_id, ordinal)
-            FROM session_agent_hierarchy_edges WHERE session_id = ?1 AND generation = ?2
-            UNION ALL
-            SELECT 'thread-edge:' || json_array(parent_thread_id, child_thread_id, ordinal)
-            FROM session_thread_hierarchy_edges WHERE session_id = ?1 AND generation = ?2
          ) ORDER BY encoded",
         batch,
     )
     .await?;
-    let copies = digest_query_rows(
-        conn,
-        "SELECT json_array(
-            occurrence_id, copied_from_occurrence_id, proof_json,
-            knowledge_at, valid_time_json, created_at
-         )
-         FROM session_logical_copy_edges
-         WHERE session_id = ?1 AND generation = ?2
-         ORDER BY occurrence_id, copied_from_occurrence_id",
-        batch,
-    )
-    .await?;
+    // Relation topology has its own graph publication digest and activation
+    // receipt; SQL projection receipts cover only SQL-owned records.
+    let copies = (0, digest_bytes(&[]));
     let assertions = digest_query_rows(
         conn,
         "SELECT json_array(assertion_id, assertion_kind, subject_anchor_id,

@@ -244,8 +244,7 @@ pub(crate) struct LcmExpandServiceCommand {
     target: LcmExpandTarget,
     grain: RetrievalGrainV1,
     content_slice: LcmContentSlice,
-    source_offset: usize,
-    source_limit: Option<usize>,
+    source_page_size: usize,
     cursor: Option<String>,
     store_scope: SessionRetrievalStoreScope,
 }
@@ -258,8 +257,7 @@ impl LcmExpandServiceCommand {
         target: LcmExpandTarget,
         grain: RetrievalGrainV1,
         content_slice: LcmContentSlice,
-        source_offset: usize,
-        source_limit: Option<usize>,
+        source_page_size: usize,
         cursor: Option<String>,
         store_scope: SessionRetrievalStoreScope,
     ) -> Self {
@@ -269,8 +267,7 @@ impl LcmExpandServiceCommand {
             target,
             grain,
             content_slice,
-            source_offset,
-            source_limit,
+            source_page_size,
             cursor,
             store_scope,
         }
@@ -296,12 +293,8 @@ impl LcmExpandServiceCommand {
         self.content_slice
     }
 
-    pub(crate) const fn source_offset(&self) -> usize {
-        self.source_offset
-    }
-
-    pub(crate) const fn source_limit(&self) -> Option<usize> {
-        self.source_limit
+    pub(crate) const fn source_page_size(&self) -> usize {
+        self.source_page_size
     }
 
     pub(crate) fn cursor(&self) -> Option<&str> {
@@ -398,6 +391,7 @@ pub(crate) enum SessionRetrievalUnavailableReason {
     RefreshWorkerStopped,
     TemporalStoreUnavailable,
     HydrationUnavailable,
+    MultiRootAuthorityUnavailable,
 }
 
 impl SessionRetrievalUnavailableReason {
@@ -410,6 +404,7 @@ impl SessionRetrievalUnavailableReason {
             Self::RefreshWorkerStopped => "refresh_worker_stopped",
             Self::TemporalStoreUnavailable => "temporal_store_unavailable",
             Self::HydrationUnavailable => "hydration_unavailable",
+            Self::MultiRootAuthorityUnavailable => "multi_root_authority_unavailable",
         }
     }
 
@@ -422,6 +417,7 @@ impl SessionRetrievalUnavailableReason {
                 | Self::RefreshWorkerStopped
                 | Self::TemporalStoreUnavailable
                 | Self::HydrationUnavailable
+                | Self::MultiRootAuthorityUnavailable
         )
     }
 }
@@ -529,6 +525,7 @@ pub(crate) enum LcmDescribeServiceOutcome {
     Unavailable(SessionRetrievalUnavailable),
     BudgetExhausted,
     Cancelled,
+    DeadlineExceeded,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -560,6 +557,7 @@ pub(crate) enum LcmExpandServiceOutcome {
     Unavailable(SessionRetrievalUnavailable),
     BudgetExhausted,
     Cancelled,
+    DeadlineExceeded,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -600,4 +598,5 @@ pub(crate) enum SessionRetrievalServiceOutcome {
     },
     BudgetExhausted,
     Cancelled,
+    DeadlineExceeded,
 }

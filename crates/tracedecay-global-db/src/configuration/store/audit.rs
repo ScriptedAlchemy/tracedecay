@@ -5,12 +5,13 @@ use super::codec::{
     SealedAuditTargetReferenceV1, StoredConfigurationAuditPayloadV1, invalid_store_data,
     unavailable_store,
 };
+use super::mutation::derived_identifier;
 use super::{
     ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
     ConfigurationIdempotencyKey, ConfigurationProtectedOperationV1,
     ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId, ConfigurationStoreError,
     ConfigurationStoreResult, Executor, ManifestDigest, ProtectedChangePlan, QueryExecutor, Row,
-    UtcMicros, canonical_sha256, derived_identifier, params,
+    UtcMicros, canonical_sha256, params,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;

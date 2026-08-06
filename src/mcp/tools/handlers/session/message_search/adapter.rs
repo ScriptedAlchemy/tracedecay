@@ -40,6 +40,8 @@ pub(crate) struct MessageSearchRequest<'a> {
     pub(crate) include_subagents: bool,
     pub(crate) catch_up: bool,
     pub(crate) cursor: Option<&'a str>,
+    pub(crate) temporal_mode: TemporalModeV1,
+    pub(crate) grain: RetrievalGrainV1,
     pub(crate) scope: SessionSearchScope,
     pub(crate) message_type: SessionMessageType,
     pub(crate) limit: usize,
@@ -49,6 +51,32 @@ pub(crate) struct MessageSearchRequest<'a> {
     /// When true, ignore FTS and list each session's latest goal
     /// (`kind = 'goal'`) instead. `query` is optional in this mode.
     pub(crate) goals: bool,
+}
+
+fn parse_temporal_mode(args: &Value) -> Result<TemporalModeV1> {
+    match optional_message_search_string(args, "temporal_mode")?.unwrap_or("current") {
+        "current" => Ok(TemporalModeV1::Current),
+        "evolution" => Ok(TemporalModeV1::Evolution),
+        "forensic" => Ok(TemporalModeV1::Forensic),
+        _ => Err(argument_error(
+            "temporal_mode must be current, evolution, or forensic",
+        )),
+    }
+}
+
+fn parse_retrieval_grain(args: &Value) -> Result<RetrievalGrainV1> {
+    match optional_message_search_string(args, "grain")?.unwrap_or("logical_message") {
+        "occurrence" => Ok(RetrievalGrainV1::Occurrence),
+        "logical_message" => Ok(RetrievalGrainV1::LogicalMessage),
+        "turn" => Ok(RetrievalGrainV1::Turn),
+        "session" => Ok(RetrievalGrainV1::Session),
+        "thread" => Ok(RetrievalGrainV1::Thread),
+        "agent" => Ok(RetrievalGrainV1::Agent),
+        "summary" => Ok(RetrievalGrainV1::Summary),
+        _ => Err(argument_error(
+            "grain must be occurrence, logical_message, turn, session, thread, agent, or summary",
+        )),
+    }
 }
 
 fn optional_message_search_string<'a>(args: &'a Value, name: &str) -> Result<Option<&'a str>> {
@@ -112,6 +140,8 @@ pub(crate) fn parse_message_search_request(args: &Value) -> Result<MessageSearch
         include_subagents,
         catch_up: bool_arg(args, "catch_up")?.unwrap_or(false),
         cursor: optional_message_search_string(args, "cursor")?,
+        temporal_mode: parse_temporal_mode(args)?,
+        grain: parse_retrieval_grain(args)?,
         scope,
         message_type: parse_session_message_type(args)?,
         limit,
@@ -155,6 +185,8 @@ fn base_message_search_payload(request: &MessageSearchRequest<'_>) -> Result<Val
         "catch_up_performed": false,
         "catch_up_failures": [],
         "catch_up_provider": request.provider_scope.response_label(),
+        "temporal_mode": request.temporal_mode.as_str(),
+        "grain": request.grain.as_str(),
         "scope": request.scope.as_str(),
         "message_type": request.message_type.as_str(),
         "since": request.time_range.start_time,
@@ -426,6 +458,12 @@ fn render_service_outcome(
             "session_retrieval_cancelled",
             "session retrieval was cancelled",
         )?,
+        SessionRetrievalServiceOutcome::DeadlineExceeded => apply_typed_error(
+            &mut payload,
+            "timed_out",
+            "session_retrieval_deadline_exceeded",
+            "session retrieval exceeded its deadline",
+        )?,
     }
     Ok(payload)
 }
@@ -492,8 +530,8 @@ fn retrieval_command(
         request.requested_provider.map(str::to_string),
         request.query,
         request.cursor.map(str::to_string),
-        TemporalModeV1::Current,
-        RetrievalGrainV1::LogicalMessage,
+        request.temporal_mode,
+        request.grain,
         request.limit,
         DiversityLimits::default(),
         ContextBudget {
@@ -529,13 +567,12 @@ fn retrieval_command(
     )
 }
 
-fn deferred_all_registered_payload(request: &MessageSearchRequest<'_>) -> Result<Value> {
-    let mut payload = base_message_search_payload(request)?;
-    apply_typed_error(
-        &mut payload,
-        "deferred",
-        "session_retrieval_multi_root_deferred",
-        "multi-root session retrieval is not implemented",
+fn unavailable_all_registered_payload(request: &MessageSearchRequest<'_>) -> Result<Value> {
+    let mut payload = render_service_outcome(
+        request,
+        SessionRetrievalServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
+            super::contract::SessionRetrievalUnavailableReason::MultiRootAuthorityUnavailable,
+        )),
     )?;
     payload_object_mut(&mut payload)?.insert("project_scope".to_string(), json!("all_registered"));
     Ok(payload)
@@ -668,7 +705,7 @@ pub(crate) async fn handle_message_search_with_service(
                 "project_scope cannot be combined with project_id, project_path, or project_selector",
             ));
         }
-        let payload = deferred_all_registered_payload(&request)?;
+        let payload = unavailable_all_registered_payload(&request)?;
         let markdown = render_temporal_message_search_md(&payload)?;
         return Ok(tool_json_with_md(
             project_root,

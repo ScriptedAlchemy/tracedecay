@@ -2,8 +2,8 @@
 //!
 //! This crate owns the load-bearing runtime substrate that every other
 //! `TraceDecay` subsystem sits on: the canonical error type, shared value
-//! types, the storage layout resolver, the `SQLite` database facade and its
-//! migrations, the observation/memory/session stores, git and worktree
+//! types, the storage layout resolver, the `SQLite` database facade and final
+//! schemas, the observation/memory/session stores, git and worktree
 //! topology reads, process-level leases, and the privacy detectors.
 //!
 //! It was extracted verbatim from the root `tracedecay` crate; the root keeps
@@ -60,11 +60,9 @@
 #![allow(rustdoc::private_intra_doc_links)]
 
 pub mod branch;
-pub mod branch_meta;
 pub mod cancellation;
 pub mod config;
 pub mod db;
-pub mod durability;
 pub mod errors;
 pub mod git;
 pub mod lifecycle_lease;
@@ -80,6 +78,7 @@ pub mod runtime_identity;
 pub mod serde_util;
 pub mod sqlite_read_snapshot;
 pub mod storage;
+pub mod storage_class;
 pub mod store;
 pub mod store_runtime;
 pub mod sync;

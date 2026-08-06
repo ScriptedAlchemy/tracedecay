@@ -492,9 +492,9 @@ reads.
   recovery and source scanning; it does not own query ranking or hydration.
 - `src/mcp/tools/handlers/session/message_search.rs` and
   `src/mcp/tools/handlers/session/lcm_handlers/mod.rs` translate an evidenced
-  independently released request protocol to the application service. Missing
-  service wiring returns typed unavailable or deferred output and never probes
-  an older persisted shape.
+  independently released request protocol to the application service. Every
+  supported operation is mounted in production; an unavailable selected
+  authority returns a typed problem and never probes an older persisted shape.
 
 The schema-v3 derived projection tables are:
 

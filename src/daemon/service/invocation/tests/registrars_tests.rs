@@ -200,6 +200,7 @@ async fn registered_work_runtime_dispatches_attempt_requests() {
         .register(
             project.path().to_path_buf(),
             Arc::clone(&database),
+            Arc::new(test_graph()),
             authority.clone(),
             actor.clone(),
             grant.clone(),
@@ -250,6 +251,7 @@ async fn registered_work_runtime_dispatches_attempt_requests() {
         .register(
             project.path().to_path_buf(),
             Arc::clone(&database),
+            Arc::new(test_graph()),
             rotated_authority.clone(),
             actor.clone(),
             rotated_grant.clone(),
@@ -288,6 +290,7 @@ async fn registered_work_runtime_dispatches_attempt_requests() {
             .register(
                 project.path().to_path_buf(),
                 database,
+                Arc::new(test_graph()),
                 mismatched_authority,
                 actor.clone(),
                 rotated_grant.clone(),
@@ -412,7 +415,7 @@ async fn expiring_registries_reaps_running_work_executions() {
     )
     .expect("request context");
 
-    let storage = database.work_storage().expect("Work storage");
+    let storage = database.work_storage(test_graph()).expect("Work storage");
     let work = tracedecay_application::WorkService::new(storage);
     let task_id = tracedecay_domain::TaskId::new("task.work.expire").expect("task id");
     work.create(
@@ -482,6 +485,7 @@ async fn expiring_registries_reaps_running_work_executions() {
         .register(
             project.path().to_path_buf(),
             Arc::clone(&database),
+            Arc::new(test_graph()),
             authority.clone(),
             actor,
             grant,

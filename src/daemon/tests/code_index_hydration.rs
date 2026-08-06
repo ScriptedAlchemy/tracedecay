@@ -106,6 +106,7 @@ fn ranked() -> RankedCandidate {
 
 fn display() -> CodeIndexSearchDisplayV1 {
     CodeIndexSearchDisplayV1 {
+        node_id: Some("function:hydrate".to_owned()),
         name: "hydrate".to_owned(),
         qualified_name: "fixture::hydrate".to_owned(),
         kind: "function".to_owned(),

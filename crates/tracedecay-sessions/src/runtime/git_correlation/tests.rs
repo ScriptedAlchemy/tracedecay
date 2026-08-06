@@ -346,6 +346,12 @@ async fn schema_v2_commit_rows_migrate_to_observed_without_becoming_producers() 
         produced_hits[0].span_overlap_kind,
         Some(SpanOverlapKind::Direct)
     );
+    let pending = pending_session_git_graph_publications(&conn, 1)
+        .await
+        .expect("migrated store stages graph evidence");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].commit_oid.as_str(), produced.commit_sha);
+    assert_eq!(pending[0].session_id.as_str(), produced.session_id);
 
     ensure_git_correlation_schema(&conn)
         .await
@@ -1111,6 +1117,176 @@ async fn sessions_for_branch_worktree_and_commit_round_trip() {
     assert_eq!(
         by_commit[0].span_overlap_kind,
         Some(SpanOverlapKind::WithinSpan)
+    );
+}
+
+#[tokio::test]
+async fn produced_commit_evidence_stages_one_exact_graph_intent_and_receipt() {
+    let conn = GitCorrelationTestDb::uninitialized();
+    ensure_git_correlation_schema(&conn).await.unwrap();
+    assert!(
+        last_completed_session_git_graph_publication(&conn)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let observed = CommitSessionRecord {
+        commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        provider: "codex".to_owned(),
+        session_id: "session.graph-evidence".to_owned(),
+        branch: Some("main".to_owned()),
+        worktree: Some("/repo".to_owned()),
+        committed_at: 100,
+        span_overlap_kind: SpanOverlapKind::WithinSpan,
+        span_id: None,
+        relation: CommitRelation::Observed,
+        evidence: CommitEvidence::TimeOverlap,
+        confidence: 20,
+        evidence_message_id: None,
+    };
+    assert!(upsert_commit_session(&conn, &observed).await.unwrap());
+    assert!(
+        pending_session_git_graph_publications(&conn, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut produced = observed;
+    produced.relation = CommitRelation::Produced;
+    produced.evidence = CommitEvidence::ToolResult;
+    produced.confidence = 100;
+    produced.evidence_message_id = Some("message.commit".to_owned());
+    assert!(upsert_commit_session(&conn, &produced).await.unwrap());
+    assert!(!upsert_commit_session(&conn, &produced).await.unwrap());
+
+    let pending = pending_session_git_graph_publications(&conn, 1)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].commit_oid.as_str(), produced.commit_sha);
+    assert_eq!(pending[0].session_id.as_str(), produced.session_id);
+
+    let common_intent = tracedecay_domain::GitGraphEvidenceIntent::new(
+        tracedecay_domain::ProjectId::new("project.graph-evidence").unwrap(),
+        pending[0].commit_oid.clone(),
+        tracedecay_domain::GitGraphEvidenceTarget::Session(pending[0].session_id.clone()),
+    )
+    .unwrap();
+    let graph_receipt = tracedecay_domain::GitGraphEvidencePublicationReceipt::new(
+        common_intent.intent_digest().clone(),
+        "graph-watermark-1".to_owned(),
+        7,
+    )
+    .unwrap();
+    let receipt =
+        acknowledge_session_git_graph_publication(&conn, &pending[0], &graph_receipt, 200)
+            .await
+            .unwrap();
+    assert_eq!(
+        acknowledge_session_git_graph_publication(&conn, &pending[0], &graph_receipt, 200)
+            .await
+            .unwrap(),
+        receipt
+    );
+    let different_receipt = tracedecay_domain::GitGraphEvidencePublicationReceipt::new(
+        common_intent.intent_digest().clone(),
+        "different".to_owned(),
+        8,
+    )
+    .unwrap();
+    assert!(matches!(
+        acknowledge_session_git_graph_publication(&conn, &pending[0], &different_receipt, 200)
+            .await,
+        Err(SessionGitGraphPublicationError::Conflict(_))
+    ));
+    assert!(
+        pending_session_git_graph_publications(&conn, 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        last_completed_session_git_graph_publication(&conn)
+            .await
+            .unwrap(),
+        Some(receipt)
+    );
+}
+
+#[tokio::test]
+async fn graph_intent_pending_page_has_a_hard_bound() {
+    let conn = GitCorrelationTestDb::uninitialized();
+    ensure_git_correlation_schema(&conn).await.unwrap();
+    assert!(matches!(
+        pending_session_git_graph_publications(&conn, 0).await,
+        Err(SessionGitGraphPublicationError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        pending_session_git_graph_publications(&conn, MAX_SESSION_GIT_GRAPH_PUBLICATIONS + 1).await,
+        Err(SessionGitGraphPublicationError::InvalidArgument(_))
+    ));
+}
+
+#[tokio::test]
+async fn graph_intent_conflict_rolls_back_the_produced_evidence_upgrade() {
+    let conn = GitCorrelationTestDb::uninitialized();
+    ensure_git_correlation_schema(&conn).await.unwrap();
+    let mut record = CommitSessionRecord {
+        commit_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+        provider: "codex".to_owned(),
+        session_id: "session.graph-conflict".to_owned(),
+        branch: Some("main".to_owned()),
+        worktree: Some("/repo".to_owned()),
+        committed_at: 100,
+        span_overlap_kind: SpanOverlapKind::WithinSpan,
+        span_id: None,
+        relation: CommitRelation::Observed,
+        evidence: CommitEvidence::TimeOverlap,
+        confidence: 20,
+        evidence_message_id: None,
+    };
+    assert!(upsert_commit_session(&conn, &record).await.unwrap());
+    conn.execute(
+        "INSERT INTO session_git_graph_publication_outbox (
+            commit_oid, session_id, intent_digest, source_committed_at,
+            state, graph_receipt_json, applied_at
+         ) VALUES (?1, ?2, 'conflicting', ?3, 'pending', NULL, NULL)",
+        params![
+            record.commit_sha.as_str(),
+            record.session_id.as_str(),
+            record.committed_at,
+        ],
+    )
+    .await
+    .unwrap();
+
+    record.relation = CommitRelation::Produced;
+    record.evidence = CommitEvidence::ToolResult;
+    record.confidence = 100;
+    assert!(upsert_commit_session(&conn, &record).await.is_err());
+
+    let mut rows = conn
+        .query(
+            "SELECT relation FROM commit_sessions
+             WHERE commit_sha = ?1 AND provider = ?2 AND session_id = ?3",
+            params![
+                record.commit_sha.as_str(),
+                record.provider.as_str(),
+                record.session_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "observed"
     );
 }
 

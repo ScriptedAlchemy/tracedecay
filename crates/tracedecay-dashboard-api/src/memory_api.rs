@@ -207,20 +207,12 @@ pub(super) struct MemoryOverviewPayloadV1 {
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
-struct MemoryFeedbackHistoryRepairV1 {
-    state: String,
-    processed: u64,
-    remaining: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(super) struct MemoryStatusPayloadV1 {
     path: String,
     exists: bool,
     memory: MemoryStatus,
     largest_bank_fact_count: i64,
     largest_bank_utilization_pct: f64,
-    feedback_history_repair: MemoryFeedbackHistoryRepairV1,
     error: String,
 }
 
@@ -301,23 +293,6 @@ async fn memory_status_payload(state: &DashboardState) -> Result<MemoryStatusPay
         memory: status,
         largest_bank_fact_count,
         largest_bank_utilization_pct,
-        feedback_history_repair: MemoryFeedbackHistoryRepairV1 {
-            state: match typed_status.feedback_history_repair() {
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => {
-                    "not_required"
-                }
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => {
-                    "complete"
-                }
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => {
-                    "incomplete"
-                }
-            }
-            .to_owned(),
-            processed: typed_status.feedback_history_repair().processed(),
-            remaining: typed_status.feedback_history_repair().remaining(),
-        },
         error: String::new(),
     })
 }
@@ -336,7 +311,7 @@ async fn fact_trust_history_payload(
         return Ok(None);
     };
     let history = application
-        .dashboard_feedback_history_v1(fact_id, 300)
+        .dashboard_feedback_history(fact_id, 300)
         .await
         .map_err(|error| error.to_string())?;
     let trust_history: Vec<Value> = history
@@ -348,17 +323,11 @@ async fn fact_trust_history_payload(
                 tracedecay_store::CompatibilityFactFeedbackActionV1::Unhelpful => "unhelpful",
             };
             let availability = match event.details_availability() {
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Available => {
-                    "available"
-                }
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted => {
-                    "legacy_redacted"
-                }
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown => {
-                    "unknown"
-                }
+                tracedecay_store::FactFeedbackDetailsAvailability::Available => "available",
+                tracedecay_store::FactFeedbackDetailsAvailability::Unknown => "unknown",
             };
             let mut row = Map::new();
+            row.insert("result_id".into(), json!(event.result_id().as_str()));
             row.insert("timestamp".into(), json!(event.occurred_at().0));
             row.insert("action".into(), json!(action));
             row.insert("old_trust".into(), json!(event.old_trust().as_f64()));
@@ -377,21 +346,9 @@ async fn fact_trust_history_payload(
             Value::Object(row)
         })
         .collect();
-    let repair_progress = history.repair_progress();
-    let repair_state = match repair_progress {
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
-    };
     Ok(Some(json!({
         "fact_id": fact_id,
         "trust_history": trust_history,
-        "repair": {
-            "state": repair_state,
-            "processed": repair_progress.processed(),
-            "remaining": repair_progress.remaining(),
-        },
         "error": "",
     })))
 }

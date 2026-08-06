@@ -3,7 +3,7 @@
 //!
 //! These types are transport-neutral value objects. They carry no store,
 //! runtime, or path capability; a [`StoreKeyV1`] names a store *logically* (for
-//! example `sessions.db` or `branches/feature-x`) so read models and Doctor
+//! example `sessions.db` or `graph.db`) so read models and Doctor
 //! producers can reference it without embedding an on-disk path or a filesystem
 //! effect.
 
@@ -16,11 +16,11 @@ use crate::identity::application_identifier;
 application_identifier!(
     @no_conversions
     /// Logical name of one owner-profile store (for example `sessions.db`,
-    /// `graph.db`, or `branches/feature-x`). Never an absolute on-disk path.
+    /// `graph.db`, or `work.db`). Never an absolute on-disk path.
     StoreKeyV1 => ("storage store key", 256),
     /// A physical table name inside a store, used for per-table growth telemetry.
     TableNameV1 => ("storage table name", 128),
-    /// A git ref (branch) a branch-scoped store was created for.
+    /// A Git ref recorded as store provenance.
     BranchRefV1 => ("storage branch ref", 256),
     /// A store-relative path to an incident-debris artifact (for example
     /// `sessions.db.corrupt-1721692800`). Store-relative, never absolute.

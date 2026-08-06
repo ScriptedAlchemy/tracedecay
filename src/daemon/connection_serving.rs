@@ -276,36 +276,6 @@ async fn serve_broker_socket_client(
         &engine.store_administration,
     )
     .await?;
-    if let Some(request) = parse_branch_admin_request(&first_request_line) {
-        let result = match request.action.clone() {
-            Ok(action) => engine.execute_branch_admin(&handshake, action).await,
-            Err(message) => Err(TraceDecayError::Config { message }),
-        };
-        drop(setup_activity);
-        write_branch_admin_response(&mut transport, request, result).await?;
-        return Ok(());
-    }
-    if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match await_project_owner_or_disconnect(
-            &mut transport,
-            engine.project_server_for_request(&handshake, ProjectServerRequirement::Core),
-        )
-        .await
-        {
-            Ok(Some(_)) => {
-                branch_add_response(&engine.store_administration, &handshake, &request).await
-            }
-            Ok(None) => return Ok(()),
-            Err(error) => JsonRpcResponse::error(
-                request.id.clone(),
-                ErrorCode::InternalError,
-                error.to_string(),
-            ),
-        };
-        drop(setup_activity);
-        write_json_rpc_response(&mut transport, &response).await?;
-        return Ok(());
-    }
     if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
         let mut invocation = invocation;
         let mut owned_lsp_sessions = HashMap::new();
@@ -672,48 +642,6 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     let initialize_route =
         apply_daemon_initialize_route(&mut handshake, &first_request_line, &store_administration)
             .await?;
-    if let Some(request) = parse_branch_admin_request(&first_request_line) {
-        let result = match request.action.clone() {
-            Ok(action) => {
-                store_administration
-                    .execute_branch_admin_for_handshake(&handshake, action)
-                    .await
-            }
-            Err(message) => Err(TraceDecayError::Config { message }),
-        };
-        drop(setup_activity);
-        write_branch_admin_response(&mut transport, request, result).await?;
-        return Ok(());
-    }
-    if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match await_project_owner_or_disconnect(
-            &mut transport,
-            portable_project_server_for_request(
-                lifecycle.clone(),
-                store_administration.clone(),
-                Arc::clone(&project_open_gates),
-                invocation.clone(),
-                http_application_registry.clone(),
-                &handshake,
-                ProjectServerRequirement::Core,
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            ),
-        )
-        .await
-        {
-            Ok(Some(_)) => branch_add_response(&store_administration, &handshake, &request).await,
-            Ok(None) => return Ok(()),
-            Err(error) => JsonRpcResponse::error(
-                request.id.clone(),
-                ErrorCode::InternalError,
-                error.to_string(),
-            ),
-        };
-        drop(setup_activity);
-        write_json_rpc_response(&mut transport, &response).await?;
-        return Ok(());
-    }
     if let Some(invocation_request) = parse_daemon_invocation_request(&first_request_line) {
         let mut invocation_request = invocation_request;
         let mut owned_lsp_sessions = HashMap::new();

@@ -137,8 +137,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
         "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
         "tracedecay_lcm_doctor",
     ] {
         assert!(names.contains(expected), "missing {expected}");
@@ -151,6 +149,8 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_describe",
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
+        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_doctor",
     ] {
         let tool = tools
             .iter()
@@ -171,20 +171,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         }
     }
 
-    for mutating in [
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
-        "tracedecay_lcm_doctor",
-    ] {
-        let tool = tools
-            .iter()
-            .find(|tool| tool.name == mutating)
-            .unwrap_or_else(|| panic!("{mutating} definition"));
-        assert_eq!(tool.input_schema["type"], "object");
-        assert_eq!(tool.annotations.as_ref().unwrap()["readOnlyHint"], false);
-    }
-
     for scoped in [
         "tracedecay_lcm_status",
         "tracedecay_lcm_load_session",
@@ -193,8 +179,6 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         "tracedecay_lcm_expand",
         "tracedecay_lcm_expand_query",
         "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
         "tracedecay_lcm_doctor",
     ] {
         let tool = tools
@@ -279,13 +263,23 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         raw_message_target["properties"]["store_id"]["type"],
         json!("integer")
     );
-    assert_eq!(
-        expand.input_schema["properties"]["source_offset"]["type"],
-        json!("integer")
+    assert!(
+        expand.input_schema["properties"]
+            .get("source_offset")
+            .is_none()
     );
+    assert!(
+        expand.input_schema["properties"]
+            .get("source_limit")
+            .is_none()
+    );
+    let expand_query = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_expand_query")
+        .expect("tracedecay_lcm_expand_query definition");
     assert_eq!(
-        expand.input_schema["properties"]["source_limit"]["type"],
-        json!("integer")
+        expand_query.input_schema["properties"]["node_ids"]["items"]["type"],
+        "string"
     );
 
     let doctor = tools
@@ -294,24 +288,22 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .expect("tracedecay_lcm_doctor definition");
     assert_eq!(
         doctor.input_schema["properties"]["mode"]["enum"],
-        json!(["diagnose", "repair", "retention", "clean", "gc"])
+        json!(["diagnose", "retention"])
     );
-    assert_eq!(
-        doctor.input_schema["properties"]["apply"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["doctor_clean_apply_enabled"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["lcm_gc_apply_enabled"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["gc_config"]["type"],
-        json!("object")
-    );
+    for removed in [
+        "apply",
+        "doctor_clean_apply_enabled",
+        "lcm_gc_apply_enabled",
+        "gc_config",
+        "ignore_session_patterns",
+        "stateless_session_patterns",
+        "ignore_message_patterns",
+    ] {
+        assert!(
+            doctor.input_schema["properties"].get(removed).is_none(),
+            "{removed} must not remain on read-only LCM doctor"
+        );
+    }
 }
 
 #[test]

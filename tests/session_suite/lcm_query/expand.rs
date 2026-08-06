@@ -274,11 +274,8 @@ async fn expand_paginates_summary_sources_with_offset_and_limit() {
         .collect();
     assert_eq!(returned_store_ids, vec![store_ids[1], store_ids[2]]);
     let pagination = page.source_pagination.expect("pagination metadata");
-    assert_eq!(pagination.source_offset, 1);
-    assert_eq!(pagination.source_limit, 2);
     assert_eq!(pagination.returned_sources, 2);
     assert_eq!(pagination.total_sources, 5);
-    assert_eq!(pagination.next_source_offset, Some(3));
     assert!(pagination.has_more);
     assert_eq!(pagination.remaining_sources, 2);
 
@@ -290,8 +287,7 @@ async fn expand_paginates_summary_sources_with_offset_and_limit() {
         .expect("cursor resume should succeed");
     assert_eq!(tail.summary_sources.len(), 2);
     let tail_pagination = tail.source_pagination.expect("tail pagination");
-    assert_eq!(tail_pagination.source_limit, 2);
-    assert_eq!(tail_pagination.next_source_offset, None);
+    assert_eq!(tail_pagination.returned_sources, 2);
     assert!(!tail_pagination.has_more);
     assert_eq!(tail_pagination.remaining_sources, 0);
 
@@ -303,7 +299,6 @@ async fn expand_paginates_summary_sources_with_offset_and_limit() {
         .expect("out-of-range offset should clamp");
     assert!(beyond.summary_sources.is_empty());
     let beyond_pagination = beyond.source_pagination.expect("beyond pagination");
-    assert_eq!(beyond_pagination.source_offset, 5);
     assert_eq!(beyond_pagination.returned_sources, 0);
     assert!(!beyond_pagination.has_more);
 

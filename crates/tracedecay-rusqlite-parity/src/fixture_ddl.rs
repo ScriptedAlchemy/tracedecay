@@ -92,10 +92,10 @@ pub const SESSION_STORE_FIXTURE_TABLES_DDL: &str = "
                 FOREIGN KEY(provider, session_id)
                     REFERENCES sessions(provider, session_id) ON DELETE CASCADE
             );
-            CREATE TABLE session_temporal_schema_migrations (
-                name TEXT PRIMARY KEY,
+            CREATE TABLE session_temporal_schema_state (
+                domain TEXT PRIMARY KEY,
                 version INTEGER NOT NULL,
-                applied_at INTEGER NOT NULL
+                installed_at INTEGER NOT NULL
             );
             CREATE TABLE session_temporal_generations (
                 session_id TEXT NOT NULL,

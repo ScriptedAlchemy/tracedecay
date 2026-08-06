@@ -31,7 +31,7 @@ pub mod semantic;
 pub use self::execution::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSemanticRecordV1, NativeSymbolRecordV1, QueryExecutionContractErrorV1,
+    NativeSemanticRecordV1, NativeSymbolRecord, QueryExecutionContractErrorV1,
 };
 pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,

@@ -2,7 +2,6 @@
 use std::os::unix::fs::symlink;
 use std::{fs, path::Path};
 use tempfile::TempDir;
-use tracedecay::config::{load_config, save_config};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::EdgeKind;
 
@@ -452,11 +451,7 @@ async fn test_index_follows_symlinked_directories() {
 
 /// Helper: init a project with git_ignore enabled and return the TraceDecay.
 async fn setup_gitignore_project(project: &Path) -> TraceDecay {
-    TraceDecay::init(project).await.unwrap();
-    let mut config = load_config(project).unwrap();
-    config.git_ignore = true;
-    save_config(project, &config).unwrap();
-    TraceDecay::open(project).await.unwrap()
+    TraceDecay::init(project).await.unwrap()
 }
 
 async fn indexed_project_paths(cg: &TraceDecay) -> Vec<String> {
@@ -785,13 +780,7 @@ async fn test_gitignore_scan_follows_symlinked_directories() {
     .unwrap();
     symlink(external.path(), project.join("src")).unwrap();
 
-    TraceDecay::init(project).await.unwrap();
-
-    let mut config = load_config(project).unwrap();
-    config.git_ignore = true;
-    save_config(project, &config).unwrap();
-
-    let cg = TraceDecay::open(project).await.unwrap();
+    let cg = TraceDecay::init(project).await.unwrap();
     let result = cg.index_all().await.unwrap();
 
     assert_eq!(

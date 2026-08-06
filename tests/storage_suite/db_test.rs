@@ -433,129 +433,6 @@ async fn test_database_size() {
     assert!(size > 0, "database should have non-zero size");
 }
 
-// ---------------------------------------------------------------------------
-// Migration v7: attrs_start_line column add + backfill
-// ---------------------------------------------------------------------------
-//
-// Builds a v6-shaped nodes table directly (no attrs_start_line column), inserts
-// rows with various start_line values, runs the migration runner, and verifies
-// the column now exists with values backfilled from start_line.
-
-#[tokio::test]
-async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
-    let dir = TempDir::new().expect("tempdir");
-    let db_path = dir.path().join("v6.db");
-
-    // Build the v6-shaped fixture offline (no attrs_start_line column) before
-    // publishing its one canonical runtime.
-    let conn = rusqlite::Connection::open(&db_path).expect("open v6 fixture");
-
-    conn.execute_batch(
-        "CREATE TABLE nodes (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            name TEXT NOT NULL,
-            qualified_name TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            start_line INTEGER NOT NULL,
-            end_line INTEGER NOT NULL,
-            start_column INTEGER NOT NULL,
-            end_column INTEGER NOT NULL,
-            docstring TEXT,
-            signature TEXT,
-            visibility TEXT NOT NULL DEFAULT 'private',
-            is_async INTEGER NOT NULL DEFAULT 0,
-            branches INTEGER NOT NULL DEFAULT 0,
-            loops INTEGER NOT NULL DEFAULT 0,
-            returns INTEGER NOT NULL DEFAULT 0,
-            max_nesting INTEGER NOT NULL DEFAULT 0,
-            unsafe_blocks INTEGER NOT NULL DEFAULT 0,
-            unchecked_calls INTEGER NOT NULL DEFAULT 0,
-            assertions INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL
-        );
-         PRAGMA user_version = 6;",
-    )
-    .expect("v6 schema setup");
-
-    // Two rows: one with a normal start_line, one a file root with start_line=0.
-    conn.execute(
-        "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
-                            start_line, end_line, start_column, end_column, updated_at)
-         VALUES ('a', 'function', 'foo', 'crate::foo', 'src/lib.rs', 42, 50, 0, 1, 1000)",
-        [],
-    )
-    .expect("insert row a");
-    conn.execute(
-        "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
-                            start_line, end_line, start_column, end_column, updated_at)
-         VALUES ('b', 'file', 'src/lib.rs', 'src/lib.rs', 'src/lib.rs', 0, 100, 0, 0, 1000)",
-        [],
-    )
-    .expect("insert row b");
-    drop(conn);
-
-    // Publishing the existing fixture runs pending migrations on that exact
-    // registered attachment.
-    let (db, migrated) = crate::common::open_test_database(&db_path)
-        .await
-        .expect("open and migrate fixture");
-    assert!(migrated, "expected v7 migration to run");
-
-    // The migrated store must have crossed the v7 boundary. Do not pin this
-    // regression test to an unrelated future latest version.
-    let version = db
-        .query_scalar_i64("read migrated schema version", "PRAGMA user_version")
-        .await
-        .expect("read version");
-    assert!(version >= 7);
-
-    // attrs_start_line is backfilled from start_line for both rows.
-    // Row a: start_line=42 -> attrs_start_line=42.
-    // Row b: start_line=0  -> attrs_start_line stays 0 (file root, consistent).
-    assert_eq!(
-        db.query_scalar_i64(
-            "verify migrated row a",
-            "SELECT COUNT(*) FROM nodes
-             WHERE id = 'a' AND start_line = 42 AND attrs_start_line = 42",
-        )
-        .await
-        .expect("inspect row a"),
-        1,
-        "attrs_start_line should backfill from start_line"
-    );
-    assert_eq!(
-        db.query_scalar_i64(
-            "verify migrated row b",
-            "SELECT COUNT(*) FROM nodes
-             WHERE id = 'b' AND start_line = 0 AND attrs_start_line = 0",
-        )
-        .await
-        .expect("inspect row b"),
-        1
-    );
-
-    // Inserting a fresh row with an explicit attrs_start_line works post-migration.
-    db.execute_write(
-        "insert post-migration row",
-        "INSERT INTO nodes (id, kind, name, qualified_name, file_path,
-                            start_line, end_line, start_column, end_column, updated_at,
-                            attrs_start_line)
-         VALUES ('c', 'function', 'bar', 'crate::bar', 'src/lib.rs', 60, 70, 0, 1, 2000, 55)",
-        (),
-    )
-    .await
-    .expect("insert row c");
-    let attrs_start_line = db
-        .query_scalar_i64(
-            "read post-migration attrs_start_line",
-            "SELECT attrs_start_line FROM nodes WHERE id = 'c'",
-        )
-        .await
-        .expect("select c");
-    assert_eq!(attrs_start_line, 55);
-}
-
 #[tokio::test]
 async fn schema_identity_check_is_idempotent_on_a_created_store() {
     // After Database::initialize creates the schema, verifying it again must
@@ -566,7 +443,7 @@ async fn schema_identity_check_is_idempotent_on_a_created_store() {
     let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
         .expect("initialize");
-    tracedecay::db::migrations::ensure_schema_current(&db)
+    tracedecay::db::schema::ensure_schema_current(&db)
         .await
         .expect("a freshly created store is already current");
 }

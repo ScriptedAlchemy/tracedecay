@@ -1975,8 +1975,8 @@ async fn test_run_returns_transport_read_errors() {
 // via the migration row's `applied_at`, which only a migration run rewrites.
 //
 // Pure-read tools (lcm_status) no longer create the store, so each session
-// issues a write-path call (`lcm_session_boundary`, whose storage open is
-// the migration-running path) before the status reads.
+// issues the internal hook-runtime `lcm_session_boundary` action (whose
+// storage open is the migration-running path) before the status reads.
 #[tokio::test]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     let (_env, _active_project) = crate::common::IsolatedEnv::acquire().await;
@@ -2000,8 +2000,9 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             json!(id),
             "tools/call",
             json!({
-                "name": "tracedecay_lcm_session_boundary",
+                "name": "tracedecay_hook_runtime",
                 "arguments": {
+                    "action": "lcm_session_boundary",
                     "provider": "codex",
                     "session_id": "migration-rerun-probe"
                 }

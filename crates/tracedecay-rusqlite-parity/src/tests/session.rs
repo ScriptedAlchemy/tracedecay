@@ -108,8 +108,8 @@ fn session_counts_schema_and_keyset_pages_cover_every_closed_table() {
         ),
         (SessionStoreTable::LcmRawMessages, "lcm_raw_messages"),
         (
-            SessionStoreTable::SessionTemporalSchemaMigrations,
-            "session_temporal_schema_migrations",
+            SessionStoreTable::SessionTemporalSchemaState,
+            "session_temporal_schema_state",
         ),
         (
             SessionStoreTable::SessionTemporalGenerations,
@@ -1061,7 +1061,7 @@ const ALL_SESSION_STORE_TABLES: [SessionStoreTable; 27] = [
     SessionStoreTable::SessionMessages,
     SessionStoreTable::SessionSchemaMigrations,
     SessionStoreTable::LcmRawMessages,
-    SessionStoreTable::SessionTemporalSchemaMigrations,
+    SessionStoreTable::SessionTemporalSchemaState,
     SessionStoreTable::SessionTemporalGenerations,
     SessionStoreTable::SessionTemporalObservationEffects,
     SessionStoreTable::SessionTemporalProjectionReceipts,

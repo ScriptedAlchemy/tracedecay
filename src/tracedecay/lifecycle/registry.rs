@@ -2,16 +2,13 @@
 //! project, store, and branch scope rows so cross-project lookups and the
 //! registry-driven identity resolution in [`super::identity`] can find it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::SystemTime;
 
-use crate::branch_meta;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{
-    GraphScopeUpsert, RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert,
-};
+use crate::global_db::{RegisteredGlobalDb, StoreArtifactUpsert, StoreInstanceUpsert};
 use crate::storage::{self, StoreLayout};
 use crate::tracedecay::current_timestamp;
 
@@ -25,23 +22,20 @@ use super::TraceDecay;
 /// and `primary_root` below): dropping `git_common_dir` would make a sibling
 /// checkout's next first touch mint a fresh store, and dropping
 /// `canonical_root` would let a linked worktree's registration pin the
-/// project's canonical/display root to a transient path. `tracked_branches`
-/// and the artifact mtimes catch every other observable change (branch
-/// tracking, store file replacement) that this function is responsible for
-/// publishing.
+/// project's canonical/display root to a transient path. Artifact mtimes catch
+/// store file replacement that this function is responsible for publishing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RegistrationDigest {
     project_id: String,
     canonical_root: PathBuf,
     git_common_dir: Option<PathBuf>,
-    tracked_branches: BTreeSet<String>,
     artifact_mtimes: Vec<Option<SystemTime>>,
 }
 
 /// Process-global cache of the last digest successfully registered for each
 /// project id, so a redundant `register_project_store_in_global_registry`
 /// call (every writable open re-runs this) can skip straight to `Ok(())`
-/// instead of redoing branch-meta/git lookups and every upsert.
+/// instead of redoing git lookups and every upsert.
 static LAST_REGISTERED_DIGEST: LazyLock<StdMutex<HashMap<String, RegistrationDigest>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
@@ -82,8 +76,6 @@ impl TraceDecay {
 
         let global_db = self.profile_database.as_ref();
 
-        let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
-        let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
         // Registering without the git common dir leaves the row unreachable
         // by repository identity, so the next first touch from a sibling
         // checkout mints a fresh store. Detached worktrees are no exception:
@@ -102,14 +94,9 @@ impl TraceDecay {
         );
         let registration_root = primary_root.as_deref().unwrap_or(&self.project_root);
 
-        let tracked_branches: BTreeSet<String> = meta
-            .as_ref()
-            .map(|meta| meta.branches.keys().cloned().collect())
-            .unwrap_or_default();
         let artifact_mtimes = vec![
             artifact_mtime(&self.store_layout.graph_db_path),
             artifact_mtime(&self.store_layout.sessions_db_path),
-            artifact_mtime(&self.store_layout.branch_meta_path),
             self.store_layout
                 .manifest_path
                 .as_deref()
@@ -119,7 +106,6 @@ impl TraceDecay {
             project_id: project_id.to_string(),
             canonical_root: registration_root.to_path_buf(),
             git_common_dir: git_common_dir.clone(),
-            tracked_branches,
             artifact_mtimes,
         };
 
@@ -144,24 +130,28 @@ impl TraceDecay {
             }
         }
 
-        let git_remote_url = git_remote_url(&self.project_root);
-
-        let previous_canonical_root = if primary_root.is_some() {
-            global_db
-                .get_code_project(project_id)
-                .await
-                .map(|record| record.canonical_root)
-        } else {
-            None
-        };
+        // Remote discovery belongs to the optional post-open advisory owner.
+        // Retain a previously published identity without touching Git here.
+        let previous_project = global_db.get_code_project(project_id).await;
+        let previous_canonical_root = primary_root
+            .is_some()
+            .then(|| {
+                previous_project
+                    .as_ref()
+                    .map(|record| record.canonical_root.clone())
+            })
+            .flatten();
+        let retained_git_remote_url = previous_project
+            .as_ref()
+            .and_then(|record| record.git_remote_url.as_deref());
 
         let project = global_db
             .upsert_code_project(
                 project_id,
                 registration_root,
                 git_common_dir.as_deref(),
-                git_remote_url.as_deref(),
-                default_branch,
+                retained_git_remote_url,
+                None,
             )
             .await
             .ok_or_else(|| registry_registration_error("upsert code project failed"))?;
@@ -211,31 +201,6 @@ impl TraceDecay {
             .await
             .ok_or_else(|| registry_registration_error("upsert store instance failed"))?;
 
-        if let Some(meta) = meta {
-            for (branch_name, entry) in meta.branches {
-                let db_path = self.store_layout.data_root.join(&entry.db_file);
-                let db_relpath = profile_relative(&profile_root, &db_path).ok_or_else(|| {
-                    registry_registration_error("branch database is outside its profile")
-                })?;
-                global_db
-                    .upsert_graph_scope(GraphScopeUpsert {
-                        graph_scope_id: profile_graph_scope_id(&store.store_id, &branch_name),
-                        project_id: store.project_id.clone(),
-                        store_id: store.store_id.clone(),
-                        branch_name: branch_name.clone(),
-                        db_relpath,
-                        parent_scope_id: entry
-                            .parent
-                            .as_deref()
-                            .map(|parent| profile_graph_scope_id(&store.store_id, parent)),
-                        last_synced_at: entry.last_synced_at.parse::<i64>().ok(),
-                        writable: true,
-                    })
-                    .await
-                    .ok_or_else(|| registry_registration_error("upsert graph scope failed"))?;
-            }
-        }
-
         let mut artifacts = Vec::new();
         push_existing_store_artifact(
             &mut artifacts,
@@ -252,15 +217,6 @@ impl TraceDecay {
             "sessions_db",
             &profile_root,
             &self.store_layout.sessions_db_path,
-            None,
-            now,
-        );
-        push_existing_store_artifact(
-            &mut artifacts,
-            &store.store_id,
-            "branch_meta",
-            &profile_root,
-            &self.store_layout.branch_meta_path,
             None,
             now,
         );
@@ -311,27 +267,6 @@ fn registry_registration_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-pub(crate) fn git_remote_url(project_root: &Path) -> Option<String> {
-    // gix reads the same config `git config --get` would (repo-local +
-    // global) without a subprocess spawn.
-    if let Ok(repo) = gix::discover(project_root) {
-        let url = repo
-            .config_snapshot()
-            .string("remote.origin.url")?
-            .to_string();
-        let url = url.trim();
-        return (!url.is_empty()).then(|| url.to_string());
-    }
-    if !crate::worktree::git_may_resolve_repo(project_root) {
-        return None;
-    }
-    crate::git::git_capture(project_root, &["config", "--get", "remote.origin.url"])
-}
-
-fn profile_graph_scope_id(store_id: &str, branch_name: &str) -> String {
-    format!("{store_id}:branch:{branch_name}")
-}
-
 fn push_existing_store_artifact(
     artifacts: &mut Vec<StoreArtifactUpsert>,
     store_id: &str,
@@ -361,13 +296,12 @@ fn push_existing_store_artifact(
 mod tests {
     use super::*;
 
-    fn digest(canonical_root: &str, branches: &[&str]) -> RegistrationDigest {
+    fn digest(canonical_root: &str) -> RegistrationDigest {
         RegistrationDigest {
             project_id: "proj-1".to_string(),
             canonical_root: PathBuf::from(canonical_root),
             git_common_dir: Some(PathBuf::from("/repo/.git")),
-            tracked_branches: branches.iter().map(ToString::to_string).collect(),
-            artifact_mtimes: vec![None, None, None, None],
+            artifact_mtimes: vec![None, None, None],
         }
     }
 
@@ -391,7 +325,7 @@ mod tests {
     fn identical_inputs_skip_the_second_registration() {
         let mut cache = HashMap::new();
         let mut register_calls = 0;
-        let d = digest("/repo", &["main"]);
+        let d = digest("/repo");
 
         simulate_call(&mut cache, "proj-1", &d, &mut register_calls);
         simulate_call(&mut cache, "proj-1", &d, &mut register_calls);
@@ -403,27 +337,11 @@ mod tests {
     }
 
     #[test]
-    fn changed_branch_set_does_not_skip() {
-        let mut cache = HashMap::new();
-        let mut register_calls = 0;
-        let first = digest("/repo", &["main"]);
-        let second = digest("/repo", &["main", "feature/x"]);
-
-        simulate_call(&mut cache, "proj-1", &first, &mut register_calls);
-        simulate_call(&mut cache, "proj-1", &second, &mut register_calls);
-
-        assert_eq!(
-            register_calls, 2,
-            "a changed tracked-branch set must force re-registration"
-        );
-    }
-
-    #[test]
     fn changed_canonical_root_does_not_skip() {
         let mut cache = HashMap::new();
         let mut register_calls = 0;
-        let first = digest("/repo", &["main"]);
-        let second = digest("/other/primary-checkout", &["main"]);
+        let first = digest("/repo");
+        let second = digest("/other/primary-checkout");
 
         simulate_call(&mut cache, "proj-1", &first, &mut register_calls);
         simulate_call(&mut cache, "proj-1", &second, &mut register_calls);
@@ -438,7 +356,7 @@ mod tests {
     fn changed_git_common_dir_does_not_skip() {
         let mut cache = HashMap::new();
         let mut register_calls = 0;
-        let mut first = digest("/repo", &["main"]);
+        let mut first = digest("/repo");
         first.git_common_dir = Some(PathBuf::from("/repo/.git"));
         let mut second = first.clone();
         second.git_common_dir = None;
@@ -456,8 +374,8 @@ mod tests {
     fn changed_artifact_mtime_does_not_skip() {
         let mut cache = HashMap::new();
         let mut register_calls = 0;
-        let mut first = digest("/repo", &["main"]);
-        first.artifact_mtimes = vec![Some(SystemTime::UNIX_EPOCH), None, None, None];
+        let mut first = digest("/repo");
+        first.artifact_mtimes = vec![Some(SystemTime::UNIX_EPOCH), None, None];
         let mut second = first.clone();
         second.artifact_mtimes[0] = Some(SystemTime::now());
 
@@ -474,8 +392,8 @@ mod tests {
     fn different_project_ids_are_tracked_independently() {
         let mut cache = HashMap::new();
         let mut register_calls = 0;
-        let a = digest("/repo-a", &["main"]);
-        let mut b = digest("/repo-b", &["main"]);
+        let a = digest("/repo-a");
+        let mut b = digest("/repo-b");
         b.project_id = "proj-2".to_string();
 
         simulate_call(&mut cache, "proj-1", &a, &mut register_calls);

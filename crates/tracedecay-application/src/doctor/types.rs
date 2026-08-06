@@ -70,9 +70,6 @@ pub enum DoctorStorageFindingKindV1 {
     /// A store whose project identity no longer resolves to a live repository
     /// root (identity-drift orphan), reported with age and size.
     OrphanStore,
-    /// Branch-scoped databases whose git refs are gone and are awaiting
-    /// lifecycle removal.
-    StaleBranchDbs,
     /// Quarantined recovery/corruption artifacts are present and awaiting
     /// collection.
     IncidentDebrisPresent,
@@ -788,10 +785,6 @@ mod tests {
                 "over_budget_store",
             ),
             (DoctorStorageFindingKindV1::OrphanStore, "orphan_store"),
-            (
-                DoctorStorageFindingKindV1::StaleBranchDbs,
-                "stale_branch_dbs",
-            ),
             (
                 DoctorStorageFindingKindV1::IncidentDebrisPresent,
                 "incident_debris_present",

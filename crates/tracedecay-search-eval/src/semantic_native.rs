@@ -649,7 +649,7 @@ fn exact_flat_oracle(
                 )
             })?;
         if candidate.retriever != RetrieverKind::Semantic
-            || evidence.search_kind != SemanticSearchKindV1::ExactFlat
+            || evidence.search_kind != SemanticSearchKindV1::EmbeddedVectorIndex
         {
             return Err(SemanticNativeEvaluationErrorV1::Contract(
                 "semantic oracle accepts only the production exact-flat lane".to_owned(),

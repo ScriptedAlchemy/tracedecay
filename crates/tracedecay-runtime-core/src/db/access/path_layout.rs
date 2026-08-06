@@ -29,11 +29,11 @@ pub(super) fn database_profile_root(database_path: &Path, fallback_parent: &Path
 
 fn profile_project_root(database_path: &Path) -> Option<&Path> {
     let parent = database_path.parent()?;
-    // Branch graphs and staged consolidation inputs live one level below
-    // their project data root and share its profile authority scope.
+    // Staged consolidation inputs live one level below their project data root
+    // and share its profile authority scope.
     let data_root = if parent
         .file_name()
-        .is_some_and(|name| name == "branches" || name == ".consolidation-input")
+        .is_some_and(|name| name == ".consolidation-input")
     {
         parent.parent()?
     } else {
@@ -54,23 +54,10 @@ pub(super) fn is_legacy_repository_database(database_path: &Path) -> bool {
     let Some(parent) = database_path.parent() else {
         return false;
     };
-    let is_branch_database = parent.file_name().is_some_and(|name| name == "branches");
-    if !is_branch_database
-        && database_path.file_name().is_some_and(|name| {
-            name == "global.db" || name == "user-memory.db" || name == "user-sessions.db"
-        })
-    {
+    if database_path.file_name().is_some_and(|name| {
+        name == "global.db" || name == "user-memory.db" || name == "user-sessions.db"
+    }) {
         return false;
     }
-    let data_root = if is_branch_database {
-        let Some(data_root) = parent.parent() else {
-            return false;
-        };
-        data_root
-    } else {
-        parent
-    };
-    data_root
-        .file_name()
-        .is_some_and(|name| name == ".tracedecay")
+    parent.file_name().is_some_and(|name| name == ".tracedecay")
 }

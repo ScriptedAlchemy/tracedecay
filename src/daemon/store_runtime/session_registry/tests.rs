@@ -2,75 +2,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use tracedecay_store::CodeShardScopeV1;
 
-use super::maintenance::RegisteredSchemaConvergenceStatus;
 use super::{
     DaemonSessionRuntimeRegistryV1, DatabaseAccessMode, DatabaseAuthority,
     LocalProfileIdentityAuthorityV1, ProjectId, StoreShardIdV1, process_runtime_generation,
 };
 use crate::db::engine::{Executor, TestConnection};
-
-async fn project_sessions_pending_convergence(
-    project_name: &str,
-) -> (
-    tempfile::TempDir,
-    LocalProfileIdentityAuthorityV1,
-    ProjectId,
-    PathBuf,
-    PathBuf,
-) {
-    let temporary = tempfile::tempdir().expect("temporary project parent");
-    let root = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
-    let profile_root = root.join("profile");
-    let project_root = root.join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("durable profile identity");
-    let project_id = ProjectId::new(project_name).expect("typed project identity");
-    crate::storage::write_enrollment_marker(
-        &project_root,
-        &crate::storage::EnrollmentMarker {
-            project_id: project_id.as_str().to_owned(),
-            storage_mode: crate::storage::StorageMode::ProfileSharded,
-        },
-    )
-    .expect("project enrollment");
-    let sessions_path =
-        crate::storage::profile_sharded_data_root(identity.profile_root(), project_id.as_str())
-            .join(crate::storage::SESSIONS_DB_FILENAME);
-    std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
-        .expect("session database directory");
-    let connection = TestConnection::open(&sessions_path);
-    crate::global_db::ensure_registered_schema(&connection)
-        .await
-        .expect("seed complete registered schema");
-    connection
-        .execute("DELETE FROM authority_audit_checkpoints", ())
-        .await
-        .expect("remove durable convergence checkpoint");
-    drop(connection);
-    (temporary, identity, project_id, project_root, sessions_path)
-}
-
-async fn wait_for_schema_convergence(
-    registry: &DaemonSessionRuntimeRegistryV1,
-    shard_id: &StoreShardIdV1,
-) -> RegisteredSchemaConvergenceStatus {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            if let Some(status) = registry.registered_schema_convergence_status(shard_id)
-                && !matches!(status, RegisteredSchemaConvergenceStatus::Pending)
-            {
-                return status;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("registered schema convergence must reach a terminal state")
-}
 
 #[test]
 fn fallback_runtime_generation_always_fits_sqlite_integer() {
@@ -150,7 +86,7 @@ async fn existing_profile_memory_is_schema_verified_before_exposure() {
         .expect("durable profile identity");
     let memory_path = crate::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
-    crate::db::migrations::create_schema_connection(&seed)
+    crate::db::schema::create_schema_connection(&seed)
         .await
         .expect("create the profile memory fixture at the production schema");
     drop(seed);
@@ -295,172 +231,6 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
         )
     );
     assert_eq!(first.db_path(), sessions_path);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
-    let (_temporary, identity, project_id, project_root, _sessions_path) =
-        project_sessions_pending_convergence("project.schema-admission").await;
-    let shard_id = StoreShardIdV1::project_sessions(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    );
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
-    let convergence_gate = registry.block_registered_schema_convergence_for_test();
-
-    let database = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        registry.project_sessions(project_id, [project_root]),
-    )
-    .await
-    .expect("daemon admission must not wait for historical convergence")
-    .expect("registered project sessions");
-    convergence_gate.wait_until_blocked().await;
-
-    assert_eq!(
-        registry.registered_schema_convergence_status(&shard_id),
-        Some(RegisteredSchemaConvergenceStatus::Pending)
-    );
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .expect("ordinary read snapshot while convergence is pending");
-    let mut rows = snapshot
-        .query("SELECT COUNT(*) FROM sessions", ())
-        .await
-        .expect("ordinary read while convergence is pending");
-    assert_eq!(
-        rows.next()
-            .await
-            .expect("read session count")
-            .expect("session count row")
-            .get::<i64>(0)
-            .expect("decode session count"),
-        0
-    );
-    convergence_gate.release();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn duplicate_project_attaches_schedule_one_historical_convergence() {
-    let (_temporary, identity, project_id, project_root, _sessions_path) =
-        project_sessions_pending_convergence("project.schema-deduplication").await;
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
-    let convergence_gate = registry.block_registered_schema_convergence_for_test();
-
-    let first = registry
-        .project_sessions(project_id.clone(), [project_root.clone()])
-        .await
-        .expect("first project session attach");
-    convergence_gate.wait_until_blocked().await;
-    let second = registry
-        .project_sessions(project_id, [project_root])
-        .await
-        .expect("duplicate project session attach");
-
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(
-        registry.registered_schema_convergence_schedule_count_for_test(),
-        1,
-        "the retained registry must deduplicate convergence tasks"
-    );
-    convergence_gate.release();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_convergence_commits_the_durable_authority_checkpoint() {
-    let (_temporary, identity, project_id, project_root, _sessions_path) =
-        project_sessions_pending_convergence("project.schema-checkpoint").await;
-    let shard_id = StoreShardIdV1::project_sessions(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    );
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
-    let database = registry
-        .project_sessions(project_id, [project_root])
-        .await
-        .expect("registered project sessions");
-
-    assert_eq!(
-        wait_for_schema_convergence(&registry, &shard_id).await,
-        RegisteredSchemaConvergenceStatus::Complete
-    );
-    let snapshot = database
-        .read_snapshot()
-        .await
-        .expect("checkpoint read snapshot");
-    let mut rows = snapshot
-        .query(
-            "SELECT bounded_passes_since_exhaustive
-                 FROM authority_audit_checkpoints
-                 WHERE audit_name = 'observation-authority'",
-            (),
-        )
-        .await
-        .expect("read durable authority checkpoint");
-    assert_eq!(
-        rows.next()
-            .await
-            .expect("read checkpoint")
-            .expect("durable checkpoint row")
-            .get::<i64>(0)
-            .expect("decode checkpoint"),
-        0
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_convergence_failure_remains_observable_as_degraded() {
-    let (_temporary, identity, project_id, project_root, sessions_path) =
-        project_sessions_pending_convergence("project.schema-degraded").await;
-    rusqlite::Connection::open(&sessions_path)
-        .expect("open corruption fixture")
-        .execute_batch(
-            "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
-                 INSERT INTO session_query_cursor_keys (
-                    key_id, key_version, key_material, created_at, retired_at
-                 ) VALUES
-                    ('cursor-a', 1, X'01', 100, NULL),
-                    ('cursor-b', 2, X'02', 200, NULL);",
-        )
-        .expect("seed corruption behind missing guards");
-    let shard_id = StoreShardIdV1::project_sessions(
-        identity.brain_id().clone(),
-        identity.profile_id().clone(),
-        project_id.clone(),
-    );
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
-
-    registry
-        .project_sessions(project_id, [project_root])
-        .await
-        .expect("minimum schema admission remains available");
-    let status = wait_for_schema_convergence(&registry, &shard_id).await;
-
-    assert!(
-        matches!(
-            status,
-            RegisteredSchemaConvergenceStatus::Degraded { ref message }
-                if message.contains("session cursor key rotation state is invalid")
-        ),
-        "unexpected convergence status: {status:?}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -804,7 +574,7 @@ async fn code_database_replacement_rebinds_after_runtime_retirement() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
+async fn read_only_ref_selector_reuses_project_publication_without_write_authority() {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
         .path()
@@ -817,23 +587,23 @@ async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 11, "branch publication")
+        crate::db::enter_daemon_database_scope(&profile_root, 11, "project graph publication")
             .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
-    let project_id = ProjectId::new("project.branch-publication").expect("project id");
-    let branch_root = profile_root.join("projects/project.branch-publication/branches");
-    std::fs::create_dir_all(&branch_root).expect("branch database directory");
-    let main_path = branch_root.join("main.db");
-    let unpublished_path = branch_root.join("unpublished.db");
-    rusqlite::Connection::open(&unpublished_path)
-        .expect("seed unpublished branch database")
+    let project_id = ProjectId::new("project.ref-publication").expect("project id");
+    let project_data_root = profile_root.join("projects/project.ref-publication");
+    std::fs::create_dir_all(&project_data_root).expect("project data root");
+    let graph_path = project_data_root.join("tracedecay.db");
+    rusqlite::Connection::open(&graph_path)
+        .expect("seed project graph database")
         .execute_batch("CREATE TABLE seed(value INTEGER);")
-        .expect("seed unpublished branch schema");
+        .expect("seed project graph schema");
 
-    let main_authority = DatabaseAuthority::for_runtime(&main_path, "publish daemon-owned branch")
-        .expect("daemon branch authority");
+    let main_authority =
+        DatabaseAuthority::for_runtime(&graph_path, "publish daemon-owned project graph")
+            .expect("daemon project graph authority");
     assert_eq!(
         main_authority.role(),
         crate::db::DatabaseAuthorityRole::Daemon
@@ -843,16 +613,13 @@ async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
             &project_root,
             project_id.clone(),
             "main",
-            main_path.clone(),
+            graph_path.clone(),
             main_authority,
             DatabaseAccessMode::ReadWrite,
         )
         .await
-        .expect("daemon-owned branch publication");
+        .expect("daemon-owned project graph publication");
     let publication_id = main.retained_runtime().publication().publication_id.clone();
-    let unpublished_authority =
-        DatabaseAuthority::for_runtime(&unpublished_path, "reserve unpublished branch")
-            .expect("unpublished daemon branch authority");
     drop(database_scope);
 
     let read_only = registry
@@ -860,22 +627,22 @@ async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
             &project_root,
             project_id.clone(),
             "main",
-            main_path.clone(),
+            graph_path.clone(),
             DatabaseAccessMode::ReadOnly,
         )
         .await
         .expect("read-only facade over retained daemon publication");
-    assert_eq!(read_only.database_path(), main_path);
+    assert_eq!(read_only.database_path(), graph_path);
     assert_eq!(
         read_only.retained_runtime().publication().publication_id,
         publication_id,
         "read-only publication must reuse the exact retained runtime"
     );
     let write_error = match read_only
-        .begin_write_transaction("write through read-only branch facade")
+        .begin_write_transaction("write through read-only ref-selector facade")
         .await
     {
-        Ok(_) => panic!("read-only branch facade unexpectedly admitted a write"),
+        Ok(_) => panic!("read-only ref-selector facade unexpectedly admitted a write"),
         Err(error) => error,
     };
     assert!(
@@ -883,26 +650,25 @@ async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
         "unexpected read-only denial: {write_error}"
     );
 
-    let unpublished_error = match registry
+    let cold_read_only = registry
         .code_graph_branch_registered(
             &project_root,
             project_id,
-            "unpublished",
-            unpublished_path,
+            "feature",
+            graph_path.clone(),
             DatabaseAccessMode::ReadOnly,
         )
         .await
+        .expect("cold read-only ref selector opens the existing project graph");
+    assert_eq!(cold_read_only.database_path(), graph_path);
+    let cold_write_error = match cold_read_only
+        .begin_write_transaction("write through cold read-only ref-selector facade")
+        .await
     {
-        Ok(_) => panic!("unpublished branch inherited synthetic write authority"),
+        Ok(_) => panic!("cold read-only ref selector unexpectedly admitted a write"),
         Err(error) => error,
     };
-    assert!(
-        unpublished_error
-            .to_string()
-            .contains("managed-daemon or exclusive-maintenance authority"),
-        "unexpected unpublished branch denial: {unpublished_error}"
-    );
-    drop(unpublished_authority);
+    assert!(cold_write_error.to_string().contains("read-only"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

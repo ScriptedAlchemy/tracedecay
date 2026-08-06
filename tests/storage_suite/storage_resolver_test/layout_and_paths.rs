@@ -1,4 +1,4 @@
-//! Store layout resolution, config path, and path-safety guard tests.
+//! Store layout resolution and path-safety guard tests.
 
 use super::*;
 
@@ -24,61 +24,6 @@ fn resolve_layout_defaults_to_profile_shard_without_marker_or_local_db() {
     assert_eq!(
         layout.graph_db_path,
         profile.join(format!("projects/{project_id}/tracedecay.db"))
-    );
-}
-
-#[tokio::test]
-async fn config_path_uses_profile_shard_when_enrolled() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let home = test_home(&dir);
-    let shard_root = home.join(".tracedecay/projects/proj_123");
-    fs::create_dir_all(project.join(".tracedecay")).unwrap();
-    fs::create_dir_all(&shard_root).unwrap();
-    let _home_guard = HomeGuard::set(&home);
-    write_enrollment(&project);
-
-    let repo_local_config = TraceDecayConfig {
-        root_dir: "repo-local-config".to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        project.join(".tracedecay/config.json"),
-        serde_json::to_string_pretty(&repo_local_config).unwrap(),
-    )
-    .unwrap();
-    let shard_config = TraceDecayConfig {
-        root_dir: "profile-shard-config".to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        shard_root.join("config.json"),
-        serde_json::to_string_pretty(&shard_config).unwrap(),
-    )
-    .unwrap();
-
-    assert_path_eq(get_config_path(&project), shard_root.join("config.json"));
-    assert_eq!(
-        load_config(&project).unwrap().root_dir,
-        "profile-shard-config"
-    );
-}
-
-#[tokio::test]
-async fn config_path_defaults_to_profile_shard_without_enrollment() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let home = test_home(&dir);
-    let profile_root = home.join(".tracedecay");
-    fs::create_dir_all(&project).unwrap();
-    let _home_guard = HomeGuard::set(&home);
-    let project_id = default_profile_project_id(&project);
-
-    assert_path_eq(
-        get_config_path(&project),
-        profile_root.join(format!("projects/{project_id}/config.json")),
     );
 }
 

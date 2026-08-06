@@ -143,7 +143,7 @@ static ISOLATED_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 
 /// The canonical way to isolate env-mutating tests: serializes tests within
 /// one binary and keeps every test's project registration, store manifests,
-/// and branch-meta writes inside a throwaway home instead of the developer's
+/// and project-store writes inside a throwaway home instead of the developer's
 /// real `~/.tracedecay` profile store.
 ///
 /// Construct via [`IsolatedEnv::acquire`] (async tests) or

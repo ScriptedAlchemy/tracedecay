@@ -119,6 +119,7 @@ fn capability(
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::EffectUnknown,
             TerminalState::Partial,

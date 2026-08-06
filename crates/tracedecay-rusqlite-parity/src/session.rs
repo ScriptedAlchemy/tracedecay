@@ -212,9 +212,9 @@ fn decode_row(table: SessionStoreTable, row: &Row<'_>) -> rusqlite::Result<Sessi
             content_hash: row.get(8)?,
             row_digest,
         }),
-        SessionStoreTable::SessionTemporalSchemaMigrations => {
-            Ok(SessionStoreRow::SessionTemporalSchemaMigrations {
-                name: row.get(0)?,
+        SessionStoreTable::SessionTemporalSchemaState => {
+            Ok(SessionStoreRow::SessionTemporalSchemaState {
+                domain: row.get(0)?,
                 version: row.get(1)?,
                 row_digest,
             })
@@ -405,8 +405,10 @@ fn cursor_for_row(row: &SessionStoreRow) -> SessionStoreCursor {
         SessionStoreRow::LcmRawMessages { store_id, .. } => SessionStoreCursor::LcmRawMessages {
             store_id: *store_id,
         },
-        SessionStoreRow::SessionTemporalSchemaMigrations { name, .. } => {
-            SessionStoreCursor::SessionTemporalSchemaMigrations { name: name.clone() }
+        SessionStoreRow::SessionTemporalSchemaState { domain, .. } => {
+            SessionStoreCursor::SessionTemporalSchemaState {
+                domain: domain.clone(),
+            }
         }
         SessionStoreRow::SessionTemporalGenerations {
             session_id,

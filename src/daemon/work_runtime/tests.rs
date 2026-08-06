@@ -23,6 +23,16 @@ use super::codex_provider::CODEX_PROVIDER_ID;
 use super::*;
 use crate::application::event_lane;
 
+fn test_graph() -> tracedecay_graph_db::GraphDb {
+    tracedecay_graph_db::GraphDb::open(tracedecay_graph_db::GraphDbOpenOptions {
+        location: tracedecay_graph_db::GraphDbLocation::Memory,
+        expected_format: tracedecay_graph_db::GraphFormatVersion::new(2).unwrap(),
+        durability: tracedecay_graph_db::GraphDurability::Memory,
+        cancellation: Arc::new(tracedecay_graph_db::NeverCancelled),
+    })
+    .unwrap()
+}
+
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -263,7 +273,7 @@ impl Harness {
         .await
         .unwrap();
         let observation_db = host.project_observation_database_arc_for_test().unwrap();
-        let storage = observation_db.work_storage().unwrap();
+        let storage = observation_db.work_storage(test_graph()).unwrap();
         let context = context(project_id);
         let authority = authority(&context);
         let (task_id, snapshot) = prepare_work(&storage, &context);

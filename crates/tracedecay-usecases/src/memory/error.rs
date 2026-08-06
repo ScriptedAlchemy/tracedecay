@@ -3,10 +3,7 @@
 use thiserror::Error;
 
 use tracedecay_domain::{DomainError, FactOwnerV1, SourceStoreId};
-use tracedecay_store::{
-    CompatibilityFeedbackRepairProgressV1, FactCompatibilityStoreError, FactProposalStoreError,
-    FactStoreError,
-};
+use tracedecay_store::{FactCompatibilityStoreError, FactProposalStoreError, FactStoreError};
 
 use super::anchors::EvidenceAnchorResolutionError;
 
@@ -33,10 +30,6 @@ pub enum MemoryApplicationError {
     IncompatibleLegacyProjection { invariant: &'static str },
     #[error("memory authority returned a result violating {invariant}")]
     InvalidAuthorityResult { invariant: &'static str },
-    #[error("memory feedback history is unavailable while repair is {progress:?}")]
-    FeedbackHistoryUnavailable {
-        progress: CompatibilityFeedbackRepairProgressV1,
-    },
     #[error("evidence anchor resolution failed")]
     EvidenceAnchor(#[from] EvidenceAnchorResolutionError),
 }

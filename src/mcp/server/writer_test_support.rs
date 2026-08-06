@@ -91,9 +91,6 @@ pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtu
             .await
             .expect("init");
     cg.index_all().await.expect("index");
-    let mut config = crate::config::load_config(root).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(root, &config).expect("disable startup sync");
     (
         cg,
         dir,

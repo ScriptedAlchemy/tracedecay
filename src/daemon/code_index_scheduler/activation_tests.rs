@@ -400,7 +400,7 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     // Tamper with the sealed payload and restamp the durable pointer digest so
     // the corruption is caught by the generation's own canonical state digest
     // rather than by the pointer check in front of it.
-    let generations_root = store.path().join("code-generations-v1");
+    let generations_root = store.path().join("code-generations");
     let sealed_path = fs::read_dir(&generations_root)
         .expect("read generations root")
         .filter_map(Result::ok)
@@ -416,7 +416,7 @@ fn a_corrupt_sealed_generation_fails_closed_on_every_request() {
     assert_ne!(corrupted, sealed, "the fixture must actually be tampered");
     fs::write(&sealed_path, &corrupted).expect("write corrupted generation");
 
-    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let pointer_path = store.path().join("active-code-generation.json");
     let mut pointer: serde_json::Value =
         serde_json::from_slice(&fs::read(&pointer_path).expect("read pointer"))
             .expect("parse pointer");

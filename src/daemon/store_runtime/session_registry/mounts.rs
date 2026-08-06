@@ -2,8 +2,6 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 
@@ -11,9 +9,8 @@ use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, LifecycleShardRuntimePublisher,
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
     LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, ProfileAuthorityPinResult,
-    RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, StoreRuntimeRegistry,
-    StoreRuntimeResolver, open_runtime, register_registered_schema_installer, runtime_incarnation,
-    session_registry_error,
+    RegisteredGlobalDb, Result, StoreRuntimeRegistry, StoreRuntimeResolver, open_runtime,
+    register_registered_schema_installer, runtime_incarnation, session_registry_error,
 };
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -74,9 +71,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             project_memory: Mutex::new(BTreeMap::new()),
             project_sessions: Mutex::new(BTreeMap::new()),
             code_graph_open_gates: Mutex::new(BTreeMap::new()),
-            registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
-            #[cfg(test)]
-            long_lived_session_maintenance_for_test: AtomicBool::new(false),
         })
     }
 
@@ -147,7 +141,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
-        crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
+        crate::db::schema::ensure_schema_current(database.as_ref()).await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -248,7 +242,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
-        crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
+        crate::db::schema::ensure_schema_current(database.as_ref()).await?;
         mounted.insert(project_id, Arc::clone(&database));
         Ok(database)
     }

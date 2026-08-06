@@ -148,6 +148,7 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::Partial,
             TerminalState::EffectUnknown,

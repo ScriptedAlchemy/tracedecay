@@ -4,11 +4,10 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test]
-async fn test_branch_list_reports_live_vs_serving_drift_state() {
+async fn test_branch_list_reports_git_snapshots_and_selected_provenance() {
     fn git(project: &Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)
@@ -39,15 +38,6 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
 
     let cg = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
     cg.index_all().await.unwrap();
-    let tracedecay_dir = resolve_layout_for_current_profile(project)
-        .unwrap()
-        .data_root;
-    tracedecay::branch_meta::save_branch_meta(
-        &tracedecay_dir,
-        &tracedecay::branch_meta::BranchMeta::new("main"),
-    )
-    .unwrap();
-
     let cg = TestTraceDecay::new(TraceDecay::open(project).await.unwrap());
     git(project, &["checkout", "-b", "feature"]);
 
@@ -56,10 +46,15 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
         .unwrap();
     let report: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     assert_eq!(report["current_branch"], json!("feature"));
-    assert_eq!(report["open_active_branch"], json!("main"));
-    assert_eq!(report["serving_branch"], json!("main"));
-    assert_eq!(report["branch_drifted"], json!(true));
-    assert_eq!(report["branch_resolution"], json!("stale_serving_branch"));
+    assert_eq!(report["selected_branch"], json!("main"));
+    assert_eq!(report["snapshot_count"], json!(2));
+    assert!(
+        report["snapshots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot["name"] == "feature" && snapshot["is_current"] == true)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -663,11 +658,6 @@ async fn test_dead_code_custom_kinds() {
 #[tokio::test]
 async fn branch_diff_returns_empty_when_base_equals_head() {
     let (cg, _env, _dir) = setup_empty_project().await;
-
-    // branch_diff requires branch tracking metadata to be present.
-    let tracedecay_dir = project_data_dir(&cg);
-    let meta = tracedecay::branch_meta::BranchMeta::new("master");
-    tracedecay::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -2965,9 +2955,6 @@ async fn mcp_server_owns_watcher_and_refreshes_token_map_on_change() {
 
     let (cg, _env) = init_test_project(project).await;
     cg.sync().await.unwrap();
-    let mut config = tracedecay::config::load_config(project).expect("load test config");
-    config.sync.session_start_sync = false;
-    tracedecay::config::save_config(project, &config).expect("disable unrelated catch-up");
 
     let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
 

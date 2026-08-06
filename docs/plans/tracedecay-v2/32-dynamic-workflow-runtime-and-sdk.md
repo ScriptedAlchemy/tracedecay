@@ -51,13 +51,14 @@ generic execution.
 
 ## PR14/PR17 implementation defaults
 
-- Use `petgraph` for task/workflow DAG traversal, topological order, and SCC
-  rejection; `tokio-util` for cancellation; Serde plus `schemars` and
-  `jsonschema` for immutable definition validation; rusqlite transactions for
-  atomic claims, effects, and publication; `process-wrap` for admitted
-  provider process-tree containment; and `d3-dag` for dashboard layout. These
-  replace bespoke graph algorithms, cancellation tokens, schema walkers,
-  transaction choreography, child-process cleanup, and DAG layout.
+- Use `tracedecay-graph-db`/Grafeo for durable task/workflow DAG traversal,
+  topological order, and SCC rejection; `tokio-util` for cancellation; Serde
+  plus `schemars` and `jsonschema` for immutable definition validation;
+  rusqlite transactions for atomic claims, effects, and publication;
+  `process-wrap` for admitted provider process-tree containment; and `d3-dag`
+  for dashboard layout. These replace bespoke graph storage/traversal
+  algorithms, cancellation tokens, schema walkers, transaction choreography,
+  child-process cleanup, and DAG layout.
 - Use existing Tokio timers and `DelayQueue` only for mechanical waiting.
   TraceDecay owns retry eligibility, attempt creation, caps, jitter, exact
   retry directives, cumulative deadline/budget, cancellation, attempt
@@ -371,9 +372,10 @@ history projections join runtime state only through exact versioned references.
 Plan 32 also publishes typed provider availability, lease/attempt liveness,
 progress, deadline, cancellation escalation, reconnect/resume, unknown-effect,
 placement/integration, and terminal evidence to the existing Doctor kernel.
-Doctor owns finding severity and remediation presentation; it may invoke only a
-separately authorized runtime control and cannot reclaim, retry, cancel, repair,
-or change configuration by inference.
+Doctor owns finding severity and may identify a separately authorized runtime
+control that could address a finding. It never invokes that control and cannot
+reclaim, retry, cancel, repair, refresh, or change configuration. Runtime
+controls remain explicit, receipt-bearing application operations.
 
 Already-shipped read-only feedback diagnostics, CI localization, GitHub review
 ingest, and proximity reads may be composed as typed workflow steps through

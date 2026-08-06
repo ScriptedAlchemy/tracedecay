@@ -1,15 +1,14 @@
 //! Legacy V1 memory API shims over the typed compatibility use cases.
 
-use tracedecay_domain::Confidence;
+use tracedecay_domain::{Confidence, FeedbackResultId};
 use tracedecay_store::{
     CompatibilityFactAddOutcomeV1, CompatibilityFactContradictionQueryV1,
     CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackDetailsAvailabilityV1, CompatibilityFactFeedbackHistoryQueryV1,
     CompatibilityFactListQueryV1, CompatibilityFactProjectionV1, CompatibilityFactRemoveCommandV1,
     CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchFilterV1,
     CompatibilityFactSearchKindV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdatePatchV1,
-    CompatibilityFeedbackRepairProgressV1, FactCompatibilityStore,
+    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdatePatchV1, FactCompatibilityStore,
+    FactFeedbackDetailsAvailability, FactFeedbackHistoryQuery,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
@@ -37,23 +36,6 @@ use super::sanitize::{
 pub enum V1UpdateFactOutcome {
     Updated(Box<FactRecord>),
     RejectedSecretLike { reason: String },
-}
-
-/// Finite V1 trust-history projection with explicit repair availability. The
-/// entries retain the historical wire shape; callers can distinguish partial,
-/// unknown, and complete history without inventing missing sources or events.
-#[derive(Clone, Debug, PartialEq)]
-pub struct V1FactTrustHistoryV1 {
-    pub entries: Vec<TrustHistoryEntry>,
-    pub repair_progress: CompatibilityFeedbackRepairProgressV1,
-}
-
-/// Legacy status fields and feedback-history repair state from one authority
-/// snapshot. Consumers must use this instead of issuing two status reads.
-#[derive(Clone, Debug, PartialEq)]
-pub struct V1MemoryStatusWithRepairV1 {
-    pub status: MemoryStatus,
-    pub feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
 }
 
 impl<A: FactCompatibilityStore> MemoryApplication<A> {
@@ -434,14 +416,15 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 note,
             )?)
             .await?;
-        let event_id = outcome.legacy_feedback_event_id().ok_or(
-            MemoryApplicationError::IncompatibleLegacyProjection {
-                invariant: "legacy feedback event identity",
-            },
-        )?;
+        let result_id =
+            FeedbackResultId::new(outcome.event_id().as_str().to_owned()).map_err(|_| {
+                MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "canonical feedback result identity",
+                }
+            })?;
         let fact = compatibility_projection_record(&self.compatibility_scope, outcome.fact())?;
         Ok(tracedecay_runtime_core::memory::types::FeedbackResult {
-            event_id,
+            result_id,
             fact_id: fact.fact_id,
             action: request.action,
             old_trust: outcome.old_trust().as_f64(),
@@ -457,41 +440,35 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         fact_id: i64,
         limit: usize,
     ) -> Result<Vec<TrustHistoryEntry>, MemoryApplicationError> {
+        let target = self.legacy_compatibility_target(fact_id)?;
+        let canonical_fact_id = self
+            .resolve_legacy_fact(target.legacy_query().cloned().ok_or(
+                MemoryApplicationError::InvalidCompatibilityInput {
+                    invariant: "legacy numeric fact target",
+                },
+            )?)
+            .await?
+            .ok_or(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "feedback history fact identity",
+            })?;
         let history = self
-            .fact_trust_history_with_progress_v1(fact_id, limit)
-            .await?;
-        if !history.repair_progress.is_complete() {
-            return Err(MemoryApplicationError::FeedbackHistoryUnavailable {
-                progress: history.repair_progress,
-            });
-        }
-        Ok(history.entries)
-    }
-
-    /// V1 trust-history entries plus explicit repair state. This is the only
-    /// V1-compatible read for consumers that can represent partial history.
-    pub async fn fact_trust_history_with_progress_v1(
-        &self,
-        fact_id: i64,
-        limit: usize,
-    ) -> Result<V1FactTrustHistoryV1, MemoryApplicationError> {
-        let history = self
-            .get_compatibility_feedback_history(CompatibilityFactFeedbackHistoryQueryV1::new(
-                self.legacy_compatibility_target(fact_id)?,
+            .query_fact_feedback_history(FactFeedbackHistoryQuery::new(
+                self.owner.clone(),
+                canonical_fact_id,
                 None,
                 limit,
             )?)
             .await?;
-        let entries = history
+        Ok(history
             .events()
             .iter()
             .filter(|event| {
-                event.details_availability()
-                    == CompatibilityFactFeedbackDetailsAvailabilityV1::Available
+                event.details_availability() == FactFeedbackDetailsAvailability::Available
             })
             .filter_map(|event| {
                 let source = event.source()?;
                 Some(TrustHistoryEntry {
+                    result_id: event.result_id().clone(),
                     timestamp: event.occurred_at().0,
                     action: match event.action() {
                         CompatibilityFactFeedbackActionV1::Helpful => FeedbackAction::Helpful,
@@ -504,39 +481,12 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                     note: event.note().map(ToOwned::to_owned),
                 })
             })
-            .collect();
-        Ok(V1FactTrustHistoryV1 {
-            entries,
-            repair_progress: history.repair_progress(),
-        })
+            .collect())
     }
 
     pub async fn memory_status_v1(&self) -> Result<MemoryStatus, MemoryApplicationError> {
-        Ok(self.memory_status_with_repair_v1().await?.status)
-    }
-
-    /// One authority status read projected both into legacy fields and the
-    /// finite feedback-history repair state.
-    ///
-    /// This is a pure read: it reports the live backlog (missing vectors,
-    /// projection and feedback repair state) and never triggers a repair pass
-    /// as a side effect. Repair remains owned by the daemon's bounded memory-
-    /// repair scheduler and the explicit [`Self::dashboard_repair_v1`] entry
-    /// point; a status read must not race or duplicate that work. The legacy
-    /// `MemoryStatus`/`V1MemoryStatusWithRepairV1` field shapes are
-    /// unchanged, but `repair` counters are always zero here: they describe
-    /// repairs performed by the reporting request, and a pure read performs
-    /// none — explicit repair entry points return their own batch stats.
-    pub async fn memory_status_with_repair_v1(
-        &self,
-    ) -> Result<V1MemoryStatusWithRepairV1, MemoryApplicationError> {
         let status = self.compatibility_memory_status().await?;
-        let feedback_history_repair = status.feedback_history_repair();
-        let projected = project_memory_status_v1(&status)?;
-        Ok(V1MemoryStatusWithRepairV1 {
-            status: projected,
-            feedback_history_repair,
-        })
+        project_memory_status_v1(&status)
     }
 
     async fn search_v1(

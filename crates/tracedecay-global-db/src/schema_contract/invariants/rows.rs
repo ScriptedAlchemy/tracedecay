@@ -12,33 +12,10 @@ use crate::session_temporal_operations::{
 use crate::{global_db_operation_error, global_db_operation_message};
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
-use super::triggers::{INVARIANTS, Invariant};
+#[cfg(test)]
+use super::triggers::INVARIANTS;
+use super::triggers::Invariant;
 use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
-
-/// How an invariant's optional row `audit_query` participates in validation.
-///
-/// Selection is name/category-driven (stable `violation` strings), never
-/// `INVARIANTS[index]` ordinals, so SESSION_* audits stay included when the
-/// catalog order shifts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InvariantRowAuditCategory {
-    /// Cheap identity / session-temporal state audits for every bounded pass.
-    Bounded,
-    /// Expensive full-table or join-heavy audits reserved for exhaustive passes.
-    Expensive,
-}
-
-/// Bounded non-exhaustive audits: prior cheap identity checks plus SESSION
-/// cursor / refresh / generation / ownership state.
-const BOUNDED_ROW_AUDIT_VIOLATIONS: &[&str] = &[
-    "graph_scopes contains a store/project identity mismatch",
-    "projection_queue contains an observation identity mismatch",
-    "observation projection provenance contains invalid message_created",
-    "session cursor key rotation state is invalid",
-    "session refresh operation state is invalid",
-    "session temporal generation state is invalid",
-    "session temporal authority ownership is invalid",
-];
 
 const OBSERVATION_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "committed observation references a missing receipt",
@@ -47,25 +24,6 @@ const OBSERVATION_ROW_AUDIT_VIOLATIONS: &[&str] = &[
 
 pub(super) fn observation_row_audit_covers(invariant: &Invariant) -> bool {
     OBSERVATION_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation)
-}
-
-fn classify_invariant_row_audit(invariant: &Invariant) -> Option<InvariantRowAuditCategory> {
-    invariant.audit_query.as_ref()?;
-    if observation_row_audit_covers(invariant) {
-        return None;
-    }
-    if BOUNDED_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation) {
-        Some(InvariantRowAuditCategory::Bounded)
-    } else {
-        // Fail closed: unknown audits run only on exhaustive passes.
-        Some(InvariantRowAuditCategory::Expensive)
-    }
-}
-
-fn bounded_row_audit_invariants() -> impl Iterator<Item = &'static Invariant> {
-    INVARIANTS.iter().filter(|invariant| {
-        classify_invariant_row_audit(invariant) == Some(InvariantRowAuditCategory::Bounded)
-    })
 }
 
 pub(super) async fn query_has_rows(
@@ -438,103 +396,10 @@ pub(super) async fn validate_source_cursor_authority_chunk(
     Ok((cursor_rowid, advance_rowid, page_rows < AUDIT_PAGE_ROWS))
 }
 
-pub(super) async fn validate_mutable_invariant_rows(
-    conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    for invariant in bounded_row_audit_invariants() {
-        if let Some(query) = invariant.audit_query
-            && query_has_rows(conn, query).await?
-        {
-            return Err(global_db_operation_message(OPERATION, invariant.violation));
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests::harness::RegisteredGlobalDbHarness;
-
-    /// Expensive audits that must stay exhaustive-only (explicit classification).
-    const EXPENSIVE_ROW_AUDIT_VIOLATIONS: &[&str] = &[
-        "observation projection provenance contains a receipt mismatch",
-        "workflow projection contains an observation receipt mismatch",
-        "observation projection disposition contains a receipt mismatch",
-        "observation projection checkpoints contains a negative sequence",
-        "projection checkpoint exceeds the committed observation frontier",
-        "global database contains a foreign-key violation",
-        "session summary authority is mutable or crosses sessions",
-        "session temporal receipts or cursor keys are mutable",
-    ];
-
-    fn session_temporal_bounded_violations() -> &'static [&'static str] {
-        &[
-            "session cursor key rotation state is invalid",
-            "session refresh operation state is invalid",
-            "session temporal generation state is invalid",
-            "session temporal authority ownership is invalid",
-        ]
-    }
-
-    #[test]
-    fn bounded_selection_is_name_driven_and_includes_session_temporal_audits() {
-        let bounded: Vec<&str> = bounded_row_audit_invariants()
-            .map(|invariant| invariant.violation)
-            .collect();
-        for violation in BOUNDED_ROW_AUDIT_VIOLATIONS {
-            assert!(
-                bounded.contains(violation),
-                "bounded selection missed named audit: {violation}"
-            );
-        }
-        for violation in session_temporal_bounded_violations() {
-            assert!(
-                bounded.contains(violation),
-                "SESSION temporal audit must run on bounded passes: {violation}"
-            );
-        }
-        for violation in EXPENSIVE_ROW_AUDIT_VIOLATIONS {
-            assert!(
-                !bounded.contains(violation),
-                "expensive audit must not run on bounded passes: {violation}"
-            );
-        }
-        // No ordinal dependence: the named set is exactly the filter result.
-        assert_eq!(bounded.len(), BOUNDED_ROW_AUDIT_VIOLATIONS.len());
-    }
-
-    #[test]
-    fn every_row_audit_is_explicitly_classified_bounded_or_expensive() {
-        for invariant in INVARIANTS {
-            let Some(category) = classify_invariant_row_audit(invariant) else {
-                continue;
-            };
-            let in_bounded = BOUNDED_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation);
-            let in_expensive = EXPENSIVE_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation);
-            assert!(
-                !(in_bounded && in_expensive),
-                "audit classified in both lists: {}",
-                invariant.violation
-            );
-            match category {
-                InvariantRowAuditCategory::Bounded => {
-                    assert!(
-                        in_bounded,
-                        "bounded category missing from BOUNDED list: {}",
-                        invariant.violation
-                    );
-                }
-                InvariantRowAuditCategory::Expensive => {
-                    assert!(
-                        in_expensive,
-                        "expensive/unknown audit must be listed in EXPENSIVE: {}",
-                        invariant.violation
-                    );
-                }
-            }
-        }
-    }
 
     #[test]
     fn observation_row_validation_replaces_redundant_sql_scans() {
@@ -544,7 +409,6 @@ mod tests {
                 .find(|invariant| invariant.violation == *violation)
                 .unwrap();
             assert!(observation_row_audit_covers(invariant));
-            assert_eq!(classify_invariant_row_audit(invariant), None);
         }
     }
 
@@ -665,14 +529,7 @@ mod tests {
         );
     }
 
-    async fn assert_bounded_and_exhaustive_reject(conn: &impl QueryExecutor, violation: &str) {
-        let bounded = validate_mutable_invariant_rows(conn)
-            .await
-            .expect_err("bounded validation must reject corruption");
-        assert!(
-            bounded.to_string().contains(violation),
-            "bounded error missing `{violation}`: {bounded}"
-        );
+    async fn assert_exhaustive_reject(conn: &impl QueryExecutor, violation: &str) {
         let exhaustive = super::super::validate_invariant_rows(conn)
             .await
             .expect_err("exhaustive validation must reject corruption");
@@ -682,11 +539,8 @@ mod tests {
         );
     }
 
-    /// `is_fresh` skips the row audits on the creating open, but a reopen
-    /// (`is_fresh = false`) still runs the exhaustive audit and rejects
-    /// corruption — the freshness fast path must be invisible on reopen.
     #[tokio::test]
-    async fn fresh_open_skips_row_audits_but_reopen_audits_exhaustively() {
+    async fn exhaustive_reject_corrupt_session_cursor_keys() {
         let harness = open_db().await;
         let transaction = harness
             .registered
@@ -706,52 +560,11 @@ mod tests {
         )
         .await
         .expect("seed corrupt cursor keys");
-
-        // Fresh creation skips the row audits, so the seeded corruption is not
-        // scanned even with force_exhaustive requested.
-        super::super::ensure_authority_invariants(conn, true, true)
-            .await
-            .expect("fresh creation skips the row audits");
-
-        // A reopen audits exhaustively and rejects the same corruption.
-        let error = super::super::ensure_authority_invariants(conn, true, false)
-            .await
-            .expect_err("reopen must run the exhaustive audit");
-        assert!(
-            error
-                .to_string()
-                .contains("session cursor key rotation state is invalid"),
-            "reopen audit missed corruption: {error}"
-        );
+        assert_exhaustive_reject(conn, "session cursor key rotation state is invalid").await;
     }
 
     #[tokio::test]
-    async fn bounded_and_exhaustive_reject_corrupt_session_cursor_keys() {
-        let harness = open_db().await;
-        let transaction = harness
-            .registered
-            .begin_write_transaction()
-            .await
-            .expect("begin invariant fixture transaction");
-        let conn = &transaction;
-        conn.execute_batch(
-            "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
-             DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
-             DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
-             INSERT INTO session_query_cursor_keys (
-                key_id, key_version, key_material, created_at, retired_at
-             ) VALUES
-                ('cursor-a', 1, X'01', 100, NULL),
-                ('cursor-b', 2, X'02', 200, NULL);",
-        )
-        .await
-        .expect("seed corrupt cursor keys");
-        assert_bounded_and_exhaustive_reject(conn, "session cursor key rotation state is invalid")
-            .await;
-    }
-
-    #[tokio::test]
-    async fn bounded_and_exhaustive_reject_corrupt_session_refresh_rows() {
+    async fn exhaustive_reject_corrupt_session_refresh_rows() {
         let harness = open_db().await;
         let transaction = harness
             .registered
@@ -773,12 +586,11 @@ mod tests {
         )
         .await
         .expect("seed corrupt refresh operation");
-        assert_bounded_and_exhaustive_reject(conn, "session refresh operation state is invalid")
-            .await;
+        assert_exhaustive_reject(conn, "session refresh operation state is invalid").await;
     }
 
     #[tokio::test]
-    async fn bounded_and_exhaustive_reject_corrupt_session_generation_rows() {
+    async fn exhaustive_reject_corrupt_session_generation_rows() {
         let harness = open_db().await;
         let transaction = harness
             .registered
@@ -801,12 +613,11 @@ mod tests {
         )
         .await
         .expect("seed corrupt generations");
-        assert_bounded_and_exhaustive_reject(conn, "session temporal generation state is invalid")
-            .await;
+        assert_exhaustive_reject(conn, "session temporal generation state is invalid").await;
     }
 
     #[tokio::test]
-    async fn bounded_and_exhaustive_reject_corrupt_session_ownership_rows() {
+    async fn exhaustive_reject_corrupt_session_ownership_rows() {
         let harness = open_db().await;
         let transaction = harness
             .registered
@@ -840,11 +651,7 @@ mod tests {
         )
         .await
         .expect("seed corrupt session ownership");
-        assert_bounded_and_exhaustive_reject(
-            conn,
-            "session temporal authority ownership is invalid",
-        )
-        .await;
+        assert_exhaustive_reject(conn, "session temporal authority ownership is invalid").await;
     }
 
     mod authority_cross_checks {

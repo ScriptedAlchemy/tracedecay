@@ -12,15 +12,16 @@ use thiserror::Error;
 use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, ProjectId, RelationEdgeKindV1,
     RepositoryId, SourceFreshness, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphEntity, GraphEntityId, GraphFormatVersion, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphSnapshot, GraphWatermark, NeverCancelled, ProjectionReplacement, SourceGeneration,
-    TraversalRequest,
+    GraphEntity, GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
+    GraphNamespace, GraphProjectionId, GraphProjectionTelemetry, GraphProjectionTelemetryRequest,
+    GraphProperty, GraphPropertyName, GraphPublication, GraphRelation, GraphRelationId,
+    GraphRelationKind, GraphSnapshot, GraphWatermark, GraphWriteBatch, NeverCancelled,
+    SourceGeneration, TraversalRequest,
 };
 
 mod traversal;
@@ -29,6 +30,7 @@ use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, com
 
 const GRAPH_FORMAT_VERSION: u32 = 2;
 const CODE_NAMESPACE: &str = "code-graph";
+const PROJECT_NAMESPACE_PREFIX: &str = "project:";
 const CODE_PROJECTION: &str = "code-generation";
 const CURRENT_GENERATION_ENTITY: &str = "code-current-generation";
 const CURRENT_GENERATION_PROPERTY: &str = "current-generation";
@@ -39,6 +41,7 @@ const SYMBOL_LABEL: &str = "CodeSymbol";
 const EDGE_LABEL: &str = "CodeRelationEvidence";
 const SOURCE_EDGE_KIND: &str = "CodeRelationSource";
 const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
+const GRAPH_PUBLICATION_BATCH_MUTATIONS: usize = 1_024;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -81,29 +84,29 @@ impl From<GraphDbError> for CodeGraphProjectionError {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CodeGraphSymbolBindingV1 {
+pub struct CodeGraphSymbolBinding {
     pub file: FileOccurrenceId,
     pub chunk: Option<CodeSearchChunkId>,
     pub language_descriptor_revision: LanguageDescriptorRevision,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct SymbolRecordV1 {
+struct SymbolRecord {
     occurrence: SymbolOccurrenceId,
-    binding: Option<CodeGraphSymbolBindingV1>,
+    binding: Option<CodeGraphSymbolBinding>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodeGraphPathCandidateV1 {
+pub struct CodeGraphPathCandidate {
     pub target: SymbolOccurrenceId,
-    pub binding: CodeGraphSymbolBindingV1,
+    pub binding: CodeGraphSymbolBinding,
     pub path: Vec<CanonicalRelationEdgeV1>,
     pub weakest_authority: EdgeAuthorityV1,
     pub score_micros: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CodeGraphTraversalCoverageV1 {
+pub struct CodeGraphTraversalCoverage {
     pub examined: u64,
     pub eligible: u64,
     pub excluded: u64,
@@ -111,9 +114,9 @@ pub struct CodeGraphTraversalCoverageV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CodeGraphTraversalBatchV1 {
-    pub candidates: Vec<CodeGraphPathCandidateV1>,
-    pub coverage: CodeGraphTraversalCoverageV1,
+pub struct CodeGraphTraversalBatch {
+    pub candidates: Vec<CodeGraphPathCandidate>,
+    pub coverage: CodeGraphTraversalCoverage,
 }
 
 pub trait CodeGraphProjectionPublisher {
@@ -129,6 +132,7 @@ pub trait CodeGraphProjectionPublisher {
 #[derive(Clone)]
 pub struct CodeGraphProjectionStore {
     database: GraphDb,
+    namespace: GraphNamespace,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -140,6 +144,16 @@ impl fmt::Debug for CodeGraphProjectionStore {
 }
 
 impl CodeGraphProjectionStore {
+    pub fn from_project_database(
+        project_id: &ProjectId,
+        database: GraphDb,
+    ) -> Result<Self, CodeGraphProjectionError> {
+        Ok(Self {
+            database,
+            namespace: project_graph_namespace(project_id)?,
+        })
+    }
+
     pub fn memory(cancellation: &CancellationSignal) -> Result<Self, CodeGraphProjectionError> {
         Self::open_location(
             GraphDbLocation::Memory,
@@ -170,7 +184,10 @@ impl CodeGraphProjectionStore {
             durability,
             cancellation,
         })?;
-        Ok(Self { database })
+        Ok(Self {
+            database,
+            namespace: namespace()?,
+        })
     }
 
     pub fn evidence_reader(
@@ -186,15 +203,18 @@ impl CodeGraphProjectionStore {
         validate_reader_metadata(repository_id.as_ref(), &freshness)?;
         let cancellation = application_cancellation(cancellation);
         let snapshot = Arc::new(self.database.snapshot()?);
-        let current = read_current_generation(&snapshot, Arc::clone(&cancellation))?;
-        if current.generation != *generation {
-            return Err(CodeGraphProjectionError::GenerationMismatch);
-        }
+        let current = read_generation(
+            &snapshot,
+            &self.namespace,
+            generation,
+            Arc::clone(&cancellation),
+        )?;
         Ok(CodeGraphEvidenceReader {
             generation: generation.clone(),
             repository_id,
             freshness,
             snapshot,
+            namespace: self.namespace.clone(),
             projection_node_count: current.projection_node_count,
             cancellation,
         })
@@ -202,6 +222,20 @@ impl CodeGraphProjectionStore {
 
     pub fn close(&self) -> Result<(), CodeGraphProjectionError> {
         self.database.close().map_err(Into::into)
+    }
+
+    pub fn publication_telemetry(
+        &self,
+        generation: &CodeGenerationId,
+        cancellation: &CancellationSignal,
+    ) -> Result<Option<GraphProjectionTelemetry>, CodeGraphProjectionError> {
+        self.database
+            .projection_telemetry(GraphProjectionTelemetryRequest {
+                namespace: self.namespace.clone(),
+                projection: projection(generation)?,
+                cancellation: application_cancellation(cancellation),
+            })
+            .map_err(Into::into)
     }
 
     fn publish_with_cancellation(
@@ -216,13 +250,89 @@ impl CodeGraphProjectionStore {
         }
         let built = build_projection(generation, edges, chunks, Arc::clone(&cancellation))?;
         let watermark = built.watermark.clone();
-        self.database.replace_projection(ProjectionReplacement {
-            namespace: namespace()?,
-            projection: projection()?,
-            source_generation: source_generation(generation)?,
-            next_watermark: built.watermark,
-            entities: built.entities,
-            relations: built.relations,
+        let source_generation = source_generation(generation)?;
+        let projection = projection(generation)?;
+        let activation_identity = generation_entity_id(generation)?;
+        let mut activation = None;
+        let mut mutations =
+            Vec::with_capacity(built.entities.len().saturating_add(built.relations.len()));
+        for entity in built.entities {
+            if entity.identity == activation_identity {
+                activation = Some(GraphMutation::UpsertEntity(entity));
+            } else {
+                mutations.push(GraphMutation::UpsertEntity(entity));
+            }
+        }
+        // Every relation batch follows every entity batch, so a committed
+        // slice never refers to an endpoint that has not reached Grafeo yet.
+        mutations.extend(
+            built
+                .relations
+                .into_iter()
+                .map(GraphMutation::UpsertRelation),
+        );
+
+        let mut expected_watermark = None;
+        for (batch_index, batch_mutations) in mutations
+            .chunks(GRAPH_PUBLICATION_BATCH_MUTATIONS)
+            .enumerate()
+        {
+            if cancellation.is_cancelled() {
+                return Err(CodeGraphProjectionError::Cancelled);
+            }
+            let batch_watermark = GraphWatermark::new(stable_identity(
+                "code-generation-publication-progress",
+                &format!("{}\0{batch_index}", generation.as_str()),
+            ))?;
+            let batch = GraphWriteBatch::new(
+                self.namespace.clone(),
+                projection.clone(),
+                source_generation.clone(),
+                batch_watermark.clone(),
+                batch_mutations.to_vec(),
+                Arc::clone(&cancellation),
+            )?;
+            let commit = self.database.publish(GraphPublication {
+                namespace: self.namespace.clone(),
+                idempotency_key: GraphIdempotencyKey::new(stable_identity(
+                    "code-generation-publication-batch",
+                    &format!("{}\0{batch_index}", generation.as_str()),
+                ))?,
+                source_generation: source_generation.clone(),
+                expected_watermark,
+                next_watermark: batch_watermark,
+                batch,
+                cancellation: Arc::clone(&cancellation),
+            })?;
+            expected_watermark = Some(commit.watermark);
+        }
+
+        // The generation entity is the activation fence and is always the last
+        // bounded transaction. Readers require it, so cancellation or failure
+        // between slices leaves a resumable but invisible partial projection.
+        let activation = activation.ok_or_else(|| {
+            CodeGraphProjectionError::Contract(
+                "code graph projection omitted its generation activation entity".to_owned(),
+            )
+        })?;
+        let activation_batch = GraphWriteBatch::new(
+            self.namespace.clone(),
+            projection.clone(),
+            source_generation.clone(),
+            watermark.clone(),
+            vec![activation],
+            Arc::clone(&cancellation),
+        )?;
+        self.database.publish(GraphPublication {
+            namespace: self.namespace.clone(),
+            idempotency_key: GraphIdempotencyKey::new(stable_identity(
+                "code-generation-publication-activation",
+                generation.as_str(),
+            ))?,
+            source_generation,
+            expected_watermark,
+            next_watermark: watermark.clone(),
+            batch: activation_batch,
             cancellation,
         })?;
         Ok(watermark)
@@ -252,6 +362,7 @@ pub struct CodeGraphEvidenceReader {
     repository_id: Option<RepositoryId>,
     freshness: SourceFreshness,
     snapshot: Arc<GraphSnapshot>,
+    namespace: GraphNamespace,
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
 }
@@ -285,12 +396,18 @@ impl CodeGraphEvidenceReader {
         store.publish_with_cancellation(&generation, edges, chunks, Arc::clone(&cancellation))?;
         validate_reader_metadata(repository_id.as_ref(), &freshness)?;
         let snapshot = Arc::new(store.database.snapshot()?);
-        let current = read_current_generation(&snapshot, Arc::clone(&cancellation))?;
+        let current = read_generation(
+            &snapshot,
+            &store.namespace,
+            &generation,
+            Arc::clone(&cancellation),
+        )?;
         Ok(Self {
             generation,
             repository_id,
             freshness,
             snapshot,
+            namespace: store.namespace.clone(),
             projection_node_count: current.projection_node_count,
             cancellation,
         })
@@ -314,7 +431,7 @@ impl CodeGraphEvidenceReader {
         seed_symbols: &[SymbolOccurrenceId],
         edge_kinds: &[RelationEdgeKindV1],
         max_depth: u32,
-    ) -> Result<CodeGraphTraversalBatchV1, CodeGraphProjectionError> {
+    ) -> Result<CodeGraphTraversalBatch, CodeGraphProjectionError> {
         if generation != &self.generation {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
@@ -327,8 +444,8 @@ impl CodeGraphEvidenceReader {
             ));
         }
         let admitted_kinds: BTreeSet<_> = edge_kinds.iter().copied().collect();
-        let mut best_by_target = BTreeMap::<SymbolOccurrenceId, CodeGraphPathCandidateV1>::new();
-        let mut coverage = CodeGraphTraversalCoverageV1::default();
+        let mut best_by_target = BTreeMap::<SymbolOccurrenceId, CodeGraphPathCandidate>::new();
+        let mut coverage = CodeGraphTraversalCoverage::default();
         for seed in seed_symbols {
             seed.validate()
                 .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
@@ -358,7 +475,7 @@ impl CodeGraphEvidenceReader {
                 .then_with(|| left.target.cmp(&right.target))
         });
         coverage.eligible = candidates.len() as u64;
-        Ok(CodeGraphTraversalBatchV1 {
+        Ok(CodeGraphTraversalBatch {
             candidates,
             coverage,
         })
@@ -379,9 +496,10 @@ impl CodeGraphEvidenceReader {
                 )
             })?;
         let result = self.snapshot.traverse(TraversalRequest {
-            namespace: namespace()?,
-            start: symbol_entity_id(seed)?,
+            namespace: self.namespace.clone(),
+            start: symbol_entity_id(&self.generation, seed)?,
             relation_kinds: BTreeSet::new(),
+            direction: tracedecay_graph_db::GraphTraversalDirection::Outgoing,
             max_depth: graph_depth,
             max_visits: self.projection_node_count,
             max_results: self.projection_node_count,
@@ -394,7 +512,11 @@ impl CodeGraphEvidenceReader {
             }
             let entity = self
                 .snapshot
-                .entity(&namespace()?, &visit.entity, Arc::clone(&self.cancellation))?
+                .entity(
+                    &self.namespace,
+                    &visit.entity,
+                    Arc::clone(&self.cancellation),
+                )?
                 .ok_or_else(|| {
                     CodeGraphProjectionError::Corrupt(
                         "graph traversal referenced a missing edge entity".to_owned(),
@@ -408,7 +530,7 @@ impl CodeGraphEvidenceReader {
             let edge: CanonicalRelationEdgeV1 =
                 deserialize_property(&entity, EDGE_RECORD_PROPERTY)?;
             validate_edge(&edge)?;
-            if edge_entity_id(&edge)? != entity.identity {
+            if edge_entity_id(&self.generation, &edge)? != entity.identity {
                 return Err(CodeGraphProjectionError::Corrupt(
                     "code graph edge identity does not match its payload".to_owned(),
                 ));
@@ -431,8 +553,8 @@ impl CodeGraphEvidenceReader {
         max_depth: u32,
         edge_kinds: &BTreeSet<RelationEdgeKindV1>,
         adjacency: &BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>,
-        coverage: &mut CodeGraphTraversalCoverageV1,
-        best_by_target: &mut BTreeMap<SymbolOccurrenceId, CodeGraphPathCandidateV1>,
+        coverage: &mut CodeGraphTraversalCoverage,
+        best_by_target: &mut BTreeMap<SymbolOccurrenceId, CodeGraphPathCandidate>,
     ) -> Result<(), CodeGraphProjectionError> {
         let mut frontiers = BTreeMap::from([(seed.clone(), vec![FrontierPath::seed()])]);
         let mut depths = BTreeMap::from([(seed.clone(), 0_usize)]);
@@ -504,7 +626,7 @@ impl CodeGraphEvidenceReader {
             let weakest_authority = best.weakest.ok_or_else(|| {
                 CodeGraphProjectionError::Corrupt("code graph emitted an empty path".to_owned())
             })?;
-            let candidate = CodeGraphPathCandidateV1 {
+            let candidate = CodeGraphPathCandidate {
                 target: target.clone(),
                 binding,
                 path: best.segments,
@@ -532,11 +654,11 @@ impl CodeGraphEvidenceReader {
     fn symbol_record(
         &self,
         occurrence: &SymbolOccurrenceId,
-    ) -> Result<Option<SymbolRecordV1>, CodeGraphProjectionError> {
-        let identity = symbol_entity_id(occurrence)?;
+    ) -> Result<Option<SymbolRecord>, CodeGraphProjectionError> {
+        let identity = symbol_entity_id(&self.generation, occurrence)?;
         let Some(entity) =
             self.snapshot
-                .entity(&namespace()?, &identity, Arc::clone(&self.cancellation))?
+                .entity(&self.namespace, &identity, Arc::clone(&self.cancellation))?
         else {
             return Ok(None);
         };
@@ -545,9 +667,11 @@ impl CodeGraphEvidenceReader {
                 "code graph symbol identity has the wrong label".to_owned(),
             ));
         }
-        let record: SymbolRecordV1 = deserialize_property(&entity, SYMBOL_RECORD_PROPERTY)?;
+        let record: SymbolRecord = deserialize_property(&entity, SYMBOL_RECORD_PROPERTY)?;
         validate_symbol_record(&record)?;
-        if record.occurrence != *occurrence || symbol_entity_id(&record.occurrence)? != identity {
+        if record.occurrence != *occurrence
+            || symbol_entity_id(&self.generation, &record.occurrence)? != identity
+        {
             return Err(CodeGraphProjectionError::Corrupt(
                 "code graph symbol identity does not match its payload".to_owned(),
             ));
@@ -571,7 +695,7 @@ fn build_projection(
     generation
         .validate()
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-    let mut bindings = BTreeMap::<SymbolOccurrenceId, CodeGraphSymbolBindingV1>::new();
+    let mut bindings = BTreeMap::<SymbolOccurrenceId, CodeGraphSymbolBinding>::new();
     for chunk in chunks {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
@@ -585,7 +709,7 @@ fn build_projection(
         let Some(symbol) = chunk.anchor.symbol_occurrence_id.clone() else {
             continue;
         };
-        let candidate = CodeGraphSymbolBindingV1 {
+        let candidate = CodeGraphSymbolBinding {
             file: chunk.anchor.file_occurrence_id.clone(),
             chunk: Some(chunk.id.clone()),
             language_descriptor_revision: chunk.language_descriptor_revision.clone(),
@@ -630,48 +754,47 @@ fn build_projection(
     }
     let mut entities = Vec::with_capacity(occurrences.len() + retained_edges.len() + 1);
     for occurrence in occurrences {
-        let record = SymbolRecordV1 {
+        let record = SymbolRecord {
             binding: bindings.get(&occurrence).cloned(),
             occurrence,
         };
-        entities.push(symbol_entity(record)?);
+        entities.push(symbol_entity(generation, record)?);
     }
     for edge in &retained_edges {
-        entities.push(edge_entity(edge)?);
+        entities.push(edge_entity(generation, edge)?);
     }
     let projection_node_count = entities.len().checked_add(1).ok_or_else(|| {
         CodeGraphProjectionError::Contract("code graph projection node count overflowed".to_owned())
     })?;
-    entities.push(current_generation_entity(
-        generation,
-        projection_node_count,
-    )?);
+    entities.push(generation_entity(generation, projection_node_count)?);
 
     let mut relations = Vec::with_capacity(retained_edges.len().saturating_mul(2));
     for edge in retained_edges {
-        relations.push(source_relation(&edge)?);
-        relations.push(target_relation(&edge)?);
+        relations.push(source_relation(generation, &edge)?);
+        relations.push(target_relation(generation, &edge)?);
     }
     Ok(BuiltProjection {
-        watermark: GraphWatermark::new(stable_identity("watermark", generation.as_str()))?,
+        watermark: code_generation_watermark(generation)?,
         entities,
         relations,
     })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct CurrentGenerationV1 {
+struct CurrentGeneration {
     generation: CodeGenerationId,
     projection_node_count: usize,
 }
 
-fn read_current_generation(
+fn read_generation(
     snapshot: &GraphSnapshot,
+    namespace: &GraphNamespace,
+    expected_generation: &CodeGenerationId,
     cancellation: Arc<dyn GraphCancellation>,
-) -> Result<CurrentGenerationV1, CodeGraphProjectionError> {
-    let identity = GraphEntityId::new(CURRENT_GENERATION_ENTITY)?;
+) -> Result<CurrentGeneration, CodeGraphProjectionError> {
+    let identity = generation_entity_id(expected_generation)?;
     let entity = snapshot
-        .entity(&namespace()?, &identity, cancellation)?
+        .entity(namespace, &identity, cancellation)?
         .ok_or_else(|| {
             CodeGraphProjectionError::Unavailable(
                 "code graph generation is not published".to_owned(),
@@ -690,19 +813,25 @@ fn read_current_generation(
             "code graph projection node count is zero".to_owned(),
         ));
     }
-    Ok(CurrentGenerationV1 {
-        generation: CodeGenerationId::new(generation)
-            .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?,
+    let generation = CodeGenerationId::new(generation)
+        .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))?;
+    if generation != *expected_generation {
+        return Err(CodeGraphProjectionError::Corrupt(
+            "code graph generation identity does not match its payload".to_owned(),
+        ));
+    }
+    Ok(CurrentGeneration {
+        generation,
         projection_node_count,
     })
 }
 
-fn current_generation_entity(
+fn generation_entity(
     generation: &CodeGenerationId,
     projection_node_count: usize,
 ) -> Result<GraphEntity, CodeGraphProjectionError> {
     GraphEntity::new(
-        GraphEntityId::new(CURRENT_GENERATION_ENTITY)?,
+        generation_entity_id(generation)?,
         BTreeSet::new(),
         BTreeMap::from([
             (
@@ -718,10 +847,13 @@ fn current_generation_entity(
     .map_err(Into::into)
 }
 
-fn symbol_entity(record: SymbolRecordV1) -> Result<GraphEntity, CodeGraphProjectionError> {
+fn symbol_entity(
+    generation: &CodeGenerationId,
+    record: SymbolRecord,
+) -> Result<GraphEntity, CodeGraphProjectionError> {
     validate_symbol_record(&record)?;
     GraphEntity::new(
-        symbol_entity_id(&record.occurrence)?,
+        symbol_entity_id(generation, &record.occurrence)?,
         BTreeSet::from([GraphLabel::new(SYMBOL_LABEL)?]),
         BTreeMap::from([(
             GraphPropertyName::new(SYMBOL_RECORD_PROPERTY)?,
@@ -731,9 +863,12 @@ fn symbol_entity(record: SymbolRecordV1) -> Result<GraphEntity, CodeGraphProject
     .map_err(Into::into)
 }
 
-fn edge_entity(edge: &CanonicalRelationEdgeV1) -> Result<GraphEntity, CodeGraphProjectionError> {
+fn edge_entity(
+    generation: &CodeGenerationId,
+    edge: &CanonicalRelationEdgeV1,
+) -> Result<GraphEntity, CodeGraphProjectionError> {
     GraphEntity::new(
-        edge_entity_id(edge)?,
+        edge_entity_id(generation, edge)?,
         BTreeSet::from([GraphLabel::new(EDGE_LABEL)?]),
         BTreeMap::from([(
             GraphPropertyName::new(EDGE_RECORD_PROPERTY)?,
@@ -744,12 +879,13 @@ fn edge_entity(edge: &CanonicalRelationEdgeV1) -> Result<GraphEntity, CodeGraphP
 }
 
 fn source_relation(
+    generation: &CodeGenerationId,
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphRelation, CodeGraphProjectionError> {
     GraphRelation::new(
-        relation_id("source", edge)?,
-        symbol_entity_id(&edge.from_occurrence)?,
-        edge_entity_id(edge)?,
+        relation_id(generation, "source", edge)?,
+        symbol_entity_id(generation, &edge.from_occurrence)?,
+        edge_entity_id(generation, edge)?,
         GraphRelationKind::new(SOURCE_EDGE_KIND)?,
         BTreeMap::new(),
     )
@@ -757,12 +893,13 @@ fn source_relation(
 }
 
 fn target_relation(
+    generation: &CodeGenerationId,
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphRelation, CodeGraphProjectionError> {
     GraphRelation::new(
-        relation_id("target", edge)?,
-        edge_entity_id(edge)?,
-        symbol_entity_id(&edge.to_occurrence)?,
+        relation_id(generation, "target", edge)?,
+        edge_entity_id(generation, edge)?,
+        symbol_entity_id(generation, &edge.to_occurrence)?,
         GraphRelationKind::new(TARGET_EDGE_KIND)?,
         BTreeMap::new(),
     )
@@ -770,22 +907,61 @@ fn target_relation(
 }
 
 fn symbol_entity_id(
+    generation: &CodeGenerationId,
     occurrence: &SymbolOccurrenceId,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
-    GraphEntityId::new(stable_identity("symbol", occurrence.as_str())).map_err(Into::into)
+    GraphEntityId::new(stable_generation_identity(
+        "symbol",
+        generation,
+        occurrence.as_str(),
+    ))
+    .map_err(Into::into)
 }
 
 fn edge_entity_id(
+    generation: &CodeGenerationId,
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
-    GraphEntityId::new(stable_identity("edge", &hex::encode(serialize(edge)?))).map_err(Into::into)
+    GraphEntityId::new(stable_generation_identity(
+        "edge",
+        generation,
+        &hex::encode(serialize(edge)?),
+    ))
+    .map_err(Into::into)
 }
 
 fn relation_id(
+    generation: &CodeGenerationId,
     role: &str,
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphRelationId, CodeGraphProjectionError> {
-    GraphRelationId::new(stable_identity(role, edge_entity_id(edge)?.as_str())).map_err(Into::into)
+    GraphRelationId::new(stable_generation_identity(
+        role,
+        generation,
+        edge_entity_id(generation, edge)?.as_str(),
+    ))
+    .map_err(Into::into)
+}
+
+pub fn code_generation_entity_id(
+    generation: &CodeGenerationId,
+) -> Result<GraphEntityId, CodeGraphProjectionError> {
+    GraphEntityId::new(stable_generation_identity(
+        CURRENT_GENERATION_ENTITY,
+        generation,
+        generation.as_str(),
+    ))
+    .map_err(Into::into)
+}
+
+fn generation_entity_id(
+    generation: &CodeGenerationId,
+) -> Result<GraphEntityId, CodeGraphProjectionError> {
+    code_generation_entity_id(generation)
+}
+
+fn stable_generation_identity(kind: &str, generation: &CodeGenerationId, value: &str) -> String {
+    stable_identity(kind, &format!("{}\0{value}", generation.as_str()))
 }
 
 fn stable_identity(kind: &str, value: &str) -> String {
@@ -800,8 +976,34 @@ fn namespace() -> Result<GraphNamespace, CodeGraphProjectionError> {
     GraphNamespace::new(CODE_NAMESPACE).map_err(Into::into)
 }
 
-fn projection() -> Result<GraphProjectionId, CodeGraphProjectionError> {
-    GraphProjectionId::new(CODE_PROJECTION).map_err(Into::into)
+pub fn project_graph_namespace(
+    project_id: &ProjectId,
+) -> Result<GraphNamespace, CodeGraphProjectionError> {
+    GraphNamespace::new(format!("{PROJECT_NAMESPACE_PREFIX}{}", project_id.as_str()))
+        .map_err(Into::into)
+}
+
+fn projection(
+    generation: &CodeGenerationId,
+) -> Result<GraphProjectionId, CodeGraphProjectionError> {
+    code_generation_projection_id(generation)
+}
+
+pub fn code_generation_projection_id(
+    generation: &CodeGenerationId,
+) -> Result<GraphProjectionId, CodeGraphProjectionError> {
+    GraphProjectionId::new(stable_generation_identity(
+        CODE_PROJECTION,
+        generation,
+        generation.as_str(),
+    ))
+    .map_err(Into::into)
+}
+
+pub fn code_generation_watermark(
+    generation: &CodeGenerationId,
+) -> Result<GraphWatermark, CodeGraphProjectionError> {
+    GraphWatermark::new(stable_identity("watermark", generation.as_str())).map_err(Into::into)
 }
 
 fn source_generation(
@@ -878,7 +1080,7 @@ fn validate_reader_metadata(
         .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
 }
 
-fn validate_symbol_record(record: &SymbolRecordV1) -> Result<(), CodeGraphProjectionError> {
+fn validate_symbol_record(record: &SymbolRecord) -> Result<(), CodeGraphProjectionError> {
     record
         .occurrence
         .validate()

@@ -14,8 +14,7 @@
 # It is strictly read-only:
 #   - the suite handshakes with allow_init=false, so it never creates a store;
 #   - only read tools are dispatched (no fact_store, no edits, no init, no
-#     ingest); tracedecay_memory_status is excluded by default because it
-#     repairs derived vectors;
+#     ingest); tracedecay_memory_status is a pure authority read;
 #   - the daemon is never started, stopped, restarted, or signalled. This
 #     script must never call systemctl or `tracedecay daemon stop/restart`.
 #
@@ -31,8 +30,6 @@
 #                                               (default: repo root)
 #   TRACEDECAY_LIVE_DAEMON_SYMBOL               symbol for the search/callers probe
 #   TRACEDECAY_LIVE_DAEMON_PATTERN              literal for the grep probe
-#   TRACEDECAY_LIVE_DAEMON_ALLOW_MEMORY_STATUS  set to 1 to include the
-#                                               repairing memory_status probe
 #
 # Exit status: 0 when every row passes, 1 otherwise.
 

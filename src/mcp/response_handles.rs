@@ -617,6 +617,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Database { .. } | TraceDecayError::DatabaseOperation { .. } => "database",
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
+        TraceDecayError::ResetRequired { .. } => "reset_required",
         TraceDecayError::ProjectRoute { .. } => "project_route",
         TraceDecayError::McpToolDispatch { .. } => "mcp_tool_dispatch",
         TraceDecayError::SyncLock { .. } => "sync_lock",

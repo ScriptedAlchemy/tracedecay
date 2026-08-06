@@ -432,7 +432,7 @@ async fn test_search_returns_index_coverage_hint_for_skipped_generated_dirs() {
 }
 
 #[tokio::test]
-async fn test_search_lazy_indexes_ignored_dependency_candidates() {
+async fn test_search_miss_does_not_lazy_index_ignored_dependencies() {
     let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -468,20 +468,24 @@ export const value = 1;
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(
-        payload["lazy_indexed_ignored_dependency_files"][0].as_str(),
-        Some("node_modules/pkg/index.d.ts")
+    let db = cg.open_project_store_db().await.unwrap();
+    assert!(
+        db.get_file("node_modules/pkg/index.d.ts")
+            .await
+            .unwrap()
+            .is_none(),
+        "{payload}"
     );
-    assert!(payload["results"].as_array().is_some_and(|results| {
-        results.iter().any(|result| {
-            result["name"].as_str() == Some("Foo")
-                && result["file"].as_str() == Some("node_modules/pkg/index.d.ts")
-        })
-    }));
+    assert!(
+        payload
+            .get("lazy_indexed_ignored_dependency_files")
+            .is_none()
+    );
+    assert!(payload["results"].as_array().is_some_and(Vec::is_empty));
 }
 
 #[tokio::test]
-async fn test_find_exact_symbol_lazy_indexes_ignored_dependency_candidate() {
+async fn test_find_exact_symbol_miss_does_not_lazy_index_ignored_dependency() {
     let dir = test_temp_dir();
     let project = dir.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -523,27 +527,13 @@ export const value = 1;
         .await
         .unwrap()
         .is_some();
-    assert!(indexed_file, "{payload}");
-    assert_eq!(payload["count"].as_u64(), Some(1), "{payload}");
-    assert_eq!(
-        payload["matches"][0]["file"].as_str(),
-        Some("node_modules/pkg/index.d.ts")
-    );
-
-    let body = handle_tool_call(
-        &cg,
-        "tracedecay_body",
-        json!({"symbol": "Foo", "limit": 5, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&body.value)).unwrap();
-    assert_eq!(payload["match_count"].as_u64(), Some(1));
-    assert_eq!(
-        payload["matches"][0]["body"].as_str(),
-        Some("export interface Foo { value: string }")
+    assert!(!indexed_file, "{payload}");
+    assert_eq!(payload["count"].as_u64(), Some(0), "{payload}");
+    assert!(payload["matches"].as_array().is_some_and(Vec::is_empty));
+    assert!(
+        payload
+            .get("lazy_indexed_ignored_dependency_files")
+            .is_none()
     );
 }
 

@@ -1107,7 +1107,12 @@ async fn memory_feedback_and_status_include_trust_fields() {
     .await
     .unwrap();
     let helpful: Value = serde_json::from_str(extract_text(&helpful.value)).unwrap();
-    assert!(helpful["feedback"]["event_id"].as_i64().unwrap() > 0);
+    assert!(
+        helpful["feedback"]["result_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("fact-event.v1.")),
+        "feedback returns the canonical typed result identity: {helpful}"
+    );
     assert_eq!(helpful["feedback"]["fact_id"], fact_id);
     assert_eq!(helpful["feedback"]["action"], "helpful");
     assert_eq!(helpful["feedback"]["old_trust"], 0.5);
@@ -1146,10 +1151,20 @@ async fn memory_feedback_and_status_include_trust_fields() {
     let fetched: Value = serde_json::from_str(extract_text(&fetched.value)).unwrap();
     assert_eq!(fetched["action"], "get");
     assert_eq!(fetched["fact"]["fact_id"], fact_id);
+    assert!(
+        fetched.get("trust_history_availability").is_none(),
+        "canonical feedback history has no legacy repair availability: {fetched}"
+    );
     let trust_history = fetched["trust_history"]
         .as_array()
         .unwrap_or_else(|| panic!("expected trust_history array: {fetched}"));
     assert_eq!(trust_history.len(), 2);
+    assert!(
+        trust_history.iter().all(|entry| entry["result_id"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("fact-event.v1."))),
+        "trust history returns canonical typed result identities: {fetched}"
+    );
     assert_eq!(trust_history[0]["action"], "helpful");
     assert_eq!(trust_history[0]["note"], "matched");
     assert_eq!(trust_history[1]["action"], "unhelpful");
@@ -1175,6 +1190,10 @@ async fn memory_feedback_and_status_include_trust_fields() {
         .unwrap();
     let status: Value = serde_json::from_str(extract_text(&status.value)).unwrap();
     assert_eq!(status["status"], "ok");
+    assert!(
+        status.get("feedback_history_repair").is_none(),
+        "status must not expose legacy feedback-history repair: {status}"
+    );
     assert!(status["memory"]["fact_count"].as_u64().unwrap() >= 1);
     assert!(status["memory"].get("trust_0_025_count").is_some());
     assert!(status["memory"].get("trust_025_050_count").is_some());
@@ -1186,7 +1205,7 @@ async fn memory_feedback_and_status_include_trust_fields() {
 }
 
 #[tokio::test]
-async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
+async fn memory_fact_store_remains_project_wide_across_branch_selectors() {
     fn git(project: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)
@@ -1221,10 +1240,10 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
     index_all_retrying_sync_lock(&cg).await;
     git(&project, &["checkout", "-b", "feature"]);
     let cg = TestTraceDecay::new(TraceDecay::open(&project).await.unwrap());
-    assert_ne!(
+    assert_eq!(
         cg.db_path(),
         cg.store_layout().graph_db_path,
-        "test must serve a branch DB distinct from the shared project store"
+        "branch selection must retain the shared project store"
     );
 
     let added = handle_tool_call(
@@ -1247,32 +1266,9 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
         .as_i64()
         .expect("fact_store add should return numeric id");
 
-    let (branch_db, _) = crate::common::open_test_database(&cg.db_path())
-        .await
-        .unwrap();
-    let branch_writer = branch_db.memory_writer().await.unwrap();
     assert!(
-        branch_writer
-            .store()
-            .get_fact(fact_id)
-            .await
-            .unwrap()
-            .is_none(),
-        "MCP memory writes must not be scoped to the branch graph DB"
-    );
-
-    let (project_db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
-        .await
-        .unwrap();
-    let project_writer = project_db.memory_writer().await.unwrap();
-    assert!(
-        project_writer
-            .store()
-            .get_fact(fact_id)
-            .await
-            .unwrap()
-            .is_some(),
-        "MCP memory writes must land in the shared project memory store"
+        cg.get_fact(fact_id).await.unwrap().is_some(),
+        "MCP memory writes must remain visible through the branch selector"
     );
 }
 

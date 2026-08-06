@@ -84,7 +84,6 @@ function memoryStatus(memory: Record<string, unknown> = {}) {
     error: '',
     largest_bank_fact_count: 0,
     largest_bank_utilization_pct: 0,
-    feedback_history_repair: { state: 'not_required', processed: 0, remaining: null },
     memory: {
       algebra_name: 'amari_fhrr',
       bank_count: 0,

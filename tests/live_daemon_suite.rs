@@ -21,11 +21,9 @@
 //! * the only child process it spawns is a short-lived `tracedecay serve`
 //!   stdio proxy, which it kills itself.
 //!
-//! `tracedecay_memory_status` is deliberately **not** in the default battery:
-//! its handler calls `memory_status_with_repair_v1()`, which repairs derived
-//! holographic vectors and is therefore a write. It is available behind
-//! `TRACEDECAY_LIVE_DAEMON_ALLOW_MEMORY_STATUS=1` for operators who accept
-//! that repair pass.
+//! `tracedecay_memory_status` is included in the default battery because status
+//! is a pure authority read. Derived-memory repair remains daemon-owned and is
+//! never triggered by this suite.
 //!
 //! Operator entry point: `scripts/live-daemon-check.sh`.
 //!
@@ -47,7 +45,6 @@
 //! | `TRACEDECAY_LIVE_DAEMON_SYMBOL` | symbol name for the search/callers probe |
 //! | `TRACEDECAY_LIVE_DAEMON_PATTERN` | literal pattern for the grep probe |
 //! | `TRACEDECAY_BIN` | installed binary to cross-check (default: `tracedecay` on `PATH`) |
-//! | `TRACEDECAY_LIVE_DAEMON_ALLOW_MEMORY_STATUS` | opt in to the repairing `memory_status` probe |
 
 // The suite drives a Unix domain socket and a stdio proxy; there is no
 // Windows-side equivalent to assert against.
@@ -143,10 +140,6 @@ fn installed_binary() -> PathBuf {
     std::env::var_os("TRACEDECAY_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("tracedecay"))
-}
-
-fn memory_status_allowed() -> bool {
-    std::env::var("TRACEDECAY_LIVE_DAEMON_ALLOW_MEMORY_STATUS").as_deref() == Ok("1")
 }
 
 /// Read-only handshake for the live project.
@@ -336,21 +329,14 @@ async fn run_read_battery(handshake: &DaemonHandshake) -> Vec<TimedCall> {
         .await,
     );
 
-    if memory_status_allowed() {
-        calls.push(
-            read_tool(
-                handshake,
-                "tracedecay_memory_status",
-                json!({ "format": "json" }),
-            )
-            .await,
-        );
-    } else {
-        eprintln!(
-            "note: skipping tracedecay_memory_status (it repairs derived vectors); \
-             set TRACEDECAY_LIVE_DAEMON_ALLOW_MEMORY_STATUS=1 to include it"
-        );
-    }
+    calls.push(
+        read_tool(
+            handshake,
+            "tracedecay_memory_status",
+            json!({ "format": "json" }),
+        )
+        .await,
+    );
 
     calls
 }
@@ -717,14 +703,12 @@ async fn live_daemon_read_battery_returns_typed_payloads() {
         "tracedecay_git_status returned an empty payload: {git}"
     );
 
-    if memory_status_allowed() {
-        let memory = &call(&calls, "tracedecay_memory_status").payload;
-        assert_eq!(
-            memory.get("status").and_then(Value::as_str),
-            Some("ok"),
-            "tracedecay_memory_status did not report ok: {memory}"
-        );
-    }
+    let memory = &call(&calls, "tracedecay_memory_status").payload;
+    assert_eq!(
+        memory.get("status").and_then(Value::as_str),
+        Some("ok"),
+        "tracedecay_memory_status did not report ok: {memory}"
+    );
 }
 
 /// (4) Every read stays inside its latency budget.

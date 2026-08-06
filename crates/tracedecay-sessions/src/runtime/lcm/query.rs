@@ -394,10 +394,8 @@ fn slice_summary_sources(
         .collect()
 }
 
-/// Pages a summary node's immediate source list with hermes-lcm `lcm_expand`
-/// cursor semantics: the offset clamps to the source count, an omitted limit
-/// returns all remaining sources, and `next_source_offset` is the resume
-/// cursor while more sources remain.
+/// Pages a summary node's immediate source list for the authenticated
+/// continuation adapter. Numeric offsets remain internal to rendering.
 fn paginate_summary_sources(
     sources: Vec<LcmExpandedSummarySource>,
     source_offset: usize,
@@ -415,11 +413,8 @@ fn paginate_summary_sources(
     let consumed = source_offset.saturating_add(source_limit);
     let has_more = consumed < total_sources;
     let pagination = LcmExpandSourcePagination {
-        source_offset,
-        source_limit,
         returned_sources: page.len(),
         total_sources,
-        next_source_offset: has_more.then_some(consumed),
         has_more,
         remaining_sources: if has_more {
             total_sources - consumed
@@ -1015,7 +1010,20 @@ mod tests {
             paginate_summary_sources(vec![summary_source(1), summary_source(2)], 0, Some(0));
 
         assert_eq!(page.len(), 1);
-        assert_eq!(pagination.next_source_offset, Some(1));
+        assert_eq!(pagination.returned_sources, 1);
+        assert_eq!(pagination.remaining_sources, 1);
         assert!(pagination.has_more);
+    }
+
+    #[test]
+    fn wire_expand_request_rejects_numeric_source_pagination() {
+        let request = serde_json::json!({
+            "provider": "cursor",
+            "session_id": "session-1",
+            "target": {"kind": "summary_node", "node_id": "summary-1"},
+            "source_offset": 1
+        });
+
+        assert!(serde_json::from_value::<LcmExpandRequest>(request).is_err());
     }
 }

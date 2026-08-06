@@ -147,11 +147,11 @@ Every product surface can run the same bounded query use case and receive determ
   logical-copy, summary-DAG, current, as-of, evolution, and forensic requests
   over current-project/single-root scope. Native rows remain addressable;
   representative views report hidden and unknown counts.
-- **PR9 — extraction gate:** before adding the lexical surface, decide the
-  `tracedecay-query` extraction with the Plan 19 evidence (reuse across the
-  PR8 temporal kernel and this slice; same-host compile-graph measurement).
-  Either outcome, PR9 code lands against the same typed-request/port contract
-  the PR8 kernel modules already enforce — location changes, contracts do not.
+- **Query ownership:** keep the shared typed-request/port contract independent
+  of its physical module location. Extract a maintained `tracedecay-query`
+  crate only when measured reuse and compile-boundary evidence justify it;
+  either location implements the same production contract and is accepted by
+  direct behavior, not a separate extraction gate.
 - **PR9 — lexical code:** add exact identifier, phrase, token, field, bounded
   fuzzy, relation, path, impact, affected-test, facet, and timeline requests.
   Preserve a non-demotable exact tier for identifiers, paths, quoted phrases,
@@ -252,5 +252,5 @@ Every product surface can run the same bounded query use case and receive determ
 - Benchmarks record corpus and watermark with p50/p95, candidate counts, allocations, peak RSS, shard opens, and quality deltas. No ranking change ships without direct held-out evidence and worst-stratum checks.
 - Boundary regressions reject storage, transport, UI, policy, task-executor,
   and model-runtime authority in the query kernel, plus any LSP-private query
-  engine or fallback. The gate follows the current owner boundary whether the
+  engine or fallback. They exercise the current owner boundary whether the
   implementation remains a module or is extracted into a crate.

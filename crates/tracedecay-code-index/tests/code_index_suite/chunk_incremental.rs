@@ -8,7 +8,7 @@ use tracedecay_code_index::incremental::{
     ChunkIncrementErrorV1, GenerationChunkManifestV1, materialize_generation_increment,
     plan_chunk_increment,
 };
-use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecord};
 use tracedecay_domain::{
     BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1, CodeSearchDocumentV1,
@@ -237,7 +237,7 @@ fn carry_forward_execution_rematerializes_chunks_and_preserves_lineage_continuit
                 .anchor
                 .symbol_occurrence_id
                 .as_ref()
-                .map(|occurrence| LineageSymbolRecordV1 {
+                .map(|occurrence| LineageSymbolRecord {
                     occurrence: occurrence.clone(),
                     identity: id::<SymbolIdentityDigest>(&format!(
                         "sha256:{}",

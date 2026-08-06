@@ -52,6 +52,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
             let made_progress = report.begun > 0
                 || report.projected_batches > 0
+                || report.relation_publications > 0
                 || report.completed > 0
                 || report.failed > 0
                 || report.cancelled > 0;
@@ -74,6 +75,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     || report.begun > 0
                     || report.saturated
                     || report.projected_batches > 0
+                    || report.relation_publications > 0
                 {
                     state.dirty.store(true, Ordering::Release);
                     tokio::task::yield_now().await;
@@ -418,6 +420,18 @@ pub(super) async fn run_session_temporal_refresh_pass(
     let mut report = SessionTemporalRefreshPassReport::default();
     if state.cancelled.load(Ordering::Acquire) {
         return report;
+    }
+    match database
+        .recover_lcm_relation_publications(policy.max_operations_per_pass.max(1))
+        .await
+    {
+        Ok(recovered) => report.relation_publications = recovered,
+        Err(error) => {
+            report.retryable_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
+            report.last_error = Some(error.to_string());
+            return report;
+        }
     }
     process_refresh_begin_requests(
         &store,

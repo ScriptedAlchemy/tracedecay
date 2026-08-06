@@ -28,15 +28,16 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
-    ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessVectorDigest, ManifestDigest,
-    PrincipalId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId,
-    RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure, RetrievalRequest, RetrievalScope,
-    RetrievalSnapshot, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SourceOccurrenceId,
-    SymbolOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, canonical_sha256,
+    ExactAdmissionRuleRevision, FileOccurrenceId, FreshnessVectorDigest, GitGraphEvidenceTarget,
+    GitOidV1, ManifestDigest, PrincipalId, ProjectId, QueryNormalizationRevision,
+    RelationEdgeKindV1, RetrievalAnchorId, RetrievalBudget, RetrievalBudgetUsage, RetrievalFailure,
+    RetrievalRequest, RetrievalScope, RetrievalSnapshot, SanitizerRevision, ScoreDomainId,
+    SingleRootScopeV1, SourceOccurrenceId, SymbolOccurrenceId, TemporalModeV1, UtcMicros,
+    VectorWatermark, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 
-use super::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
+use super::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndex};
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest, ExactLaneRetriever,
@@ -49,7 +50,7 @@ use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceR
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSymbolRecordV1, PreparedQueryBindingsV1, PreparedQueryErrorV1,
+    NativeSymbolRecord, PreparedQueryBindingsV1, PreparedQueryErrorV1,
     PreparedQueryRoutingBindingsV1, PreparedQueryV1, QueryExecutionContractErrorV1,
     route_authenticated_prepared_query_cursor,
 };
@@ -204,7 +205,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
         generation_id: &CodeGenerationId,
-    ) -> Option<LatestCompleteCodeIndexV1> {
+    ) -> Option<LatestCompleteCodeIndex> {
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             let mut matched = None;
@@ -252,6 +253,144 @@ impl CodeIndexSchedulerRegistryV1 {
         .flatten()
     }
 
+    /// Load one immutable generation through the mounted authority for exactly
+    /// one project. Historical ref reads deliberately do not require the
+    /// generation's worktree/ref identity to equal the current route: the
+    /// current route authorizes the project, while the sealed generation
+    /// remains authoritative for its own snapshot provenance.
+    pub(in crate::daemon) async fn generation_for_project_generation(
+        &self,
+        project_id: &ProjectId,
+        generation_id: &CodeGenerationId,
+    ) -> Option<LatestCompleteCodeIndex> {
+        let schedulers = {
+            let mounted = self.mounted.lock().await;
+            let mut schedulers = Vec::new();
+            for worktree in mounted
+                .values()
+                .filter(|worktree| &worktree.project_id == project_id)
+            {
+                if !schedulers
+                    .iter()
+                    .any(|candidate| std::sync::Arc::ptr_eq(candidate, &worktree.scheduler))
+                {
+                    schedulers.push(std::sync::Arc::clone(&worktree.scheduler));
+                }
+            }
+            schedulers
+        };
+        let generation_id = generation_id.clone();
+        crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
+            let mut resolved = None;
+            for scheduler in schedulers {
+                let scheduler = scheduler
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(generation) = scheduler.generation(&generation_id).ok().flatten() else {
+                    continue;
+                };
+                if let Some(existing) = resolved.as_ref()
+                    && existing.generation().manifest().snapshot_digest
+                        != generation.generation().manifest().snapshot_digest
+                {
+                    return None;
+                }
+                resolved = Some(generation);
+            }
+            resolved
+        }))
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Resolve the latest sealed generation explicitly evidenced by one commit
+    /// in this project's Grafeo namespace.
+    ///
+    /// Git evidence and generation loading are both project-scoped. A commit
+    /// with evidence in another project, or evidence for an unavailable
+    /// generation, therefore fails closed instead of aliasing the active
+    /// project's current generation.
+    pub(in crate::daemon) async fn generation_for_project_commit(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &tracedecay_domain::RepositoryId,
+        commit: &GitOidV1,
+    ) -> Option<LatestCompleteCodeIndex> {
+        let graph_database = {
+            let mounted = self.mounted.lock().await;
+            let mut database = None;
+            for worktree in mounted
+                .values()
+                .filter(|worktree| &worktree.project_id == project_id)
+            {
+                match database.as_ref() {
+                    Some(existing)
+                        if !std::sync::Arc::ptr_eq(existing, &worktree.graph_database) =>
+                    {
+                        return None;
+                    }
+                    Some(_) => {}
+                    None => database = Some(std::sync::Arc::clone(&worktree.graph_database)),
+                }
+            }
+            database?
+        };
+        let evidence_project = project_id.clone();
+        let evidence_commit = commit.clone();
+        let generation_ids =
+            crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
+                crate::graph::git::GitTopologyStore::new(graph_database)
+                    .evidence_for(&evidence_project, &evidence_commit)
+                    .ok()
+                    .map(|targets| {
+                        targets
+                            .into_iter()
+                            .filter_map(|target| match target {
+                                GitGraphEvidenceTarget::CodeGeneration(generation) => {
+                                    Some(generation)
+                                }
+                                GitGraphEvidenceTarget::Session(_)
+                                | GitGraphEvidenceTarget::Work(_) => None,
+                            })
+                            .collect::<BTreeSet<_>>()
+                    })
+            }))
+            .await
+            .ok()
+            .flatten()?;
+
+        let mut resolved = Vec::new();
+        for generation_id in generation_ids {
+            let Some(generation) = self
+                .generation_for_project_generation(project_id, &generation_id)
+                .await
+            else {
+                continue;
+            };
+            if generation
+                .generation()
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .is_some_and(|revision| revision.as_str() == commit.as_str())
+                && &generation.generation().snapshot().repository == repository_id
+            {
+                resolved.push(generation);
+            }
+        }
+        resolved.into_iter().max_by(|left, right| {
+            (
+                left.generation().manifest().seal.sealed_at,
+                &left.generation().manifest().generation_id,
+            )
+                .cmp(&(
+                    right.generation().manifest().seal.sealed_at,
+                    &right.generation().manifest().generation_id,
+                ))
+        })
+    }
+
     /// Resolve the generation a callable-code query serves.
     ///
     /// An explicit, caller-pinned generation is matched exactly and served
@@ -269,7 +408,7 @@ impl CodeIndexSchedulerRegistryV1 {
         page: &tracedecay_application::PageRequest,
         authority: &tracedecay_query::retrieval::QueryAuthorityV1,
         routing: &PreparedQueryRoutingBindingsV1,
-    ) -> Result<LatestCompleteCodeIndexV1, CallableCodeCursorError> {
+    ) -> Result<LatestCompleteCodeIndex, CallableCodeCursorError> {
         let wait = remaining_generation_resolution_wait(request)
             .ok_or(CallableCodeCursorError::Unavailable)?;
         let resolution = async {
@@ -401,7 +540,7 @@ fn reject_unresolved_cursor<T>(
 
 fn base_request(
     context: &RetrievalPortContext<'_>,
-    latest: &LatestCompleteCodeIndexV1,
+    latest: &LatestCompleteCodeIndex,
     temporal_mode: TemporalModeV1,
     profile: &tracedecay_domain::FusionProfile,
 ) -> Result<RetrievalRequest, String> {
@@ -587,7 +726,7 @@ fn path_is_in_code_query_scope(path: &str, scope: &tracedecay_application::CodeQ
 /// once per retrieval candidate, making each serving lane
 /// `O(candidates x records)`. Building the whole index costs a single
 /// `O(files + chunks + symbols + edges)` pass, and
-/// [`LatestCompleteCodeIndexV1::record_index`] memoizes it per generation so
+/// [`LatestCompleteCodeIndex::record_index`] memoizes it per generation so
 /// concurrent queries share one build.
 ///
 /// Equivalence rule: `Iterator::find` returns the *first* match, so duplicate
@@ -711,7 +850,7 @@ impl GenerationRecordIndexV1 {
 }
 
 struct LatestCompleteNativeRecordReadPortV1<'a> {
-    latest: &'a LatestCompleteCodeIndexV1,
+    latest: &'a LatestCompleteCodeIndex,
 }
 
 impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
@@ -781,7 +920,7 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         &self,
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
-    ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
+    ) -> Result<NativeSymbolRecord, QueryExecutionContractErrorV1> {
         let index = self.latest.record_index();
         let lineage = index
             .symbol_position(symbol)
@@ -814,7 +953,7 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
             .next()
             .unwrap_or(&qualified_name)
             .to_owned();
-        Ok(NativeSymbolRecordV1 {
+        Ok(NativeSymbolRecord {
             occurrence: symbol.clone(),
             name,
             qualified_name,
@@ -860,7 +999,7 @@ fn application_lexical_record(record: NativeLexicalRecordV1) -> LexicalOccurrenc
     }
 }
 
-fn application_symbol_record(record: NativeSymbolRecordV1) -> SymbolPrimitiveRecord {
+fn application_symbol_record(record: NativeSymbolRecord) -> SymbolPrimitiveRecord {
     SymbolPrimitiveRecord {
         node_id: record.occurrence.as_str().to_owned(),
         name: record.name,
@@ -891,7 +1030,7 @@ fn application_graph_record(record: NativeGraphRecordV1) -> SymbolRelationRecord
 }
 
 fn symbol_record(
-    latest: &LatestCompleteCodeIndexV1,
+    latest: &LatestCompleteCodeIndex,
     symbol: &SymbolOccurrenceId,
     file: &tracedecay_domain::FileOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
@@ -903,7 +1042,7 @@ fn symbol_record(
 }
 
 fn symbol_record_by_id(
-    latest: &LatestCompleteCodeIndexV1,
+    latest: &LatestCompleteCodeIndex,
     symbol: &SymbolOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
     let position = latest.record_index().chunk_position_for_symbol(symbol)?;
@@ -912,7 +1051,7 @@ fn symbol_record_by_id(
 }
 
 struct PreparedCallableQueryV1 {
-    latest: LatestCompleteCodeIndexV1,
+    latest: LatestCompleteCodeIndex,
     query: PreparedQueryV1,
 }
 
@@ -1117,7 +1256,7 @@ fn finish_query_with_coverage<T: serde::Serialize>(
 }
 
 fn relation_records(
-    latest: &LatestCompleteCodeIndexV1,
+    latest: &LatestCompleteCodeIndex,
     start: &SymbolOccurrenceId,
     kinds: &[RelationEdgeKindV1],
     reverse: bool,

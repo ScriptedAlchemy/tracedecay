@@ -33,8 +33,6 @@ pub mod operations {
     /// Collection of an identity-drift orphan store.
     pub const STORAGE_COLLECT_ORPHAN_STORE: &str =
         "use-case.application.storage.collect-orphan-store";
-    /// Lifecycle removal of branch-scoped databases whose git refs are gone.
-    pub const STORAGE_BRANCH_GC: &str = "use-case.application.storage.branch-gc";
     /// Quarantine and collection of incident/corruption debris beside a store.
     pub const STORAGE_QUARANTINE_AND_COLLECT_DEBRIS: &str =
         "use-case.application.storage.quarantine-and-collect-debris";
@@ -287,13 +285,6 @@ impl DoctorRemediationRegistryV1 {
                 "collect a store whose project identity no longer resolves",
             ),
             (
-                operations::STORAGE_BRANCH_GC,
-                DoctorOwningSurfaceV1::StorageRuntime,
-                true,
-                DoctorConfirmationRequirementV1::Required,
-                "remove branch-scoped databases whose git refs are gone",
-            ),
-            (
                 operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS,
                 DoctorOwningSurfaceV1::StorageRuntime,
                 true,
@@ -373,7 +364,6 @@ mod tests {
         for operation in [
             operations::STORAGE_RETENTION_COLLECT,
             operations::STORAGE_COLLECT_ORPHAN_STORE,
-            operations::STORAGE_BRANCH_GC,
             operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS,
         ] {
             let descriptor = registry
@@ -466,11 +456,11 @@ mod tests {
     #[test]
     fn doctor_registry_rejects_duplicate_operation() {
         let descriptor = DoctorRemediationDescriptorV1::new(
-            DoctorOwningOperationRefV1::new(operations::STORAGE_BRANCH_GC).expect("valid"),
+            DoctorOwningOperationRefV1::new(operations::STORAGE_RETENTION_COLLECT).expect("valid"),
             DoctorOwningSurfaceV1::StorageRuntime,
             true,
             DoctorConfirmationRequirementV1::Required,
-            "branch gc",
+            "retention collect",
         )
         .expect("descriptor");
         let error = DoctorRemediationRegistryV1::new(vec![descriptor.clone(), descriptor])

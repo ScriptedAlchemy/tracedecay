@@ -4,13 +4,12 @@
 use std::path::Path;
 #[cfg(not(any(test, feature = "test-transport")))]
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(not(any(test, feature = "test-transport")))]
 use std::sync::LazyLock;
-use std::sync::{Arc, OnceLock};
 
 use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
-use crate::branch_meta::{self, BranchMeta};
 use crate::config::{
     install_usecase_runtime_configuration_authority, materialize_root_runtime_configuration,
 };
@@ -40,7 +39,6 @@ mod registry;
 use recovery::{OpenHealthOutcome, active_graph_layout};
 
 pub(crate) use recovery::is_fts_only_corruption;
-pub(crate) use registry::git_remote_url;
 
 #[cfg(not(any(test, feature = "test-transport")))]
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
@@ -327,15 +325,6 @@ impl TraceDecay {
             storage::write_store_manifest(&store_layout)?;
         }
 
-        // Bootstrap branch metadata if we can detect a default branch
-        let default_branch = active_branch.as_ref().and_then(|_| {
-            branch::detect_default_branch(project_root).or_else(|| active_branch.clone())
-        });
-        if let Some(ref default) = default_branch {
-            let meta = BranchMeta::new_for_dir(&store_layout.data_root, default);
-            let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
-        }
-
         let mut ts = Self {
             db,
             profile_database,
@@ -348,10 +337,7 @@ impl TraceDecay {
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
-            serving_branch: None,
-            fallback_warning: None,
             read_only: false,
-            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
@@ -447,7 +433,7 @@ impl TraceDecay {
     /// by an incompatible binary, so the only remedy is a fresh one.
     pub async fn ensure_schema_current(&self) -> Result<()> {
         let current = Self::schema_version(&self.db, "ensure_schema_current").await?;
-        let supported = crate::db::migrations::SCHEMA_VERSION;
+        let supported = crate::db::schema::SCHEMA_VERSION;
         if current != supported {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -562,7 +548,6 @@ impl TraceDecay {
             configuration_database,
             profile_database,
             runtime_registry,
-            true,
             false,
         )
         .await
@@ -584,7 +569,6 @@ impl TraceDecay {
             profile_database,
             runtime_registry,
             true,
-            true,
         )
         .await
     }
@@ -596,45 +580,15 @@ impl TraceDecay {
         configuration_database: Arc<RegisteredGlobalDb>,
         profile_database: Arc<RegisteredGlobalDb>,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-        allow_corrupt_branch_repair: bool,
         defer_post_open_health: bool,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
         let graph_scope = active_branch
             .clone()
             .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
-        Self::auto_track_active_branch_with_registered_configuration(
-            project_root,
-            &store_layout.data_root,
-            graph_scope.as_deref(),
-            open_options.clone(),
-            &store_layout,
-            &configuration_database,
-            &profile_database,
-            &runtime_registry,
-        )
-        .await?;
 
-        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
-            project_root,
-            &store_layout.data_root,
-            graph_scope.as_deref(),
-        );
-        let serving_branch = if active_branch.is_none() && graph_scope.is_some() {
-            None
-        } else {
-            mounted_graph_scope.clone()
-        };
-
-        // Sync state belongs to the concrete graph DB, not the repository-wide
-        // store root. Different tracked branches have independent databases
-        // and must never clear or inherit one another's dirty marker or lock.
+        let db_path = store_layout.graph_db_path.clone();
         let active_graph_layout = active_graph_layout(&db_path);
-        let repair_corrupt_branch = allow_corrupt_branch_repair
-            && active_branch.is_some()
-            && active_branch == serving_branch
-            && db_path != store_layout.graph_db_path
-            && db_path.parent() == Some(store_layout.data_root.join("branches").as_path());
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -650,15 +604,11 @@ impl TraceDecay {
         // markers enter recovery and contend for the writer's lock.
         let db = match Self::run_open_health_recovery(
             project_root,
-            open_options.clone(),
             &store_layout,
             &db_path,
-            mounted_graph_scope.as_deref(),
+            graph_scope.as_deref(),
             &active_graph_layout,
-            repair_corrupt_branch,
             defer_post_open_health,
-            Arc::clone(&configuration_database),
-            Arc::clone(&profile_database),
             Arc::clone(&runtime_registry),
         )
         .await?
@@ -694,10 +644,7 @@ impl TraceDecay {
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
-            serving_branch,
-            fallback_warning,
             read_only: false,
-            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
@@ -825,16 +772,7 @@ impl TraceDecay {
             .clone()
             .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
 
-        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
-            project_root,
-            &store_layout.data_root,
-            graph_scope.as_deref(),
-        );
-        let serving_branch = if active_branch.is_none() && graph_scope.is_some() {
-            None
-        } else {
-            mounted_graph_scope.clone()
-        };
+        let db_path = store_layout.graph_db_path.clone();
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
@@ -851,7 +789,7 @@ impl TraceDecay {
             project_root,
             &store_layout,
             &db_path,
-            mounted_graph_scope.as_deref(),
+            graph_scope.as_deref(),
             "open project store read-only",
             DatabaseAccessMode::ReadOnly,
         )
@@ -883,10 +821,7 @@ impl TraceDecay {
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
-            serving_branch,
-            fallback_warning,
             read_only: true,
-            db_path_cache: OnceLock::new(),
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]

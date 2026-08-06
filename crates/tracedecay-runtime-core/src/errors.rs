@@ -41,6 +41,9 @@ pub enum TraceDecayError {
     #[error("config error: {message}")]
     Config { message: String },
 
+    #[error("reset required for {authority}: {message}")]
+    ResetRequired { authority: String, message: String },
+
     #[error("project route error ({reason_code}): {detail}")]
     ProjectRoute {
         reason_code: String,
@@ -114,6 +117,20 @@ fn flatten_error_chain(source: &(dyn std::error::Error + 'static)) -> String {
 }
 
 impl TraceDecayError {
+    pub fn reset_required(authority: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::ResetRequired {
+            authority: authority.into(),
+            message: message.into(),
+        }
+    }
+
+    pub fn reset_required_context(&self) -> Option<(&str, &str)> {
+        let Self::ResetRequired { authority, message } = self else {
+            return None;
+        };
+        Some((authority, message))
+    }
+
     pub fn project_route(
         reason_code: impl Into<String>,
         retryable: bool,
@@ -385,6 +402,26 @@ mod tests {
             message: "bad value".to_string(),
         };
         assert!(err.to_string().contains("bad value"));
+    }
+
+    #[test]
+    fn reset_required_preserves_authority_and_message() {
+        let err = TraceDecayError::reset_required(
+            "configuration",
+            "stored snapshot is not the exact final shape",
+        );
+
+        assert_eq!(
+            err.reset_required_context(),
+            Some((
+                "configuration",
+                "stored snapshot is not the exact final shape"
+            ))
+        );
+        assert_eq!(
+            err.to_string(),
+            "reset required for configuration: stored snapshot is not the exact final shape"
+        );
     }
 
     #[test]

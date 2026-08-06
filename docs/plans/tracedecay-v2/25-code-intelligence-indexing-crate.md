@@ -93,7 +93,9 @@ when semantics are unavailable.
   indexing overlays captured from repository state. Unsaved per-client LSP
   document overlays are separate Plan 35 daemon session state.
 - Logical generation planning, sealing, digests, and lineage evidence.
-- Read-only conversion of V1 graph records into the V2 logical model.
+- Direct construction of the final logical graph model from sanitized source
+  observations in a fresh V2 store. No legacy TraceDecay graph reader or
+  conversion path exists.
 
 ## Does not own
 
@@ -462,11 +464,16 @@ pub struct ProjectionBatchReceiptV1 {
   authority is capability-reported, never simulated or replaced with a
   heuristic lookalike.
 
-### V1 migration
+### Historical host-data intake
 
-- Consume logical batches emitted by the store-owned, read-only V1 importer through the sanitizer boundary.
-- Preserve source generation and migration provenance, rebuild deterministic V2 identities, and verify counts and digests before publication.
-- Never open a V1 database from the indexer.
+- Do not import old TraceDecay code-index database shapes. V2 code-intelligence
+  stores are born in the final shape, and old TraceDecay stores return typed
+  `ResetRequired`.
+- Historical agent-host transcripts, logs, and repository observations may be
+  captured through the same sanitizer/admission boundary as live V2 intake when
+  the host data is available and authorized.
+- Preserve source generation, capture provenance, and verification counts for
+  that V2 intake; never open a legacy TraceDecay database from the indexer.
 
 ## PR9 behavioral delivery and verification
 
@@ -509,11 +516,12 @@ normal CI.
    independent provenance. Direct regressions cover working/staged/range
    hunks, mismatch/binary/rename/deletion cases, current/stale/cleared
    diagnostics, and every declared attribution evidence class.
-6. **Projection boundary and V1 migration:** prove receipt conformance with
+6. **Projection boundary and fresh-store admission:** prove receipt conformance with
    reordered, duplicate, missing, extra, wrong-generation, and wrong-digest
-   fixtures without a model runtime or concrete store adapter. Prove migration
-   counts, digests, duplicates, unsupported rows, cancellation, and the
-   no-database-open boundary.
+   fixtures without a model runtime or concrete store adapter. Prove final-shape
+   store creation, typed reset-required rejection for incompatible stores,
+   cancellation, and the no-legacy-database-open boundary. Historical
+   repository and host observations enter through ordinary V2 capture.
 7. **Exact, lexical, and graph retrieval:** implement independently disableable
    exact and lexical lanes; graph consumes only generation-matched Plan 25
    evidence. Quality fixtures and direct regressions cover exact admission,

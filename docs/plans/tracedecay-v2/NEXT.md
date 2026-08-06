@@ -7,24 +7,31 @@ authority. This file tracks only current product outcomes, blockers, and the
 next direct user journeys. Numbered plans own the detailed semantics.
 `GAP-LEDGER-PR8-PR14.md` is history, not a work queue.
 
-## Current outcomes
+## Intended final outcome
 
-- CLI, MCP, HTTP, SSE, LSP, dashboard, and supported host integrations reach
-  the same daemon/application owners and preserve one typed result model.
-- Post-edit diagnostics, impact, affected tests, CI localization, read-only
-  GitHub review evidence, and agent proximity remain generation-bound,
-  authorized, and read-only.
+- CLI, MCP, HTTP, SSE, LSP, dashboard, SDK, automation, and supported host
+  integrations are thin clients over the same daemon/application authority and
+  preserve one typed result model.
+- TraceDecay V2 accepts only final V2 stores. Old TraceDecay stores return
+  typed `ResetRequired`; historical host transcripts/logs are ingested as
+  ordinary V2 capture when available and authorized.
+- Durable facts are project-wide. Branch/ref/worktree/commit/PR/session/agent
+  identity is provenance only, never a fact-storage shard.
+- LCM compression, live-turn projection, and session-boundary mutation are
+  daemon hook-runtime lifecycle effects. Public LCM surfaces are read-only
+  retrieval/diagnostics except explicit refresh; Doctor is read-only.
+- Grafeo through `tracedecay-graph-db` is the embedded durable graph/vector
+  authority. SQLite remains for relational, transactional, content-bearing
+  records.
+- Post-edit diagnostics, impact, affected tests, CI localization, Git review
+  evidence, and agent proximity are generation-bound, authorized, and truthful.
 - Saved edits trigger bounded background code and semantic indexing without
   delaying project open or exact, lexical, and graph retrieval.
 - Only complete compatible generations publish. Stale, partial, denied,
-  cancelled, failed, and unavailable work remains distinguishable from a
-  complete empty result.
+  cancelled, failed, unavailable, and reset-required states remain
+  distinguishable from complete empty results.
 - Default release artifacts include the supported semantic runtime and pass
   real package, install, startup, and host-integration journeys.
-- The implemented dashboard checkpoint is retained. Remaining dashboard work
-  is the direct Plan 11 renderer, browser, accessibility, and usability
-  journeys rather than reconstruction of old frontend scaffolding; the
-  performance and payload budgets were withdrawn by owner decision 2026-07-31.
 
 ## Current blockers
 
@@ -43,6 +50,11 @@ next direct user journeys. Numbered plans own the detailed semantics.
   assistive-technology, and usability journeys. The performance,
   sustained-update, and payload budgets were withdrawn by owner decision
   2026-07-31 and no longer block acceptance.
+- Remaining implementation work includes removing direct database/tool
+  bypasses from MCP/dashboard/host code, deleting branch-fact archive/cutover
+  mechanics, replacing legacy hookEvent paths with hook-runtime calls, wiring
+  Work/Workflow/Feedback parity, completing the Grafeo authority cutover, and
+  recontracting stale tests/docs against the final V2 decisions.
 
 ## Next direct journeys
 

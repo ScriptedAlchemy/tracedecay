@@ -512,10 +512,6 @@ impl CompatibilityFactRemoveOutcomeV1 {
 pub struct CompatibilityFactFeedbackOutcomeV1 {
     fact: CompatibilityFactProjectionV1,
     event_id: FactEventId,
-    /// Numeric event identity from the authoritative V1 mirror.  It is only
-    /// present when the adapter durably recorded that mirror row; callers must
-    /// not derive it from the canonical event identifier.
-    legacy_feedback_event_id: Option<i64>,
     old_trust: Confidence,
     new_trust: Confidence,
     trust_delta_millionths: i32,
@@ -528,7 +524,6 @@ impl CompatibilityFactFeedbackOutcomeV1 {
     pub fn new(
         fact: CompatibilityFactProjectionV1,
         event_id: FactEventId,
-        legacy_feedback_event_id: Option<i64>,
         old_trust: Confidence,
         new_trust: Confidence,
         trust_delta_millionths: i32,
@@ -536,16 +531,10 @@ impl CompatibilityFactFeedbackOutcomeV1 {
         unhelpful_count: u64,
     ) -> FactStoreResult<Self> {
         event_id.validate()?;
-        if legacy_feedback_event_id.is_some_and(|value| value <= 0) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility legacy feedback event id",
-            }));
-        }
         validate_feedback_trust_delta(old_trust, new_trust, trust_delta_millionths)?;
         Ok(Self {
             fact,
             event_id,
-            legacy_feedback_event_id,
             old_trust,
             new_trust,
             trust_delta_millionths,
@@ -559,9 +548,6 @@ impl CompatibilityFactFeedbackOutcomeV1 {
     }
     pub fn event_id(&self) -> &FactEventId {
         &self.event_id
-    }
-    pub fn legacy_feedback_event_id(&self) -> Option<i64> {
-        self.legacy_feedback_event_id
     }
     pub fn old_trust(&self) -> Confidence {
         self.old_trust

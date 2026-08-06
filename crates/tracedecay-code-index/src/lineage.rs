@@ -58,7 +58,7 @@ pub const ABSTAIN_CANDIDATE_COUNT_MISMATCH: &str =
 /// digests, the qualified structure, and the content identity digest.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct LineageSymbolRecordV1 {
+pub struct LineageSymbolRecord {
     pub occurrence: SymbolOccurrenceId,
     /// The logical identity tuple (file identity, qualified name, kind,
     /// same-name occurrence index); stable while every declared input is.
@@ -69,7 +69,7 @@ pub struct LineageSymbolRecordV1 {
     pub content_digest: ContentDigest,
 }
 
-impl LineageSymbolRecordV1 {
+impl LineageSymbolRecord {
     /// The qualified-structure group key: identity minus the same-name
     /// occurrence index.
     fn group_key(&self) -> (&str, &str, &str) {
@@ -87,7 +87,7 @@ impl LineageSymbolRecordV1 {
 pub struct GenerationSymbolIndexV1 {
     pub generation_id: CodeGenerationId,
     /// Canonically ordered by occurrence identity; duplicates are rejected.
-    pub symbols: Vec<LineageSymbolRecordV1>,
+    pub symbols: Vec<LineageSymbolRecord>,
 }
 
 impl GenerationSymbolIndexV1 {
@@ -95,7 +95,7 @@ impl GenerationSymbolIndexV1 {
     /// rejecting duplicate occurrences.
     pub fn new(
         generation_id: CodeGenerationId,
-        mut symbols: Vec<LineageSymbolRecordV1>,
+        mut symbols: Vec<LineageSymbolRecord>,
     ) -> Result<Self, LineageResolutionErrorV1> {
         generation_id
             .validate()
@@ -199,7 +199,7 @@ impl SymbolLineageResolver {
         &self,
         prior: &GenerationSymbolIndexV1,
         current: &GenerationSymbolIndexV1,
-        symbol: &LineageSymbolRecordV1,
+        symbol: &LineageSymbolRecord,
         by_identity: &BTreeMap<&str, usize>,
         by_content: &BTreeMap<&str, Vec<usize>>,
         by_group: &BTreeMap<(&str, &str, &str), Vec<usize>>,
@@ -377,8 +377,8 @@ impl SymbolLineageResolver {
         &self,
         prior: &GenerationSymbolIndexV1,
         current: &GenerationSymbolIndexV1,
-        symbol: &LineageSymbolRecordV1,
-        ancestor: &LineageSymbolRecordV1,
+        symbol: &LineageSymbolRecord,
+        ancestor: &LineageSymbolRecord,
         kind: LineageKindV1,
         method: LineageMethodV1,
         confidence: LineageConfidenceKindV1,
@@ -415,7 +415,7 @@ impl SymbolLineageResolver {
         &self,
         prior: &GenerationSymbolIndexV1,
         current: &GenerationSymbolIndexV1,
-        symbol: &LineageSymbolRecordV1,
+        symbol: &LineageSymbolRecord,
         candidates: &[usize],
         reason: &str,
         candidate_count: usize,
@@ -472,8 +472,8 @@ impl Default for SymbolLineageResolver {
 fn evidence(
     prior_generation: &CodeGenerationId,
     current_generation: &CodeGenerationId,
-    symbol: &LineageSymbolRecordV1,
-    ancestor: Option<&LineageSymbolRecordV1>,
+    symbol: &LineageSymbolRecord,
+    ancestor: Option<&LineageSymbolRecord>,
     kind: LineageKindV1,
     method: LineageMethodV1,
 ) -> Result<LineageEvidenceV1, LineageResolutionErrorV1> {
@@ -530,8 +530,8 @@ mod tests {
         kind: &str,
         file_byte: char,
         content_byte: char,
-    ) -> LineageSymbolRecordV1 {
-        LineageSymbolRecordV1 {
+    ) -> LineageSymbolRecord {
+        LineageSymbolRecord {
             occurrence: SymbolOccurrenceId::new(occurrence).expect("valid occurrence"),
             identity: identity(identity_byte),
             qualified_name: name.to_owned(),
@@ -543,7 +543,7 @@ mod tests {
 
     fn index(
         generation: CodeGenerationId,
-        symbols: Vec<LineageSymbolRecordV1>,
+        symbols: Vec<LineageSymbolRecord>,
     ) -> GenerationSymbolIndexV1 {
         GenerationSymbolIndexV1::new(generation, symbols).expect("canonical index")
     }

@@ -83,8 +83,6 @@ TRACEDECAY_BIN = {bin}
 TRACEDECAY_TIMEOUT_SECONDS = 120
 TRACEDECAY_LONG_TIMEOUT_SECONDS = 600
 LONG_RUNNING_TOOLS = frozenset((
-    "tracedecay_lcm_compress",
-    "tracedecay_lcm_preflight",
     "tracedecay_lcm_doctor",
     "tracedecay_diagnose",
     # First hermes search runs the state.db catch-up sweep, which can

@@ -5,8 +5,8 @@ agent benchmark token-savior uses to publish its 97.9% score) to drive
 tracedecay instead of token-savior, then reports the result.
 
 Headline: **184 / 192 (95.8%)** on the first untuned run. Full breakdown in
-[`SUMMARY.md`](SUMMARY.md). See also
-[`docs/TRACEDECAY-VS-TOKENSAVIOR.md`](../../docs/TRACEDECAY-VS-TOKENSAVIOR.md) §4.
+[`SUMMARY.md`](SUMMARY.md). Current product architecture is documented by the
+final-V2 plan set rather than this historical benchmark.
 
 ## Reproduce
 

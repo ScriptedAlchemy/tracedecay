@@ -264,7 +264,7 @@ mod tests {
                     project_id: "proj_test".to_string(),
                     store_id: "store:test".to_string(),
                     branch_name: "main".to_string(),
-                    db_relpath: "projects/proj_test/branches/main.db".to_string(),
+                    db_relpath: "projects/proj_test/tracedecay.db".to_string(),
                     parent_scope_id: None,
                     last_synced_at: Some(230),
                     writable: true,
@@ -272,7 +272,7 @@ mod tests {
                 artifacts: vec![StoreArtifactRecord {
                     store_id: "store:test".to_string(),
                     artifact_kind: "graph_db".to_string(),
-                    relpath: "projects/proj_test/branches/main.db".to_string(),
+                    relpath: "projects/proj_test/tracedecay.db".to_string(),
                     size_bytes: Some(4096),
                     schema_version: None,
                     updated_at: Some(240),
@@ -342,7 +342,7 @@ mod tests {
         assert!(text.contains("Aliases:\n  /repo"));
         assert!(text.contains("Stores:\n  store:test [code_project / profile_sharded]"));
         assert!(text.contains("scope store:test:branch:main branch=main"));
-        assert!(text.contains("artifact graph_db path=projects/proj_test/branches/main.db"));
+        assert!(text.contains("artifact graph_db path=projects/proj_test/tracedecay.db"));
         assert!(!text.contains("sekret-token"));
     }
 }

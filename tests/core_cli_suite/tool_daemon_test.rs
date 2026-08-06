@@ -1864,6 +1864,7 @@ fn user_scoped_lcm_tool_cli_handshakes_projectless_from_filesystem_root_cwd() {
     let socket_path = socket_dir.path().join("tracedecay.sock");
     let observed_handshake = spawn_handshake_capturing_daemon(socket_path.clone());
     let args = json!({
+        "action": "lcm_preflight",
         "provider": "hermes",
         "session_id": "stock-check-session",
         "storage_scope": "user",
@@ -1880,7 +1881,7 @@ fn user_scoped_lcm_tool_cli_handshakes_projectless_from_filesystem_root_cwd() {
         .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
         .args([
             "tool",
-            "tracedecay_lcm_preflight",
+            "tracedecay_hook_runtime",
             "--json",
             "--args",
             args.as_str(),
@@ -1918,6 +1919,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
     let socket = common::daemon_socket_path(&home_path);
 
     let user_args = json!({
+        "action": "lcm_preflight",
         "provider": "hermes",
         "session_id": "stock-check-session",
         "storage_scope": "user",
@@ -1945,7 +1947,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
         .env("TRACEDECAY_DAEMON_SOCKET", &socket)
         .args([
             "tool",
-            "tracedecay_lcm_preflight",
+            "tracedecay_hook_runtime",
             "--json",
             "--args",
             user_args.as_str(),
@@ -1960,6 +1962,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
     );
 
     let project_args = json!({
+        "action": "lcm_preflight",
         "provider": "hermes",
         "session_id": "stock-check-session",
         "transcript_projection": true,
@@ -1988,7 +1991,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
             "tool",
             "--project",
             &project_arg,
-            "tracedecay_lcm_preflight",
+            "tracedecay_hook_runtime",
             "--json",
             "--args",
             project_args.as_str(),

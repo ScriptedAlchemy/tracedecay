@@ -192,6 +192,55 @@ fn definitions_activate_and_reject_conflicting_payloads() {
 }
 
 #[test]
+fn definition_reads_do_not_drain_pending_graph_publications() {
+    let store = RegisteredWorkStore::start("workflow-definition-read-effects");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let first = definition(1, "operation.prepare.v1");
+    WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
+    store.inspect(|connection| {
+        connection
+            .execute(
+                "UPDATE workflow_graph_publication_outbox_v1 SET applied = 0",
+                [],
+            )
+            .unwrap();
+    });
+
+    assert_eq!(
+        WorkflowDefinitionAuthorityPort::load(&authority, first.definition_id(), 1)
+            .unwrap()
+            .as_ref(),
+        Some(&first)
+    );
+    assert_eq!(
+        store.inspect(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM workflow_graph_publication_outbox_v1 WHERE applied = 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        }),
+        1
+    );
+
+    authority.reconcile_graph_publications().unwrap();
+    assert_eq!(
+        store.inspect(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM workflow_graph_publication_outbox_v1 WHERE applied = 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        }),
+        0
+    );
+}
+
+#[test]
 fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     let store = RegisteredWorkStore::start("workflow-handoff");
     let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();

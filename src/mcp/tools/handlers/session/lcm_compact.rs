@@ -164,13 +164,6 @@ fn bounded_lcm_contract_text(value: &Value) -> String {
     .unwrap_or_default()
 }
 
-pub(super) fn lcm_response_handle_root(
-    project_root: Option<&Path>,
-    _args: &Value,
-) -> Option<PathBuf> {
-    project_root.map(Path::to_path_buf)
-}
-
 pub(super) fn lcm_expand_query_tool_json(
     project_root: Option<&Path>,
     args: &Value,
@@ -793,23 +786,4 @@ pub(super) fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
     let truncated = value.chars().nth(max_chars).is_some();
     let text = value.chars().take(max_chars).collect::<String>();
     (text, truncated)
-}
-
-#[cfg(test)]
-mod authority_tests {
-    use super::*;
-
-    #[test]
-    fn response_handle_root_ignores_caller_controlled_paths() {
-        let args = json!({
-            "response_handle_project_root": "/attacker/cache",
-            "project_root": "/attacker/project"
-        });
-
-        assert_eq!(
-            lcm_response_handle_root(Some(Path::new("/authorized/project")), &args),
-            Some(PathBuf::from("/authorized/project"))
-        );
-        assert_eq!(lcm_response_handle_root(None, &args), None);
-    }
 }

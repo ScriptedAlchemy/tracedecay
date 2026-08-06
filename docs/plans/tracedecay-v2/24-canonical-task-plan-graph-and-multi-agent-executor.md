@@ -292,24 +292,17 @@ inputs, application operations, surfaces, provider/runtime mapping,
 observations, and host execution behavior land as implementation slices of
 this journey.
 
-## Implementation slices
+## Production completeness
 
-1. In PR14, deliver create/change/history plus core Work projections on one
-   immutable owner-shard graph.
-2. Deliver TaskId-rooted bounded evidence retrieval and exact expansion through
-   existing evidence authorities.
-3. Deliver explained shape/sizing/decomposition/topology/route proposal and
-   explicit review.
-4. Deliver one accepted-attempt mapping to a supported real provider through
-   Plan 32, with progress/outcome projection and safe control.
-5. In PR17, deliver outcome/calibration updates, governed recall/handoff, and
-   non-auto-applied live replanning through the same surfaces.
-6. In PR17, deliver optional advanced placement/stack/review/integration
-   behavior through the same work identity and explicit effect flow.
+The final Work journey includes create/change/history, bounded evidence
+retrieval, exact expansion, shape/sizing/decomposition/topology/route
+proposals, explicit review, admitted provider execution, progress/outcome,
+calibration, governed recall/handoff, live replanning, placement, stack,
+review, and integration through one work identity and explicit effect flow.
 
-Each slice includes the minimum domain, store, application, surface, and direct
-tests it uses. No standalone schema, registry, port, exact type/file inventory,
-fixture framework, or contract-only phase counts as delivery.
+Every capability is mounted through domain, store, application, daemon, public
+surfaces, SDKs, dashboard, and supported hosts. No standalone schema, registry,
+port, feature flag, shadow mode, or contract-only phase counts as delivery.
 
 ## Replacement and deletion
 

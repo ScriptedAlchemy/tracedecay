@@ -309,6 +309,7 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
             "execution-unavailable" => Some(SessionTemporalExecutionError::Unavailable),
             "execution-budget" => Some(SessionTemporalExecutionError::BudgetExhausted),
             "execution-cancelled" => Some(SessionTemporalExecutionError::Cancelled),
+            "execution-deadline" => Some(SessionTemporalExecutionError::DeadlineExceeded),
             _ => None,
         };
         if let Some(error) = execution_error {
@@ -325,6 +326,13 @@ impl SessionTemporalExecutionPort for FakeExecutionPort {
             return Box::pin(async {
                 Err(SessionTemporalExecutionError::Kernel(
                     TemporalKernelError::Cancelled,
+                ))
+            });
+        }
+        if request.query() == "kernel-deadline" {
+            return Box::pin(async {
+                Err(SessionTemporalExecutionError::Kernel(
+                    TemporalKernelError::DeadlineExceeded,
                 ))
             });
         }
@@ -1604,7 +1612,7 @@ async fn cancellation_or_deadline_during_authorization_prevents_execution_constr
     );
     assert!(matches!(
         retrieve(&deadline_service, &deadline_context, query("alpha")).await,
-        SessionRetrievalOutcome::Cancelled
+        SessionRetrievalOutcome::DeadlineExceeded
     ));
     assert!(application_observed_at() >= deadline_context.deadline().expires_at);
     assert_eq!(deadline_port.calls.load(Ordering::SeqCst), 0);
@@ -1830,6 +1838,10 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
         SessionRetrievalOutcome::Cancelled
     ));
     assert!(matches!(
+        retrieve(&service, &context("root.one"), query("kernel-deadline")).await,
+        SessionRetrievalOutcome::DeadlineExceeded
+    ));
+    assert!(matches!(
         retrieve(
             &service,
             &context("root.one"),
@@ -1860,6 +1872,10 @@ async fn typed_omission_and_cursor_states_do_not_collapse_to_complete_zero_or_wr
     assert!(matches!(
         retrieve(&service, &context("root.one"), query("execution-cancelled")).await,
         SessionRetrievalOutcome::Cancelled
+    ));
+    assert!(matches!(
+        retrieve(&service, &context("root.one"), query("execution-deadline")).await,
+        SessionRetrievalOutcome::DeadlineExceeded
     ));
     assert!(matches!(
         retrieve(

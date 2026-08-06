@@ -333,11 +333,9 @@ fn memory_request_types_round_trip_through_json() {
 }
 
 #[test]
-fn trust_feedback_clamps_buckets_and_decays() {
+fn trust_clamps_buckets_and_decays() {
     assert_eq!(clamp_trust(-0.2), 0.0);
     assert_eq!(clamp_trust(1.2), 1.0);
-    assert!((apply_feedback(DEFAULT_TRUST, FeedbackAction::Helpful) - 0.55).abs() < f64::EPSILON);
-    assert!((apply_feedback(DEFAULT_TRUST, FeedbackAction::Unhelpful) - 0.4).abs() < f64::EPSILON);
     assert_eq!(trust_bucket(0.2), "low");
     assert_eq!(trust_bucket(0.5), "medium");
     assert_eq!(trust_bucket(0.8), "high");
@@ -1117,14 +1115,14 @@ async fn remove_fact_defers_vacuum_while_peer_connections_are_live() {
 }
 
 #[tokio::test]
-async fn memory_store_records_feedback_audit_and_retrieval_counts() {
+async fn memory_store_records_retrieval_counts_without_changing_fact_ordering() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
     let fact = store
         .add_fact(
             fact_request(
-                "Feedback adjusts trust with an audit trail",
+                "Batch retrieval counts preserve fact ordering",
                 MemoryCategory::General,
                 0.5,
             ),
@@ -1162,61 +1160,6 @@ async fn memory_store_records_feedback_audit_and_retrieval_counts() {
     let other_retrieved = store.get_fact(other_fact.fact_id).await.unwrap().unwrap();
     assert_eq!(other_retrieved.retrieval_count, 1);
     assert!(other_retrieved.last_retrieved_at.is_some());
-
-    let helpful = store
-        .record_feedback_event(FeedbackRequest {
-            fact_id: fact.fact_id,
-            action: FeedbackAction::Helpful,
-            source: Some("test".to_string()),
-            note: Some("useful".to_string()),
-        })
-        .await
-        .unwrap();
-    assert!(helpful.event_id > 0);
-    assert_eq!(helpful.fact_id, fact.fact_id);
-    assert_eq!(helpful.action, FeedbackAction::Helpful);
-    assert!((helpful.old_trust - 0.5).abs() < f64::EPSILON);
-    assert!((helpful.new_trust - 0.55).abs() < f64::EPSILON);
-    assert!((helpful.trust_delta - 0.05).abs() < f64::EPSILON);
-    assert_eq!(helpful.helpful_count, 1);
-    assert_eq!(helpful.unhelpful_count, 0);
-
-    let unhelpful = store
-        .record_feedback_event(FeedbackRequest {
-            fact_id: fact.fact_id,
-            action: FeedbackAction::Unhelpful,
-            source: None,
-            note: None,
-        })
-        .await
-        .unwrap();
-    assert!((unhelpful.old_trust - 0.55).abs() < f64::EPSILON);
-    assert!((unhelpful.new_trust - 0.45).abs() < f64::EPSILON);
-    assert_eq!(unhelpful.helpful_count, 1);
-    assert_eq!(unhelpful.unhelpful_count, 1);
-
-    let updated = store.get_fact(fact.fact_id).await.unwrap().unwrap();
-    assert_eq!(updated.helpful_count, 1);
-    assert_eq!(updated.unhelpful_count, 1);
-    assert!(updated.last_feedback_at.is_some());
-
-    let trust_history = store.fact_trust_history(fact.fact_id).await.unwrap();
-    assert_eq!(trust_history.len(), 2);
-    assert_eq!(trust_history[0].action, FeedbackAction::Helpful);
-    assert!((trust_history[0].old_trust - 0.5).abs() < f64::EPSILON);
-    assert!((trust_history[0].new_trust - 0.55).abs() < f64::EPSILON);
-    assert!((trust_history[0].delta - 0.05).abs() < f64::EPSILON);
-    assert_eq!(trust_history[0].source, "test");
-    assert_eq!(trust_history[0].note.as_deref(), Some("useful"));
-    assert_eq!(trust_history[1].action, FeedbackAction::Unhelpful);
-    assert!((trust_history[1].old_trust - 0.55).abs() < f64::EPSILON);
-    assert!((trust_history[1].new_trust - 0.45).abs() < f64::EPSILON);
-    assert!((trust_history[1].delta + 0.10).abs() < f64::EPSILON);
-    assert_eq!(trust_history[1].source, "mcp");
-    assert_eq!(trust_history[1].note, None);
-
-    let empty_history = store.fact_trust_history(other_fact.fact_id).await.unwrap();
-    assert!(empty_history.is_empty());
 }
 
 #[tokio::test]
@@ -1715,10 +1658,10 @@ async fn fact_retriever_reason_deduplicates_entity_predicates() {
 /// Policy: deleted memories are permanently hard-deleted. `remove_fact` (the
 /// path behind dashboard curation and the MCP `fact_remove` tool) must leave
 /// no trace on the store's own connection: the fact row, its FTS mirror, its
-/// entity links, and its feedback events must all be gone, with the fact's
-/// banks marked dirty for rebuild.
+/// entity links, and its bank assignment must all be gone, with the fact's bank
+/// marked dirty for rebuild.
 #[tokio::test]
-async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
+async fn remove_fact_hard_deletes_fts_and_entity_links() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
@@ -1735,15 +1678,6 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
         .unwrap()
         .fact
         .unwrap();
-    store
-        .record_feedback_event(FeedbackRequest {
-            fact_id: fact.fact_id,
-            action: FeedbackAction::Helpful,
-            source: None,
-            note: Some("cascade fixture".to_string()),
-        })
-        .await
-        .unwrap();
     store.rebuild_dirty_banks().await.unwrap();
 
     async fn count(db: &Database, sql: &str, fact_id: i64) -> i64 {
@@ -1758,10 +1692,8 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
 
     let fts_sql = "SELECT COUNT(*) FROM memory_facts_fts WHERE rowid = ?1";
     let links_sql = "SELECT COUNT(*) FROM memory_fact_entities WHERE fact_id = ?1";
-    let feedback_sql = "SELECT COUNT(*) FROM memory_feedback_events WHERE fact_id = ?1";
     assert_eq!(count(&db, fts_sql, fact.fact_id).await, 1);
     assert_eq!(count(&db, links_sql, fact.fact_id).await, 1);
-    assert_eq!(count(&db, feedback_sql, fact.fact_id).await, 1);
 
     assert!(store.remove_fact(fact.fact_id).await.unwrap());
 
@@ -1775,11 +1707,6 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
         count(&db, links_sql, fact.fact_id).await,
         0,
         "entity links must FK-cascade on fact delete"
-    );
-    assert_eq!(
-        count(&db, feedback_sql, fact.fact_id).await,
-        0,
-        "feedback events must FK-cascade on fact delete"
     );
     assert!(
         dirty_bank_names(&db).await.contains(&"project".to_string()),
@@ -2116,15 +2043,6 @@ async fn memory_oplog_records_mutations_with_hashes_not_content() {
         })
         .await
         .unwrap();
-    store
-        .record_feedback_event(FeedbackRequest {
-            fact_id: fact.fact_id,
-            action: FeedbackAction::Helpful,
-            source: None,
-            note: None,
-        })
-        .await
-        .unwrap();
     assert!(store.remove_fact(fact.fact_id).await.unwrap());
 
     let conn = rusqlite::Connection::open_with_flags(
@@ -2154,7 +2072,7 @@ async fn memory_oplog_records_mutations_with_hashes_not_content() {
         }
         ops.push(op);
     }
-    assert_eq!(ops, vec!["add", "update", "feedback", "remove"]);
+    assert_eq!(ops, vec!["add", "update", "remove"]);
     assert!(
         remove_detail.contains("content_hash"),
         "remove rows must record a content hash: {remove_detail}"

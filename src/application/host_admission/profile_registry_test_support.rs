@@ -217,32 +217,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn apply_registry_reconstruction_report(
-        &self,
-        report: &crate::migrate::registry::RegistryReconstructionReport,
-    ) -> std::result::Result<crate::migrate::registry::RegistryReconstructionApplyReport, Vec<String>>
-    {
-        crate::migrate::registry::apply_registry_reconstruction_report(
-            self.profile_database.as_ref(),
-            report,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn apply_single_registry_reconstruction_report(
-        &self,
-        report: &crate::migrate::registry::RegistryReconstructionReport,
-    ) -> std::result::Result<crate::migrate::registry::RegistryReconstructionApplyReport, Vec<String>>
-    {
-        crate::migrate::registry::apply_single_registry_reconstruction_report(
-            self.profile_database.as_ref(),
-            report,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
     pub async fn upsert_graph_scope(
         &self,
         upsert: crate::global_db::GraphScopeUpsert,

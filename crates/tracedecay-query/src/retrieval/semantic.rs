@@ -1,22 +1,23 @@
-//! Exact-flat semantic retrieval lane.
+//! Embedded vector-index semantic retrieval lane.
 //!
 //! The lane consumes only an admitted embedding projection, a request-local
 //! query-embedding port, and an immutable vector-generation read port. It
-//! performs no artifact admission, vector mutation, ANN lookup, fusion,
+//! performs no artifact admission, vector mutation, fusion,
 //! reranking, hydration, activation, or calls into another retrieval lane.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use tracedecay_domain::EmbeddingMetricV1;
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CompactCandidate,
-    CursorPayloadDigest, EmbeddingMetricV1, EmbeddingProjectionKeyV1,
-    EphemeralSanitizedQueryViewV1, FixedPointScore, FreshnessCompatibilityV1, ManifestDigest,
-    ProjectionKeyV1, QueryDigest, RetrievalBudget, RetrievalBudgetUsage, RetrievalError,
-    RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SemanticSearchIndexKeyV1,
-    VectorGenerationIdV1,
+    CursorPayloadDigest, EmbeddingProjectionKeyV1, EphemeralSanitizedQueryViewV1, FixedPointScore,
+    FreshnessCompatibilityV1, ManifestDigest, ProjectionKeyV1, QueryDigest, RetrievalBudget,
+    RetrievalBudgetUsage, RetrievalError, RetrievalFailure, RetrievalRequest, Retriever,
+    RetrieverBatch, RetrieverContinuation, RetrieverCoverage, RetrieverKind, RetrieverOutcome,
+    SemanticSearchIndexKeyV1, VectorGenerationIdV1,
 };
 
 use super::ports::{
@@ -39,13 +40,13 @@ pub use service::{
 };
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
-const SEMANTIC_CHECKPOINT_DOMAIN: &str = "tracedecay.semantic-flat-checkpoint.v1";
+const SEMANTIC_CHECKPOINT_DOMAIN: &str = "tracedecay.semantic-vector-checkpoint.v1";
 
 /// The only search implementation admitted by this quarantined lane.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SemanticSearchKindV1 {
-    #[serde(rename = "exact_flat")]
-    ExactFlat,
+    #[serde(rename = "embedded_vector_index")]
+    EmbeddedVectorIndex,
 }
 
 /// Canonical fixed-point semantic distance. Smaller values rank first.
@@ -131,7 +132,7 @@ pub struct SemanticQueryEmbeddingRequestV1<'a> {
 }
 
 /// Request-local query vector. It deliberately implements neither
-/// serialization nor cloning and is dropped after the exact-flat scan.
+/// serialization nor cloning and is dropped after the bounded index query.
 pub struct EphemeralQueryEmbeddingV1 {
     query_digest: QueryDigest,
     projection: AdmittedEmbeddingProjectionKeyV1,
@@ -195,10 +196,9 @@ pub struct SemanticVectorRecordV1 {
     pub chunk_id: CodeSearchChunkId,
     pub candidate: CompactCandidate,
     pub binding: CodeCandidateBindingV1,
-    pub values: Vec<f32>,
 }
 
-/// Store-owned coverage for one complete exact-flat generation scan.
+/// Store-owned coverage for one bounded embedded-index query.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SemanticVectorScanSummaryV1 {
     pub examined: u64,
@@ -207,15 +207,33 @@ pub struct SemanticVectorScanSummaryV1 {
     pub unknown: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SemanticVectorSearchRequestV1<'a> {
+    pub identity: SemanticVectorReadRequestV1<'a>,
+    pub query: &'a [f32],
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticVectorMatchV1 {
+    pub record: SemanticVectorRecordV1,
+    pub distance: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticVectorSearchPageV1 {
+    pub matches: Vec<SemanticVectorMatchV1>,
+    pub summary: SemanticVectorScanSummaryV1,
+}
+
 /// Read-only port over one immutable, fully published vector generation.
-/// The callback shape lets the lane scan without retaining or copying the
-/// complete vector set.
+/// Implementations must query the embedded vector index before hydrating
+/// bounded relational candidate metadata.
 pub trait SemanticVectorReadPort {
-    fn scan_exact_flat(
+    fn search_bounded(
         &self,
-        request: SemanticVectorReadRequestV1<'_>,
-        visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
-    ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError>;
+        request: SemanticVectorSearchRequestV1<'_>,
+    ) -> Result<SemanticVectorSearchPageV1, RetrievalPortError>;
 }
 
 /// Request-scoped cancellation and monotonic deadline authority.
@@ -260,9 +278,10 @@ where
 {
     fn enforce_record(
         request: &SemanticRetrievalRequestV1<'_>,
-        record: &SemanticVectorRecordV1,
-        query: &EphemeralQueryEmbeddingV1,
+        matched: &SemanticVectorMatchV1,
+        _query: &EphemeralQueryEmbeddingV1,
     ) -> Result<(CompactCandidate, CodeSemanticEvidenceV1), RetrievalPortError> {
+        let record = &matched.record;
         if record.vector_generation != request.vector_generation
             || record.projection_key != *request.projection.projection_key()
         {
@@ -295,16 +314,7 @@ where
                 "semantic candidate is outside the frozen repository or freshness scope".to_owned(),
             ));
         }
-        validate_vector(
-            &record.values,
-            request.projection.embedding_key().dimensions,
-            "stored semantic vector",
-        )?;
-        let distance = canonical_distance(
-            request.projection.embedding_key().metric,
-            &query.values,
-            &record.values,
-        )?;
+        let distance = canonical_index_distance(matched.distance)?;
         let mut candidate = record.candidate.clone();
         candidate.raw_score = distance.as_descending_score();
         Ok((
@@ -315,7 +325,7 @@ where
                 vector_generation: request.vector_generation.clone(),
                 chunk_id: record.chunk_id.clone(),
                 distance,
-                search_kind: SemanticSearchKindV1::ExactFlat,
+                search_kind: SemanticSearchKindV1::EmbeddedVectorIndex,
             },
         ))
     }
@@ -329,111 +339,74 @@ where
             return Err(RetrievalPortError::IncompatibleProjection);
         }
 
-        // Bound retention to the lane cap during the scan with a max-heap
-        // keyed by the final ranking order, instead of collecting every
-        // eligible row into an unbounded vec and sorting the whole set. The cap
-        // depends only on the request budgets, so it is known up front. Every
-        // eligible row is still visited (duplicate detection and coverage
-        // accounting run over all of them via `eligible_count`); only the
-        // retained set is bounded. Because `source_occurrence_id` is unique
-        // across retained rows, the ranking order is a strict total order with
-        // no ties, so the cap smallest rows and their order are identical to a
-        // full sort followed by truncation.
         let cap = lane_candidate_cap(&request.budget, &request.base.budget);
-        let mut ranked: BinaryHeap<SemanticRankedEntryV1> = BinaryHeap::new();
-        let mut eligible_count: usize = 0;
-        let mut seen_occurrences = BTreeSet::new();
-        let scan_request = SemanticVectorReadRequestV1 {
-            vector_generation: &request.vector_generation,
-            projection_key: request.projection.projection_key(),
-            search_index_key: request.search_index_key,
-            source_generation: &request.code_generation,
-            capability_manifest_digest: &request.capability_manifest_digest,
-            search_kind: SemanticSearchKindV1::ExactFlat,
-        };
-        let scan = self.vectors.scan_exact_flat(scan_request, &mut |record| {
-            if self.control.is_cancelled() {
-                return Err(RetrievalPortError::Cancelled);
-            }
-            if deadline_exhausted(request, self.control) {
-                return Err(RetrievalPortError::BudgetExceeded);
-            }
-            let (candidate, evidence) = Self::enforce_record(request, record, query)?;
-            if !seen_occurrences.insert(candidate.source_occurrence_id.clone()) {
-                return Err(RetrievalPortError::Contract(
-                    "semantic vector generation contains duplicate source occurrences".to_owned(),
-                ));
-            }
-            eligible_count += 1;
-            if cap == 0 {
-                return Ok(());
-            }
-            let entry = SemanticRankedEntryV1 {
-                candidate,
-                evidence,
-            };
-            if ranked.len() < cap {
-                ranked.push(entry);
-            } else if ranked
-                .peek()
-                .is_some_and(|worst| entry.cmp(worst) == Ordering::Less)
-            {
-                ranked.pop();
-                ranked.push(entry);
-            }
-            Ok(())
-        });
-        let summary = match scan {
-            Ok(summary) => summary,
+        let page = match self.vectors.search_bounded(SemanticVectorSearchRequestV1 {
+            identity: SemanticVectorReadRequestV1 {
+                vector_generation: &request.vector_generation,
+                projection_key: request.projection.projection_key(),
+                search_index_key: request.search_index_key,
+                source_generation: &request.code_generation,
+                capability_manifest_digest: &request.capability_manifest_digest,
+                search_kind: SemanticSearchKindV1::EmbeddedVectorIndex,
+            },
+            query: &query.values,
+            limit: cap,
+        }) {
+            Ok(page) => page,
             Err(error) => {
-                return port_error_outcome(
-                    error,
-                    budget_usage(request, eligible_count as u64, 0, self.control),
-                );
+                return port_error_outcome(error, budget_usage(request, 0, 0, self.control));
             }
         };
-
         if self.control.is_cancelled() {
             return Ok(RetrieverOutcome::Cancelled);
         }
         if deadline_exhausted(request, self.control) {
             return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
                 request,
-                eligible_count as u64,
+                page.summary.examined,
                 0,
                 self.control,
             )));
         }
-        if summary.eligible != eligible_count as u64 {
-            return Err(RetrievalPortError::Contract(
-                "semantic vector scan coverage does not match the visited eligible rows".to_owned(),
-            ));
-        }
-        let accounted = summary
+        let accounted = page
+            .summary
             .eligible
-            .checked_add(summary.excluded)
-            .and_then(|count| count.checked_add(summary.unknown))
+            .checked_add(page.summary.excluded)
+            .and_then(|count| count.checked_add(page.summary.unknown))
             .ok_or_else(|| {
-                RetrievalPortError::Contract("semantic scan coverage overflowed".to_owned())
+                RetrievalPortError::Contract("semantic vector coverage overflowed".to_owned())
             })?;
-        if summary.examined != accounted {
+        if page.summary.examined != accounted
+            || page.matches.len() > cap
+            || page.matches.len() as u64 > page.summary.eligible
+        {
             return Err(RetrievalPortError::Contract(
-                "semantic vector scan coverage is incomplete".to_owned(),
+                "semantic vector index coverage is incomplete".to_owned(),
             ));
         }
-        if summary.unknown != 0 {
+        if page.summary.unknown != 0 {
             return Ok(RetrieverOutcome::Unavailable(
                 RetrievalFailure::AuthorityUnavailable {
                     detail: "semantic vector generation has unknown coverage".to_owned(),
                 },
             ));
         }
-
-        // The heap already retained only the cap smallest rows; drain it in
-        // ascending ranking order (identical to sorting the full set and
-        // truncating to `cap`).
-        let ranked = ranked.into_sorted_vec();
-        let truncated = eligible_count.saturating_sub(cap);
+        let mut seen_occurrences = BTreeSet::new();
+        let mut ranked = Vec::with_capacity(page.matches.len());
+        for matched in &page.matches {
+            let (candidate, evidence) = Self::enforce_record(request, matched, query)?;
+            if !seen_occurrences.insert(candidate.source_occurrence_id.clone()) {
+                return Err(RetrievalPortError::Contract(
+                    "semantic vector generation contains duplicate source occurrences".to_owned(),
+                ));
+            }
+            ranked.push(SemanticRankedEntryV1 {
+                candidate,
+                evidence,
+            });
+        }
+        ranked.sort();
+        let truncated = page.summary.eligible.saturating_sub(ranked.len() as u64);
 
         let mut candidates = Vec::with_capacity(ranked.len());
         let mut evidence_by_occurrence = BTreeMap::new();
@@ -451,11 +424,11 @@ where
             candidates,
             evidence_by_occurrence,
             coverage: RetrieverCoverage {
-                examined: summary.examined,
-                eligible: summary.eligible,
-                excluded: summary.excluded,
-                capped: truncated as u64,
-                unknown: summary.unknown,
+                examined: page.summary.examined,
+                eligible: page.summary.eligible,
+                excluded: page.summary.excluded,
+                capped: truncated,
+                unknown: page.summary.unknown,
             },
             continuation: Some(RetrieverContinuation {
                 lane: RetrieverKind::Semantic,
@@ -470,7 +443,7 @@ where
         if deadline_exhausted(request, self.control) {
             return Ok(RetrieverOutcome::BudgetExceeded(budget_usage(
                 request,
-                summary.examined,
+                page.summary.examined,
                 batch.candidates.len() as u64,
                 self.control,
             )));
@@ -570,6 +543,7 @@ fn validate_vector(values: &[f32], dimensions: u32, label: &str) -> Result<(), R
     Ok(())
 }
 
+#[cfg(test)]
 fn canonical_distance(
     metric: EmbeddingMetricV1,
     query: &[f32],
@@ -616,6 +590,23 @@ fn canonical_distance(
     if !distance.is_finite() {
         return Err(RetrievalPortError::Contract(
             "semantic distance is not finite".to_owned(),
+        ));
+    }
+    let scaled = (distance * SEMANTIC_DISTANCE_SCALE).round();
+    if scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
+        return Err(RetrievalPortError::Contract(
+            "semantic distance exceeds the canonical fixed-point range".to_owned(),
+        ));
+    }
+    Ok(CanonicalSemanticDistanceV1(scaled as i64))
+}
+
+fn canonical_index_distance(
+    distance: f64,
+) -> Result<CanonicalSemanticDistanceV1, RetrievalPortError> {
+    if !distance.is_finite() {
+        return Err(RetrievalPortError::Contract(
+            "semantic vector index returned a non-finite distance".to_owned(),
         ));
     }
     let scaled = (distance * SEMANTIC_DISTANCE_SCALE).round();
@@ -680,7 +671,7 @@ fn elapsed_micros<C: SemanticExecutionControl>(
     control.elapsed_micros()
 }
 
-/// One retained ExactFlat row, ordered by the deterministic semantic ranking
+/// One retained indexed row, ordered by the deterministic semantic ranking
 /// key (ascending distance, then `source_occurrence_id`,
 /// `retriever_evidence_anchor`, `chunk_id`). `Ord` mirrors the former
 /// `ranked.sort_by` comparator exactly, so a max-heap of these keeps the cap

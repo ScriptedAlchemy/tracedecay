@@ -182,6 +182,7 @@ pub(in crate::daemon) async fn mount_query_authority_on_project_open(
 /// consumed immediately by [`RawRetrievalRequestV1::sanitize`].
 pub(in crate::daemon) struct QuerySearchExecutionRequestV1 {
     query: String,
+    requested_generation: Option<CodeGenerationId>,
     pub principal: PrincipalId,
     pub authorization_revision: AuthorizationRevision,
     pub sanitizer_revision: SanitizerRevision,
@@ -200,6 +201,7 @@ impl QuerySearchExecutionRequestV1 {
     pub fn new(query: impl Into<String>, policy: QuerySearchExecutionPolicyV1) -> Self {
         Self {
             query: query.into(),
+            requested_generation: None,
             principal: policy.principal,
             authorization_revision: policy.authorization_revision,
             sanitizer_revision: policy.sanitizer_revision,
@@ -213,6 +215,11 @@ impl QuerySearchExecutionRequestV1 {
             page_size: policy.page_size,
             cursor: policy.cursor,
         }
+    }
+
+    pub fn with_generation(mut self, generation: CodeGenerationId) -> Self {
+        self.requested_generation = Some(generation);
+        self
     }
 }
 
@@ -289,27 +296,36 @@ impl CodeIndexSchedulerRegistryV1 {
         // nothing is servable may the query await the in-flight decode, and
         // when no complete generation exists at all this stays a typed
         // fail-fast rather than degrading into an empty answer.
-        let (latest, served_stale) = match self.latest_complete_serving_for_scope(scope).await {
-            Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
-                // Warm path: the ready gate admits, byte-identical to before.
-                Some(ready) => (ready, false),
-                None => (serving, true),
-            },
-            None => match self.latest_complete_ready_for_scope(scope).await {
-                Some(ready) => (ready, false),
-                None => {
-                    // Nothing servable and the ready gate refused. Search is the
-                    // one lane whose resolution never runs the freshness ladder,
-                    // so nothing else on this path will ever request the rebuild
-                    // that would remedy the failure — it would return this typed
-                    // error forever. Ask for the remedy exactly once per
-                    // admission (debounced on the pending wake), never inline and
-                    // never parking, then still fail typed rather than degrade
-                    // into an empty answer.
-                    self.request_query_background_reconcile(scope).await;
-                    return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
-                }
-            },
+        let (latest, served_stale) = if let Some(generation) = &input.requested_generation {
+            let latest = self
+                .generation_for_project_generation(&scope.project_id, generation)
+                .await
+                .filter(|latest| latest.generation().snapshot().repository == scope.repository_id)
+                .ok_or(QuerySearchExecutionErrorV1::GenerationUnavailable)?;
+            (latest, false)
+        } else {
+            match self.latest_complete_serving_for_scope(scope).await {
+                Some(serving) => match self.latest_complete_ready_decoded_for_scope(scope).await {
+                    // Warm path: the ready gate admits, byte-identical to before.
+                    Some(ready) => (ready, false),
+                    None => (serving, true),
+                },
+                None => match self.latest_complete_ready_for_scope(scope).await {
+                    Some(ready) => (ready, false),
+                    None => {
+                        // Nothing servable and the ready gate refused. Search is the
+                        // one lane whose resolution never runs the freshness ladder,
+                        // so nothing else on this path will ever request the rebuild
+                        // that would remedy the failure — it would return this typed
+                        // error forever. Ask for the remedy exactly once per
+                        // admission (debounced on the pending wake), never inline and
+                        // never parking, then still fail typed rather than degrade
+                        // into an empty answer.
+                        self.request_query_background_reconcile(scope).await;
+                        return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
+                    }
+                },
+            }
         };
         let authority = self
             .query_authority_for_scope(scope)

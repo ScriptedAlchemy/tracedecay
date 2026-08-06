@@ -55,7 +55,6 @@ pub use tracedecay_code_index::ast_grep_search;
 pub mod automation;
 pub mod bench;
 pub mod branch;
-pub mod branch_meta;
 pub mod catalog_composition;
 pub mod client_identity;
 pub mod cloud;
@@ -98,7 +97,6 @@ mod host_admission_test;
 pub mod lifecycle_lease;
 pub mod mcp;
 pub mod memory;
-pub mod migrate;
 pub mod monitor;
 mod open_store_holders;
 #[cfg(test)]

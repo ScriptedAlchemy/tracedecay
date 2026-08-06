@@ -163,6 +163,7 @@ pub fn context_scout_surface_catalog_contribution()
                     TerminalState::Completed,
                     TerminalState::Cancelled,
                     TerminalState::TimedOut,
+                    TerminalState::Unavailable,
                     TerminalState::Failed,
                     TerminalState::EffectUnknown,
                     TerminalState::Partial,
@@ -172,6 +173,7 @@ pub fn context_scout_surface_catalog_contribution()
                     TerminalState::Completed,
                     TerminalState::Cancelled,
                     TerminalState::TimedOut,
+                    TerminalState::Unavailable,
                     TerminalState::Failed,
                     TerminalState::Partial,
                 ]

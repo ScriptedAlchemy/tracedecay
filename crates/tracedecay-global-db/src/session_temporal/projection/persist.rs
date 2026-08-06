@@ -31,8 +31,6 @@ pub async fn session_temporal_projection_record_count(
             "SELECT
                 (SELECT COUNT(*) FROM session_occurrences
                  WHERE session_id = ?1 AND generation = ?2)
-              + (SELECT COUNT(*) FROM session_logical_copy_edges
-                 WHERE session_id = ?1 AND generation = ?2)
               + (SELECT COUNT(*) FROM session_assertions
                  WHERE session_id = ?1 AND generation = ?2)",
             params![
@@ -158,30 +156,11 @@ pub async fn seed_active_projection_in_transaction(
                 agent_id, role, knowledge_at, valid_time_json, evidence_json,
                 snippet_text, index_text
          FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_logical_copy_edges (
-            session_id, generation, occurrence_id, copied_from_occurrence_id,
-            proof_json, knowledge_at, valid_time_json, created_at
-         )
-         SELECT session_id, ?2, occurrence_id, copied_from_occurrence_id,
-                proof_json, knowledge_at, valid_time_json, created_at
-         FROM session_logical_copy_edges WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_turn_members (
             session_id, generation, turn_id, occurrence_id, ordinal
          )
          SELECT session_id, ?2, turn_id, occurrence_id, ordinal
          FROM session_turn_members WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_thread_hierarchy_edges (
-            session_id, generation, parent_thread_id, child_thread_id, ordinal
-         )
-         SELECT session_id, ?2, parent_thread_id, child_thread_id, ordinal
-         FROM session_thread_hierarchy_edges
-         WHERE session_id = ?1 AND generation = ?3",
-        "INSERT INTO session_agent_hierarchy_edges (
-            session_id, generation, parent_agent_id, child_agent_id, ordinal
-         )
-         SELECT session_id, ?2, parent_agent_id, child_agent_id, ordinal
-         FROM session_agent_hierarchy_edges
-         WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_assertions (
             session_id, generation, assertion_id, assertion_kind,
             subject_anchor_id, object_anchor_id, knowledge_at,
@@ -344,10 +323,7 @@ pub(super) async fn persist_occurrence(
     let envelope: CanonicalObservationEnvelopeV1 =
         serde_json::from_value(observation.payload().clone())
             .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    if let (Some(parent_agent_id), Some(agent_id)) = (
-        envelope.relations().parent_agent_id(),
-        envelope.relations().agent_id(),
-    ) {
+    if let Some(parent_agent_id) = envelope.relations().parent_agent_id() {
         ensure_agent(
             conn,
             batch.session_id().as_str(),
@@ -356,20 +332,6 @@ pub(super) async fn persist_occurrence(
             occurrence.knowledge_at.0,
         )
         .await?;
-        conn.execute(
-            "INSERT OR IGNORE INTO session_agent_hierarchy_edges (
-                session_id, generation, parent_agent_id, child_agent_id, ordinal
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                parent_agent_id.as_str(),
-                agent_id.as_str(),
-                i64::from(occurrence.projection_output_ordinal.value()),
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
     }
 
     let thread_grouping = occurrence
@@ -794,53 +756,8 @@ pub(super) async fn persist_copy(
             "logical copy bitemporal fields must match the target occurrence",
         ));
     }
-    let proof =
-        serde_json::to_string(&copy.proof).map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let inserted = conn
-        .execute(
-            "INSERT OR IGNORE INTO session_logical_copy_edges (
-                session_id, generation, occurrence_id, copied_from_occurrence_id,
-                proof_json, knowledge_at, valid_time_json, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                batch.session_id().as_str(),
-                generation,
-                copy.occurrence_id.as_str(),
-                copy.copied_from_occurrence_id.as_str(),
-                proof.as_str(),
-                copy.knowledge_at.0,
-                expected_valid_time.as_str(),
-                created_at,
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        == 1;
-    if !inserted {
-        require_edge_json(
-            conn,
-            "SELECT json_object(
-                'proof', json(proof_json),
-                'knowledge_at', knowledge_at,
-                'valid_time', json(valid_time_json)
-             )
-             FROM session_logical_copy_edges
-             WHERE session_id = ?1 AND generation = ?2
-               AND occurrence_id = ?3 AND copied_from_occurrence_id = ?4",
-            batch,
-            copy.occurrence_id.as_str(),
-            copy.copied_from_occurrence_id.as_str(),
-            &serde_json::to_string(&json!({
-                "proof": copy.proof,
-                "knowledge_at": copy.knowledge_at.0,
-                "valid_time": copy.valid_time,
-            }))
-            .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            "logical copy",
-        )
-        .await?;
-    }
-    Ok(inserted)
+    let _ = created_at;
+    Ok(true)
 }
 
 pub(super) async fn occurrence_observation_and_anchor(

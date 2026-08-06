@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, EmbeddingMetricV1, ManifestDigest, canonical_sha256,
 };
+use tracedecay_graph_db::GraphDb;
 
 use crate::config::retrieval::SemanticCompatibilityPinsV1;
 use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
@@ -96,6 +97,8 @@ struct SemanticRedundancyAuthorityV1 {
 struct RetainedProjectGenerationsV1 {
     latest: CodeGenerationId,
     generations: BTreeMap<CodeGenerationId, CodeIndexPublishedGenerationV1>,
+    database: Arc<Database>,
+    graph: Arc<GraphDb>,
 }
 
 fn retained_generations() -> &'static Mutex<BTreeMap<PathBuf, RetainedProjectGenerationsV1>> {
@@ -117,6 +120,8 @@ fn retained_authorities() -> &'static Mutex<BTreeMap<PathBuf, SemanticRedundancy
 pub(crate) fn register_project_semantic_redundancy_generation(
     project_root: PathBuf,
     generation: CodeIndexPublishedGenerationV1,
+    database: Arc<Database>,
+    graph: Arc<GraphDb>,
 ) {
     let current =
         project_semantic_generation_pointer(&project_root).map(|pointer| pointer.source_generation);
@@ -129,7 +134,11 @@ pub(crate) fn register_project_semantic_redundancy_generation(
         .or_insert_with(|| RetainedProjectGenerationsV1 {
             latest: incoming.clone(),
             generations: BTreeMap::new(),
+            database: Arc::clone(&database),
+            graph: Arc::clone(&graph),
         });
+    project.database = database;
+    project.graph = graph;
     project.latest = incoming.clone();
     project
         .generations
@@ -174,7 +183,6 @@ pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &P
 /// the semantic runtime's atomically current pointer.
 pub async fn project_semantic_redundancy_generation(
     project_root: &Path,
-    database: &Database,
 ) -> Option<SemanticRedundancyGenerationV1> {
     let pointer = project_semantic_generation_pointer(project_root)?;
     let authority = retained_authorities()
@@ -188,7 +196,7 @@ pub async fn project_semantic_redundancy_generation(
         return None;
     }
     let source_generation = pointer.source_generation;
-    let code = {
+    let (code, database, graph) = {
         let retained = retained_generations()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -196,11 +204,16 @@ pub async fn project_semantic_redundancy_generation(
         if project.latest != source_generation {
             return None;
         }
-        project.generations.get(&source_generation).cloned()?
+        (
+            project.generations.get(&source_generation).cloned()?,
+            Arc::clone(&project.database),
+            Arc::clone(&project.graph),
+        )
     };
-    let vectors = DatabaseVectorGenerationStoreV1::read_active_generation(database)
-        .await
-        .ok()??;
+    let vectors =
+        DatabaseVectorGenerationStoreV1::read_active_generation(database.as_ref(), graph.as_ref())
+            .await
+            .ok()??;
     if vectors.source_generation() != &source_generation
         || vectors.generation_id() != &authority.pins.vector_generation_id
         || vectors.embedding_key() != &authority.pins.projection

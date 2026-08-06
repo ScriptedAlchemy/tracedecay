@@ -1,7 +1,7 @@
 //! Kernel-owned configuration primitives.
 //!
 //! These items used to live in the root crate's `config` module, but the
-//! storage layout, database, branch-metadata, and store layers all need them
+//! storage layout, database, and store layers all need them
 //! and those layers moved into this crate. The root `config` module re-exports
 //! every item declared here, so `crate::config::<item>` keeps resolving on
 //! both sides of the split.
@@ -179,8 +179,7 @@ fn paths_same(left: &Path, right: &Path) -> bool {
 ///   patterns, but a project's `config.exclude` can still be overridden).
 /// - `tracedecay::scan::TraceDecay::is_skipped_dir_hint` (an informational
 ///   hint only; the authoritative gate there is still `is_excluded_dir`).
-/// - `tracedecay_migrate::inventory::should_prune_dir` (authoritative
-///   directory prune during migration inventory scans).
+/// - retained storage inventory scans.
 /// - `mcp::tools::handlers::redundancy::is_generated_path` (candidate
 ///   filtering for the duplicate-code scanner).
 ///

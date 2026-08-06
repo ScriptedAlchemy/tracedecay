@@ -17,6 +17,79 @@ use super::{
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
 
 impl RegisteredGlobalDb {
+    pub async fn pending_session_git_graph_publications(
+        &self,
+        limit: usize,
+    ) -> Result<
+        Vec<tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationIntent>,
+        tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationError,
+    > {
+        let snapshot = self.read_snapshot().await.map_err(|error| {
+            tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationError::Store(
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                    error.to_string(),
+                ),
+            )
+        })?;
+        tracedecay_sessions::runtime::git_correlation::pending_session_git_graph_publications(
+            &snapshot, limit,
+        )
+        .await
+    }
+
+    pub async fn acknowledge_session_git_graph_publication(
+        &self,
+        intent: &tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationIntent,
+        graph_receipt: &tracedecay_domain::GitGraphEvidencePublicationReceipt,
+        applied_at: i64,
+    ) -> Result<
+        tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationReceipt,
+        tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationError,
+    > {
+        let transaction = self.begin_write_transaction().await.map_err(|error| {
+            tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationError::Store(
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                    error.to_string(),
+                ),
+            )
+        })?;
+        let receipt =
+            tracedecay_sessions::runtime::git_correlation::acknowledge_session_git_graph_publication(
+                &transaction,
+                intent,
+                graph_receipt,
+                applied_at,
+            )
+            .await?;
+        transaction.commit().await.map_err(|error| {
+            tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationError::Store(
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                    error.to_string(),
+                ),
+            )
+        })?;
+        Ok(receipt)
+    }
+
+    pub async fn last_completed_session_git_graph_publication(
+        &self,
+    ) -> Result<
+        Option<tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationReceipt>,
+        tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationError,
+    > {
+        let snapshot = self.read_snapshot().await.map_err(|error| {
+            tracedecay_sessions::runtime::git_correlation::SessionGitGraphPublicationError::Store(
+                tracedecay_sessions::runtime::git_correlation::GitCorrelationError::Db(
+                    error.to_string(),
+                ),
+            )
+        })?;
+        tracedecay_sessions::runtime::git_correlation::last_completed_session_git_graph_publication(
+            &snapshot,
+        )
+        .await
+    }
+
     pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
         self.session_ingest_health_for_provider(Some("cursor"))
             .await

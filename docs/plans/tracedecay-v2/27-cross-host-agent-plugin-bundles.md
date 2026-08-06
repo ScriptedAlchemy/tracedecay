@@ -360,15 +360,15 @@ the host observation replay spool.
   inventories, fixed test names/counts, giant matrices, and placeholder
   benchmarks are not deliverables.
 
-## Later callable extensions
+## Integrated callable capabilities
 
-- **PR14:** Dashboard and Doctor call the shipped host status and confirmed
+- Dashboard and Doctor call the shipped host status and confirmed
   lifecycle operations. They do not redefine install/repair mechanics.
-- **PR15:** A callable read-only capability probe may expose optional GitHub
+- A callable read-only capability probe exposes supported GitHub
   Stacked PR preview state and hand off to standard Git/forge reads when it is
   absent or degraded. It never invokes provider mutation, rebase, or
   force-push.
-- **PR17:** Host packages may add the callable Plan 24 work surface and Plan 32
+- Host packages include the callable Plan 24 work surface and Plan 32
   native Claude Code/Codex execution adapters, including the independently
   installable Work MCP companion. Discovery reports configured executables and
   protocol capability; Plan 32 alone admits, invokes, supervises, cancels, and

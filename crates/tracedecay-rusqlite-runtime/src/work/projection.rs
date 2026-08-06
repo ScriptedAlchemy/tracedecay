@@ -1,6 +1,6 @@
 //! Bounded, generation-bound projection snapshot and delta reads.
 
-use super::events::load_registered_projection;
+use super::events::{has_any_pending_graph_publication, load_registered_projection};
 use super::*;
 
 impl WorkProjectionReadPort for WorkSqliteStorage {
@@ -9,7 +9,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        exact_snapshot_registered(&self.handle, authority, task_id)
+        exact_snapshot_registered(&self.handle, &self.topology, authority, task_id)
     }
 
     fn snapshot(
@@ -17,7 +17,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
         authority: &WorkAuthority,
         page_size: u32,
     ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
-        snapshot_registered(&self.handle, authority, page_size)
+        snapshot_registered(&self.handle, &self.topology, authority, page_size)
     }
 
     fn delta(
@@ -32,12 +32,18 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
 
 pub(crate) fn exact_snapshot_registered(
     handle: &ExactSqlHandle,
+    topology: &topology::WorkGraphTopologyStore,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
+    if has_any_pending_graph_publication(handle, authority)
+        .map_err(|_| WorkProjectionPortError::Unavailable)?
+    {
+        return Err(WorkProjectionPortError::Unavailable);
+    }
     let generation_id = projection_generation(authority)?;
     let sequence = WorkProjectionSequenceV1::new(registered_owner_cursor(handle, authority)?);
-    let projection = load_registered_projection(handle, authority, task_id)
+    let projection = load_registered_projection(handle, topology, authority, task_id)
         .map_err(|_| WorkProjectionPortError::Unavailable)?;
     WorkProjectionSnapshotV1::new(
         generation_id,
@@ -51,34 +57,23 @@ pub(crate) fn exact_snapshot_registered(
 
 pub(crate) fn snapshot_registered(
     handle: &ExactSqlHandle,
+    topology: &topology::WorkGraphTopologyStore,
     authority: &WorkAuthority,
     page_size: u32,
 ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
+    if has_any_pending_graph_publication(handle, authority)
+        .map_err(|_| WorkProjectionPortError::Unavailable)?
+    {
+        return Err(WorkProjectionPortError::Unavailable);
+    }
     let generation_id = projection_generation(authority)?;
     let sequence = WorkProjectionSequenceV1::new(registered_owner_cursor(handle, authority)?);
-    let total = registered_count(
-        &registered_work_query(
-            handle,
-            "SELECT COUNT(*) FROM work_projection_snapshots_v1
-             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-               AND actor_id = ?4 AND policy_digest = ?5",
-            authority_params_owned(authority),
-        )
-        .map_err(|_| WorkProjectionPortError::Unavailable)?,
-    )?;
-    let rows = registered_work_query(
-        handle,
-        "SELECT projection_payload FROM work_projection_snapshots_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5
-         ORDER BY task_id LIMIT ?6",
-        authority_params_owned(authority)
-            .into_iter()
-            .chain([ExactSqlValue::Integer(i64::from(page_size))])
-            .collect(),
-    )
-    .map_err(|_| WorkProjectionPortError::Unavailable)?;
-    let projections = decode_registered_projections(rows)?;
+    let page_size_usize =
+        usize::try_from(page_size).map_err(|_| WorkProjectionPortError::Unavailable)?;
+    let (projections, total) = topology
+        .projection_page(authority, page_size_usize)
+        .map_err(|_| WorkProjectionPortError::Unavailable)?;
+    let total = u32::try_from(total).map_err(|_| WorkProjectionPortError::Unavailable)?;
     let returned =
         u32::try_from(projections.len()).map_err(|_| WorkProjectionPortError::Unavailable)?;
     let coverage = if returned == total {
@@ -106,6 +101,11 @@ pub(crate) fn delta_registered(
     cursor: &WorkProjectionResumeCursorV1,
     page_size: u32,
 ) -> Result<WorkProjectionDeltaV1, WorkProjectionPortError> {
+    if has_any_pending_graph_publication(handle, authority)
+        .map_err(|_| WorkProjectionPortError::Unavailable)?
+    {
+        return Err(WorkProjectionPortError::Unavailable);
+    }
     let generation_id = projection_generation(authority)?;
     if cursor.generation_id() != &generation_id {
         return Err(WorkProjectionPortError::StaleCursor);
@@ -119,7 +119,7 @@ pub(crate) fn delta_registered(
     let total = registered_count(
         &registered_work_query(
             handle,
-            "SELECT COUNT(DISTINCT task_id) FROM work_projection_deltas_v1
+            "SELECT COUNT(DISTINCT task_id) FROM work_graph_publication_outbox_v1
              WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
                AND actor_id = ?4 AND policy_digest = ?5 AND owner_sequence > ?6",
             authority_params_owned(authority)
@@ -133,17 +133,18 @@ pub(crate) fn delta_registered(
         handle,
         "WITH latest AS (
             SELECT task_id, MAX(owner_sequence) AS owner_sequence
-            FROM work_projection_deltas_v1
+            FROM work_graph_publication_outbox_v1
             WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
               AND actor_id = ?4 AND policy_digest = ?5 AND owner_sequence > ?6
             GROUP BY task_id
          )
-         SELECT delta.projection_payload, latest.owner_sequence
-         FROM latest JOIN work_projection_deltas_v1 AS delta
-           ON delta.project_id = ?1 AND delta.repository_id = ?2 AND delta.worktree_id = ?3
-          AND delta.actor_id = ?4 AND delta.policy_digest = ?5
-          AND delta.task_id = latest.task_id
-          AND delta.owner_sequence = latest.owner_sequence
+         SELECT publication.projection_payload, latest.owner_sequence
+         FROM latest JOIN work_graph_publication_outbox_v1 AS publication
+           ON publication.project_id = ?1 AND publication.repository_id = ?2
+          AND publication.worktree_id = ?3
+          AND publication.actor_id = ?4 AND publication.policy_digest = ?5
+          AND publication.task_id = latest.task_id
+          AND publication.owner_sequence = latest.owner_sequence
          ORDER BY latest.owner_sequence LIMIT ?7",
         authority_params_owned(authority)
             .into_iter()
@@ -222,20 +223,6 @@ pub(crate) fn registered_count(rows: &ExactSqlRows) -> Result<u32, WorkProjectio
             .ok_or(WorkProjectionPortError::Unavailable)?,
     )
     .map_err(|_| WorkProjectionPortError::Unavailable)
-}
-
-pub(crate) fn decode_registered_projections(
-    rows: ExactSqlRows,
-) -> Result<Vec<WorkProjection>, WorkProjectionPortError> {
-    rows.rows
-        .into_iter()
-        .map(|row| {
-            serde_json::from_str(
-                exact_sql_text(&row.values, 0).ok_or(WorkProjectionPortError::Unavailable)?,
-            )
-            .map_err(|_| WorkProjectionPortError::Unavailable)
-        })
-        .collect()
 }
 
 pub(crate) fn projection_generation(

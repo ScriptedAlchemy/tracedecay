@@ -202,9 +202,7 @@ pub(super) async fn execute_profile_retained_application_tool(
         | RetainedSurfaceOperation::LcmDescribe
         | RetainedSurfaceOperation::LcmExpand
         | RetainedSurfaceOperation::LcmExpandQuery
-        | RetainedSurfaceOperation::LcmPreflight
-        | RetainedSurfaceOperation::LcmCompress
-        | RetainedSurfaceOperation::LcmSessionBoundary => {
+        | RetainedSurfaceOperation::LcmPreflight => {
             handle_user_lcm_tool_with_db(
                 tool_name,
                 request.arguments,

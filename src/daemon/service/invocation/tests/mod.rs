@@ -11,6 +11,16 @@ use tracedecay_lsp::{
     LspRequestId, UnavailableSemanticProvider,
 };
 
+fn test_graph() -> tracedecay_graph_db::GraphDb {
+    tracedecay_graph_db::GraphDb::open(tracedecay_graph_db::GraphDbOpenOptions {
+        location: tracedecay_graph_db::GraphDbLocation::Memory,
+        expected_format: tracedecay_graph_db::GraphFormatVersion::new(2).expect("graph format"),
+        durability: tracedecay_graph_db::GraphDurability::Memory,
+        cancellation: Arc::new(tracedecay_graph_db::NeverCancelled),
+    })
+    .expect("test graph")
+}
+
 #[derive(Default)]
 struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
 

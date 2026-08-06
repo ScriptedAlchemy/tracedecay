@@ -229,15 +229,15 @@ fn finding_contract(
             "refresh terminal receipt drift",
             "Pause temporal refresh and request daemon-owned terminal receipt reconciliation.",
         ),
-        SessionTemporalHealthFindingKind::MigrationGap => (
-            "migration_gap",
-            "temporal schema migration gap",
-            "Preserve the database, upgrade the daemon owner, and rerun Doctor; do not initialize or force-sync the store.",
+        SessionTemporalHealthFindingKind::SchemaMismatch => (
+            "schema_mismatch",
+            "temporal schema mismatch",
+            "Remove the incompatible store and restart TraceDecay so it can create the final schema.",
         ),
         SessionTemporalHealthFindingKind::CompatibilityDrift => (
             "compatibility_drift",
             "canonical-to-compatibility projection drift",
-            "Preserve canonical temporal rows and request a daemon-owned compatibility projection rebuild.",
+            "Remove the incompatible store and restart TraceDecay so it can create the final schema.",
         ),
     }
 }

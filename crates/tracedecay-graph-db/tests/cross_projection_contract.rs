@@ -53,6 +53,7 @@ fn traversal(start: &str) -> TraversalRequest {
         namespace: GraphNamespace::new("workspace").unwrap(),
         start: identity(start),
         relation_kinds: BTreeSet::new(),
+        direction: tracedecay_graph_db::GraphTraversalDirection::Outgoing,
         max_depth: 1,
         max_visits: 2,
         max_results: 2,

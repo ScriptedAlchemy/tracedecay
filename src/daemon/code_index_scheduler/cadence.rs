@@ -94,7 +94,7 @@ pub(crate) enum CodeIndexCadenceOutcomeV1 {
 
 /// One completed event-to-ready measurement for a mounted worktree.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CodeIndexEventToReadyReceiptV1 {
+pub(crate) struct CodeIndexEventToReadyReceipt {
     pub project_root: PathBuf,
     pub trigger: CodeIndexCadenceTriggerV1,
     /// When the wake was accepted, when that is attributable.
@@ -108,7 +108,7 @@ pub(crate) struct CodeIndexEventToReadyReceiptV1 {
     pub overflow_reconciled: bool,
 }
 
-impl CodeIndexEventToReadyReceiptV1 {
+impl CodeIndexEventToReadyReceipt {
     pub(crate) fn new(
         project_root: PathBuf,
         trigger: CodeIndexCadenceTriggerV1,
@@ -252,7 +252,7 @@ pub(crate) struct CodeIndexCadenceReadModelV1 {
 /// unavailable by construction.
 #[derive(Debug, Default)]
 pub(crate) struct CodeIndexCadenceTelemetryV1 {
-    receipts: VecDeque<CodeIndexEventToReadyReceiptV1>,
+    receipts: VecDeque<CodeIndexEventToReadyReceipt>,
 }
 
 impl CodeIndexCadenceTelemetryV1 {
@@ -263,20 +263,18 @@ impl CodeIndexCadenceTelemetryV1 {
         "cadence ring must be able to hold a p99-eligible population"
     );
 
-    pub(crate) fn record(&mut self, receipt: CodeIndexEventToReadyReceiptV1) {
+    pub(crate) fn record(&mut self, receipt: CodeIndexEventToReadyReceipt) {
         while self.receipts.len() >= Self::CAPACITY {
             self.receipts.pop_front();
         }
         self.receipts.push_back(receipt);
     }
 
-    pub(crate) fn latest(&self) -> Option<&CodeIndexEventToReadyReceiptV1> {
+    pub(crate) fn latest(&self) -> Option<&CodeIndexEventToReadyReceipt> {
         self.receipts.back()
     }
 
-    pub(crate) fn receipts(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &CodeIndexEventToReadyReceiptV1> {
+    pub(crate) fn receipts(&self) -> impl ExactSizeIterator<Item = &CodeIndexEventToReadyReceipt> {
         self.receipts.iter()
     }
 
@@ -363,8 +361,8 @@ mod tests {
         arrival: CodeIndexArrivalV1,
         started_micros: i64,
         ready_micros: i64,
-    ) -> CodeIndexEventToReadyReceiptV1 {
-        CodeIndexEventToReadyReceiptV1::new(
+    ) -> CodeIndexEventToReadyReceipt {
+        CodeIndexEventToReadyReceipt::new(
             PathBuf::from("/tmp/project"),
             CodeIndexCadenceTriggerV1::HookHint,
             arrival,

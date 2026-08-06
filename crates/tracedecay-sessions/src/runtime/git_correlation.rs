@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::{GitGraphEvidencePublicationReceipt, GitOidV1, SessionId};
 
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
@@ -45,6 +46,8 @@ pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 
 /// Hard cap on rows returned by [`sessions_for`].
 pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
+/// Hard cap on one daemon graph-publication replay page.
+pub const MAX_SESSION_GIT_GRAPH_PUBLICATIONS: usize = 256;
 
 /// `git_correlation_meta` key holding the auto-backfill activity watermark:
 /// the highest session-activity timestamp the incremental backfill has
@@ -74,6 +77,43 @@ impl std::error::Error for GitCorrelationError {}
 impl From<tracedecay_runtime_core::db::engine::Error> for GitCorrelationError {
     fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
         Self::Db(err.to_string())
+    }
+}
+
+/// Typed failures for daemon graph-publication journal operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionGitGraphPublicationError {
+    Store(GitCorrelationError),
+    InvalidArgument(String),
+    Conflict(String),
+}
+
+impl std::fmt::Display for SessionGitGraphPublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(formatter),
+            Self::InvalidArgument(message) => formatter.write_str(message),
+            Self::Conflict(message) => {
+                write!(
+                    formatter,
+                    "session git graph publication conflict: {message}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionGitGraphPublicationError {}
+
+impl From<GitCorrelationError> for SessionGitGraphPublicationError {
+    fn from(error: GitCorrelationError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<tracedecay_runtime_core::db::engine::Error> for SessionGitGraphPublicationError {
+    fn from(error: tracedecay_runtime_core::db::engine::Error) -> Self {
+        Self::Store(GitCorrelationError::from(error))
     }
 }
 
@@ -293,6 +333,27 @@ pub struct CommitSessionRecord {
     pub confidence: i64,
     /// Source message or host event that supplied direct evidence, when known.
     pub evidence_message_id: Option<String>,
+}
+
+/// One immutable direct-evidence relation waiting for daemon graph apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionGitGraphPublicationIntent {
+    pub source_sequence: u64,
+    pub commit_oid: GitOidV1,
+    pub session_id: SessionId,
+    pub intent_digest: String,
+    pub source_committed_at: i64,
+}
+
+/// Exact durable acknowledgement of one applied graph relation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionGitGraphPublicationReceipt {
+    pub source_sequence: u64,
+    pub commit_oid: GitOidV1,
+    pub session_id: SessionId,
+    pub intent_digest: String,
+    pub graph_receipt: GitGraphEvidencePublicationReceipt,
+    pub applied_at: i64,
 }
 
 /// A parsed, validated git reference to correlate sessions against.
@@ -593,7 +654,42 @@ pub async fn ensure_git_correlation_schema_in_transaction(
             GIT_CORRELATION_SCHEMA_VERSION
         )));
     }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_git_graph_publication_outbox (
+            publication_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            commit_oid TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            intent_digest TEXT NOT NULL,
+            source_committed_at INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('pending', 'applied')),
+            graph_receipt_json TEXT CHECK(
+                graph_receipt_json IS NULL OR json_valid(graph_receipt_json)
+            ),
+            applied_at INTEGER,
+            UNIQUE(commit_oid, session_id),
+            CHECK(
+                (state = 'pending' AND graph_receipt_json IS NULL AND applied_at IS NULL)
+                OR (
+                    state = 'applied'
+                    AND graph_receipt_json IS NOT NULL
+                    AND applied_at IS NOT NULL
+                )
+            )
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_git_graph_publication_pending
+            ON session_git_graph_publication_outbox(
+                state, publication_sequence
+            );
+        CREATE INDEX IF NOT EXISTS idx_session_git_graph_publication_applied
+            ON session_git_graph_publication_outbox(
+                state, applied_at DESC, commit_oid, session_id
+            );",
+    )
+    .await?;
     if version == Some(GIT_CORRELATION_SCHEMA_VERSION) {
+        if table_exists(conn, "commit_sessions").await? {
+            ensure_session_git_graph_publication_triggers(conn).await?;
+        }
         return Ok(());
     }
     // Only a pre-v3 `commit_sessions` needs the relation/evidence rebuild
@@ -683,6 +779,7 @@ pub async fn ensure_git_correlation_schema_in_transaction(
         conn.execute("DROP TABLE commit_sessions_legacy_v3", ())
             .await?;
     }
+    ensure_session_git_graph_publication_triggers(conn).await?;
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_commit_sessions_session
                 ON commit_sessions(provider, session_id, committed_at);
@@ -705,6 +802,63 @@ pub async fn ensure_git_correlation_schema_in_transaction(
          ON CONFLICT(name) DO UPDATE SET
             version = excluded.version",
         params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_session_git_graph_publication_triggers(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), GitCorrelationError> {
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS commit_sessions_stage_graph_insert
+         AFTER INSERT ON commit_sessions
+         WHEN NEW.relation = 'produced'
+         BEGIN
+             INSERT INTO session_git_graph_publication_outbox (
+                 commit_oid, session_id, intent_digest, source_committed_at,
+                 state, graph_receipt_json, applied_at
+             ) VALUES (
+                 NEW.commit_sha,
+                 NEW.session_id,
+                 'session-git-graph-publication-v1:' || NEW.commit_sha || ':' || NEW.session_id,
+                 NEW.committed_at,
+                 'pending',
+                 NULL,
+                 NULL
+             )
+             ON CONFLICT(commit_oid, session_id) DO UPDATE SET
+                 intent_digest = CASE
+                     WHEN session_git_graph_publication_outbox.intent_digest
+                          = excluded.intent_digest
+                     THEN session_git_graph_publication_outbox.intent_digest
+                     ELSE RAISE(ABORT, 'session git graph publication digest conflict')
+                 END;
+         END;
+         CREATE TRIGGER IF NOT EXISTS commit_sessions_stage_graph_upgrade
+         AFTER UPDATE OF relation ON commit_sessions
+         WHEN NEW.relation = 'produced' AND OLD.relation <> 'produced'
+         BEGIN
+             INSERT INTO session_git_graph_publication_outbox (
+                 commit_oid, session_id, intent_digest, source_committed_at,
+                 state, graph_receipt_json, applied_at
+             ) VALUES (
+                 NEW.commit_sha,
+                 NEW.session_id,
+                 'session-git-graph-publication-v1:' || NEW.commit_sha || ':' || NEW.session_id,
+                 NEW.committed_at,
+                 'pending',
+                 NULL,
+                 NULL
+             )
+             ON CONFLICT(commit_oid, session_id) DO UPDATE SET
+                 intent_digest = CASE
+                     WHEN session_git_graph_publication_outbox.intent_digest
+                          = excluded.intent_digest
+                     THEN session_git_graph_publication_outbox.intent_digest
+                     ELSE RAISE(ABORT, 'session git graph publication digest conflict')
+                 END;
+         END;",
     )
     .await?;
     Ok(())
@@ -1325,6 +1479,18 @@ pub async fn upsert_commit_session(
     conn: &(impl Executor + ?Sized),
     record: &CommitSessionRecord,
 ) -> Result<bool, GitCorrelationError> {
+    if record.relation == CommitRelation::Produced {
+        GitOidV1::new(record.commit_sha.clone()).map_err(|error| {
+            GitCorrelationError::InvalidArgument(format!(
+                "direct commit evidence has an invalid object id: {error}"
+            ))
+        })?;
+        SessionId::new(record.session_id.clone()).map_err(|error| {
+            GitCorrelationError::InvalidArgument(format!(
+                "direct commit evidence has an invalid session id: {error}"
+            ))
+        })?;
+    }
     let worktree = record.worktree.as_deref().map(normalize_worktree);
     let inserted = conn
         .execute(
@@ -1364,6 +1530,245 @@ pub async fn upsert_commit_session(
         )
         .await?;
     Ok(inserted > 0)
+}
+
+/// Reads one deterministic, bounded page of pending direct-evidence intents.
+pub async fn pending_session_git_graph_publications(
+    conn: &(impl QueryExecutor + ?Sized),
+    limit: usize,
+) -> Result<Vec<SessionGitGraphPublicationIntent>, SessionGitGraphPublicationError> {
+    if !(1..=MAX_SESSION_GIT_GRAPH_PUBLICATIONS).contains(&limit) {
+        return Err(SessionGitGraphPublicationError::InvalidArgument(format!(
+            "session git graph publication limit must be between 1 and {MAX_SESSION_GIT_GRAPH_PUBLICATIONS}"
+        )));
+    }
+    let mut rows = conn
+        .query(
+            "SELECT publication_sequence, commit_oid, session_id, intent_digest,
+                    source_committed_at
+             FROM session_git_graph_publication_outbox
+             WHERE state = 'pending'
+             ORDER BY publication_sequence
+             LIMIT ?1",
+            params![i64::try_from(limit).map_err(|error| {
+                SessionGitGraphPublicationError::InvalidArgument(error.to_string())
+            })?],
+        )
+        .await?;
+    let mut intents = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let source_sequence = u64::try_from(row.get::<i64>(0)?).map_err(|error| {
+            SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+                "stored session graph publication has an invalid sequence: {error}"
+            )))
+        })?;
+        let commit_oid = GitOidV1::new(row.get::<String>(1)?).map_err(|error| {
+            SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+                "stored session graph publication has an invalid commit id: {error}"
+            )))
+        })?;
+        let session_id = SessionId::new(row.get::<String>(2)?).map_err(|error| {
+            SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+                "stored session graph publication has an invalid session id: {error}"
+            )))
+        })?;
+        let intent_digest = row.get::<String>(3)?;
+        if session_git_graph_intent_digest(&commit_oid, &session_id) != intent_digest {
+            return Err(SessionGitGraphPublicationError::Store(
+                GitCorrelationError::Db(
+                    "stored session graph publication has an invalid digest".to_owned(),
+                ),
+            ));
+        }
+        intents.push(SessionGitGraphPublicationIntent {
+            source_sequence,
+            commit_oid,
+            session_id,
+            intent_digest,
+            source_committed_at: row.get(4)?,
+        });
+    }
+    Ok(intents)
+}
+
+/// Atomically acknowledges exactly one pending intent. Exact receipt replay is
+/// idempotent; any different digest or receipt is a typed conflict.
+pub async fn acknowledge_session_git_graph_publication(
+    conn: &(impl Executor + ?Sized),
+    intent: &SessionGitGraphPublicationIntent,
+    graph_receipt: &GitGraphEvidencePublicationReceipt,
+    applied_at: i64,
+) -> Result<SessionGitGraphPublicationReceipt, SessionGitGraphPublicationError> {
+    graph_receipt.validate().map_err(|error| {
+        SessionGitGraphPublicationError::InvalidArgument(format!(
+            "graph publication receipt is invalid: {error}"
+        ))
+    })?;
+    let graph_receipt_json = serde_json::to_string(graph_receipt).map_err(|error| {
+        SessionGitGraphPublicationError::InvalidArgument(format!(
+            "graph publication receipt cannot be encoded: {error}"
+        ))
+    })?;
+    if session_git_graph_intent_digest(&intent.commit_oid, &intent.session_id)
+        != intent.intent_digest
+    {
+        return Err(SessionGitGraphPublicationError::Conflict(
+            "caller intent digest is invalid".to_owned(),
+        ));
+    }
+    let changed = conn
+        .execute(
+            "UPDATE session_git_graph_publication_outbox
+             SET state = 'applied', graph_receipt_json = ?4, applied_at = ?5
+             WHERE commit_oid = ?1 AND session_id = ?2
+               AND intent_digest = ?3 AND state = 'pending'
+               AND publication_sequence = ?6",
+            params![
+                intent.commit_oid.as_str(),
+                intent.session_id.as_str(),
+                intent.intent_digest.as_str(),
+                graph_receipt_json.as_str(),
+                applied_at,
+                i64::try_from(intent.source_sequence).map_err(|error| {
+                    SessionGitGraphPublicationError::InvalidArgument(error.to_string())
+                })?,
+            ],
+        )
+        .await?;
+    if changed == 0 {
+        let mut rows = conn
+            .query(
+                "SELECT publication_sequence, intent_digest, state,
+                        graph_receipt_json, applied_at
+                 FROM session_git_graph_publication_outbox
+                 WHERE commit_oid = ?1 AND session_id = ?2",
+                params![intent.commit_oid.as_str(), intent.session_id.as_str()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Err(SessionGitGraphPublicationError::Conflict(
+                "intent is not durably staged".to_owned(),
+            ));
+        };
+        let existing_sequence = u64::try_from(row.get::<i64>(0)?).map_err(|error| {
+            SessionGitGraphPublicationError::Store(GitCorrelationError::Db(error.to_string()))
+        })?;
+        let existing_digest: String = row.get(1)?;
+        let state: String = row.get(2)?;
+        let existing_receipt_json: Option<String> = row.get(3)?;
+        let existing_applied_at: Option<i64> = row.get(4)?;
+        let existing_receipt = existing_receipt_json
+            .as_deref()
+            .map(serde_json::from_str::<GitGraphEvidencePublicationReceipt>)
+            .transpose()
+            .map_err(|error| {
+                SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+                    "stored graph publication receipt is invalid: {error}"
+                )))
+            })?;
+        if existing_sequence != intent.source_sequence
+            || existing_digest != intent.intent_digest
+            || state != "applied"
+            || existing_receipt.as_ref() != Some(graph_receipt)
+        {
+            return Err(SessionGitGraphPublicationError::Conflict(
+                "intent was acknowledged with different evidence".to_owned(),
+            ));
+        }
+        return Ok(SessionGitGraphPublicationReceipt {
+            source_sequence: intent.source_sequence,
+            commit_oid: intent.commit_oid.clone(),
+            session_id: intent.session_id.clone(),
+            intent_digest: intent.intent_digest.clone(),
+            graph_receipt: existing_receipt.ok_or_else(|| {
+                SessionGitGraphPublicationError::Conflict(
+                    "applied intent has no graph receipt".to_owned(),
+                )
+            })?,
+            applied_at: existing_applied_at.ok_or_else(|| {
+                SessionGitGraphPublicationError::Conflict(
+                    "applied intent has no completion timestamp".to_owned(),
+                )
+            })?,
+        });
+    }
+    Ok(SessionGitGraphPublicationReceipt {
+        source_sequence: intent.source_sequence,
+        commit_oid: intent.commit_oid.clone(),
+        session_id: intent.session_id.clone(),
+        intent_digest: intent.intent_digest.clone(),
+        graph_receipt: graph_receipt.clone(),
+        applied_at,
+    })
+}
+
+/// Returns the most recent exact acknowledgement, or typed absence.
+pub async fn last_completed_session_git_graph_publication(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<Option<SessionGitGraphPublicationReceipt>, SessionGitGraphPublicationError> {
+    let mut rows = conn
+        .query(
+            "SELECT publication_sequence, commit_oid, session_id, intent_digest,
+                    graph_receipt_json, applied_at
+             FROM session_git_graph_publication_outbox
+             WHERE state = 'applied'
+             ORDER BY publication_sequence DESC
+             LIMIT 1",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let source_sequence = u64::try_from(row.get::<i64>(0)?).map_err(|error| {
+        SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+            "stored graph receipt has an invalid sequence: {error}"
+        )))
+    })?;
+    let commit_oid = GitOidV1::new(row.get::<String>(1)?).map_err(|error| {
+        SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+            "stored graph receipt has an invalid commit id: {error}"
+        )))
+    })?;
+    let session_id = SessionId::new(row.get::<String>(2)?).map_err(|error| {
+        SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+            "stored graph receipt has an invalid session id: {error}"
+        )))
+    })?;
+    let intent_digest = row.get::<String>(3)?;
+    if session_git_graph_intent_digest(&commit_oid, &session_id) != intent_digest {
+        return Err(SessionGitGraphPublicationError::Store(
+            GitCorrelationError::Db("stored graph receipt has an invalid digest".to_owned()),
+        ));
+    }
+    let graph_receipt =
+        serde_json::from_str::<GitGraphEvidencePublicationReceipt>(&row.get::<String>(4)?)
+            .map_err(|error| {
+                SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+                    "stored graph publication receipt is invalid: {error}"
+                )))
+            })?;
+    graph_receipt.validate().map_err(|error| {
+        SessionGitGraphPublicationError::Store(GitCorrelationError::Db(format!(
+            "stored graph publication receipt is non-canonical: {error}"
+        )))
+    })?;
+    Ok(Some(SessionGitGraphPublicationReceipt {
+        source_sequence,
+        commit_oid,
+        session_id,
+        intent_digest,
+        graph_receipt,
+        applied_at: row.get(5)?,
+    }))
+}
+
+fn session_git_graph_intent_digest(commit_oid: &GitOidV1, session_id: &SessionId) -> String {
+    format!(
+        "session-git-graph-publication-v1:{}:{}",
+        commit_oid.as_str(),
+        session_id.as_str()
+    )
 }
 
 mod attribution;

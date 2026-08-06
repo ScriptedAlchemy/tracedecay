@@ -100,7 +100,7 @@ struct StoreRuntimeHandleInner {
     attachment: Arc<dyn PhysicalRuntimeAttachment>,
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
-    schema_migrated: bool,
+    schema_installed: bool,
     database_authority: Option<crate::db::DatabaseAuthority>,
 }
 
@@ -230,8 +230,8 @@ impl StoreRuntimeHandle {
         Some(self.inner.opened_file_identity)
     }
 
-    pub fn schema_migrated(&self) -> bool {
-        self.inner.schema_migrated
+    pub fn schema_installed(&self) -> bool {
+        self.inner.schema_installed
     }
 
     pub fn database_authority(

@@ -226,6 +226,7 @@ pub(super) async fn read_revision_from_executor(
         &metadata.resolution_provenance_digest,
     )
     .await?;
+    validate_snapshot_registry_completeness(&snapshot)?;
     Ok(Some(revision_from_metadata(metadata, snapshot)?))
 }
 

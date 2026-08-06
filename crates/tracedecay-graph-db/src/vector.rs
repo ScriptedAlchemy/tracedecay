@@ -1,16 +1,19 @@
 use std::fmt;
 use std::sync::Arc;
 
-use grafeo_core::index::vector::DistanceMetric;
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::runtime::vector_property_key;
-use crate::state::{ENTITY_LABEL, StateCache};
+use crate::state::StateCache;
 use crate::{
-    GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProperty,
-    GraphPropertyName,
+    GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProjectionId,
+    GraphProperty, GraphPropertyName,
 };
+
+pub const MAX_VECTOR_SEARCH_LIMIT: usize = 4_096;
+const MAX_VECTOR_SEARCH_EF: usize = MAX_VECTOR_SEARCH_LIMIT * 4;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum VectorMetric {
@@ -31,14 +34,6 @@ impl VectorMetric {
         }
     }
 
-    pub(crate) const fn into_grafeo(self) -> DistanceMetric {
-        match self {
-            Self::Cosine => DistanceMetric::Cosine,
-            Self::DotProduct => DistanceMetric::DotProduct,
-            Self::Euclidean => DistanceMetric::Euclidean,
-        }
-    }
-
     pub(crate) const fn storage_tag(self) -> &'static str {
         match self {
             Self::Cosine => "cos",
@@ -46,11 +41,20 @@ impl VectorMetric {
             Self::Euclidean => "l2",
         }
     }
+
+    pub(crate) const fn engine_name(self) -> &'static str {
+        match self {
+            Self::Cosine => "cosine",
+            Self::DotProduct => "dot_product",
+            Self::Euclidean => "euclidean",
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct VectorSearchRequest {
     pub namespace: GraphNamespace,
+    pub projection: GraphProjectionId,
     pub property: GraphPropertyName,
     pub query: Vec<f32>,
     pub dimension: usize,
@@ -59,11 +63,55 @@ pub struct VectorSearchRequest {
     pub cancellation: Arc<dyn GraphCancellation>,
 }
 
+#[derive(Clone)]
+pub struct GraphVectorIndexRequest {
+    pub namespace: GraphNamespace,
+    pub projection: GraphProjectionId,
+    pub property: GraphPropertyName,
+    pub dimension: usize,
+    pub metric: VectorMetric,
+    pub cancellation: Arc<dyn GraphCancellation>,
+}
+
+impl GraphVectorIndexRequest {
+    pub(crate) fn validate(&self) -> Result<(), GraphDbError> {
+        if self.cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        if self.dimension == 0 {
+            return Err(GraphDbError::invalid(
+                "vector index dimension must be greater than zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for GraphVectorIndexRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GraphVectorIndexRequest")
+            .field("namespace", &self.namespace)
+            .field("projection", &self.projection)
+            .field("property", &self.property)
+            .field("dimension", &self.dimension)
+            .field("metric", &self.metric)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphVectorIndexStatus {
+    Available,
+    Missing,
+}
+
 impl fmt::Debug for VectorSearchRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("VectorSearchRequest")
             .field("namespace", &self.namespace)
+            .field("projection", &self.projection)
             .field("property", &self.property)
             .field("dimension", &self.dimension)
             .field("metric", &self.metric)
@@ -89,15 +137,22 @@ pub(crate) fn vector_search(
     request: VectorSearchRequest,
 ) -> Result<VectorSearchResult, GraphDbError> {
     validate_request(&request)?;
-    let store = database.graph_store();
     let key = vector_property_key(&request.property, request.dimension, request.metric);
-    let candidates = store.vector_search(
-        Some(ENTITY_LABEL),
-        &key,
-        &request.query,
-        store.node_count(),
-        request.metric.into_grafeo(),
+    let label = native_vector_label(
+        &request.namespace,
+        &request.projection,
+        &request.property,
+        request.dimension,
+        request.metric,
     );
+    let ef = request
+        .limit
+        .saturating_mul(4)
+        .max(64)
+        .min(MAX_VECTOR_SEARCH_EF);
+    let candidates = database
+        .vector_search(&label, &key, &request.query, request.limit, Some(ef), None)
+        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
     if request.cancellation.is_cancelled() {
         return Err(GraphDbError::Cancelled);
     }
@@ -110,7 +165,7 @@ pub(crate) fn vector_search(
         let Some(stored) = state.entity_by_node(node_id) else {
             continue;
         };
-        if stored.namespace != request.namespace {
+        if stored.namespace != request.namespace || stored.projection != request.projection {
             continue;
         }
         let Some(GraphProperty::Vector(vector)) = stored.entity.properties.get(&request.property)
@@ -123,7 +178,7 @@ pub(crate) fn vector_search(
         {
             matches.push(VectorMatch {
                 entity: stored.entity.identity.clone(),
-                distance: normalize_distance(distance),
+                distance: normalize_distance(f64::from(distance)),
             });
         }
     }
@@ -134,6 +189,30 @@ pub(crate) fn vector_search(
     });
     matches.truncate(request.limit);
     Ok(VectorSearchResult { matches })
+}
+
+pub(crate) fn native_vector_label(
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    property: &GraphPropertyName,
+    dimension: usize,
+    metric: VectorMetric,
+) -> String {
+    let mut digest = Sha256::new();
+    for component in [
+        namespace.as_str(),
+        projection.as_str(),
+        property.as_str(),
+        metric.storage_tag(),
+    ] {
+        digest.update(component.len().to_le_bytes());
+        digest.update(component.as_bytes());
+    }
+    digest.update(dimension.to_le_bytes());
+    format!(
+        "__tracedecay_graph_db_vector_{}",
+        hex::encode(digest.finalize())
+    )
 }
 
 fn normalize_distance(distance: f64) -> f64 {
@@ -162,6 +241,11 @@ fn validate_request(request: &VectorSearchRequest) -> Result<(), GraphDbError> {
         return Err(GraphDbError::invalid(
             "vector result limit must be greater than zero",
         ));
+    }
+    if request.limit > MAX_VECTOR_SEARCH_LIMIT {
+        return Err(GraphDbError::invalid(format!(
+            "vector result limit exceeds {MAX_VECTOR_SEARCH_LIMIT}"
+        )));
     }
     Ok(())
 }

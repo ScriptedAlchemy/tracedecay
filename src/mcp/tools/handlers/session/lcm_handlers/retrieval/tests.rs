@@ -202,14 +202,20 @@ async fn grep_binds_summary_source_as_of_and_renders_stable_summary_hits() {
 async fn grep_missing_profile_store_is_unavailable_without_db_fallback() {
     let temp = TempDir::new().unwrap();
     let missing_path = temp.path().join("sessions.db");
+    let started = std::time::Instant::now();
     let response = payload(
-        handle_lcm_grep(
-            LcmHandlerContext::user(&missing_path, None, None),
-            json!({"query": "anything", "format": "json"}),
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            handle_lcm_grep(
+                LcmHandlerContext::user(&missing_path, None, None),
+                json!({"query": "anything", "format": "json"}),
+            ),
         )
         .await
+        .expect("unavailable LCM grep should finish within the fast-path budget")
         .unwrap(),
     );
+    eprintln!("unavailable LCM grep latency: {:?}", started.elapsed());
 
     assert_eq!(response["status"], "unavailable");
     assert_eq!(

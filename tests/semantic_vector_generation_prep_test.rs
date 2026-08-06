@@ -9,10 +9,10 @@ use sha2::{Digest, Sha256};
 use tracedecay::code_index::projection::{expected_request_digest, verify_batch_receipt};
 use tracedecay::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use tracedecay::store::vector_generation_test_support::{
-    CanonicalChunkVectorEncoderV1, DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1,
-    ProjectionRequestBatchV1, SemanticProjectionErrorV1, VectorGenerationIdV1,
-    VectorGenerationPlanV1, VectorGenerationStoreErrorV1, fail_before_publication_swap_once,
-    prepare_vector_generation, prepare_vector_generation_async, split_projection_request,
+    CanonicalChunkVectorEncoderV1, DatabaseVectorGenerationStoreV1, ProjectionRequestBatchV1,
+    SemanticProjectionErrorV1, VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationState,
+    VectorGenerationStoreErrorV1, fail_before_publication_swap_once, prepare_vector_generation,
+    prepare_vector_generation_async, split_projection_request,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
@@ -211,7 +211,7 @@ impl CanonicalChunkVectorEncoderV1 for BlockingEncoder {
 }
 
 fn publish_initial_generation() -> (
-    FakeVectorGenerationStoreV1,
+    VectorGenerationState,
     EmbeddingProjectionKeyV1,
     VectorGenerationIdV1,
 ) {
@@ -248,7 +248,7 @@ fn publish_initial_generation() -> (
     assert_eq!(encoder.seen.len(), 3);
     assert_eq!(encoder.batch_sizes, [3]);
 
-    let mut store = FakeVectorGenerationStoreV1::new();
+    let mut store = VectorGenerationState::new();
     let build_id = store
         .begin_generation(VectorGenerationPlanV1 {
             target_projection_key: projection_key.clone(),
@@ -795,7 +795,7 @@ fn duplicate_vector_rows_fail_without_advancing_the_checkpoint() {
         &mut FakeEncoder::default(),
     )
     .unwrap();
-    let mut store = FakeVectorGenerationStoreV1::new();
+    let mut store = VectorGenerationState::new();
     let build_id = store
         .begin_generation(VectorGenerationPlanV1 {
             target_projection_key: projection_key,
@@ -855,7 +855,7 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
         &mut FakeEncoder::default(),
     )
     .expect("single projection batch");
-    let mut single_store = FakeVectorGenerationStoreV1::new();
+    let mut single_store = VectorGenerationState::new();
     let single_build = single_store
         .begin_generation(plan.clone())
         .expect("single build");
@@ -902,7 +902,7 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
         &mut FakeEncoder::default(),
     )
     .expect("second projection batch");
-    let mut multi_store = FakeVectorGenerationStoreV1::new();
+    let mut multi_store = VectorGenerationState::new();
     let multi_build = multi_store.begin_generation(plan).expect("multi build");
     let checkpoint = multi_store
         .commit_batch(&multi_build, None, alpha_prepared)
@@ -977,10 +977,10 @@ fn publish_in_batches(
     plan: VectorGenerationPlanV1,
     batches: Vec<ProjectionRequestBatchV1>,
 ) -> (
-    FakeVectorGenerationStoreV1,
+    VectorGenerationState,
     tracedecay::store::vector_generation_test_support::VectorGenerationPublicationV1,
 ) {
-    let mut store = FakeVectorGenerationStoreV1::new();
+    let mut store = VectorGenerationState::new();
     let build = store.begin_generation(plan).expect("staged build");
     let mut checkpoint = None;
     for batch in batches {
@@ -1113,7 +1113,7 @@ fn a_partial_incremental_run_resumes_from_its_checkpoint() {
     let batches = split_projection_request(&whole, &corpus, 16).expect("split request");
     let reference = publish_in_batches(&admitted, plan.clone(), batches.clone()).1;
 
-    let mut store = FakeVectorGenerationStoreV1::new();
+    let mut store = VectorGenerationState::new();
     let build = store.begin_generation(plan.clone()).expect("staged build");
     let mut checkpoint = None;
     for batch in batches.iter().take(1) {

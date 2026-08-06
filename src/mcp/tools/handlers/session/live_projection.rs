@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn upsert_live_transcript_projection(
+pub(in crate::mcp::tools::handlers) async fn upsert_live_transcript_projection(
     db: &RegisteredGlobalDb,
     project_root: Option<&Path>,
     provider: &str,

@@ -4,7 +4,6 @@ use tracedecay_domain::{
     LegacyFactMappingV1, PayloadAccessState, UtcMicros,
 };
 
-mod archive;
 mod compatibility;
 mod error;
 mod queries;
@@ -12,12 +11,6 @@ mod telemetry;
 mod traits;
 mod write;
 
-pub use archive::{
-    MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1, MemoryV2ArchiveConflictV1, MemoryV2ArchiveError,
-    MemoryV2ArchiveFamilyV1, MemoryV2ArchiveRecordV1, MemoryV2ArchiveReferenceV1,
-    MemoryV2ArchiveScalarV1, MemoryV2OwnerArchiveV1, MemoryV2OwnerMergePlanV1,
-    authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
-};
 pub use compatibility::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,
     CompatibilityDashboardFactDetailV1, CompatibilityDashboardFactEntityLinkV1,
@@ -38,39 +31,36 @@ pub use compatibility::{
     CompatibilityFactLinkV1, CompatibilityFactMappingV1, CompatibilityFactMergeCommandV1,
     CompatibilityFactMergeEntitiesV1, CompatibilityFactMergeOutcomeV1,
     CompatibilityFactNormalizeTagsV1, CompatibilityFactPageV1, CompatibilityFactProjectionV1,
-    CompatibilityFactProposalImportReceiptV1, CompatibilityFactProposalImportV1,
-    CompatibilityFactProposalLegacyRecordV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionResultV1,
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
-    CompatibilityFactRelationV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRepairVectorV1,
-    CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchCursorV1,
-    CompatibilityFactSearchFilterV1, CompatibilityFactSearchHitV1, CompatibilityFactSearchKindV1,
-    CompatibilityFactSearchPageV1, CompatibilityFactSearchScoresV1, CompatibilityFactSourceV1,
-    CompatibilityFactTargetV1, CompatibilityFactUnavailableV1, CompatibilityFactUpdateCommandV1,
-    CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1, CompatibilityFactV1,
-    CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
-    FactProposalPromotionStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    CompatibilityFactProposalPageV1, CompatibilityFactProposalPromotionDispositionV1,
+    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
+    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
+    CompatibilityFactProposalStateV1, CompatibilityFactRelationV1,
+    CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
+    CompatibilityFactRepairVectorV1, CompatibilityFactRetrievalCommandV1,
+    CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1, CompatibilityFactSearchHitV1,
+    CompatibilityFactSearchKindV1, CompatibilityFactSearchPageV1, CompatibilityFactSearchScoresV1,
+    CompatibilityFactSourceV1, CompatibilityFactTargetV1, CompatibilityFactUnavailableV1,
+    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
+    CompatibilityFactUpdatePatchV1, CompatibilityFactV1, CompatibilityLegacyEntityTargetV1,
+    CompatibilityMemoryRepairCommandV1, FactProposalPromotionStateV1, PromoteFactProposal,
+    PromoteFactProposalOutcome,
 };
 pub use error::{
     FactCompatibilityResult, FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
     FactStoreResult,
 };
 pub use queries::{
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactFeedbackHistoryQueryV1,
-    CompatibilityFactHistoryQueryV1, CompatibilityFactListQueryV1, CompatibilityFactSearchQuery,
-    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
-    FactCurrentQuery, FactCurrentResponseV1, FactLineageCursor, FactLineageQuery,
-    FactLineageResponseV1, FactQueryCoverageV1, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS,
-    RetrievalAnchorQuery,
+    CompatibilityFactContentDigestQueryV1, CompatibilityFactHistoryQueryV1,
+    CompatibilityFactListQueryV1, CompatibilityFactSearchQuery, CurrentFactsQuery, FactAsOfQuery,
+    FactAsOfResponseV1, FactContradictionStateV1, FactCurrentQuery, FactCurrentResponseV1,
+    FactFeedbackHistoryQuery, FactLineageCursor, FactLineageQuery, FactLineageResponseV1,
+    FactQueryCoverageV1, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
 };
 pub use telemetry::{
-    CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackDetailsAvailabilityV1,
-    CompatibilityFactFeedbackHistoryEntryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactStatusV1, CompatibilityFactTelemetryV1, CompatibilityFeedbackRepairProgressV1,
+    CompatibilityFactFeedbackActionV1, CompatibilityFactStatusV1, CompatibilityFactTelemetryV1,
     CompatibilityMemoryAlgebraV1, CompatibilityMemoryFeedbackFunnelV1,
     CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1,
+    FactFeedbackDetailsAvailability, FactFeedbackHistoryEntry, FactFeedbackHistoryPage,
 };
 pub use traits::{FactCompatibilityStore, FactProposalStore, FactStore};
 pub use write::{FactCommitConflict, FactCommitOutcome, FactCommitReceipt, FactWriteBatch};

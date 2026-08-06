@@ -358,10 +358,9 @@ async fn registry_entries_for_deleted_paths_are_reapable() {
     );
 }
 
-/// A vanished path is not permission to discard data. Two branch stores were
-/// deleted on the strength of a dead path and both held facts that existed
-/// nowhere else, so an authority whose store is still on disk is reported and
-/// kept rather than reaped.
+/// A vanished path is not permission to discard project-wide data, so an
+/// authority whose store is still on disk is reported and kept rather than
+/// reaped.
 #[tokio::test]
 async fn a_dead_path_with_a_surviving_store_is_retained_not_reaped() {
     let dir = TempDir::new().unwrap();

@@ -1,9 +1,7 @@
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use super::super::{global_db_operation_error, global_db_operation_message};
-use super::definitions::{
-    Column, INDEXES, Index, OBSERVATIONS_TABLE_NAME, REGISTRY_TABLE_NAMES, TABLES, Table,
-};
+use super::definitions::{Column, INDEXES, Index, REGISTRY_TABLE_NAMES, TABLES, Table};
 use super::normalize_trigger_sql;
 use super::pragma::{
     ActualColumn, ActualForeignKey, ActualIndex, read_columns, read_foreign_keys, read_indexes,
@@ -159,98 +157,6 @@ fn index_matches(actual: &ActualIndex, expected: &Index) -> bool {
             })
 }
 
-fn index_has_columns(actual: &ActualIndex, expected: &[&str]) -> bool {
-    actual.unique
-        && actual.origin.eq_ignore_ascii_case("u")
-        && !actual.partial
-        && actual.columns.len() == expected.len()
-        && actual
-            .columns
-            .iter()
-            .zip(expected)
-            .all(|(actual, expected)| {
-                actual.cid >= 0
-                    && !actual.descending
-                    && actual.collation.eq_ignore_ascii_case("BINARY")
-                    && actual.name.eq_ignore_ascii_case(expected)
-            })
-}
-
-pub async fn validate_observation_migration_source(
-    conn: &impl QueryExecutor,
-    has_legacy_idempotency: bool,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    let Some(contract) = TABLES
-        .iter()
-        .find(|contract| contract.name == OBSERVATIONS_TABLE_NAME)
-    else {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "canonical observations schema contract is not defined",
-        ));
-    };
-    let columns = read_columns(conn, contract.name).await?;
-    if columns.len() != contract.columns.len() + usize::from(has_legacy_idempotency)
-        || contract.columns.iter().any(|expected| {
-            columns
-                .get(&expected.name.to_ascii_lowercase())
-                .is_none_or(|actual| !column_metadata_matches(actual, expected))
-        })
-    {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "observations has incompatible metadata for canonical migration",
-        ));
-    }
-    if has_legacy_idempotency {
-        let Some(column) = columns.get("idempotency_key") else {
-            return Err(global_db_operation_message(
-                OPERATION,
-                "observations is missing legacy idempotency metadata",
-            ));
-        };
-        if column.hidden != 0
-            || !column.declared_type.eq_ignore_ascii_case("TEXT")
-            || !column.not_null
-            || column.default_value.is_some()
-            || column.primary_key_ordinal != 0
-        {
-            return Err(global_db_operation_message(
-                OPERATION,
-                "observations has incompatible legacy idempotency metadata",
-            ));
-        }
-    }
-    let foreign_keys = read_foreign_keys(conn, contract.name).await?;
-    if !foreign_keys_match(&foreign_keys, contract) {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "observations has incompatible foreign keys for canonical migration",
-        ));
-    }
-    let indexes = read_indexes(conn, contract.name).await?;
-    let unique = indexes
-        .iter()
-        .filter(|index| index.unique && !index.origin.eq_ignore_ascii_case("pk"))
-        .collect::<Vec<_>>();
-    let expected_count = 1 + usize::from(has_legacy_idempotency);
-    if unique.len() != expected_count
-        || !unique
-            .iter()
-            .any(|index| index_has_columns(index, &["observation_id"]))
-        || (has_legacy_idempotency
-            && !unique
-                .iter()
-                .any(|index| index_has_columns(index, &["idempotency_key"])))
-    {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "observations has incompatible unique indexes for canonical migration",
-        ));
-    }
-    Ok(())
-}
-
 async fn validate_indexes_for_table(
     conn: &impl QueryExecutor,
     table: &str,
@@ -344,11 +250,7 @@ async fn validate_observation_autoincrement(
 ) -> tracedecay_runtime_core::errors::Result<()> {
     let mut rows = conn
         .query(
-            "SELECT EXISTS(
-                SELECT 1 FROM global_schema_migrations
-                WHERE migration = 'observations-v2-canonical-autoincrement'
-             ),
-             COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'observations'), 0),
+            "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'observations'), 0),
              COALESCE((SELECT MAX(sequence) FROM observations), 0)",
             (),
         )
@@ -361,17 +263,13 @@ async fn validate_observation_autoincrement(
         .ok_or_else(|| {
             global_db_operation_message(OPERATION, "AUTOINCREMENT invariant returned no row")
         })?;
-    let recorded = row
-        .get::<i64>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        != 0;
     let sqlite_sequence = row
-        .get::<i64>(1)
+        .get::<i64>(0)
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     let committed_sequence = row
-        .get::<i64>(2)
+        .get::<i64>(1)
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if recorded && sqlite_sequence >= committed_sequence {
+    if sqlite_sequence >= committed_sequence {
         Ok(())
     } else {
         Err(global_db_operation_message(

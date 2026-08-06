@@ -100,8 +100,9 @@ In short:
 
 Linked git worktrees do not need their own `tracedecay init`. Once the main
 repository has been initialized, TraceDecay resolves linked worktrees through
-the repository's shared git common directory and uses the existing branch
-database tracking to keep the checked-out branch isolated.
+the repository's shared git common directory. Branch/ref/worktree identity is
+snapshot provenance for code generations; TraceDecay does not create branch
+databases or branch-local fact stores.
 
 ### Incremental syncs
 
@@ -109,7 +110,7 @@ After the initial full index, every subsequent `tracedecay sync` is incremental.
 
 ### Force re-index
 
-If you ever need to rebuild the entire index from scratch (for example, after a major TraceDecay upgrade), pass `--force`:
+If you intentionally want to discard and recreate the current index, pass `--force`:
 
 ```bash
 tracedecay sync --force
@@ -263,9 +264,9 @@ feedback; and `tracedecay_run_affected_tests` for the focused test set when test
 execution is appropriate.
 
 For LCM/session issues, pair `tracedecay_lcm_status` with the LCM doctor
-(`tracedecay_lcm_doctor`, or the native Hermes `lcm_doctor` wrapper). Prefer its
-dry-run or diagnose mode first, then inspect the reported store, config, and
-payload diagnostics before applying any repair.
+(`tracedecay_lcm_doctor`, or the native Hermes `lcm_doctor` wrapper). Doctor is
+read-only; inspect reported store, config, and payload diagnostics before using
+any separate daemon/application maintenance operation.
 
 Known Hermes API caveats: native `lcm_*` tool dispatch receives
 `messages=messages`, but direct registered live-ingest tools should remain
@@ -309,8 +310,8 @@ Cursor install is plugin-based:
   - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_grep`, `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
   - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
   - `afterFileEdit` (unmatched, so every Agent edit tool counts) sends the edited path(s) to the daemon, whose MCP server runs a **targeted single-file** sync — not a full-tree scan — so it stays cheap on large codebases even when the Agent edits many files per turn.
-  - `afterShellExecution` sends shell command effects to the daemon, whose MCP server makes branch handling automatic: Agent-run `git checkout`/`switch`/`worktree add` bootstraps/maintains tracedecay branch tracking (`branch add`), while other state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop) trigger a coalesced incremental sync.
-  - `workspaceOpen` notifies the daemon, whose MCP server ensures the current branch's DB exists (branch add if missing) and runs a catch-up incremental sync.
+  - `afterShellExecution` sends shell command effects to the daemon, whose MCP server records branch/ref/worktree snapshot provenance and schedules coalesced incremental sync after state-changing git commands (pull/merge/rebase/reset/cherry-pick/stash apply|pop).
+  - `workspaceOpen` notifies the daemon, whose MCP server resolves the current worktree snapshot and runs a catch-up incremental sync.
 
   Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal `git checkout` and in-place branch switches are not visible to these hooks (`workspaceOpen` does not fire for an in-place checkout). Use the git post-commit hook and the on-demand MCP staleness check to keep the index fresh for those cases. The Cursor `postToolUse` hint remains nonblocking to avoid noisy denials.
 
@@ -354,7 +355,10 @@ The generated MCP entries use the resolved absolute path to the current `tracede
 
 #### Config backups
 
-Whenever tracedecay rewrites an agent config file — on `install`, on `uninstall`, or when the `doctor` auto-repairs hooks — it first copies the original to a sibling `.bak` file in the same directory. For example:
+Whenever an explicit install, update, reinstall, or uninstall operation
+rewrites an agent config file, it first copies the original to a sibling
+`.bak` file in the same directory. Doctor reports hook/config drift and the
+separate action to run; it never rewrites or repairs files. For example:
 
 - `~/.claude.json` → `~/.claude.json.bak`
 
@@ -432,7 +436,10 @@ This starts the MCP server over stdio. You normally don't need to run this yours
 
 ### Working from a subdirectory
 
-You can open your AI agent from any subdirectory of an indexed project. TraceDecay will walk up the directory tree to find the nearest `.tracedecay/` database — similar to how git finds `.git/`.
+You can open your AI agent from any subdirectory of an enrolled project.
+TraceDecay walks up to the nearest `.tracedecay/` enrollment marker—similar to
+how Git finds `.git/`—then asks the daemon to resolve the canonical registered
+project/profile stores. The repository marker is not a database.
 
 When the MCP server starts from a subdirectory, listing tools like `tracedecay_files`, `tracedecay_search`, and `tracedecay_context` automatically scope their results to that subdirectory. This is useful in monorepos or large projects where you want to focus on one area.
 
@@ -472,13 +479,17 @@ cp scripts/post-commit .git/hooks/post-commit
 chmod +x .git/hooks/post-commit
 ```
 
-## MCP Staleness Checks
+## Freshness and daemon service
 
-The MCP server does not run a background file watcher. Instead, MCP tool calls perform a lightweight staleness check and run an incremental sync when indexed files are stale. Agent file/shell hooks notify the daemon about targeted edits and branch-affecting commands, and the daemon's MCP server schedules the resulting sync/branch work. Multiple MCP servers on the same project coordinate via a per-project sync lock: only one sync runs at a time.
+MCP reads report the exact indexed watermark and a typed
+`refresh_required`/stale state; they never perform synchronization as a hidden
+read-side effect. Agent file/shell hooks and bounded daemon watchers submit
+content-free change signals, and the daemon coalesces and schedules incremental
+capture/indexing. An explicit refresh operation is used when the host cannot
+signal historical or missed source data.
 
-### Optional daemon service
-
-If you want the daemon available across terminal sessions and after login, install the per-user service:
+All clients use the daemon/application authority. To keep it available across
+terminal sessions and after login, install the per-user service:
 
 ```bash
 tracedecay daemon install-service
@@ -515,8 +526,10 @@ tracedecay doctor
 It verifies:
 
 - **Binary** — location and version
-- **Current project** — whether a `.tracedecay/` index exists and the database is healthy
-- **Global database** — the cross-project database at `~/.tracedecay/global.db`
+- **Current project** — enrollment, exact registered identity, daemon
+  reachability, and typed store/projection health
+- **Profile authorities** — bounded health for the selected relational,
+  content, and embedded Grafeo authorities without exposing their paths
 - **User config** — `~/.tracedecay/config.toml` and upload settings
 - **Agent integrations** — MCP server registration, hook installation, tool permissions, prompt rules
 - **Network** — connectivity to the worldwide counter and GitHub releases API
@@ -575,7 +588,9 @@ tracedecay tool affected --args '{"files":["src/lib.rs"]}' --json
 
 ## MCP Tools for AI Agents
 
-When running as an MCP server, tracedecay exposes more than 70 tools that AI agents can call. Here's what they do, grouped by purpose.
+When running as an MCP server, TraceDecay exposes the operations available in
+the selected canonical catalog profile. Availability is contextual; no static
+universal tool count is authoritative.
 
 ### Core exploration
 
@@ -680,9 +695,9 @@ The holographic memory tools store durable facts linked to entities:
 
 | Tool | What it does |
 |------|--------------|
-| `tracedecay_fact_store` | Store, search, update, remove, and reason over facts linked to entities such as symbols, files, branches, subsystems, people, or concepts. |
+| `tracedecay_fact_store` | Store, search, update, remove, and reason over project-wide facts linked to entities such as symbols, files, subsystems, people, or concepts. Branch/ref/worktree identity may be provenance, not fact ownership. |
 | `tracedecay_fact_feedback` | Record `helpful` or `unhelpful` feedback for a numeric `fact_id` so the fact's computed trust score changes over time. |
-| `tracedecay_memory_status` | Repair dirty memory banks, then report fact/entity counts, trust-score buckets, feedback counts, and missing-vector count. |
+| `tracedecay_memory_status` | Report fact/entity counts, trust-score buckets, feedback counts, and missing-vector diagnostics. |
 
 Entity recall surfaces facts by named entity and includes why each fact was recalled: matching entities, reason text, related fact IDs, contradiction links, and the current trust score. The legacy memory tools are no longer exposed; update old prompts and permissions to use `tracedecay_fact_store`, `tracedecay_fact_feedback`, and `tracedecay_memory_status`.
 
@@ -701,9 +716,15 @@ Common `tracedecay_fact_feedback` payloads:
 {"fact_id": "42", "unhelpful": true, "source": "user", "note": "Superseded by a newer decision."}
 ```
 
-For exact fields, inspect the live MCP descriptors; the generated schemas are the source of truth.
+For exact fields, inspect the selected canonical catalog snapshot exposed by
+the daemon. MCP descriptors, CLI help, SDK descriptors, and generated schemas
+are projections of that catalog, not independent authorities.
 
-Discovery and analysis tools are read-only and safe to call in parallel. Session baseline tools write/remove `.tracedecay/session_baseline.json`, memory and feedback/status tools update the project database, and edit tools modify source files.
+Discovery, status, and analysis tools—including `memory_status`—are read-only
+and safe to call in parallel. Session baseline, fact/feedback, configuration,
+workflow, Git, and edit operations advertise their actual effect and
+idempotency contracts through the catalog; no caller should infer safety from
+a name.
 
 ---
 
@@ -807,11 +828,13 @@ scoop update tracedecay          # Scoop
 cargo install tracedecay         # Cargo
 ```
 
-After upgrading, it's good practice to re-run install (to pick up any new tool permissions or prompt rules) and force a re-index:
+After upgrading, re-run install to pick up new host capabilities. If final V2
+reports `ResetRequired`, explicitly clear and recreate only the selected
+profile through the documented profile-management journey; do not run sync or
+another read as an attempted migration:
 
 ```bash
 tracedecay install
-tracedecay sync --force
 ```
 
 ---
@@ -822,8 +845,10 @@ TraceDecay stores data in three local store classes.
 
 ### User memory store
 
-`~/.tracedecay/user-memory.db` stores durable user preferences and memory from
-chat sessions that are not attached to an initialized TraceDecay project. Use
+The selected profile's registered user-memory authority stores durable user
+preferences and memory from chat sessions that are not attached to an
+initialized TraceDecay project. Its path and backend handle remain private to
+the daemon. Use
 `memory_scope=user` with `tracedecay_fact_store`,
 `tracedecay_fact_feedback`, or `tracedecay_memory_status`. The CLI can access
 this scope outside any project. Hermes routes untethered chat and explicit
@@ -831,23 +856,30 @@ user-preference writes here; projectless Codex and Cursor hooks recall from it.
 
 ### Active project store
 
-Repo-local projects create `.tracedecay/` inside each project you index. Profile-backed storage may instead keep the code project's graph/session artifacts in a private profile shard such as `~/.tracedecay/projects/<project_id>/`, with only a small enrollment marker in the repository. The active project store contains:
+Repo-local projects create only a `.tracedecay/` enrollment marker. The daemon
+keeps the registered project shard in the selected private profile. Its final
+V2 storage authorities are:
 
-- `tracedecay.db` — the SQLite database, served by the `rusqlite` runtime, with all symbols, edges, files, and vector embeddings
-- `sessions.db` and sidecar directories such as response handles, LCM payloads, branch metadata, and dashboard artifacts when those features are used
+- SQLite stores for relational state, content, manifests, receipts, leases,
+  journals, configuration, and execution fencing; and
+- one embedded Grafeo store for durable graph topology, graph relations, and
+  admitted vector indexes, shared by project domains through the daemon graph
+  registry.
 
-Project holographic memory remains sharded: project `memory_facts`, entities,
-feedback, and derived holographic banks live in that project's
-`tracedecay.db`. The user-level `global.db` tracks the project registry and
-cross-project usage; it is not a single fact table with a `project_id` tag.
-Tools select either the profile-level user store or a registered project store
-before reading or writing facts. Read-only tools can explicitly select another
-registered project, while project-scoped mutations write only to the active
-project.
+Project holographic memory is project-wide: canonical fact content, entities,
+trust/feedback, tombstones, and algorithm-intrinsic holographic state live in
+the selected registered project store. Grafeo may index vectors and typed
+relations whose endpoints are canonical fact IDs; it does not copy fact
+content. Branch, ref, worktree, commit, PR, session, and agent identity may be
+recorded as provenance, but branches/worktrees do not own or shard facts.
+Tools select either the profile-level user authority or a registered project
+authority through the daemon before reading or writing facts.
 
 Add `.tracedecay` to your `.gitignore` so enrollment markers are not committed.
 
-Projects indexed before the TraceDecay rename should be migrated into the user-level profile store; runtime storage no longer falls back to `.tracedecay/`.
+TraceDecay V2 uses a fresh-profile/store cutover. Old TraceDecay profile or
+project stores return typed reset-required diagnostics instead of being
+migrated in place.
 
 ### Cross-project reads
 

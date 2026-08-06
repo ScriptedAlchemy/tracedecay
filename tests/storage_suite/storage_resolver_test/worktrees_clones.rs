@@ -63,23 +63,10 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
         &worktree_cg.store_layout().sessions_db_path,
         main_store.join("sessions.db"),
     );
-    assert!(
-        !worktree_cg
-            .search("worktree_only", 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "opening a linked worktree should auto-track and sync its branch DB"
-    );
+    assert_eq!(worktree_cg.active_branch(), Some("feature/worktree-auto"));
     assert!(
         !worktree.join(".tracedecay").exists(),
         "automatic worktree support must not require or create a per-worktree marker"
-    );
-
-    let meta = branch_meta::load_branch_meta(&main_store).unwrap();
-    assert!(
-        meta.is_tracked("feature/worktree-auto"),
-        "linked worktree branch should be tracked in the shared store"
     );
 }
 
@@ -144,15 +131,7 @@ async fn detached_linked_worktree_uses_repository_identity_and_isolated_graph_sc
     );
     assert_eq!(detached.store_layout().data_root, main_store);
     assert_eq!(detached.active_branch(), None);
-    assert_eq!(detached.serving_branch(), None);
-    assert!(
-        !detached
-            .search("detached_only", 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "detached worktree should read its isolated graph scope"
-    );
+    assert_eq!(detached.db_path(), detached.store_layout().graph_db_path);
 }
 
 #[tokio::test]
@@ -185,8 +164,6 @@ async fn worktree_profile_stores_prefer_the_exact_manifest_root() {
         fs::create_dir_all(&data_root).unwrap();
         fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
         fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
-        branch_meta::save_branch_meta(&data_root, &BranchMeta::new_for_dir(&data_root, "main"))
-            .unwrap();
         write_store_manifest_to_path(
             &data_root.join(STORE_MANIFEST_FILENAME),
             &StoreManifest {
@@ -198,7 +175,6 @@ async fn worktree_profile_stores_prefer_the_exact_manifest_root() {
                 data_root,
                 graph_db_relpath: "tracedecay.db".into(),
                 sessions_db_relpath: "sessions.db".into(),
-                branch_meta_relpath: "branch-meta.json".into(),
             },
         )
         .unwrap();
@@ -361,8 +337,6 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
         fs::create_dir_all(&data_root).unwrap();
         fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
         fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
-        branch_meta::save_branch_meta(&data_root, &BranchMeta::new_for_dir(&data_root, "main"))
-            .unwrap();
         write_store_manifest_to_path(
             &data_root.join(STORE_MANIFEST_FILENAME),
             &StoreManifest {
@@ -374,7 +348,6 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
                 data_root,
                 graph_db_relpath: "tracedecay.db".into(),
                 sessions_db_relpath: "sessions.db".into(),
-                branch_meta_relpath: "branch-meta.json".into(),
             },
         )
         .unwrap();

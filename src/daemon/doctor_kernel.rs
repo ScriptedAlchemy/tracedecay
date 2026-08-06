@@ -1041,58 +1041,6 @@ async fn collect_over_budget_store_findings(
     }
 }
 
-/// Observe current-project branch stores against live local refs.
-pub fn collect_stale_branch_store_findings(
-    project_root: &Path,
-    layout: &crate::storage::StoreLayout,
-) -> DoctorStorageFamilyReadV1 {
-    use tracedecay_application::storage::{
-        BranchRefV1, StaleBranchDbRecordV1, StorageByteSizeV1, StoreKeyV1, stale_branch_dbs_finding,
-    };
-
-    if !layout.branch_meta_path.exists() {
-        return DoctorStorageFamilyReadV1::Absent;
-    }
-    let Some(meta) = crate::branch_meta::load_branch_meta(&layout.data_root) else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let mut findings = Vec::new();
-    for (branch, entry) in meta.branches {
-        if branch == meta.default_branch || entry.gc_protected {
-            continue;
-        }
-        let Ok(store) = StoreKeyV1::new(entry.db_file.clone()) else {
-            return DoctorStorageFamilyReadV1::Unknown;
-        };
-        let Ok(branch_ref) = BranchRefV1::new(branch.clone()) else {
-            return DoctorStorageFamilyReadV1::Unknown;
-        };
-        let db_path = layout.data_root.join(&entry.db_file);
-        let size_bytes = ["", "-wal", "-shm"]
-            .into_iter()
-            .map(|suffix| {
-                let mut path = db_path.as_os_str().to_os_string();
-                path.push(suffix);
-                std::fs::metadata(PathBuf::from(path))
-            })
-            .filter_map(Result::ok)
-            .map(|metadata| metadata.len())
-            .fold(0_u64, u64::saturating_add);
-        let record = StaleBranchDbRecordV1 {
-            store,
-            branch: branch_ref,
-            ref_present: crate::branch::is_branch_ref_present(project_root, &branch),
-            size_bytes: StorageByteSizeV1(size_bytes),
-        };
-        let Ok(finding) = stale_branch_dbs_finding(&record, DoctorCoverageCompletenessV1::Complete)
-        else {
-            return DoctorStorageFamilyReadV1::Unknown;
-        };
-        findings.push(finding);
-    }
-    storage_family_read(findings)
-}
-
 /// Scan every registered profile-sharded store for loose or quarantined
 /// recovery debris and map the exhaustive census through the Plan 38 producer.
 pub async fn collect_incident_debris_findings(
@@ -1178,7 +1126,8 @@ pub async fn collect_retention_backlog_findings(
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
 pub async fn collect_code_generation_retention_findings(
-    graph: &crate::db::Database,
+    relational: &crate::db::Database,
+    vector_graph: &tracedecay_graph_db::GraphDb,
     code_index_store_root: &Path,
     project_root: &Path,
 ) -> DoctorStorageFamilyReadV1 {
@@ -1187,7 +1136,6 @@ pub async fn collect_code_generation_retention_findings(
         GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
         plan_code_generation_retention_with_verification, plan_scope_root_retention,
     };
-    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
     use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
     use tracedecay_application::storage::{
         CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
@@ -1195,24 +1143,20 @@ pub async fn collect_code_generation_retention_findings(
     };
 
     if !code_index_store_root
-        .join("active-code-generation-v1.json")
+        .join("active-code-generation.json")
         .is_file()
     {
         return DoctorStorageFamilyReadV1::Absent;
     }
-    if !permits_synchronous_generation_census(&code_index_store_root.join("code-generations-v1")) {
+    if !permits_synchronous_generation_census(&code_index_store_root.join("code-generations")) {
         return DoctorStorageFamilyReadV1::Unknown;
     }
-    let Ok(store) = DatabaseVectorGenerationStoreV1::open(graph).await else {
+    let Ok(vector_readable_sources) =
+        DatabaseVectorGenerationStoreV1::readable_source_generations(relational, vector_graph)
+            .await
+    else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let Ok(inventory) = store.read_legacy_inventory().await else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let Ok(inventory) = inventory.read_only_inventory() else {
-        return DoctorStorageFamilyReadV1::Unknown;
-    };
-    let vector_readable_sources = inventory.retained_readable_sources();
     let root = code_index_store_root.to_path_buf();
     // The shared parent that holds every scope root for this repository. A
     // stranded sibling scope is invisible to the scope-local census above, so
@@ -1456,6 +1400,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_id: tracedecay_domain::ProjectId,
     layout: crate::storage::StoreLayout,
     graph: crate::db::Database,
+    embedded_graph: Arc<tracedecay_graph_db::GraphDb>,
     registry: Arc<crate::global_db::RegisteredGlobalDb>,
     profile_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
     project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
@@ -1473,6 +1418,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let project_id = project_id.clone();
         let layout = layout.clone();
         let graph = graph.clone();
+        let embedded_graph = Arc::clone(&embedded_graph);
         let registry = Arc::clone(&registry);
         let profile_sessions = Arc::clone(&profile_sessions);
         let project_sessions = Arc::clone(&project_sessions);
@@ -1568,7 +1514,6 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             };
             let store_telemetry =
                 collect_over_budget_store_findings(&context, &telemetry_ports, &retention).await;
-            let stale_branches = collect_stale_branch_store_findings(&project_root, &layout);
             let incident_debris = if permits_profile_census {
                 collect_incident_debris_findings(registry.as_ref(), &profile_root, now).await
             } else {
@@ -1586,6 +1531,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             );
             let code_generation_retention = collect_code_generation_retention_findings(
                 &graph,
+                embedded_graph.as_ref(),
                 &code_index_store_root,
                 &project_root,
             )
@@ -1594,7 +1540,6 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 orphan,
                 unregistered,
                 store_telemetry.findings,
-                stale_branches,
                 incident_debris,
                 profile_retention_backlog,
                 project_retention_backlog,
@@ -2062,37 +2007,6 @@ async fn dispatch_doctor_owner_operation(
                 ),
             )?);
         }
-        (DoctorRemediationTargetV1::StorageBranchGc, false) => {
-            let prepared = crate::branch::prepare_branch_admin_mutation(
-                &owners.project_root,
-                &owners.layout.data_root,
-                crate::branch::BranchAdminAction::Gc,
-                owners.config.sync.branch_gc_days,
-                owners.config.sync.orphan_db_gc_days,
-            )
-            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-            owner_observation = Some(doctor_owner_observation(
-                "tracedecay.doctor.storage-branch-gc.preview.v1",
-                prepared.report(),
-            )?);
-        }
-        (DoctorRemediationTargetV1::StorageBranchGc, true) => {
-            let report = owners
-                .store_administration
-                .execute_branch_admin_in_layout(
-                    &owners.project_root,
-                    &owners.layout.data_root,
-                    crate::branch::BranchAdminAction::Gc,
-                    owners.config.sync.branch_gc_days,
-                    owners.config.sync.orphan_db_gc_days,
-                )
-                .await
-                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
-            owner_observation = Some(doctor_owner_observation(
-                "tracedecay.doctor.storage-branch-gc.apply.v1",
-                &report,
-            )?);
-        }
         (DoctorRemediationTargetV1::StorageQuarantineAndCollectDebris, apply) => {
             let census = crate::retention::orphan_stores::build_store_census(
                 owners.registry.as_ref(),
@@ -2223,7 +2137,7 @@ async fn dispatch_doctor_owner_operation(
                 .mount_code_index(
                     owners.project_id.clone(),
                     &owners.project_root,
-                    owners.code_index_store_root.clone(),
+                    owners.layout.data_root.clone(),
                     Some(&owners.semantic_runtime),
                     Some(Arc::clone(&owners.semantic_database)),
                     owners.semantic_lifecycle.clone(),

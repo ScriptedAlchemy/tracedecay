@@ -88,51 +88,6 @@ async fn status_reports_schema_frontier_payload_and_debt_counts() {
 }
 
 #[tokio::test]
-async fn status_reports_payload_gc_run_metadata_after_apply() {
-    let tmp = TempDir::new().unwrap();
-    let db = registered_lcm_runtime(&tmp).await;
-    insert_session(&db, "cursor", "session-gc").await;
-
-    let payload = format!("gc metadata payload\n{}", "G".repeat(300_000));
-    let mut external = raw_message("cursor", "tool-gc", "session-gc", 1, &payload);
-    external.role = "tool".to_string();
-    external.kind = Some("tool_result".to_string());
-    db.lcm_ingest_raw_message(&external)
-        .await
-        .expect("external payload should ingest");
-
-    let cfg = LcmGcConfig {
-        backup_before_reap: false,
-        ..LcmGcConfig::default()
-    };
-    let report = db
-        .lcm_run_payload_gc_apply_for_test(
-            HostAdmissionScope::Profile,
-            "cursor",
-            Some("session-gc"),
-            &cfg,
-            1_715_123_456,
-        )
-        .await
-        .expect("payload gc should run");
-    assert_eq!(report.status, "applied");
-
-    let status = db
-        .lcm_status_for_test("cursor", Some("session-gc"))
-        .await
-        .expect("status should load");
-    assert_eq!(status.payload_gc.last_gc_at, Some(1_715_123_456));
-    assert!(
-        status.payload_gc.last_gc_duration_ms.is_some(),
-        "status should expose the last GC duration"
-    );
-    assert_eq!(status.payload_gc.last_gc_status.as_deref(), Some("ok"));
-    assert_eq!(status.payload_gc.last_gc_error, None);
-    assert_eq!(status.payload_gc.last_reaped_refs, Some(0));
-    assert_eq!(status.payload_gc.last_reaped_bytes, Some(0));
-}
-
-#[tokio::test]
 async fn status_reports_dag_depth_distribution_store_estimate_and_config_defaults() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;

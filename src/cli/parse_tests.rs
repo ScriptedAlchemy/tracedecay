@@ -2,8 +2,8 @@ use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
-    MigrateAction, PackageHookAction, ScoopPackageHookAction, SessionsAction,
-    SessionsRefreshAction,
+    PackageHookAction, ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
+    StorageAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -788,21 +788,13 @@ fn status_and_branch_add_commands_dispatch_to_expected_variants() {
             && runtime
     ));
 
-    let branch = Cli::try_parse_from([
-        "tracedecay",
-        "branch",
-        "add",
-        "feature/dispatch-tests",
-        "--path",
-        "/tmp/project",
-    ])
-    .expect("branch add should parse");
+    let branch = Cli::try_parse_from(["tracedecay", "branch", "list", "--path", "/tmp/project"])
+        .expect("branch list should parse");
     assert!(matches!(
         branch.command,
         Some(Commands::Branch {
-            action: BranchAction::Add { name, path }
-        }) if name.as_deref() == Some("feature/dispatch-tests")
-            && path.as_deref() == Some("/tmp/project")
+            action: BranchAction::List { path }
+        }) if path.as_deref() == Some("/tmp/project")
     ));
 }
 
@@ -1653,18 +1645,18 @@ fn project_selector_flags_parse_for_cli_read_surfaces() {
 fn migrate_storage_report_parses() {
     let cli = Cli::try_parse_from([
         "tracedecay",
-        "migrate",
-        "storage-report",
+        "storage",
+        "report",
         "--profile-root",
         "/tmp/profile",
         "--json",
     ])
-    .expect("migrate storage-report should parse");
+    .expect("storage report should parse");
 
     assert!(matches!(
         cli.command,
-        Some(Commands::Migrate {
-            action: MigrateAction::StorageReport {
+        Some(Commands::Storage {
+            action: StorageAction::Report {
                 profile_root,
                 project_id,
                 project_root,
@@ -1681,8 +1673,8 @@ fn migrate_storage_report_parses() {
 fn migrate_storage_report_parses_targeted_project() {
     let cli = Cli::try_parse_from([
         "tracedecay",
-        "migrate",
-        "storage-report",
+        "storage",
+        "report",
         "--profile-root",
         "/tmp/profile",
         "--project-id",
@@ -1690,12 +1682,12 @@ fn migrate_storage_report_parses_targeted_project() {
         "--project-root",
         "/repos/a",
     ])
-    .expect("targeted migrate storage-report should parse");
+    .expect("targeted storage report should parse");
 
     assert!(matches!(
         cli.command,
-        Some(Commands::Migrate {
-            action: MigrateAction::StorageReport {
+        Some(Commands::Storage {
+            action: StorageAction::Report {
                 profile_root,
                 project_id,
                 project_root,
@@ -1723,16 +1715,6 @@ fn migrate_cleanup_sources_is_not_a_supported_subcommand() {
     };
 
     assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
-}
-
-#[test]
-fn branch_remove_requires_a_branch_name() {
-    let err = match Cli::try_parse_from(["tracedecay", "branch", "remove"]) {
-        Ok(_) => panic!("branch remove should require a name"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
 }
 
 #[test]
@@ -1778,6 +1760,11 @@ fn parses_sessions_ingest_and_search_commands() {
             assert_eq!(args.limit, 5);
             assert!(args.project_id.is_none());
             assert!(args.project_path.is_none());
+            assert!(args.project_scope.is_none());
+            assert!(args.cursor.is_none());
+            assert_eq!(args.temporal_mode, "current");
+            assert_eq!(args.grain, "logical_message");
+            assert!(!args.json);
             assert!(args.since.is_none());
             assert!(args.until.is_none());
             assert!(args.branch.is_none());
@@ -1841,6 +1828,33 @@ fn parses_sessions_ingest_and_search_commands() {
         }) if args.scope == "subagents_only"
             && args.message_type == "direct_user"
             && args.parent_session_id.as_deref() == Some("parent-1")
+    ));
+
+    let continued = Cli::try_parse_from([
+        "tracedecay",
+        "sessions",
+        "search",
+        "needle",
+        "--project-scope",
+        "all_registered",
+        "--cursor",
+        "opaque.cursor",
+        "--temporal-mode",
+        "forensic",
+        "--grain",
+        "occurrence",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        continued.command,
+        Some(Commands::Sessions {
+            action: SessionsAction::Search(args)
+        }) if args.project_scope.as_deref() == Some("all_registered")
+            && args.cursor.as_deref() == Some("opaque.cursor")
+            && args.temporal_mode == "forensic"
+            && args.grain == "occurrence"
+            && args.json
     ));
 }
 

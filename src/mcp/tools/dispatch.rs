@@ -110,9 +110,9 @@ mod metadata_tests {
 
 /// Resolve the exact lifecycle policy advertised by the MCP catalog.
 ///
-/// Advertised tools consume the rich dispatch contract used for discovery.
-/// Server-only tools use their explicit root binding policy. Missing or invalid
-/// catalog authority is unavailable, never replaced by an implicit timeout.
+/// Public discovery and daemon-internal bindings consume the same composed
+/// dispatch contract. Missing or invalid catalog authority is unavailable,
+/// never replaced by an implicit timeout.
 pub(crate) fn lifecycle_policy_for_tool(
     tool_name: &str,
 ) -> Result<Option<crate::mcp::server::McpToolLifecyclePolicy>, McpDispatchMetadataError> {
@@ -124,11 +124,6 @@ pub(crate) fn lifecycle_policy_for_tool(
                 tracedecay_tool_catalog::CancellationContract::Cooperative { .. }
             ),
         ))),
-        Err(McpDispatchMetadataError::MissingContract(_))
-            if super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) =>
-        {
-            Ok(super::binding::lifecycle_policy_for_bound_tool(tool_name))
-        }
         Err(McpDispatchMetadataError::MissingContract(_)) => Ok(None),
         Err(error) => Err(error),
     }

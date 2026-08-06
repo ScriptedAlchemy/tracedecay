@@ -809,9 +809,8 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
     .expect("deadline")
 }
 
-/// An already-elapsed deadline must short-circuit *before* the expensive body
-/// runs, so neither the `pr_context` walk nor the `admin_branch_add` index
-/// build can proceed once the horizon is gone.
+/// An already-elapsed deadline must short-circuit before the expensive
+/// `pr_context` walk can proceed.
 #[tokio::test]
 async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_handler() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -827,7 +826,7 @@ async fn git_dispatch_rejects_an_already_elapsed_deadline_without_running_the_ha
     .await
     .unwrap();
 
-    for tool_name in ["tracedecay_pr_context", "tracedecay_admin_branch_add"] {
+    for tool_name in ["tracedecay_pr_context"] {
         let options = ToolCallRegistryOptions {
             application_deadline: Some(
                 tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(1)).unwrap(),
@@ -1332,17 +1331,26 @@ fn long_running_policy_is_explicit_and_still_bounded() {
 }
 #[test]
 fn unavailable_effect_contract_fails_before_handler_dispatch() {
-    let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").unwrap_err();
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
-    );
+    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_preflight").is_ok());
+    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
+    for tool_name in [
+        "tracedecay_feedback_advisory_cycle",
+        "tracedecay_test_results",
+    ] {
+        let error = super::ensure_mcp_dispatch_available(tool_name)
+            .expect_err("unmounted feedback journey");
+        let context = error
+            .project_route_context()
+            .expect("project route context");
+        assert_eq!(context.0, "mcp_dispatch_surface_not_mounted");
+        assert!(!context.1);
+        assert_eq!(
+            context.2,
+            format!("MCP tool '{tool_name}' has no mounted production journey")
+        );
+    }
 }
 
 #[tokio::test]
@@ -1398,7 +1406,7 @@ async fn unavailable_application_effect_is_rejected_before_canonical_executor_in
 }
 
 #[tokio::test]
-async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
+async fn removed_public_lcm_effect_is_rejected_before_profile_store_open() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
     let _env = SelectorEnv::new(dir.path());
@@ -1416,12 +1424,12 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
 
     let error = handle_tool_call_with_registry_and_implicit_project(
         &cg,
-        "tracedecay_lcm_doctor",
+        "tracedecay_lcm_compress",
         json!({
             "storage_scope": "user",
             "provider": "codex",
-            "mode": "repair",
-            "apply": true,
+            "session_id": "session-1",
+            "messages": [],
         }),
         None,
         None,
@@ -1433,13 +1441,11 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     .await
     .unwrap_err();
 
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
+    assert!(
+        error
+            .to_string()
+            .contains("tool 'tracedecay_lcm_compress' has no canonical MCP lifecycle policy"),
+        "{error}"
     );
     assert!(
         !sessions_db.exists(),

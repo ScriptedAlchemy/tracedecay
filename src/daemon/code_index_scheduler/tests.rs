@@ -41,6 +41,11 @@ use crate::semantic_code::{
 };
 #[cfg(feature = "semantic-fastembed")]
 use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
+#[cfg(feature = "semantic-fastembed")]
+use tracedecay_graph_db::{
+    GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion,
+    NeverCancelled,
+};
 
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
@@ -264,7 +269,7 @@ fn code_generation_retention_dry_run_reports_without_deleting() {
     assert!(
         store
             .path()
-            .join("code-generations-v1")
+            .join("code-generations")
             .join(&report.plan.collectable_generations[0].generation_file)
             .is_file()
     );
@@ -300,7 +305,7 @@ fn code_generation_retention_never_sweeps_vector_readable_source() {
     assert!(
         store
             .path()
-            .join("code-generations-v1")
+            .join("code-generations")
             .join(&vector_generation.generation_file)
             .is_file(),
         "a generation named by retained_readable_sources must survive the sweep"
@@ -420,7 +425,7 @@ fn stranded_code_index_scope_is_collected_while_its_live_sibling_is_untouched() 
         "a scope whose canonical project root is gone must be collected"
     );
     assert!(
-        live_scope.join("active-code-generation-v1.json").is_file(),
+        live_scope.join("active-code-generation.json").is_file(),
         "reconciliation must never touch a scope a live root names"
     );
     let receipt = report.receipt.expect("durable reconciliation receipt");
@@ -514,9 +519,7 @@ fn code_index_scope_with_a_pending_generation_journal_is_refused() {
         StrandedScopeRefusalV1::PendingGenerationRetention
     );
     assert!(
-        stranded_scope
-            .join("active-code-generation-v1.json")
-            .is_file(),
+        stranded_scope.join("active-code-generation.json").is_file(),
         "a scope mid-transaction must survive reconciliation untouched"
     );
     assert!(
@@ -597,7 +600,7 @@ fn scope_reconciliation_refuses_to_collect_without_a_proven_live_root_set() {
     assert!(planned.is_err());
     assert!(applied.is_err());
     assert!(
-        scope.join("active-code-generation-v1.json").is_file(),
+        scope.join("active-code-generation.json").is_file(),
         "an empty live-root set must never mean every scope is stranded"
     );
 }
@@ -624,8 +627,8 @@ fn oversized_generations_still_produce_a_complete_retention_finding() {
     retention_generations(&fixture, store.path(), 4);
     // Sparse growth: the manifest prefix each generation is read through is
     // untouched, only the on-disk size a byte budget would have measured.
-    for entry in std::fs::read_dir(store.path().join("code-generations-v1"))
-        .expect("list sealed generations")
+    for entry in
+        std::fs::read_dir(store.path().join("code-generations")).expect("list sealed generations")
     {
         let entry = entry.expect("sealed generation entry");
         let file = std::fs::OpenOptions::new()
@@ -942,7 +945,9 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
 async fn registry_feeds_publications_and_bounded_freshness_reads() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let graph_runtime =
+        crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry::default();
+    let registry = CodeIndexSchedulerRegistryV1::with_graph_runtime(1, graph_runtime.clone());
     let mut publications = registry.subscribe_generation_publications();
 
     registry
@@ -986,6 +991,30 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         .expect("changed publication timeout")
         .expect("changed publication event");
     assert_ne!(changed.generation_id, initial.generation_id);
+
+    assert!(registry.unmount_worktree(fixture.path()).await);
+    assert!(!registry.is_worktree_mounted(fixture.path()).await);
+    let project_id = test_project_id();
+    let graph = graph_runtime
+        .mounted_project(&project_id, store.path())
+        .expect("exact graph lookup")
+        .expect("project graph remains mounted");
+    let telemetry = graph
+        .projection_telemetry(tracedecay_graph_db::GraphProjectionTelemetryRequest {
+            namespace: tracedecay_code_index::graph_projection::project_graph_namespace(
+                &project_id,
+            )
+            .expect("project namespace"),
+            projection: tracedecay_code_index::graph_projection::code_generation_projection_id(
+                &changed.generation_id,
+            )
+            .expect("generation projection"),
+            cancellation: Arc::new(tracedecay_graph_db::NeverCancelled),
+        })
+        .expect("projection telemetry")
+        .expect("immutable generation survives worktree unmount");
+    assert!(telemetry.entity_count > 0);
+    assert!(graph_runtime.close_all().await.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1481,6 +1510,120 @@ fn content_noop_suppresses_publication() {
 }
 
 #[test]
+fn warm_noop_reads_no_files_and_one_path_edit_reads_only_that_path() {
+    let fixture = GitFixture::new(&[
+        ("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n"),
+        ("src/beta.rs", "pub fn beta() -> u32 { 2 }\n"),
+        ("src/gamma.rs", "pub fn gamma() -> u32 { 3 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let cold_started = std::time::Instant::now();
+    published(scheduler.reconcile_now().expect("baseline publish"));
+    let cold_discovery = cold_started.elapsed();
+    let baseline_reads = scheduler.captured_file_read_count();
+    assert_eq!(baseline_reads, 3);
+
+    let noop_started = std::time::Instant::now();
+    assert!(matches!(
+        scheduler.reconcile_now().expect("warm no-op"),
+        CodeIndexReconcileOutcomeV1::Noop(_)
+    ));
+    let warm_noop = noop_started.elapsed();
+    assert_eq!(
+        scheduler.captured_file_read_count(),
+        baseline_reads,
+        "Git/index truth must prove a warm no-op without reading source files"
+    );
+
+    fixture.edit("src/beta.rs", "pub fn beta() -> u32 { 20 }\n");
+    scheduler.notify_path(fixture.path().join("src/beta.rs"));
+    let edit_started = std::time::Instant::now();
+    let changed = published(scheduler.reconcile_now().expect("one-path publish"));
+    let warm_one_path_edit = edit_started.elapsed();
+    assert_eq!(changed.reextracted_files, 1);
+    assert_eq!(
+        scheduler.captured_file_read_count(),
+        baseline_reads + 1,
+        "one dirty path must cause exactly one source-file read"
+    );
+    let query_started = std::time::Instant::now();
+    scheduler
+        .latest_complete()
+        .expect("active generation")
+        .production_query_owners()
+        .expect("first query owners");
+    let first_query = query_started.elapsed();
+    eprintln!(
+        "code-index latency: cold={cold_discovery:?} noop={warm_noop:?} one_path={warm_one_path_edit:?} first_query={first_query:?}"
+    );
+    assert!(
+        warm_one_path_edit <= Duration::from_millis(100),
+        "one dirty path must converge within 100ms on the representative fixture; observed {warm_one_path_edit:?}"
+    );
+    assert!(
+        first_query <= Duration::from_millis(50),
+        "first query activation must stay within 50ms on the representative fixture; observed {first_query:?}"
+    );
+}
+
+#[test]
+fn publication_atomically_journals_git_graph_evidence_and_exact_receipt() {
+    let fixture = GitFixture::new(&[("src/main.rs", "pub fn main_value() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let published = published(scheduler.reconcile_now().expect("publish generation"));
+    let pending = scheduler
+        .publication
+        .pending_git_graph_evidence(8)
+        .expect("read durable evidence journal");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].intent.target(),
+        &tracedecay_domain::GitGraphEvidenceTarget::CodeGeneration(published.generation_id.clone())
+    );
+    assert_eq!(
+        pending[0].intent.project_id(),
+        scheduler.project_id(),
+        "journal intent preserves the mounted project identity"
+    );
+    let intent_digest = pending[0].intent.intent_digest().clone();
+    let receipt = tracedecay_domain::GitGraphEvidencePublicationReceipt::new(
+        intent_digest.clone(),
+        "git-evidence:code-generation-test".to_owned(),
+        1,
+    )
+    .expect("receipt");
+    assert!(
+        scheduler
+            .publication
+            .acknowledge_git_graph_evidence(&intent_digest, receipt.clone())
+            .expect("acknowledge evidence")
+    );
+    assert!(
+        scheduler
+            .publication
+            .acknowledge_git_graph_evidence(&intent_digest, receipt)
+            .expect("idempotent acknowledgement")
+    );
+    assert!(
+        scheduler
+            .publication
+            .pending_git_graph_evidence(8)
+            .expect("read acknowledged journal")
+            .is_empty()
+    );
+}
+
+#[test]
 fn superseding_notifies_publish_only_latest_content() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -1903,7 +2046,7 @@ async fn mount_bundled_query_authority(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
     scope: &ResolvedScope,
-    latest: &super::LatestCompleteCodeIndexV1,
+    latest: &super::LatestCompleteCodeIndex,
 ) {
     let (_, accepted, _) =
         crate::application::semantic_runtime::bundled_query_authority().expect("bundled authority");
@@ -2447,13 +2590,6 @@ fn restored_generation_abstains_and_schedules_background_truth() {
         published(scheduler.reconcile_now().expect("initial publish"));
     }
 
-    // Simulate a generation sealed WITHOUT a restore-time freshness witness (an
-    // older daemon, or a witness that never landed). With no witness the restore
-    // must fail closed: unproven bytes are not request-admissible until the
-    // background worker reconciles against gix truth.
-    std::fs::remove_file(store.path().join("freshness_witness.v1"))
-        .expect("remove restore-time freshness witness");
-
     let mut restarted = scheduler(&fixture, store.path().to_path_buf(), bytes);
     assert!(
         restarted
@@ -2491,77 +2627,6 @@ fn restored_generation_abstains_and_schedules_background_truth() {
 }
 
 #[test]
-fn unchanged_reopen_with_witness_skips_full_reconcile() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let baseline = {
-        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
-        published(scheduler.reconcile_now().expect("initial publish"))
-    };
-    assert!(
-        store.path().join("freshness_witness.v1").is_file(),
-        "a successful reconcile persists the restore-time freshness witness"
-    );
-
-    // Reopen against the same store with the worktree unchanged. The witness
-    // proves the sealed generation is still current, so the scheduler adopts it
-    // as verified WITHOUT the forced whole-repo read+hash+parse.
-    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    assert!(
-        reopened.verified_against_source(),
-        "an unchanged reopen with a matching witness is verified without a scan"
-    );
-    assert!(
-        reopened
-            .ensure_fresh_for_query()
-            .expect("freshness ladder runs")
-            .is_none(),
-        "a witness-verified reopen skips the forced full reconcile"
-    );
-    let served = reopened
-        .latest_complete_ready_for_query()
-        .expect("ready check")
-        .expect("witness-verified restore serves immediately");
-    assert_eq!(
-        served.generation.manifest().generation_id,
-        baseline.generation_id,
-        "the witness-verified reopen serves the sealed generation"
-    );
-}
-
-#[test]
-fn edited_reopen_forces_full_reconcile_when_witness_mismatches() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let baseline = {
-        let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), Arc::clone(&bytes));
-        published(scheduler.reconcile_now().expect("initial publish"))
-    };
-
-    // A working-tree edit changes the tier-2 stat signature, so the witness no
-    // longer matches. The reopen must fail closed and fully reconcile the change
-    // rather than serve the now-stale sealed generation.
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-
-    let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
-    assert!(
-        !reopened.verified_against_source(),
-        "a changed worktree must never be adopted as verified from a stale witness"
-    );
-    let outcome = reopened
-        .ensure_fresh_for_query()
-        .expect("freshness ladder runs")
-        .expect("a witness mismatch forces a reconcile");
-    assert_ne!(
-        published(outcome).generation_id,
-        baseline.generation_id,
-        "the edited source is captured in a freshly published generation"
-    );
-}
-
-#[test]
 fn restart_rejects_corrupt_sealed_generation() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
@@ -2574,13 +2639,13 @@ fn restart_rejects_corrupt_sealed_generation() {
         published(scheduler.reconcile_now().expect("initial publish"));
     }
     let pointer: super::DurablePublicationPointerV1 = serde_json::from_slice(
-        &std::fs::read(store.path().join("active-code-generation-v1.json"))
+        &std::fs::read(store.path().join("active-code-generation.json"))
             .expect("read active pointer"),
     )
     .expect("decode active pointer");
     let generation_path = store
         .path()
-        .join("code-generations-v1")
+        .join("code-generations")
         .join(pointer.generation_file);
     let mut bytes = std::fs::read(&generation_path).expect("read sealed generation");
     let middle = bytes.len() / 2;
@@ -2611,7 +2676,7 @@ fn restart_rejects_pointer_generation_mismatch() {
         );
         published(scheduler.reconcile_now().expect("initial publish"));
     }
-    let pointer_path = store.path().join("active-code-generation-v1.json");
+    let pointer_path = store.path().join("active-code-generation.json");
     let mut pointer: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
             .expect("decode active pointer");
@@ -2818,19 +2883,13 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
     });
     held_rx.recv().expect("slow scheduler lock acquired");
 
-    // A freshness query on the slow worktree now blocks on its scheduler lock.
-    // Under the old design it would hold the registry map lock while blocked,
-    // starving every other worktree's query.
+    // Foreground admission must not observe the held scheduler lock at all.
     let slow_registry = registry.clone();
     let slow_path = slow.path().to_path_buf();
     let slow_query =
         tokio::spawn(async move { slow_registry.latest_complete_fresh(&slow_path).await });
-    // Let the slow query enter its blocking reconcile section (acquire and drop
-    // the map lock, then park on the scheduler lock) before the fast query runs.
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // The fast worktree's query must complete within a bounded time even while
-    // the slow worktree's reconcile is stuck holding its scheduler lock.
+    // The sibling worktree also remains independent.
     let fast_result = tokio::time::timeout(
         Duration::from_secs(2),
         registry.latest_complete_fresh(fast.path()),
@@ -2879,17 +2938,23 @@ async fn busy_worktree_serves_last_complete_generation_without_waiting() {
     });
     held_rx.recv().expect("scheduler lock acquired");
 
-    let result = tokio::time::timeout(
-        Duration::from_millis(250),
-        registry.latest_complete_fresh(fixture.path()),
-    )
-    .await;
+    let mut latencies = Vec::new();
+    let mut latest = None;
+    for _ in 0..100 {
+        let started = std::time::Instant::now();
+        latest = registry.latest_complete_fresh(fixture.path()).await;
+        latencies.push(started.elapsed());
+    }
     release_tx.send(()).expect("release scheduler lock");
     lock_thread.join().expect("scheduler lock thread joins");
 
-    let latest = result
-        .expect("foreground query must not wait for an in-flight refresh")
-        .expect("last complete generation remains queryable");
+    latencies.sort();
+    let p95 = latencies[94];
+    assert!(
+        p95 <= Duration::from_millis(50),
+        "foreground query admission p95 must stay <=50ms while the scheduler lock is held; observed {p95:?}"
+    );
+    let latest = latest.expect("last complete generation remains queryable");
     assert_eq!(
         latest.generation.manifest().generation_id,
         expected,
@@ -3217,9 +3282,19 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         .0,
     );
     let handle = DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("semantic handle");
+    let vector_graph = Arc::new(
+        GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Memory,
+            expected_format: GraphFormatVersion::new(1).expect("graph format"),
+            durability: GraphDurability::Memory,
+            cancellation: Arc::new(NeverCancelled),
+        })
+        .expect("semantic vector graph"),
+    );
     let runtime = ProductionSemanticRuntimeV1::new(
         handle.clone(),
         Arc::clone(&database),
+        Arc::clone(&vector_graph),
         Arc::clone(&lifecycle),
         SemanticResourceCeilings {
             max_model_bytes: 1024 * 1024 * 1024,
@@ -3246,7 +3321,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     .expect("Jina projection became atomically current");
     let current = handle.current().expect("current semantic pointer");
     assert!(current_query_factory(&handle).is_some());
-    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
+    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref(), Arc::clone(&vector_graph))
         .await
         .expect("vector store");
     assert_eq!(
@@ -3259,6 +3334,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     let restarted = ProductionSemanticRuntimeV1::new(
         restarted_handle.clone(),
         database,
+        vector_graph,
         lifecycle,
         SemanticResourceCeilings {
             max_model_bytes: 1024 * 1024 * 1024,
@@ -5505,12 +5581,14 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
         .await
         .expect("mount with retained generation");
 
-    // Serve-prior: the retained generation is queryable immediately.
-    let served_before = registry
-        .latest_generation_id(fixture.path())
-        .await
-        .expect("retained generation remains available");
-    assert_eq!(served_before, first_generation);
+    // Admission remains O(identity): retained bytes are not decoded on mount.
+    assert!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .is_none(),
+        "mount must publish typed warming until background decode/convergence finishes"
+    );
 
     // Cadence: mount wake must verify against gix and publish the new content.
     let refreshed = wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
@@ -5539,14 +5617,6 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
         let mut scheduler = scheduler(&fixture, scoped_store.clone(), Arc::clone(&bytes));
         published(scheduler.reconcile_now().expect("seed generation"));
     }
-    // Exercise the mount-time verification of a restored generation that carries
-    // NO freshness witness (an older seal, or a witness that never landed): the
-    // mount must still schedule a verification pass that emits a no-op receipt.
-    // The witness-present fast path (mount skips the reconcile) is covered by
-    // `witness_verified_mount_skips_reconcile`.
-    std::fs::remove_file(scoped_store.join("freshness_witness.v1"))
-        .expect("remove restore-time freshness witness");
-
     let registry = CodeIndexSchedulerRegistryV1::new(1);
     registry
         .mount_worktree(
@@ -5595,56 +5665,6 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
     assert!(
         !read_model.event_to_ready_micros.p99.is_available(),
         "p99 must stay unavailable until 100 samples are retained"
-    );
-    registry.shutdown().await;
-}
-
-/// P2: a mount whose restored generation is proved current by its freshness
-/// witness must NOT schedule the mount-time verification reconcile. The whole
-/// point of the witness is to skip that whole-repo read on an unchanged reopen,
-/// so no reconcile runs and no event-to-ready receipt is emitted.
-#[tokio::test(flavor = "multi_thread")]
-async fn witness_verified_mount_skips_reconcile() {
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store = TempDir::new().expect("store root");
-    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
-    let scoped_store = super::scoped_code_index_store_root(
-        store.path(),
-        &fixture.path().canonicalize().expect("canonical fixture"),
-    );
-    let seeded = {
-        let mut scheduler = scheduler(&fixture, scoped_store.clone(), Arc::clone(&bytes));
-        published(scheduler.reconcile_now().expect("seed generation")).generation_id
-    };
-    assert!(
-        scoped_store.join("freshness_witness.v1").is_file(),
-        "seeding a generation persists its restore-time freshness witness"
-    );
-
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    registry
-        .mount_worktree(
-            test_project_id(),
-            fixture.path(),
-            store.path().to_path_buf(),
-            None,
-        )
-        .await
-        .expect("mount retained");
-
-    // The witness proves the retained generation current, so the mount schedules
-    // no verification reconcile. Give any (incorrectly scheduled) reconcile ample
-    // time to land, then assert none did: no receipt, and the served generation
-    // is still the seeded one — never rebuilt.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        registry.latest_event_to_ready_receipt().is_none(),
-        "a witness-verified mount performs no reconcile, so emits no cadence receipt"
-    );
-    assert_eq!(
-        registry.latest_generation_id(fixture.path()).await,
-        Some(seeded),
-        "the witness-verified mount serves the sealed generation without rebuilding"
     );
     registry.shutdown().await;
 }
@@ -5719,7 +5739,7 @@ async fn busy_admission_schedules_follow_up_cadence_wake() {
 
 async fn wait_for_event_to_ready(
     registry: &CodeIndexSchedulerRegistryV1,
-) -> super::CodeIndexEventToReadyReceiptV1 {
+) -> super::CodeIndexEventToReadyReceipt {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if let Some(receipt) = registry.latest_event_to_ready_receipt() {

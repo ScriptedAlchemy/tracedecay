@@ -238,10 +238,10 @@ provable terminal outcome.
   coordination. They replace new Git parsers, watcher loops, and executor
   mechanics while preserving stable repository/worktree identity, exact
   native snapshots, immutable previews, queue bounds, and restart behavior.
-- Use `petgraph` only for branch-stack DAG traversal, topological order, and
-  SCC detection. Plan 16/36 still own edge meaning, authorization, visibility,
-  readiness, preflight, apply, and receipts; graph-library nodes or paths are
-  never authority.
+- Use `tracedecay-graph-db`/Grafeo for durable branch-stack DAG traversal,
+  topological order, and SCC detection. Plan 16/36 still own edge meaning,
+  authorization, visibility, readiness, preflight, apply, and receipts;
+  graph-library node handles or paths are never authority.
 - If `gix` or the fixed native Git plumbing cannot prove a required state,
   retain useful read-only evidence and block apply. Do not add `git2`; an
   unsupported object format, operation, or platform remains typed unsupported

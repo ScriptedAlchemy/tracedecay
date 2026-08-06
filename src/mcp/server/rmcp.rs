@@ -40,6 +40,9 @@ pub(crate) struct RmcpRequestIngressRegistry {
 struct RmcpRequestIngress {
     started: McpRequestStart,
     response_deadline_at: Option<tokio::time::Instant>,
+    externally_cancellable: bool,
+    cancellation_response_sent: bool,
+    dispatch_control: Option<McpToolDispatchControl>,
     method: Arc<str>,
     tool_name: Option<Arc<str>>,
 }
@@ -67,20 +70,25 @@ impl RmcpRequestIngressRegistry {
         let Some(request_key) = Self::request_key(id) else {
             return;
         };
-        let response_deadline_at = (method == "tools/call")
+        let lifecycle_policy = (method == "tools/call")
             .then(|| params?.get("name")?.as_str())
             .flatten()
             .and_then(|tool_name| {
                 crate::mcp::tools::dispatch::lifecycle_policy_for_tool(tool_name)
                     .ok()
                     .flatten()
-            })
-            .and_then(|policy| started.runtime_deadline(policy.maximum_duration()));
+            });
+        let response_deadline_at =
+            lifecycle_policy.and_then(|policy| started.runtime_deadline(policy.maximum_duration()));
         self.entries().insert(
             request_key,
             RmcpRequestIngress {
                 started,
                 response_deadline_at,
+                externally_cancellable: lifecycle_policy
+                    .is_some_and(|policy| policy.externally_cancellable()),
+                cancellation_response_sent: false,
+                dispatch_control: None,
                 method: Arc::from(method),
                 tool_name: params
                     .and_then(|params| params.get("name"))
@@ -105,17 +113,40 @@ impl RmcpRequestIngressRegistry {
         self.entries().remove(request_key);
     }
 
+    fn observe_dispatch_control(&self, id: &Value, control: McpToolDispatchControl) {
+        let Some(request_key) = Self::request_key(id) else {
+            return;
+        };
+        if let Some(ingress) = self.entries().get_mut(&request_key) {
+            if ingress.cancellation_response_sent {
+                control.cancel_from_transport();
+            }
+            ingress.dispatch_control = Some(control);
+        }
+    }
+
     pub(crate) fn cancelled_response(
         &self,
         id: &Value,
     ) -> Option<(JsonRpcResponse, Option<tokio::time::Instant>)> {
         let request_key = Self::request_key(id)?;
-        let ingress = self.entries().remove(&request_key)?;
+        let mut entries = self.entries();
+        let ingress = entries.get_mut(&request_key)?;
+        if !ingress.externally_cancellable || ingress.cancellation_response_sent {
+            return None;
+        }
+        ingress.cancellation_response_sent = true;
+        let ingress = ingress.clone();
+        drop(entries);
+        if let Some(control) = ingress.dispatch_control.as_ref() {
+            control.cancel_from_transport();
+        }
         let response = if ingress.method.as_ref() == "tools/call" {
             super::finish_transport_cancelled_tool_call_response(
                 id.clone(),
                 ingress.tool_name.as_deref().unwrap_or("<unresolved>"),
                 ingress.started,
+                ingress.dispatch_control.as_ref(),
             )
         } else {
             JsonRpcResponse::error_with_data(
@@ -216,6 +247,10 @@ impl RmcpConnectionAdapter {
             ),
             None => None,
         };
+        if let Some(control) = dispatch_control.as_ref() {
+            self.request_ingress
+                .observe_dispatch_control(&id, control.clone());
+        }
         if request_cancellation.is_cancelled() {
             let _ = self.cancel_request(Some(request_id));
         }
@@ -600,6 +635,166 @@ mod tests {
             .expect("canonical execution receipt");
         assert_eq!(receipt["terminal"], "denied");
         assert_eq!(receipt["worker_settlement"], "not_started");
+    }
+
+    #[test]
+    fn non_cancellable_ingress_keeps_response_ownership_on_cancel_notification() {
+        let ingress = RmcpRequestIngressRegistry::default();
+        let id = json!(17);
+        ingress.record(
+            &id,
+            "tools/call",
+            Some(&json!({
+                "name": "tracedecay_diagnostics",
+                "arguments": {},
+            })),
+            McpRequestStart::now(),
+        );
+
+        assert!(
+            ingress.cancelled_response(&id).is_none(),
+            "a catalog NotCancellable operation must not emit a false cancellation terminal"
+        );
+        assert!(
+            ingress
+                .response_deadline(&RmcpRequestIngressRegistry::request_key(&id).unwrap())
+                .is_some(),
+            "ignored cancellation must leave the real response owner registered"
+        );
+    }
+
+    #[test]
+    fn cancellable_ingress_cancels_the_admitted_request_signal() {
+        let ingress = RmcpRequestIngressRegistry::default();
+        let id = json!(18);
+        let params = json!({
+            "name": "tracedecay_search",
+            "arguments": {"query": "cancel"},
+        });
+        let started = McpRequestStart::now();
+        ingress.record(&id, "tools/call", Some(&params), started);
+        let request_key = RmcpRequestIngressRegistry::request_key(&id).unwrap();
+        let policy = crate::mcp::tools::dispatch::lifecycle_policy_for_tool("tracedecay_search")
+            .unwrap()
+            .unwrap();
+        let control = super::super::request_lifecycle::McpRequestRegistry::new()
+            .admit(&request_key, "tracedecay_search", started, policy)
+            .unwrap();
+        ingress.observe_dispatch_control(&id, control.clone());
+
+        let (response, _) = ingress
+            .cancelled_response(&id)
+            .expect("cancellable ingress response");
+        assert!(
+            control.is_cancelled(),
+            "transport cancellation must cancel the admitted application signal"
+        );
+        let error = response.error.expect("cancellation error");
+        assert_eq!(
+            error.code,
+            crate::mcp::transport::ErrorCode::RequestCancelled.as_i32()
+        );
+        let receipt = error
+            .data
+            .and_then(|data| {
+                data.get(super::super::request_receipts::EXECUTION_RECEIPT_KEY)
+                    .cloned()
+            })
+            .expect("cancellation receipt");
+        assert_eq!(receipt["terminal"], "cancelled");
+        assert_eq!(receipt["worker_settlement"], "not_started");
+    }
+
+    #[test]
+    fn cancellation_before_control_observation_cancels_control_at_admission() {
+        let ingress = RmcpRequestIngressRegistry::default();
+        let id = json!(20);
+        let params = json!({
+            "name": "tracedecay_search",
+            "arguments": {"query": "cancel-before-admission"},
+        });
+        let started = McpRequestStart::now();
+        ingress.record(&id, "tools/call", Some(&params), started);
+        ingress
+            .cancelled_response(&id)
+            .expect("cancellable ingress response");
+
+        let request_key = RmcpRequestIngressRegistry::request_key(&id).unwrap();
+        let policy = crate::mcp::tools::dispatch::lifecycle_policy_for_tool("tracedecay_search")
+            .unwrap()
+            .unwrap();
+        let control = super::super::request_lifecycle::McpRequestRegistry::new()
+            .admit(&request_key, "tracedecay_search", started, policy)
+            .unwrap();
+        ingress.observe_dispatch_control(&id, control.clone());
+
+        assert!(
+            control.is_cancelled(),
+            "the ingress cancellation tombstone must cancel a control admitted after notification"
+        );
+        assert!(
+            ingress.cancelled_response(&id).is_none(),
+            "the client receives exactly one cancellation response"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_flight_worker_cancellation_receipt_has_real_reconciliation_identity() {
+        let ingress = RmcpRequestIngressRegistry::default();
+        let id = json!(19);
+        let params = json!({
+            "name": "tracedecay_search",
+            "arguments": {"query": "worker"},
+        });
+        let started = McpRequestStart::now();
+        ingress.record(&id, "tools/call", Some(&params), started);
+        let request_key = RmcpRequestIngressRegistry::request_key(&id).unwrap();
+        let policy = crate::mcp::tools::dispatch::lifecycle_policy_for_tool("tracedecay_search")
+            .unwrap()
+            .unwrap();
+        let control = super::super::request_lifecycle::McpRequestRegistry::new()
+            .admit(&request_key, "tracedecay_search", started, policy)
+            .unwrap();
+        ingress.observe_dispatch_control(&id, control.clone());
+
+        let reservation = control
+            .reserve_join_required_worker(McpToolDispatchStage::Handler)
+            .unwrap();
+        let worker =
+            tokio::spawn(async { std::future::pending::<crate::errors::Result<()>>().await });
+        let worker_control = control.clone();
+        let dispatch = tokio::spawn(async move {
+            worker_control
+                .run_owned_join_required(McpToolDispatchStage::Handler, reservation, worker)
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let (response, _) = ingress
+            .cancelled_response(&id)
+            .expect("cancellable ingress response");
+        let receipt = response
+            .error
+            .and_then(|error| error.data)
+            .and_then(|data| {
+                data.get(super::super::request_receipts::EXECUTION_RECEIPT_KEY)
+                    .cloned()
+            })
+            .expect("cancellation receipt");
+        assert_eq!(receipt["worker_settlement"], "indeterminate");
+        assert!(
+            receipt["worker_reconciliation"]["id"]
+                .as_u64()
+                .is_some_and(|id| id > 0),
+            "an indeterminate worker must name its real reaper record: {receipt}"
+        );
+        assert_eq!(receipt["worker_reconciliation"]["status"], "pending");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), dispatch)
+            .await
+            .expect("cancelled dispatch cleanup")
+            .expect("dispatch task");
+        assert!(result.is_err());
     }
 
     #[tokio::test(start_paused = true)]

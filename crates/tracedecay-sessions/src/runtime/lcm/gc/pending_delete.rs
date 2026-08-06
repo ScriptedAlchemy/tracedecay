@@ -54,21 +54,6 @@ impl PayloadDeleteDrain {
             });
         }
     }
-
-    pub fn merge(&mut self, other: Self) {
-        self.outcomes.removed.merge(other.outcomes.removed);
-        self.outcomes.preserved.merge(other.outcomes.preserved);
-        self.outcomes.missing.merge(other.outcomes.missing);
-        // The second drain observes every tombstone still pending after the
-        // first drain and the GC transaction. Its failure set is therefore the
-        // authoritative current state, not another batch of attempts to add.
-        self.outcomes.failed = other.outcomes.failed;
-        self.errors = other.errors;
-    }
-
-    pub(super) fn has_failures(&self) -> bool {
-        !self.outcomes.failed.is_empty()
-    }
 }
 
 pub(super) fn pending_payload_delete_key(payload_ref: &str) -> String {
@@ -293,30 +278,6 @@ async fn record_pending_delete_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn merge_replaces_resolved_failures_with_latest_snapshot() {
-        let mut first = PayloadDeleteDrain::default();
-        first.add_error(
-            "payload_a.payload",
-            "payload_delete_failed",
-            "first".to_string(),
-        );
-
-        let mut second = PayloadDeleteDrain::default();
-        second.outcomes.removed.add("payload_a.payload", 12);
-        second.add_error(
-            "payload_b.payload",
-            "payload_delete_failed",
-            "second".to_string(),
-        );
-        first.merge(second);
-
-        assert_eq!(first.outcomes.removed.count, 1);
-        assert_eq!(first.outcomes.failed.refs, ["payload_b.payload"]);
-        assert_eq!(first.errors.len(), 1);
-        assert_eq!(first.errors[0].payload_ref, "payload_b.payload");
-    }
 
     #[test]
     fn pending_delete_serializes_only_digest_and_sizes() {

@@ -777,6 +777,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
         | crate::errors::TraceDecayError::Database { .. }
         | crate::errors::TraceDecayError::DatabaseOperation { .. }
         | crate::errors::TraceDecayError::Search { .. }
+        | crate::errors::TraceDecayError::ResetRequired { .. }
         | crate::errors::TraceDecayError::SyncLock { .. }
         | crate::errors::TraceDecayError::Sqlite(_)
         | crate::errors::TraceDecayError::Json(_) => false,
@@ -1644,38 +1645,6 @@ fn registry_profile_roots(profile_root: &Path) -> Vec<PathBuf> {
     roots
 }
 
-/// Counts profile store manifests with no matching registry row, plus any
-/// manifest scan issues. Shared between `doctor` and the post-update health
-/// pass.
-pub(crate) async fn orphan_store_manifest_report(
-    global_db: &crate::global_db::RegisteredGlobalDb,
-    profile_root: &Path,
-) -> (usize, Vec<String>) {
-    let report = crate::migrate::registry::scan_profile_store_manifests(
-        profile_root,
-        crate::tracedecay::current_timestamp(),
-    );
-    let mut warnings = report.issues.clone();
-    for plan in &report.plans {
-        match plan.status {
-            crate::migrate::registry::RegistryReconstructionStatus::Blocked => {
-                warnings.push(format!(
-                    "blocked store manifest '{}': {}",
-                    plan.manifest_path.display(),
-                    plan.status_reason.as_deref().unwrap_or("not eligible")
-                ));
-            }
-            crate::migrate::registry::RegistryReconstructionStatus::Eligible
-            | crate::migrate::registry::RegistryReconstructionStatus::Stale
-            | crate::migrate::registry::RegistryReconstructionStatus::Retired => {}
-        }
-    }
-    let diff =
-        crate::migrate::registry::diff_registry_reconstruction_report(global_db, &report).await;
-    warnings.extend(diff.issues);
-    (diff.missing_plans, warnings)
-}
-
 /// Reports git-metadata watcher health (design D3/D5).
 ///
 /// The watcher lives in the daemon; its per-project state is only in-process, so
@@ -1687,7 +1656,7 @@ pub(crate) async fn orphan_store_manifest_report(
 fn check_watcher(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mWatcher\x1b[0m");
 
-    let config = crate::config::SyncConfig::default().with_env_overrides();
+    let config = crate::config::SyncConfig::default();
     if !config.auto_watch {
         dc.info("Git-metadata watcher disabled (`sync.auto_watch = false`)");
         return;

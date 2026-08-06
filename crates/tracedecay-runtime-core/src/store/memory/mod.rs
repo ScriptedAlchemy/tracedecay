@@ -14,12 +14,10 @@ use tracedecay_store::{
     CompatibilityFactContentDigestQueryV1, CompatibilityFactContradictionPageV1,
     CompatibilityFactContradictionQueryV1, CompatibilityFactCurationBatchV1,
     CompatibilityFactCurationReceiptV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
     CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
     CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
     CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
@@ -29,22 +27,22 @@ use tracedecay_store::{
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    FactCurrentResponseV1, FactFeedbackHistoryPage, FactFeedbackHistoryQuery, FactLineageQuery,
+    FactLineageResponseV1, FactProposalStore, FactProposalStoreError, FactStore, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 use crud::{
-    PROMOTE_OPERATION, add_compatibility_fact_tx, compatibility_fact_feedback_history_tx,
-    compatibility_fact_history_tx, fact_response_metadata_tx,
-    find_compatibility_fact_by_content_digest_tx, get_compatibility_fact_tx,
-    get_retrieval_anchor_tx, inspect_compatibility_fact_tx, list_compatibility_facts_tx,
-    promote_compatibility_fact_proposal_tx,
+    PROMOTE_OPERATION, add_compatibility_fact_tx, compatibility_fact_history_tx,
+    fact_response_metadata_tx, find_compatibility_fact_by_content_digest_tx,
+    get_compatibility_fact_tx, get_retrieval_anchor_tx, inspect_compatibility_fact_tx,
+    list_compatibility_facts_tx, promote_compatibility_fact_proposal_tx,
     promote_compatibility_fact_proposal_with_disposition_tx, promote_fact_proposal_tx,
     query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
-    query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_response_tx,
-    query_fact_lineage_tx, record_compatibility_fact_feedback_tx, remove_compatibility_fact_tx,
-    update_compatibility_fact_tx,
+    query_fact_current_response_tx, query_fact_current_tx, query_fact_feedback_history_tx,
+    query_fact_lineage_response_tx, query_fact_lineage_tx, record_compatibility_fact_feedback_tx,
+    remove_compatibility_fact_tx, update_compatibility_fact_tx,
 };
 use curation::{apply_compatibility_fact_curation_tx, merge_compatibility_facts_tx};
 use dashboard::{
@@ -56,10 +54,10 @@ use primitives::{QUERY_OPERATION, authority_storage_error, storage_error};
 use projection::resolve_legacy_fact_tx;
 use proposals::{
     count_pending_compatibility_fact_proposals_tx, get_compatibility_fact_proposal_tx,
-    import_legacy_compatibility_fact_proposals_tx, list_compatibility_fact_proposals_tx,
-    reject_compatibility_fact_proposal_tx, submit_compatibility_fact_proposal_tx,
+    list_compatibility_fact_proposals_tx, reject_compatibility_fact_proposal_tx,
+    submit_compatibility_fact_proposal_tx,
 };
-use repair::{compatibility_feedback_history_repair_progress_tx, repair_compatibility_memory_tx};
+use repair::repair_compatibility_memory_tx;
 use search::{
     find_compatibility_contradictions_tx, probe_compatibility_facts_tx,
     reason_compatibility_facts_tx, record_compatibility_fact_retrieval_tx,
@@ -96,54 +94,6 @@ pub struct DatabaseFactStore<'a> {
 impl<'a> DatabaseFactStore<'a> {
     pub const fn new(db: &'a Database) -> Self {
         Self { db }
-    }
-
-    #[cfg(any(test, feature = "test-transport"))]
-    #[doc(hidden)]
-    pub async fn inspect_owner_archive_for_test(
-        &self,
-        owner: &tracedecay_domain::FactOwnerV1,
-    ) -> FactStoreResult<tracedecay_store::MemoryV2OwnerArchiveV1> {
-        let transaction = self
-            .db
-            .begin_memory_read_transaction(QUERY_OPERATION)
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        let archive = crate::db::export_memory_v2_owner_archive(
-            &transaction,
-            crate::db::MemoryV2ArchiveDatabase::Main,
-            owner,
-        )
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error));
-        finish_read_snapshot(transaction, archive).await
-    }
-
-    #[cfg(any(test, feature = "test-transport"))]
-    #[doc(hidden)]
-    pub async fn import_owner_archive_for_test(
-        &self,
-        archive: &tracedecay_store::MemoryV2OwnerArchiveV1,
-    ) -> FactStoreResult<()> {
-        let transaction = self
-            .db
-            .begin_memory_write_transaction("import typed Memory V2 owner archive fixture")
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        let plan = crate::db::plan_memory_v2_owner_archive_import(&transaction, archive)
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        crate::db::import_memory_v2_owner_archive(&transaction, archive, &plan)
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        self.db
-            .checkpoint()
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))
     }
 }
 
@@ -292,6 +242,19 @@ impl FactStore for DatabaseFactStore<'_> {
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
         let result = query_fact_lineage_response_tx(&snapshot, &query).await;
+        finish_read_snapshot(snapshot, result).await
+    }
+
+    async fn query_fact_feedback_history(
+        &self,
+        query: FactFeedbackHistoryQuery,
+    ) -> FactStoreResult<FactFeedbackHistoryPage> {
+        let snapshot = self
+            .db
+            .begin_memory_read_transaction(QUERY_OPERATION)
+            .await
+            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        let result = query_fact_feedback_history_tx(&snapshot, &query).await;
         finish_read_snapshot(snapshot, result).await
     }
 
@@ -444,11 +407,7 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         owner: FactOwnerV1,
     ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {
         self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                let feedback_repair =
-                    compatibility_feedback_history_repair_progress_tx(transaction, &owner).await?;
-                compatibility_memory_status_tx(transaction, &owner, feedback_repair).await
-            })
+            Box::pin(async move { compatibility_memory_status_tx(transaction, &owner).await })
         })
         .await
     }
@@ -504,23 +463,6 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
             Box::pin(
                 async move { record_compatibility_fact_feedback_tx(transaction, &request).await },
             )
-        })
-        .await
-    }
-
-    async fn compatibility_fact_feedback_history(
-        &self,
-        query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1> {
-        self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                let feedback_repair = compatibility_feedback_history_repair_progress_tx(
-                    transaction,
-                    query.target().owner(),
-                )
-                .await?;
-                compatibility_fact_feedback_history_tx(transaction, &query, feedback_repair).await
-            })
         })
         .await
     }
@@ -725,18 +667,6 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1> {
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move {
-                import_legacy_compatibility_fact_proposals_tx(transaction, &request).await
-            })
-        })
-        .await
-    }
-
     async fn promote_compatibility_fact_proposal(
         &self,
         request: CompatibilityFactProposalPromotionV1,
@@ -766,17 +696,12 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 }
 
 /// The single owned-or-borrowed handle shape for the shared project-memory
-/// database. Every project-memory route — the core fact-store accessors in
-/// [`crate::tracedecay::facts`] and the MCP memory handlers alike — resolves
-/// through this one type and its `db_path() == graph_db_path` routing
-/// predicate, instead of each maintaining its own near-duplicate enum kept in
-/// sync only by hand.
+/// database. Every project-memory route — active or explicitly selected —
+/// resolves through this one type.
 pub enum ProjectMemoryDbHandle<'a> {
-    /// The database this instance already serves, when it already is the
-    /// shared project store rather than a branch shard.
+    /// The project database this instance already serves.
     Active(&'a Database),
-    /// A separately opened handle to the shared project store, owned by the
-    /// resolution because the active database is a branch shard.
+    /// A separately opened project or profile database.
     Owned(Box<Database>),
 }
 
@@ -854,6 +779,9 @@ impl FactStore for ProjectFactStore<'_> {
         fn query_fact_lineage_response(
             query: FactLineageQuery,
         ) -> FactStoreResult<FactLineageResponseV1>;
+        fn query_fact_feedback_history(
+            query: FactFeedbackHistoryQuery,
+        ) -> FactStoreResult<FactFeedbackHistoryPage>;
         fn resolve_legacy_fact(query: LegacyFactQuery) -> FactStoreResult<Option<FactId>>;
         fn get_retrieval_anchor(
             query: RetrievalAnchorQuery,
@@ -913,9 +841,6 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
         fn record_compatibility_fact_feedback(
             request: CompatibilityFactFeedbackCommandV1,
         ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1>;
-        fn compatibility_fact_feedback_history(
-            query: CompatibilityFactFeedbackHistoryQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1>;
         fn find_compatibility_fact_by_content_digest(
             query: CompatibilityFactContentDigestQueryV1,
         ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>;
@@ -968,9 +893,6 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
             reviewer: ActorId,
             reason: String,
         ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
-        fn import_legacy_compatibility_fact_proposals(
-            request: CompatibilityFactProposalImportV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>;
         fn promote_compatibility_fact_proposal(
             request: CompatibilityFactProposalPromotionV1,
         ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;

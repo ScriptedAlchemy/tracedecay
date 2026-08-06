@@ -52,6 +52,67 @@ pub(super) async fn execute_primitive(
             DaemonInvocationProblem::InvalidRequest,
         );
     };
+    let request = match request {
+        Pr12PrimitiveRequest::SymbolSearch(request) => {
+            // Symbol search is the producer for every node-based callable
+            // graph read. Run it through the same immutable code-generation
+            // owner as those consumers so its page and temporal evidence carry
+            // the exact activated generation. The legacy mutable graph adapter
+            // had no source-generation authority and emitted `None`, leaving
+            // callers with only the unpinned request sentinel, which the
+            // generation-bound relation surfaces correctly reject.
+            let Ok(operations) = callable_code_operations() else {
+                return application_problem(
+                    wire_request_id,
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "callable_code.operation_unavailable".to_owned(),
+                        message: "The callable code operation is unavailable".to_owned(),
+                    }),
+                );
+            };
+            let callable_operation = operations.get(CallableCodeOperationKind::SymbolSearch);
+            let context = match callable_code_request_context(
+                &registered.scope,
+                &access,
+                &wire_request_id,
+                callable_operation,
+                observed_at,
+                deadline,
+                cancellation,
+            ) {
+                Ok(context) => context,
+                Err(problem) => return application_problem(wire_request_id, problem),
+            };
+            let scope = match tracedecay_application::retrieval::CodeQueryScope::new(
+                crate::daemon::code_index_scheduler::queries::unpinned_latest_generation(),
+                request.scope.path_prefix,
+            ) {
+                Ok(scope) => scope,
+                Err(_) => return invalid_callable_code_request(wire_request_id),
+            };
+            let query = CallableCodeQueryService::new(
+                service.code_index_schedulers.clone(),
+                registered.authorization.authorize(access),
+                operations,
+            );
+            return callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query
+                    .symbol_search(
+                        &context,
+                        tracedecay_application::retrieval::CodeSymbolSearchRequest {
+                            query: request.query,
+                            scope,
+                            meta: request.meta,
+                        },
+                        observed_at,
+                    )
+                    .await,
+            );
+        }
+        request => request,
+    };
     let context = match callable_code_request_context(
         &registered.scope,
         &access,
@@ -146,6 +207,26 @@ pub(super) async fn execute_callable_code(
             crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
         ) => CallableCodeOperationKind::PhraseSearch,
         (
+            crate::application_surface::CallableCodeSurfaceRequest::SymbolSearch(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeSymbolSearch,
+        ) => CallableCodeOperationKind::SymbolSearch,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::SignatureSearch(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeSignatureSearch,
+        ) => CallableCodeOperationKind::SignatureSearch,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Implementations(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeImplementations,
+        ) => CallableCodeOperationKind::Implementations,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::TypeHierarchy(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeTypeHierarchy,
+        ) => CallableCodeOperationKind::TypeHierarchy,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Callers(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeCallers,
+        ) => CallableCodeOperationKind::Callers,
+        (
             crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
             crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
         ) => CallableCodeOperationKind::Callees,
@@ -230,6 +311,61 @@ pub(super) async fn execute_callable_code(
                 wire_request_id,
                 &registered.scope,
                 query.phrase_search(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::SymbolSearch(request) => {
+            let Ok(request) = request.into_application_request(
+                crate::daemon::code_index_scheduler::queries::callable_query_sanitizer_revision(),
+                crate::daemon::code_index_scheduler::queries::callable_query_normalization_revision(
+                ),
+                page,
+            ) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.symbol_search(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::SignatureSearch(request) => {
+            let Ok(request) = request.into_application_request(page) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.signature_search(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Implementations(request) => {
+            let Ok(request) = request.into_application_request(page) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.implementations(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::TypeHierarchy(request) => {
+            let Ok(request) = request.into_application_request(page) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.type_hierarchy(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Callers(request) => {
+            let Ok(request) = request.into_application_request(page) else {
+                return invalid_callable_code_request(wire_request_id);
+            };
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.callers(&context, request, observed_at).await,
             )
         }
         crate::application_surface::CallableCodeSurfaceRequest::Callees(request) => {

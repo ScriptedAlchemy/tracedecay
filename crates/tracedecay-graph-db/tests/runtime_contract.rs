@@ -135,6 +135,7 @@ fn traversal(start: &str) -> TraversalRequest {
         namespace: namespace(),
         start: entity_id(start),
         relation_kinds: BTreeSet::new(),
+        direction: tracedecay_graph_db::GraphTraversalDirection::Outgoing,
         max_depth: 8,
         max_visits: 100,
         max_results: 100,
@@ -479,6 +480,147 @@ fn traversal_honors_cancellation() {
     assert_eq!(db.traverse(request).unwrap_err(), GraphDbError::Cancelled);
 }
 
+#[test]
+fn projection_batch_point_read_preserves_input_identity_and_cancellation() {
+    let db = memory_db();
+    db.apply(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+        ],
+    ))
+    .unwrap();
+    let identities = ["b", "missing", "a"].map(entity_id);
+    let entities = db
+        .projection_entities(&namespace(), &projection("code"), &identities, live())
+        .unwrap();
+    assert_eq!(
+        entities
+            .iter()
+            .map(|entity| entity.as_ref().map(|entity| entity.identity.as_str()))
+            .collect::<Vec<_>>(),
+        vec![Some("b"), None, Some("a")]
+    );
+    assert_eq!(
+        db.projection_entities(
+            &namespace(),
+            &projection("code"),
+            &identities,
+            Arc::new(Cancelled),
+        )
+        .unwrap_err(),
+        GraphDbError::Cancelled
+    );
+}
+
+#[test]
+fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
+    let db = memory_db();
+    db.apply(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
+            GraphMutation::UpsertRelation(relation("ac", "a", "c", "owns")),
+        ],
+    ))
+    .unwrap();
+    let starts = ["a", "missing", "b"].map(entity_id);
+    let kinds = BTreeSet::from([GraphRelationKind::new("calls").unwrap()]);
+    let relations = db
+        .outgoing_relations(&namespace(), &starts, &kinds, 1, live())
+        .unwrap();
+    assert_eq!(
+        relations
+            .iter()
+            .map(|relations| {
+                relations
+                    .iter()
+                    .map(|relation| relation.identity.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        vec![vec!["ab"], Vec::<&str>::new(), Vec::<&str>::new()]
+    );
+    assert_eq!(
+        db.outgoing_relation_ids(&namespace(), &starts, &kinds, 0, live())
+            .unwrap_err(),
+        GraphDbError::BudgetExhausted
+    );
+    assert_eq!(
+        db.outgoing_relations(&namespace(), &starts, &kinds, 1, Arc::new(Cancelled),)
+            .unwrap_err(),
+        GraphDbError::Cancelled
+    );
+}
+
+#[test]
+fn multi_source_reachability_uses_overlay_and_global_budget() {
+    let db = memory_db();
+    db.apply(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertEntity(entity("d")),
+            GraphMutation::UpsertRelation(relation("ab", "a", "b", "depends")),
+            GraphMutation::UpsertRelation(relation("bc", "b", "c", "depends")),
+        ],
+    ))
+    .unwrap();
+    let starts = [entity_id("a"), entity_id("d")];
+    let kinds = BTreeSet::from([GraphRelationKind::new("depends").unwrap()]);
+    let overrides = BTreeMap::from([(entity_id("b"), BTreeSet::from([entity_id("d")]))]);
+    let reachable = db
+        .reachable_entities(
+            &namespace(),
+            &projection("code"),
+            &starts,
+            &kinds,
+            &overrides,
+            4,
+            live(),
+        )
+        .unwrap();
+    assert_eq!(
+        reachable[0]
+            .iter()
+            .map(GraphEntityId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "d"]
+    );
+    assert_eq!(
+        reachable[1]
+            .iter()
+            .map(GraphEntityId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["d"]
+    );
+    assert_eq!(
+        db.reachable_entities(
+            &namespace(),
+            &projection("code"),
+            &starts,
+            &kinds,
+            &overrides,
+            3,
+            live(),
+        )
+        .unwrap_err(),
+        GraphDbError::BudgetExhausted
+    );
+}
+
 fn vector_entity(value: &str, vector: Vec<f32>, metric: VectorMetric) -> GraphEntity {
     vector_entity_with_dimension(value, vector.clone(), vector.len(), metric)
 }
@@ -500,6 +642,7 @@ fn vector_entity_with_dimension(
 fn vector_request(metric: VectorMetric, query: Vec<f32>) -> VectorSearchRequest {
     VectorSearchRequest {
         namespace: namespace(),
+        projection: projection("vectors"),
         property: GraphPropertyName::new("embedding").unwrap(),
         query,
         dimension: 2,
@@ -675,6 +818,7 @@ fn vector_upsert_clears_prior_dimension_and_metric_keys() {
     let stale = db
         .vector_search(VectorSearchRequest {
             namespace: namespace(),
+            projection: projection("vectors"),
             property: GraphPropertyName::new("embedding").unwrap(),
             query: vec![1.0, 0.0, 0.0],
             dimension: 3,
@@ -885,11 +1029,10 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
 
     let reopened = GraphDb::open(persistent_options(path)).unwrap();
     assert_eq!(reopened.traverse(traversal("a")).unwrap().visits.len(), 2);
+    let mut request = vector_request(VectorMetric::Cosine, vec![1.0, 0.0]);
+    request.projection = projection("code");
     assert_eq!(
-        reopened
-            .vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
-            .unwrap()
-            .matches[0]
+        reopened.vector_search(request).unwrap().matches[0]
             .entity
             .as_str(),
         "a"

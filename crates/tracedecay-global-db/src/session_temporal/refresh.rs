@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use tracedecay_domain::{
     SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1,
     SessionRefreshKeyV1, SessionRefreshOperationIdV1, SessionRefreshSourceTargetV1,
@@ -30,6 +31,11 @@ use super::query::{
     storage_message,
 };
 use super::rebuild::validate_candidate_frontier;
+use super::relation_publication::{
+    SessionRelationPublicationState, apply_intent, empty_projection, load_intent,
+    merge_refresh_batch, stage_projection,
+};
+use super::relations::{SessionRelationError, SessionRelationGraphStore};
 
 const BEGIN_REFRESH: &str = "begin or join session refresh";
 const PERSIST_REFRESH: &str = "persist session refresh progress";
@@ -311,6 +317,13 @@ impl RegisteredGlobalDb {
                 let receipt =
                     persist_session_temporal_projection_batch_in_transaction(&transaction, &batch)
                         .await?;
+                stage_refresh_relation_projection(
+                    self,
+                    &transaction,
+                    &batch,
+                    progress.updated_at(),
+                )
+                .await?;
                 require_batch_binding(
                     &transaction,
                     progress.session_id(),
@@ -335,6 +348,8 @@ impl RegisteredGlobalDb {
         seed_active_projection_in_transaction(&transaction, &batch).await?;
         let receipt =
             persist_session_temporal_projection_batch_in_transaction(&transaction, &batch).await?;
+        stage_refresh_relation_projection(self, &transaction, &batch, progress.updated_at())
+            .await?;
         validate_next_progress(
             &transaction,
             &progress,
@@ -450,6 +465,36 @@ impl RegisteredGlobalDb {
         &self,
         request: SessionRefreshCompletionRequestV1,
     ) -> SessionStoreResult<SessionRefreshReceiptV1> {
+        {
+            let snapshot = self
+                .read_snapshot()
+                .await
+                .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+            if let Some(receipt) =
+                read_receipt(&snapshot, request.session_id(), request.operation_id()).await?
+            {
+                require_exact_completion(&receipt, &request)?;
+                return Ok(receipt);
+            }
+        }
+        let project_relations = self.binding().shard_id.scope.project_id().is_some();
+        if project_relations {
+            prepare_relation_publication_for_completion(self, &request).await?;
+            let binding = {
+                let snapshot = self
+                    .read_snapshot()
+                    .await
+                    .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+                require_running_binding(
+                    &snapshot,
+                    request.session_id(),
+                    request.operation_id(),
+                    COMPLETE_REFRESH,
+                )
+                .await?
+            };
+            apply_intent(self, request.session_id(), binding.generation).await?;
+        }
         let transaction = self
             .begin_write_transaction()
             .await
@@ -505,8 +550,14 @@ impl RegisteredGlobalDb {
         )
         .await?;
         let terminal_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
-        activate_bound_generation(&transaction, request.session_id(), &binding, terminal_at)
-            .await?;
+        activate_bound_generation(
+            &transaction,
+            request.session_id(),
+            &binding,
+            terminal_at,
+            project_relations,
+        )
+        .await?;
         finish_operation(
             &transaction,
             request.session_id(),
@@ -746,6 +797,175 @@ impl RegisteredGlobalDb {
             .map_err(|error| storage(READ_REFRESH, error))?;
         read_running_recoveries(&snapshot, None).await
     }
+}
+
+async fn stage_refresh_relation_projection(
+    database: &RegisteredGlobalDb,
+    conn: &impl Executor,
+    batch: &SessionTemporalProjectionBatchV1,
+    updated_at: UtcMicros,
+) -> SessionStoreResult<()> {
+    let Some(binding_project_id) = database.binding().shard_id.scope.project_id() else {
+        return Ok(());
+    };
+    let (project_id, graph) = database
+        .session_relation_graph()
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    if project_id != binding_project_id {
+        return Err(storage_message(
+            PERSIST_REFRESH,
+            "session relation graph binding does not match the registered project shard",
+        ));
+    }
+    let active = batch.watermarks().active_generation();
+    let mut projection =
+        if let Some(intent) = load_intent(conn, batch.session_id(), batch.generation()).await? {
+            intent.projection
+        } else if active == batch.generation() {
+            empty_projection(
+                project_id.clone(),
+                batch.session_id().clone(),
+                batch.generation().value(),
+            )
+        } else {
+            match SessionRelationGraphStore::new(Arc::clone(graph)).load_projection(
+                project_id,
+                batch.session_id(),
+                active.value(),
+            ) {
+                Ok(mut projection) => {
+                    projection.generation = batch.generation().value();
+                    projection
+                }
+                Err(SessionRelationError::Pending) => {
+                    return Err(storage_message(
+                        PERSIST_REFRESH,
+                        "active session relation generation is pending graph publication",
+                    ));
+                }
+                Err(error) => return Err(storage(PERSIST_REFRESH, error)),
+            }
+        };
+    projection.project_id = project_id.clone();
+    projection.session_id = batch.session_id().clone();
+    projection.generation = batch.generation().value();
+    let projection = merge_refresh_batch(conn, projection, batch).await?;
+    let expected_active_generation = (active != batch.generation()).then_some(active.value());
+    stage_projection(conn, &projection, expected_active_generation, updated_at.0).await
+}
+
+async fn prepare_relation_publication_for_completion(
+    database: &RegisteredGlobalDb,
+    request: &SessionRefreshCompletionRequestV1,
+) -> SessionStoreResult<()> {
+    let transaction = database
+        .begin_write_transaction()
+        .await
+        .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+    if let Some(receipt) =
+        read_receipt(&transaction, request.session_id(), request.operation_id()).await?
+    {
+        require_exact_completion(&receipt, request)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        return Ok(());
+    }
+    let binding = require_running_binding(
+        &transaction,
+        request.session_id(),
+        request.operation_id(),
+        COMPLETE_REFRESH,
+    )
+    .await?;
+    let progress = require_exact_terminal_progress(
+        &transaction,
+        request.session_id(),
+        request.operation_id(),
+        request.frontier(),
+        request.coverage(),
+    )
+    .await?;
+    if request.frontier().committed_through() != binding.target_frontier {
+        return Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh completion target coverage",
+        });
+    }
+    validate_final_projection_receipt(
+        &transaction,
+        request.session_id(),
+        binding.generation,
+        &binding.watermarks,
+    )
+    .await?;
+    validate_candidate_frontier(
+        &transaction,
+        request.session_id().as_str(),
+        generation_i64(binding.generation, COMPLETE_REFRESH)?,
+        binding.target_frontier,
+    )
+    .await?;
+    let intent = load_intent(&transaction, request.session_id(), binding.generation)
+        .await?
+        .ok_or_else(|| {
+            storage_message(
+                COMPLETE_REFRESH,
+                "session relation publication intent is pending",
+            )
+        })?;
+    if !matches!(
+        intent.state,
+        SessionRelationPublicationState::Pending | SessionRelationPublicationState::Applied
+    ) {
+        return Err(storage_message(
+            COMPLETE_REFRESH,
+            "session relation publication is not eligible for graph apply",
+        ));
+    }
+    let candidate = read_generation(
+        &transaction,
+        request.session_id(),
+        binding.generation,
+        COMPLETE_REFRESH,
+    )
+    .await?
+    .ok_or(SessionStoreError::MissingGeneration {
+        generation: binding.generation,
+    })?;
+    if candidate.frozen_watermarks_json != encode_watermarks(&binding.watermarks, COMPLETE_REFRESH)?
+    {
+        return Err(SessionStoreError::FrozenWatermarkMismatch);
+    }
+    if candidate.state == "building" {
+        let ready_at = terminal_timestamp(&progress, COMPLETE_REFRESH)?;
+        let changed = transaction
+            .execute(
+                "UPDATE session_temporal_generations
+                 SET state = 'ready', ready_at = ?3
+                 WHERE session_id = ?1 AND generation = ?2 AND state = 'building'",
+                params![
+                    request.session_id().as_str(),
+                    generation_i64(binding.generation, COMPLETE_REFRESH)?,
+                    ready_at.0,
+                ],
+            )
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        if changed != 1 {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh relation publication preparation",
+            });
+        }
+    } else if candidate.state != "ready" {
+        return Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh relation publication preparation",
+        });
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage(COMPLETE_REFRESH, error))
 }
 
 #[derive(Clone)]
@@ -1612,6 +1832,7 @@ async fn activate_bound_generation(
     session_id: &SessionId,
     binding: &RefreshBinding,
     terminal_at: UtcMicros,
+    require_relation_publication: bool,
 ) -> SessionStoreResult<()> {
     let generation = generation_i64(binding.generation, COMPLETE_REFRESH)?;
     let candidate = read_generation(conn, session_id, binding.generation, COMPLETE_REFRESH)
@@ -1633,14 +1854,91 @@ async fn activate_bound_generation(
         .await
         .map_err(|error| storage(COMPLETE_REFRESH, error))?;
     }
-    conn.execute(
-        "UPDATE session_temporal_generations
-         SET state = 'superseded', completed_at = ?3
-         WHERE session_id = ?1 AND generation <> ?2 AND state = 'active'",
-        params![session_id.as_str(), generation, terminal_at.0],
-    )
-    .await
-    .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+    let relation_intent = if require_relation_publication {
+        let intent = load_intent(conn, session_id, binding.generation)
+            .await?
+            .ok_or_else(|| {
+                storage_message(
+                    COMPLETE_REFRESH,
+                    "session relation publication intent is pending",
+                )
+            })?;
+        if intent.state != SessionRelationPublicationState::Applied {
+            return Err(storage_message(
+                COMPLETE_REFRESH,
+                "session relation publication has not been durably applied",
+            ));
+        }
+        Some(intent)
+    } else {
+        None
+    };
+    let mut active_rows = conn
+        .query(
+            "SELECT generation FROM session_temporal_generations
+             WHERE session_id = ?1 AND generation <> ?2 AND state = 'active'
+             ORDER BY generation",
+            params![session_id.as_str(), generation],
+        )
+        .await
+        .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+    let active_generation = active_rows
+        .next()
+        .await
+        .map_err(|error| storage(COMPLETE_REFRESH, error))?
+        .map(|row| {
+            row.get::<i64>(0)
+                .map_err(|error| storage(COMPLETE_REFRESH, error))
+        })
+        .transpose()?
+        .map(|generation| {
+            u64::try_from(generation).map_err(|error| storage(COMPLETE_REFRESH, error))
+        })
+        .transpose()?;
+    if active_rows
+        .next()
+        .await
+        .map_err(|error| storage(COMPLETE_REFRESH, error))?
+        .is_some()
+    {
+        return Err(storage_message(
+            COMPLETE_REFRESH,
+            "session has multiple active generations during relation activation",
+        ));
+    }
+    drop(active_rows);
+    let expected_active_generation = relation_intent
+        .as_ref()
+        .and_then(|intent| intent.expected_active_generation)
+        .or_else(|| {
+            (binding.watermarks.active_generation() != binding.generation)
+                .then_some(binding.watermarks.active_generation().value())
+        });
+    if active_generation != expected_active_generation {
+        return Err(SessionStoreError::InvalidStateTransition {
+            context: "refresh relation activation compare-and-swap",
+        });
+    }
+    if let Some(expected) = expected_active_generation {
+        let superseded = conn
+            .execute(
+                "UPDATE session_temporal_generations
+                 SET state = 'superseded', completed_at = ?3
+                 WHERE session_id = ?1 AND generation = ?2 AND state = 'active'",
+                params![
+                    session_id.as_str(),
+                    i64::try_from(expected).map_err(|error| storage(COMPLETE_REFRESH, error))?,
+                    terminal_at.0,
+                ],
+            )
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        if superseded != 1 {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh relation activation compare-and-swap",
+            });
+        }
+    }
     let changed = conn
         .execute(
             "UPDATE session_temporal_generations
@@ -1654,6 +1952,28 @@ async fn activate_bound_generation(
         return Err(SessionStoreError::InvalidStateTransition {
             context: "refresh candidate activation",
         });
+    }
+    if let Some(intent) = relation_intent {
+        let activated = conn
+            .execute(
+                "UPDATE session_relation_publications
+                 SET state = 'active', activated_at = ?4
+                 WHERE session_id = ?1 AND generation = ?2
+                   AND projection_digest = ?3 AND state = 'applied'",
+                params![
+                    session_id.as_str(),
+                    generation,
+                    intent.digest.as_str(),
+                    terminal_at.0,
+                ],
+            )
+            .await
+            .map_err(|error| storage(COMPLETE_REFRESH, error))?;
+        if activated != 1 {
+            return Err(SessionStoreError::InvalidStateTransition {
+                context: "refresh relation publication activation",
+            });
+        }
     }
     Ok(())
 }

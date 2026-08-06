@@ -1,13 +1,11 @@
 use super::{
-    DatabaseOwnerReconciler, McpServer, McpServerConstructionContext, StalenessBannerInputs,
-    format_index_age_phrase, staleness_banner, tool_error_response,
+    McpServer, StalenessBannerInputs, format_index_age_phrase, staleness_banner,
+    tool_error_response,
 };
 use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -89,77 +87,6 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority)
     )
 }
 
-/// Serve-old/await-new: the request that notices the drift answers on the
-/// snapshot it already had, and the reopen (plus its owner reconcile) lands
-/// behind it.
-#[tokio::test]
-async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
-    let (cg, dir, fixture_authority) = init_indexed_repo().await;
-    let root = dir.path();
-    cg.checkpoint().await.unwrap();
-    let layout = cg.store_layout().clone();
-    drop(cg);
-
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
-    std::fs::create_dir_all(layout.data_root.join("branches")).unwrap();
-    std::fs::copy(
-        &layout.graph_db_path,
-        layout.data_root.join("branches/feature.db"),
-    )
-    .unwrap();
-
-    git(root, &["checkout", "-q", "-b", "feature"]);
-    git(root, &["checkout", "-q", "main"]);
-    let main = fixture_authority
-        ._runtime
-        .open_project_graph_for_test(root, crate::tracedecay::TraceDecayOpenOptions::default())
-        .await
-        .unwrap();
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let callback: DatabaseOwnerReconciler = {
-        let observed = Arc::clone(&observed);
-        Arc::new(move |fresh| {
-            let observed = Arc::clone(&observed);
-            Box::pin(async move {
-                observed.lock().unwrap().push(fresh.db_path());
-            })
-        })
-    };
-    let server = McpServer::new_with_context(
-        McpServerConstructionContext::direct(main, None).with_database_owner_reconciler(callback),
-    )
-    .await;
-
-    git(root, &["checkout", "-q", "feature"]);
-    let before = server.branch_reopens_completed();
-    let served = server.reopen_if_branch_drifted().await;
-
-    // The caller is answered on the pre-drift snapshot: it never waits for the
-    // full DB open the reopen performs.
-    assert_eq!(
-        served.serving_branch(),
-        Some("main"),
-        "the drifting request must serve the last complete snapshot"
-    );
-    assert!(
-        observed.lock().unwrap().is_empty(),
-        "the owner reconcile must not run inside the request"
-    );
-
-    assert!(
-        server
-            .wait_for_branch_reopen(before, std::time::Duration::from_secs(30))
-            .await,
-        "the detached reopen must land"
-    );
-    let fresh = server.reopen_if_branch_drifted().await;
-    assert_eq!(fresh.serving_branch(), Some("feature"));
-    assert_eq!(observed.lock().unwrap().as_slice(), &[fresh.db_path()]);
-    server.shutdown().await;
-}
-
 // ---- D7 pure-logic banner tests (test c) --------------------------
 
 #[test]
@@ -175,7 +102,6 @@ fn banner_says_refresh_in_progress_when_auto_sync_on() {
     let banner = staleness_banner(StalenessBannerInputs {
         age_secs: 2 * 3600,
         auto_sync_on: true,
-        fallback_store: false,
         refresh_running: true,
         refreshed_recently: false,
     })
@@ -190,7 +116,6 @@ fn banner_says_scheduled_when_auto_sync_on_and_idle() {
     let banner = staleness_banner(StalenessBannerInputs {
         age_secs: 2 * 3600,
         auto_sync_on: true,
-        fallback_store: false,
         refresh_running: false,
         refreshed_recently: false,
     })
@@ -204,7 +129,6 @@ fn banner_suppressed_shortly_after_refresh() {
     let banner = staleness_banner(StalenessBannerInputs {
         age_secs: 2 * 3600,
         auto_sync_on: true,
-        fallback_store: false,
         refresh_running: false,
         refreshed_recently: true,
     });
@@ -212,25 +136,10 @@ fn banner_suppressed_shortly_after_refresh() {
 }
 
 #[test]
-fn banner_instructs_manual_sync_only_on_fallback_store() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: true,
-        refresh_running: true,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.starts_with("WARNING"), "{banner}");
-    assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
-}
-
-#[test]
 fn banner_instructs_manual_sync_when_auto_sync_disabled() {
     let banner = staleness_banner(StalenessBannerInputs {
         age_secs: 2 * 3600,
         auto_sync_on: false,
-        fallback_store: false,
         refresh_running: false,
         refreshed_recently: false,
     })
@@ -365,9 +274,6 @@ fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
     let (cg, _dir, _pin) = init_indexed_repo().await;
-    let mut config = crate::config::load_config(cg.project_root()).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(cg.project_root(), &config).expect("disable unrelated catch-up");
     let server = McpServer::new(cg, None).await;
 
     // Inject a never-completing observed ledger write via the same accounting
@@ -388,65 +294,5 @@ async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
     assert!(
         !bounded,
         "a wedged ledger write must be reported as un-settled"
-    );
-}
-
-// ---- D4: sync-on-read never blocks + single-flight (tests a, d) ---
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_refresh_is_non_blocking_and_single_flighted() {
-    let (cg, dir, _pin) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
-    let mut config = crate::config::load_config(&root).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&root, &config).expect("save config");
-    let server = McpServer::new(cg, None).await;
-    // Reset the read cooldown so the next spawn is eligible regardless of
-    // any startup timing.
-    server
-        .last_background_refresh_at
-        .store(0, Ordering::Release);
-    server
-        .background_refresh_running
-        .store(false, Ordering::Release);
-
-    // Make the tree stale: a new committed source file, as the
-    // diff-scoped refresh contract tracks git history.
-    std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-q", "-m", "add b"]);
-
-    let cg_snapshot = server.cg_snapshot().await;
-
-    // First read-refresh: returns immediately (we never await the sync).
-    // Assert it does not block by bounding the call duration well under a
-    // real sync (~hundreds of ms); the spawn does the work off-thread.
-    let start = std::time::Instant::now();
-    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "maybe_spawn_read_refresh must not block on the sync (took {elapsed:?})"
-    );
-    // The refresh should have been claimed (running flag set) — proving a
-    // task was spawned rather than run inline.
-    // (It may already have finished on a very fast machine; in that case
-    // the cooldown stamp still advanced, which we assert below.)
-    assert_ne!(
-        server.last_background_refresh_at.load(Ordering::Acquire),
-        0,
-        "cooldown stamp must advance when a refresh is kicked"
-    );
-
-    // Second immediate read-refresh: single-flighted. Because the cooldown
-    // stamp just advanced (and/or a refresh is running), no second task is
-    // spawned. We verify by confirming the stamp does not change to a new
-    // value on a back-to-back call within the cooldown window.
-    let stamp_after_first = server.last_background_refresh_at.load(Ordering::Acquire);
-    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
-    let stamp_after_second = server.last_background_refresh_at.load(Ordering::Acquire);
-    assert_eq!(
-        stamp_after_first, stamp_after_second,
-        "second read within cooldown must not re-kick (single-flight)"
     );
 }

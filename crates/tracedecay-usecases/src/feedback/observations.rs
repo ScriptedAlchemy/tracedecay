@@ -317,6 +317,7 @@ pub enum Plan26SseLifecycleV1 {
     Completed,
     Cancelled,
     TimedOut,
+    Unavailable,
     Failed,
     Partial,
     Disconnected,

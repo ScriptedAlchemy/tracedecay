@@ -372,8 +372,23 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
                 || visible_operations.contains(&definition.name)
         })
         .collect::<Vec<_>>();
+    retain_available_dispatch_definitions(&mut definitions)?;
     super::dispatch::attach_dispatch_metadata(&mut definitions)?;
     Ok(definitions)
+}
+
+fn retain_available_dispatch_definitions(
+    definitions: &mut Vec<ToolDefinition>,
+) -> Result<(), super::dispatch::McpDispatchMetadataError> {
+    let mut available = Vec::with_capacity(definitions.len());
+    for definition in definitions.drain(..) {
+        let contract = super::mcp_dispatch_contract(&definition.name)?;
+        if contract.availability().is_available() {
+            available.push(definition);
+        }
+    }
+    *definitions = available;
+    Ok(())
 }
 
 pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
@@ -595,8 +610,6 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_lcm_expand(),
         def_lcm_expand_query(),
         def_lcm_preflight(),
-        def_lcm_compress(),
-        def_lcm_session_boundary(),
         def_read(),
         def_outline(),
         def_implementations(),
@@ -851,9 +864,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_lcm_describe",
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",
-    "tracedecay_lcm_session_boundary",
     "tracedecay_lcm_preflight",
-    "tracedecay_lcm_compress",
     "tracedecay_session_refresh",
     // skills
     "tracedecay_skill_list",
@@ -1023,6 +1034,17 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "tracedecay_ast_grep_rewrite")
         );
+        for unavailable in [
+            "tracedecay_feedback_advisory_cycle",
+            "tracedecay_test_results",
+        ] {
+            assert!(
+                definitions
+                    .iter()
+                    .all(|definition| definition.name != unavailable),
+                "{unavailable} must stay undiscoverable until its production journey is mounted"
+            );
+        }
 
         let fingerprints = definitions
             .iter()
@@ -1058,10 +1080,23 @@ mod tests {
             .find(|definition| definition.name == "tracedecay_lcm_doctor")
             .unwrap();
         let dispatch = &doctor.meta.as_ref().unwrap()["tracedecay/dispatch"];
-        assert_eq!(dispatch["effect"], "administrative");
-        assert_eq!(dispatch["availability"]["state"], "unavailable");
-        assert!(dispatch.get("receipt").is_none());
-        assert!(dispatch.get("reconciliation").is_none());
+        assert_eq!(dispatch["effect"], "read");
+        assert_eq!(dispatch["availability"]["state"], "available");
+        assert_eq!(doctor.annotations.as_ref().unwrap()["readOnlyHint"], true);
+        for removed in [
+            "apply",
+            "doctor_clean_apply_enabled",
+            "lcm_gc_apply_enabled",
+            "gc_config",
+            "ignore_session_patterns",
+            "stateless_session_patterns",
+            "ignore_message_patterns",
+        ] {
+            assert!(
+                doctor.input_schema["properties"].get(removed).is_none(),
+                "{removed} must not remain on read-only LCM doctor"
+            );
+        }
     }
 
     #[test]

@@ -65,6 +65,7 @@ pub struct DaemonCodeIndexControlV1 {
     epoch: Arc<AtomicU64>,
     expected_epoch: u64,
     shutting_down: Arc<AtomicBool>,
+    progress: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
 }
 
 impl DaemonCodeIndexControlV1 {
@@ -74,7 +75,19 @@ impl DaemonCodeIndexControlV1 {
             epoch,
             expected_epoch,
             shutting_down,
+            progress: None,
         }
+    }
+
+    pub fn with_progress(
+        epoch: Arc<AtomicU64>,
+        shutting_down: Arc<AtomicBool>,
+        total_files: Arc<AtomicU64>,
+        processed_files: Arc<AtomicU64>,
+    ) -> Self {
+        let mut control = Self::new(epoch, shutting_down);
+        control.progress = Some((total_files, processed_files));
+        control
     }
 
     pub fn advance(epoch: &AtomicU64) {
@@ -90,6 +103,22 @@ impl CodeIndexExecutionControlV1 for DaemonCodeIndexControlV1 {
 
     fn is_deadline_exceeded(&self) -> bool {
         false
+    }
+
+    fn begin_file_work(&self, total_files: usize) {
+        if let Some((total, processed)) = &self.progress {
+            total.store(
+                u64::try_from(total_files).unwrap_or(u64::MAX),
+                Ordering::Release,
+            );
+            processed.store(0, Ordering::Release);
+        }
+    }
+
+    fn complete_file_work(&self) {
+        if let Some((_, processed)) = &self.progress {
+            processed.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 

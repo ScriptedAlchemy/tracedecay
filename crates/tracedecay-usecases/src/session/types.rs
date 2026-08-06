@@ -529,6 +529,7 @@ pub enum SessionRetrievalOutcome<T> {
     },
     BudgetExhausted,
     Cancelled,
+    DeadlineExceeded,
 }
 
 impl<T> SessionRetrievalOutcome<T> {
@@ -1326,7 +1327,7 @@ mod tests {
 
     #[test]
     fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 12] = [
+        let states: [SessionRetrievalOutcome<()>; 13] = [
             SessionRetrievalOutcome::CompleteZero {
                 freshness: SessionDataFreshness::Fresh,
             },
@@ -1351,6 +1352,7 @@ mod tests {
             },
             SessionRetrievalOutcome::BudgetExhausted,
             SessionRetrievalOutcome::Cancelled,
+            SessionRetrievalOutcome::DeadlineExceeded,
         ];
 
         assert!(matches!(

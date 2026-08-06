@@ -7,10 +7,9 @@ use crate::db::engine::params;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
-    CompatibilityFeedbackRepairProgressV1, CompatibilityMemoryAlgebraV1,
-    CompatibilityMemoryFeedbackFunnelV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1, FactCompatibilityResult,
-    FactStoreResult,
+    CompatibilityMemoryAlgebraV1, CompatibilityMemoryFeedbackFunnelV1,
+    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1,
+    FactCompatibilityResult, FactStoreResult,
 };
 
 use super::primitives::{
@@ -162,7 +161,6 @@ async fn compatibility_owner_has_dirty_banks_tx(
 pub(super) async fn compatibility_memory_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    feedback_repair: CompatibilityFeedbackRepairProgressV1,
 ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {
     let (
         fact_count,
@@ -317,6 +315,5 @@ pub(super) async fn compatibility_memory_status_tx(
             feedback_total,
         ),
     )
-    .map(|status| status.with_feedback_history_repair(feedback_repair))
     .map_err(Into::into)
 }

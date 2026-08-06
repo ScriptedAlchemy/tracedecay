@@ -772,12 +772,75 @@ impl DaemonWorkRuntimeRegistrar {
         &self,
         project_root: PathBuf,
         database: Arc<crate::global_db::RegisteredGlobalDb>,
+        graph: Arc<tracedecay_graph_db::GraphDb>,
         authority: WorkAuthority,
         actor: ActorId,
         grant: CapabilityGrantSnapshot,
         policy_digest: ManifestDigest,
         configuration_digest: ManifestDigest,
         config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
+    ) -> Result<(), TraceDecayError> {
+        self.register_inner(
+            project_root,
+            database,
+            graph,
+            authority,
+            actor,
+            grant,
+            policy_digest,
+            configuration_digest,
+            config,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn register_with_git_evidence(
+        &self,
+        project_root: PathBuf,
+        project_store_root: PathBuf,
+        graph_runtime: crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
+        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        graph: Arc<tracedecay_graph_db::GraphDb>,
+        authority: WorkAuthority,
+        actor: ActorId,
+        grant: CapabilityGrantSnapshot,
+        policy_digest: ManifestDigest,
+        configuration_digest: ManifestDigest,
+        config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
+    ) -> Result<(), TraceDecayError> {
+        self.register_inner(
+            project_root,
+            database,
+            graph,
+            authority,
+            actor,
+            grant,
+            policy_digest,
+            configuration_digest,
+            config,
+            Some((project_store_root, graph_runtime)),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn register_inner(
+        &self,
+        project_root: PathBuf,
+        database: Arc<crate::global_db::RegisteredGlobalDb>,
+        graph: Arc<tracedecay_graph_db::GraphDb>,
+        authority: WorkAuthority,
+        actor: ActorId,
+        grant: CapabilityGrantSnapshot,
+        policy_digest: ManifestDigest,
+        configuration_digest: ManifestDigest,
+        config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
+        git_evidence: Option<(
+            PathBuf,
+            crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
+        )>,
     ) -> Result<(), TraceDecayError> {
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
@@ -807,6 +870,11 @@ impl DaemonWorkRuntimeRegistrar {
                     {
                         // The same authority re-registering only renews its grant.
                         registered.grant = grant.clone();
+                        if let Some(publisher) = &registered.git_evidence_publisher {
+                            tracedecay_rusqlite_runtime::work::WorkGitGraphEvidenceNotifier::notify(
+                                publisher.as_ref(),
+                            );
+                        }
                         return Ok(());
                     }
                     Err(TraceDecayError::Config {
@@ -818,9 +886,54 @@ impl DaemonWorkRuntimeRegistrar {
                 || {
                     // Opening the provider runtime is deferred until the slot is
                     // known to be free so a refused registration never starts one.
+                    let storage = database.work_storage(graph.as_ref().clone())?;
+                    storage
+                        .reconcile_graph_publications(&authority)
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!(
+                                "pending Work graph publication reconciliation failed: {error}"
+                            ),
+                        })?;
+                    database
+                        .workflow_storage(graph.as_ref().clone())?
+                        .reconcile_graph_publications()
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!(
+                                "pending workflow graph publication reconciliation failed: {error}"
+                            ),
+                        })?;
+                    let git_evidence_publisher = git_evidence
+                        .clone()
+                        .map(|(project_store_root, graph_runtime)| {
+                            crate::daemon::work_git_evidence::WorkGitGraphEvidencePublisher::start(
+                                storage.clone(),
+                                authority.clone(),
+                                project_root.clone(),
+                                project_store_root,
+                                Arc::clone(&graph),
+                                graph_runtime,
+                            )
+                        })
+                        .transpose()
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!(
+                                "Work Git evidence publisher registration failed: {error}"
+                            ),
+                        })?;
+                    let storage = if let Some(publisher) = &git_evidence_publisher {
+                        tracedecay_rusqlite_runtime::work::WorkGitGraphEvidenceNotifier::notify(
+                            publisher.as_ref(),
+                        );
+                        storage.with_git_graph_evidence_notifier(Arc::clone(publisher)
+                            as Arc<
+                                dyn tracedecay_rusqlite_runtime::work::WorkGitGraphEvidenceNotifier,
+                            >)
+                    } else {
+                        storage
+                    };
                     let runtime = DaemonWorkRuntimeV1::new(
                         authority,
-                        database.work_storage()?,
+                        storage,
                         config,
                         configuration_digest.clone(),
                         Arc::clone(&database),
@@ -828,12 +941,14 @@ impl DaemonWorkRuntimeRegistrar {
                     );
                     Ok(RegisteredWorkRuntime {
                         database,
+                        graph,
                         runtime: Arc::new(runtime),
                         actor: actor.clone(),
                         grant: grant.clone(),
                         authority_digest: authority_digest.clone(),
                         policy_digest: policy_digest.clone(),
                         configuration_digest: configuration_digest.clone(),
+                        git_evidence_publisher,
                     })
                 },
             )

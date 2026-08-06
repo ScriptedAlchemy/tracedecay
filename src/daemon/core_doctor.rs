@@ -27,7 +27,7 @@ fn doctor_graph_schema_state(actual: i64) -> DoctorGraphSchemaState {
     match actual {
         18 => DoctorGraphSchemaState::ReleasedV0067,
         24 => DoctorGraphSchemaState::PreviousV2Candidate,
-        actual if actual == i64::from(crate::migrate::final_v2::FINAL_PROJECT_SCHEMA_VERSION) => {
+        actual if actual == i64::from(crate::db::schema::SCHEMA_VERSION) => {
             DoctorGraphSchemaState::Current
         }
         _ => DoctorGraphSchemaState::Unsupported,
@@ -175,15 +175,6 @@ fn doctor_runtime_store_paths(
     project_path: &Path,
     profile_root: &Path,
 ) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
-    let branch = crate::branch::current_branch(project_path);
-    doctor_runtime_store_paths_for_branch(project_path, profile_root, branch.as_deref())
-}
-
-fn doctor_runtime_store_paths_for_branch(
-    project_path: &Path,
-    profile_root: &Path,
-    branch: Option<&str>,
-) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
     let layout = match crate::storage::read_enrollment_marker(project_path) {
         Ok(Some(marker)) => {
             crate::storage::profile_sharded_layout(project_path, profile_root, &marker)
@@ -210,12 +201,7 @@ fn doctor_runtime_store_paths_for_branch(
         }
         Err(_) => return Err("project_store_schema_unsupported"),
     };
-    let (graph_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
-        project_path,
-        &layout.data_root,
-        branch,
-    );
-    Ok((graph_path, layout.sessions_db_path))
+    Ok((layout.graph_db_path, layout.sessions_db_path))
 }
 
 async fn doctor_literal_workspace_placeholder_paths(
@@ -347,7 +333,7 @@ async fn doctor_runtime_value_inner(
         }
     };
     let schema_state = doctor_graph_schema_state(schema_version);
-    let expected_schema_version = crate::migrate::final_v2::FINAL_PROJECT_SCHEMA_VERSION;
+    let expected_schema_version = crate::db::schema::SCHEMA_VERSION;
     let mut value = json!({
         "tracedecay_version": crate::version::build_version(),
         "process": {
@@ -391,10 +377,8 @@ async fn doctor_runtime_value_inner(
     let (authority_ok, authority_reason, authority_detail) = match registry.as_ref() {
         Some(registry) => match registry.read_snapshot().await {
             Ok(snapshot) => {
-                match crate::global_db::schema_stages::validate_observation_authority_connection(
-                    &snapshot,
-                )
-                .await
+                match crate::global_db::schema::validate_observation_authority_connection(&snapshot)
+                    .await
                 {
                     Ok(()) => (Some(true), None, None),
                     Err(error) => (
@@ -1238,43 +1222,6 @@ mod doctor_runtime_route_tests {
                 );
             }
         }
-    }
-
-    #[tokio::test]
-    async fn doctor_store_paths_follow_the_active_branch_database() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "-b", "main"])
-                .current_dir(&project)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let layout = initialize_test_project(&project, &profile).await;
-        let default_graph = layout.graph_db_path.clone();
-
-        let branch_relpath = "branches/feature_doctor.db";
-        let branch_graph = layout.data_root.join(branch_relpath);
-        std::fs::create_dir_all(branch_graph.parent().unwrap()).unwrap();
-        std::fs::copy(&default_graph, &branch_graph).unwrap();
-        let mut meta = crate::branch_meta::BranchMeta::new_for_dir(&layout.data_root, "main");
-        meta.add_branch("feature/doctor", branch_relpath, "main");
-        crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
-
-        assert_eq!(
-            super::doctor_runtime_store_paths_for_branch(
-                &project,
-                &profile,
-                Some("feature/doctor"),
-            )
-            .expect("resolve branch-aware Doctor paths"),
-            (branch_graph, layout.sessions_db_path)
-        );
     }
 
     #[tokio::test]

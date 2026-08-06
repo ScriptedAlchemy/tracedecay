@@ -270,10 +270,6 @@ pub(super) async fn validate_candidate_frontier(
     source_frontier: u64,
 ) -> SessionStoreResult<()> {
     let mut expected = BTreeSet::new();
-    let mut expected_copies = BTreeSet::new();
-    let parent_resolver =
-        canonical_parent_message_resolver(conn, session_id, source_frontier, ACTIVATE_OPERATION)
-            .await?;
     let mut canonical_outputs = Vec::new();
     let mut rows = conn
         .query(
@@ -323,12 +319,7 @@ pub(super) async fn validate_candidate_frontier(
             canonical_outputs.push((occurrence_id, parent_message_id));
         }
     }
-    for (occurrence_id, parent_message_id) in canonical_outputs {
-        if let Some(parent_message_id) = parent_message_id
-            && let Some(parent_occurrence_id) = parent_resolver.resolve(&parent_message_id)
-        {
-            expected_copies.insert((occurrence_id.clone(), parent_occurrence_id.to_owned()));
-        }
+    for (occurrence_id, _) in canonical_outputs {
         expected.insert(occurrence_id);
     }
     if expected.is_empty() && source_frontier != 0 {
@@ -363,39 +354,6 @@ pub(super) async fn validate_candidate_frontier(
         return Err(storage_message(
             ACTIVATE_OPERATION,
             "candidate occurrence coverage does not equal the frozen source frontier",
-        ));
-    }
-    let mut actual_copies = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT occurrence_id, copied_from_occurrence_id
-             FROM session_logical_copy_edges
-             WHERE session_id = ?1 AND generation = ?2
-             ORDER BY occurrence_id, copied_from_occurrence_id",
-            params![session_id, generation],
-        )
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(ACTIVATE_OPERATION, error))?
-    {
-        actual_copies.insert((
-            row.get::<String>(0)
-                .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
-            row.get::<String>(1)
-                .map_err(|error| storage(ACTIVATE_OPERATION, error))?,
-        ));
-    }
-    // Parent-message copies are mandatory canonical coverage. Additional copy
-    // edges are allowed only because batch persistence already validated their
-    // typed retained-evidence proof and the final immutable receipt re-hashed
-    // the complete edge set before activation.
-    if !expected_copies.is_subset(&actual_copies) {
-        return Err(storage_message(
-            ACTIVATE_OPERATION,
-            "candidate copy coverage omits canonical parent-message relations",
         ));
     }
     Ok(())

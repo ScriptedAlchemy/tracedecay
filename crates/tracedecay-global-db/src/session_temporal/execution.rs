@@ -204,6 +204,7 @@ pub enum SessionTemporalExecutionError {
     Empty { freshness: SessionDataFreshness },
     BudgetExhausted,
     Cancelled,
+    DeadlineExceeded,
     Kernel(TemporalKernelError),
 }
 
@@ -220,6 +221,7 @@ impl fmt::Display for SessionTemporalExecutionError {
             Self::Empty { .. } => "temporal execution root is authoritatively empty",
             Self::BudgetExhausted => "temporal execution budget was exhausted",
             Self::Cancelled => "temporal execution was cancelled",
+            Self::DeadlineExceeded => "temporal execution deadline was exceeded",
             Self::Kernel(_) => "temporal kernel failed",
         };
         formatter.write_str(message)

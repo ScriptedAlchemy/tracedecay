@@ -26,11 +26,11 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     AnchoredObservationWrite, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
-    FactCommitOutcome, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
-    FactLineageResponseV1, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
-    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStore,
-    ObservationStore, ObservationWrite, RetrievalAnchorQuery, SESSION_MESSAGE_PROJECTOR_VERSION,
-    StoredFactV1, build_observation_resolution_authorization_v1,
+    FactCommitOutcome, FactCurrentQuery, FactCurrentResponseV1, FactFeedbackHistoryPage,
+    FactFeedbackHistoryQuery, FactLineageQuery, FactLineageResponseV1, FactStore, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, ObservationCommitReceipt, ObservationPersistOutcome,
+    ObservationProjectionStore, ObservationStore, ObservationWrite, RetrievalAnchorQuery,
+    SESSION_MESSAGE_PROJECTOR_VERSION, StoredFactV1, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
 
@@ -599,6 +599,13 @@ impl FactStore for UnavailableFactStore {
         _query: FactLineageQuery,
     ) -> FactStoreResult<FactLineageResponseV1> {
         unreachable!("report resolution never queries fact lineage")
+    }
+
+    async fn query_fact_feedback_history(
+        &self,
+        _query: FactFeedbackHistoryQuery,
+    ) -> FactStoreResult<FactFeedbackHistoryPage> {
+        unreachable!("report resolution never queries fact feedback history")
     }
 
     async fn resolve_legacy_fact(

@@ -84,35 +84,14 @@ async fn trace_decay_open_uses_profile_shard_paths_from_enrollment_marker() {
     let _home_guard = HomeGuard::set(&home);
 
     write_enrollment(&project);
-    let repo_local_config = TraceDecayConfig {
-        root_dir: "repo-local-marker-config".to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        project.join(".tracedecay/config.json"),
-        serde_json::to_string_pretty(&repo_local_config).unwrap(),
-    )
-    .unwrap();
-    let shard_config = TraceDecayConfig {
-        root_dir: project.to_string_lossy().to_string(),
-        ..TraceDecayConfig::default()
-    };
-    fs::write(
-        shard_root.join("config.json"),
-        serde_json::to_string_pretty(&shard_config).unwrap(),
-    )
-    .unwrap();
     crate::common::initialize_test_database(&shard_root.join("tracedecay.db"))
         .await
         .unwrap();
-    let meta = BranchMeta::new_for_dir(&shard_root, "main");
-    branch_meta::save_branch_meta(&shard_root, &meta).unwrap();
-
     let opened = open_with_maintenance(&project).await.unwrap();
 
     assert_path_eq(opened.db_path(), shard_root.join("tracedecay.db"));
     assert_eq!(opened.get_config().root_dir, project.to_string_lossy());
-    assert_eq!(opened.serving_branch(), Some("main"));
+    assert_eq!(opened.active_branch(), Some("main"));
 }
 
 #[cfg(feature = "test-transport")]
@@ -128,7 +107,6 @@ async fn tracked_branch_project_memory_resolves_the_shared_project_store() {
     init_repo_with_commit(&project);
 
     let initialized = init_with_maintenance(&project).await.unwrap();
-    let data_root = initialized.store_layout().data_root.clone();
     let project_graph = initialized.store_layout().graph_db_path.clone();
     let profile_root = maintenance_profile_root();
     let lifecycle = acquire_fixture_maintenance();
@@ -147,18 +125,11 @@ async fn tracked_branch_project_memory_resolves_the_shared_project_store() {
     drop(_database_scope);
     drop(lifecycle);
 
-    let branch_relative = "branches/feature.db";
-    let branch_graph = data_root.join(branch_relative);
-    fs::create_dir_all(branch_graph.parent().unwrap()).unwrap();
-    fs::copy(&project_graph, &branch_graph).unwrap();
-    let mut meta = branch_meta::load_branch_meta(&data_root).unwrap();
-    meta.add_branch("feature", branch_relative, "main");
-    branch_meta::save_branch_meta(&data_root, &meta).unwrap();
-
     let branch = open_branch_with_maintenance(&project, "feature")
         .await
         .unwrap();
-    assert_path_eq(branch.db_path(), &branch_graph);
+    assert_path_eq(branch.db_path(), &project_graph);
+    assert_eq!(branch.active_branch(), Some("feature"));
     let memory = branch.open_project_store_db_read_only().await.unwrap();
     assert_path_eq(memory.database_path(), &project_graph);
 }

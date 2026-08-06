@@ -8,10 +8,8 @@ All tool responses may be prepended with staleness warnings when the index is ou
 
 - **Per-file**: `WARNING: STALE INDEX — N file(s) modified since last sync: file1.rs, file2.rs. Run tracedecay sync to update.`
 - **Index age**: `WARNING: Index last synced Xh Ym ago. Run tracedecay sync to update.`
-- **Branch fallback**: `WARNING: branch 'feature-x' is not tracked — serving from 'main'. Run tracedecay branch add feature-x to track it.`
 
 To test staleness: edit a file without re-syncing, then call any tool that touches that file.
-To test branch fallback: check out an untracked branch while multi-branch is active, then call any tool.
 
 ---
 
@@ -24,10 +22,9 @@ Expected: Returns node/edge/file counts, DB size, language distribution, tokens 
 - `stale_warning`: human-readable message about stale commits
 - `stale_files`: count of files modified on disk since indexing (sampled up to 100)
 
-When multi-branch is active, also includes:
-- `active_branch`: the current git branch name
-- `branch_fallback`: `true` if serving from an ancestor branch DB
-- `branch_warning`: explanation of which branch DB is being used
+When a Git worktree is active, the response also includes exact branch/ref,
+commit, worktree snapshot, and selected project generation provenance. It must
+never fall back to an ancestor branch database.
 
 To test staleness: make a git commit without running `tracedecay sync`, then call status.
 

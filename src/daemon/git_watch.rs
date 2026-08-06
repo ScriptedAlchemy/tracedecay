@@ -224,6 +224,7 @@ pub(super) struct GitWatcherInner {
     pub(super) config: SyncConfig,
     /// Serializes every store-writing lifetime with daemon branch administration.
     pub(super) administration: StoreAdministration,
+    pub(super) code_index: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance: MaintenanceCoordinator,
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
@@ -252,6 +253,7 @@ impl GitWatcher {
         Self::from_parts(
             SyncConfig::default(),
             StoreAdministration::default(),
+            super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
             false,
             MaintenanceCoordinator::default(),
         )
@@ -260,6 +262,7 @@ impl GitWatcher {
     fn from_parts(
         config: SyncConfig,
         administration: StoreAdministration,
+        code_index: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         enabled: bool,
         maintenance: MaintenanceCoordinator,
     ) -> Self {
@@ -268,6 +271,7 @@ impl GitWatcher {
             inner: Arc::new(GitWatcherInner {
                 config,
                 administration,
+                code_index,
                 maintenance,
                 enabled,
                 sync_semaphore: Arc::new(Semaphore::new(permits)),
@@ -288,6 +292,7 @@ impl GitWatcher {
         Self::new_with_administration(
             config,
             StoreAdministration::default(),
+            super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(8),
             MaintenanceCoordinator::default(),
         )
     }
@@ -298,10 +303,11 @@ impl GitWatcher {
     pub(super) fn new_with_administration(
         config: SyncConfig,
         administration: StoreAdministration,
+        code_index: super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
         maintenance: MaintenanceCoordinator,
     ) -> Self {
         let enabled = config.auto_watch;
-        Self::from_parts(config, administration, enabled, maintenance)
+        Self::from_parts(config, administration, code_index, enabled, maintenance)
     }
 
     // Doctor watcher-health surface (follow-up wiring).
@@ -711,11 +717,10 @@ async fn execute_plan(
             let _permit = inner.sync_semaphore.acquire().await;
             let outcome = match retained_graph.as_deref() {
                 Some(cg) => {
-                    store_maintenance::track_worktree_branch(
-                        &inner.administration,
+                    store_maintenance::mount_linked_worktree_code_index(
+                        &inner.code_index,
                         cg,
                         wt_root.clone(),
-                        branch.clone(),
                     )
                     .await
                 }
@@ -803,11 +808,22 @@ async fn execute_plan(
         }
     }
 
-    // 3. GC eligibility on ref/worktree deletion.
+    // 3. Retire live schedulers for worktrees Git removed. Immutable
+    // generations remain inside the project graph; there is no branch-store
+    // garbage collection.
     if (plan.gc_eligible || plan.reconcile_metadata)
         && let Some(cg) = retained_graph.as_ref()
+        && let Some(project_id) = cg
+            .store_layout()
+            .identity
+            .project_id
+            .as_ref()
+            .and_then(|value| tracedecay_domain::ProjectId::new(value.clone()).ok())
     {
-        store_maintenance::run_gc(inner, cg).await;
+        inner
+            .code_index
+            .unmount_missing_worktrees(&project_id)
+            .await;
     }
 }
 
@@ -862,7 +878,7 @@ fn now_secs() -> u64 {
 }
 
 /// Backstop scheduler (design D5): a single daemon timer covering projects whose
-/// watcher heartbeat is stale/absent, plus daily branch-store GC.
+/// watcher heartbeat is stale/absent.
 mod backstop {
     use super::*;
 
@@ -879,16 +895,13 @@ mod backstop {
         // Skip the immediate first tick so startup registration settles first.
         ticker.tick().await;
 
-        let mut last_gc: Option<Instant> = None;
-        let gc_period = Duration::from_hours(24);
-
         loop {
             ticker.tick().await;
-            tick(&watcher, &mut last_gc, gc_period).await;
+            tick(&watcher).await;
         }
     }
 
-    async fn tick(watcher: &GitWatcher, last_gc: &mut Option<Instant>, gc_period: Duration) {
+    async fn tick(watcher: &GitWatcher) {
         let interval_secs = watcher
             .inner
             .config
@@ -904,9 +917,6 @@ mod backstop {
                 .map(|(root, state)| (root.clone(), Arc::clone(state)))
                 .collect()
         };
-
-        let run_gc_now = last_gc.is_none_or(|t| t.elapsed() >= gc_period);
-        let mut gc_retry_needed = false;
 
         for (root, state) in &entries {
             let snap = state.health.snapshot();
@@ -935,17 +945,6 @@ mod backstop {
                     );
                 }
             }
-
-            if run_gc_now
-                && let Some(cg) = retained_graph.as_ref()
-                && !super::store_maintenance::run_gc(&watcher.inner, cg).await
-            {
-                gc_retry_needed = true;
-            }
-        }
-
-        if run_gc_now && !gc_retry_needed {
-            *last_gc = Some(Instant::now());
         }
     }
 

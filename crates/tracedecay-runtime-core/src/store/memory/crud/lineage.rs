@@ -135,13 +135,11 @@ pub(super) async fn legacy_mapping_matches(
     else {
         return Ok(false);
     };
-    // A mapping's identity is (owner, source store, legacy fact) -> fact id;
-    // the query already keys on source store and legacy fact. Import
-    // attributes embedded in mapping_json (history coverage, migrated_at)
-    // legitimately differ between the compatibility write path and the
-    // backfill, so full-JSON equality would false-positive on a benign
-    // duplicate import. Genuine corruption (a different fact id or owner for
-    // the same legacy fact) is still caught here.
+    // A mapping's identity is (owner, source store, compatibility fact) ->
+    // canonical fact id; the query already keys on source store and
+    // compatibility fact. Runtime metadata embedded in mapping_json is not
+    // part of that identity. A different fact id or owner for the same
+    // compatibility fact is still rejected.
     Ok(row_string(&row, 0, QUERY_OPERATION)? == owner.json
         && row_string(&row, 1, QUERY_OPERATION)? == mapping.fact_id().as_str())
 }
@@ -494,7 +492,7 @@ pub(super) async fn publish_current_projection(
                 "UPDATE memory_v2_feedback_history
                  SET source = NULL, note = NULL,
                      details_availability = CASE
-                         WHEN details_availability = 'available' THEN 'legacy_redacted'
+                         WHEN details_availability = 'available' THEN 'unknown'
                          ELSE details_availability
                      END
                  WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",

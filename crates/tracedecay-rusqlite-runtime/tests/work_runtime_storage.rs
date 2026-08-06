@@ -7,16 +7,16 @@ use tracedecay_application::{
     WorkExecutionPersistenceError, WorkExecutionService, WorkService,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
-    ProviderId, RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
-    WorkAttemptIdentityV1, WorkAttemptProgressV1, WorkAttemptProjectionBindingV1,
-    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationAcknowledgementV1,
-    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1,
-    WorkEffectStateV1, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1, WorkFenceEpochV1,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProjectionCoverageV1, WorkProjectionSequenceV1,
-    WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, WorkVersion,
-    WorkflowOperationRef, WorktreeId,
+    ActorId, AttemptId, CommitId, GitGraphEvidencePublicationReceipt, ManifestDigest, ProjectId,
+    ProjectionGenerationId, ProposalId, ProviderId, RepositoryId, RunId, TaskId, UtcMicros,
+    WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAttemptProgressV1,
+    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkCancellationAcknowledgementV1, WorkCancellationRequestId, WorkCancellationRequestV1,
+    WorkCancellationStateV1, WorkEffectStateV1, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1,
+    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProjectionCoverageV1,
+    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1,
+    WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -96,6 +96,20 @@ fn execution_envelope(
     identity: WorkAttemptIdentityV1,
     binding: WorkAttemptProjectionBindingV1,
 ) -> WorkExecutionEnvelopeV1 {
+    execution_envelope_at_commit(
+        authority,
+        identity,
+        binding,
+        id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+    )
+}
+
+fn execution_envelope_at_commit(
+    authority: &WorkAuthority,
+    identity: WorkAttemptIdentityV1,
+    binding: WorkAttemptProjectionBindingV1,
+    commit: CommitId,
+) -> WorkExecutionEnvelopeV1 {
     WorkExecutionEnvelopeV1::new(
         identity,
         binding,
@@ -109,7 +123,7 @@ fn execution_envelope(
         authority.worktree_id().clone(),
         "/tmp/work-runtime-store".to_owned(),
         None,
-        id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+        commit,
         UtcMicros(9_000),
         1,
         WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
@@ -172,6 +186,14 @@ fn prepare_admitted_work(storage: &WorkSqliteStorage) -> (RequestContext, TaskId
 }
 
 fn leased(authority: &WorkAuthority, task_id: TaskId) -> WorkAttemptV1 {
+    leased_at_commit(
+        authority,
+        task_id,
+        id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+    )
+}
+
+fn leased_at_commit(authority: &WorkAuthority, task_id: TaskId, commit: CommitId) -> WorkAttemptV1 {
     let identity = WorkAttemptIdentityV1::new(
         task_id,
         id::<RunId>("run.work.runtime-store"),
@@ -188,7 +210,7 @@ fn leased(authority: &WorkAuthority, task_id: TaskId) -> WorkAttemptV1 {
     WorkAttemptV1::new(
         identity.clone(),
         binding.clone(),
-        execution_envelope(authority, identity, binding),
+        execution_envelope_at_commit(authority, identity, binding, commit),
         lease(1),
         WorkAttemptStateV1::Leased,
         None,
@@ -372,6 +394,125 @@ fn attempt_transitions_replay_and_rebuild_after_restart() {
 }
 
 #[test]
+fn git_graph_evidence_journal_is_atomic_bounded_and_exactly_acknowledged() {
+    let store = RegisteredWorkStore::start("git-evidence-journal");
+    let storage = store.storage().clone();
+    let (context, task_id) = prepare_admitted_work(&storage);
+    let owner = authority(&context);
+    let leased = leased(&owner, task_id);
+    insert_attempt(&storage, &owner, &leased).unwrap();
+    insert_attempt(&storage, &owner, &leased).unwrap();
+
+    assert_eq!(
+        storage.pending_git_graph_evidence(&owner, 0).unwrap_err(),
+        WorkExecutionPersistenceError::InvalidRequest
+    );
+    let pending = storage.pending_git_graph_evidence(&owner, 1).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].intent().project_id(), owner.project_id());
+    assert_eq!(
+        pending[0].intent().target(),
+        &tracedecay_domain::GitGraphEvidenceTarget::Work(leased.identity().task_id().clone())
+    );
+    assert_eq!(
+        pending[0].intent().commit().as_str(),
+        leased.execution().commit().as_str()
+    );
+
+    let receipt = GitGraphEvidencePublicationReceipt::new(
+        pending[0].intent().intent_digest().clone(),
+        "git-evidence:work-runtime-store".to_owned(),
+        7,
+    )
+    .unwrap();
+    storage
+        .acknowledge_git_graph_evidence(&owner, pending[0].journal_sequence(), &receipt)
+        .unwrap();
+    storage
+        .acknowledge_git_graph_evidence(&owner, pending[0].journal_sequence(), &receipt)
+        .unwrap();
+    assert!(
+        storage
+            .pending_git_graph_evidence(&owner, 1)
+            .unwrap()
+            .is_empty()
+    );
+
+    let conflicting_receipt = GitGraphEvidencePublicationReceipt::new(
+        receipt.intent_digest().clone(),
+        "git-evidence:other-watermark".to_owned(),
+        8,
+    )
+    .unwrap();
+    assert_eq!(
+        storage.acknowledge_git_graph_evidence(
+            &owner,
+            pending[0].journal_sequence(),
+            &conflicting_receipt,
+        ),
+        Err(WorkExecutionPersistenceError::Conflict)
+    );
+}
+
+#[test]
+fn non_oid_work_commit_does_not_fabricate_git_graph_evidence() {
+    let store = RegisteredWorkStore::start("git-evidence-absent");
+    let storage = store.storage().clone();
+    let (context, task_id) = prepare_admitted_work(&storage);
+    let owner = authority(&context);
+    let leased = leased_at_commit(
+        &owner,
+        task_id,
+        id::<CommitId>("commit.not-a-native-git-object-id"),
+    );
+    insert_attempt(&storage, &owner, &leased).unwrap();
+
+    assert!(
+        storage
+            .pending_git_graph_evidence(&owner, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.count("work_git_graph_evidence_journal"), 0);
+}
+
+#[test]
+fn git_graph_evidence_stage_failure_rolls_back_the_attempt() {
+    let store = RegisteredWorkStore::start("git-evidence-atomic");
+    let storage = store.storage().clone();
+    let (context, task_id) = prepare_admitted_work(&storage);
+    let owner = authority(&context);
+    store.inspect(|connection| {
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_work_git_evidence
+                 BEFORE INSERT ON work_git_graph_evidence_journal
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected Work Git evidence failure');
+                 END;",
+            )
+            .unwrap();
+    });
+
+    assert!(matches!(
+        insert_attempt(&storage, &owner, &leased(&owner, task_id)),
+        Err(WorkExecutionPersistenceError::Unavailable(_))
+    ));
+    for table in [
+        "work_attempt_events_v1",
+        "work_attempt_snapshots_v1",
+        "work_attempt_idempotency_v1",
+        "work_git_graph_evidence_journal",
+    ] {
+        assert_eq!(
+            store.count(table),
+            0,
+            "{table} must share the Git evidence stage transaction"
+        );
+    }
+}
+
+#[test]
 fn lease_loss_rejects_stale_writer_without_partial_progress_or_artifacts() {
     let store = RegisteredWorkStore::start("lease-loss");
     let storage = store.storage().clone();
@@ -485,6 +626,7 @@ fn failed_attempt_event_rolls_back_snapshot_idempotency_and_terminal_rows() {
         "work_attempt_snapshots_v1",
         "work_attempt_idempotency_v1",
         "work_attempt_terminal_evidence_v1",
+        "work_git_graph_evidence_journal",
     ] {
         assert_eq!(
             store.count(table),

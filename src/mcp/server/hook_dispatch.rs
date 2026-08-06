@@ -4,107 +4,7 @@
 use super::*;
 use crate::application::host_admission::HostAdmissionStatus;
 
-/// When a settled branch write is allowed to refresh the file token map.
-///
-/// The three branch plans differ here and the differences are load-bearing, so
-/// each one names its policy rather than inheriting a shared default.
-#[derive(Clone, Copy)]
-enum BranchTokenMapRefresh {
-    /// Refresh whenever the branch was already tracked, whatever the writer asked.
-    AlreadyTrackedAlways,
-    /// Refresh when the branch was already tracked and the writer asked for it.
-    AlreadyTrackedWhenRequested,
-    /// Refresh for any settled outcome the writer flagged, before it is classified.
-    AnyOutcomeWhenRequested,
-}
-
-/// The per-plan effects that survive the shared branch-write path.
-#[derive(Clone, Copy)]
-struct BranchEffectPolicy {
-    refresh: BranchTokenMapRefresh,
-    /// Whether a newly added branch reopens the retained handle.
-    reopen_on_added: bool,
-}
-
 impl McpServer {
-    /// Authorizes, writes, and classifies one branch effect.
-    ///
-    /// `effect_root` is the root the write targets and `live_root` the current
-    /// project root; both are revalidated here so admit-time membership is never
-    /// reused. Everything that differs between the branch plans is carried by
-    /// `policy` rather than by branching on the plan again.
-    async fn apply_branch_effect(
-        &self,
-        cg: &Arc<TraceDecay>,
-        effect_root: &Path,
-        live_root: &Path,
-        branch: String,
-        agent: Option<HookAgent>,
-        policy: BranchEffectPolicy,
-    ) -> HostAdmissionOutcome {
-        let root =
-            match hook_events::authorize_planned_branch_effect(effect_root, live_root, &branch) {
-                Ok(authorized) => authorized,
-                Err(error) => {
-                    return match error {
-                        hook_events::AddBranchAtRootAuthError::Unresolvable => {
-                            HostAdmissionOutcome::retained_unavailable(error.reason_code())
-                        }
-                        _ => HostAdmissionOutcome::degraded(error.reason_code()),
-                    };
-                }
-            };
-        let request = HookBranchWriteRequest {
-            // R4: resolve the live branch once, here, where the effect root is
-            // final; every gate this write crosses reads it from the request.
-            live_branch: crate::branch::BranchMemo::new(&root),
-            graph: Arc::clone(cg),
-            root,
-            branch,
-            incremental_sync_agent: agent,
-        };
-        let result = match (self.hook_branch_writer)(request).await {
-            Ok(result) => result,
-            Err(_) => {
-                return HostAdmissionOutcome::retained_unavailable("canonical_admission_failed");
-            }
-        };
-        if matches!(
-            policy.refresh,
-            BranchTokenMapRefresh::AnyOutcomeWhenRequested
-        ) && result.refresh_file_token_map
-        {
-            self.refresh_file_token_map().await;
-        }
-        match result.branch_outcome {
-            crate::branch::BranchAddOutcome::Added => {
-                if policy.reopen_on_added {
-                    self.reopen_after_branch_tracking_added().await;
-                }
-                HostAdmissionOutcome::replay_completed(true, false)
-            }
-            crate::branch::BranchAddOutcome::AlreadyTracked => {
-                let refresh = match policy.refresh {
-                    BranchTokenMapRefresh::AlreadyTrackedAlways => true,
-                    BranchTokenMapRefresh::AlreadyTrackedWhenRequested => {
-                        result.refresh_file_token_map
-                    }
-                    BranchTokenMapRefresh::AnyOutcomeWhenRequested => false,
-                };
-                if refresh {
-                    self.refresh_file_token_map().await;
-                }
-                HostAdmissionOutcome::replay_completed(false, true)
-            }
-            crate::branch::BranchAddOutcome::Deferred => {
-                HostAdmissionOutcome::retained_backpressured("daemon_backpressure")
-            }
-            crate::branch::BranchAddOutcome::NotIndexed => {
-                HostAdmissionOutcome::retained_unavailable("canonical_admission_unavailable")
-            }
-        }
-    }
-
     pub(crate) async fn update_hook_workspace_route(
         &self,
         event: &hook_events::HookEvent,
@@ -171,59 +71,9 @@ impl McpServer {
     ) -> HostAdmissionOutcome {
         match plan {
             HookEventPlan::SyncFiles(rel_paths) => self.enqueue_hook_paths(root, rel_paths).await,
-            HookEventPlan::AddBranch(branch) => {
-                // Project-root plans must revalidate live root + current branch
-                // immediately before effect — same strictness as AddBranchAt.
-                self.apply_branch_effect(
-                    &cg,
-                    root,
-                    root,
-                    branch,
-                    None,
-                    BranchEffectPolicy {
-                        refresh: BranchTokenMapRefresh::AlreadyTrackedAlways,
-                        reopen_on_added: true,
-                    },
-                )
-                .await
-            }
-            HookEventPlan::AddBranchAt {
-                root: effect_root,
-                branch,
-                agent,
-            } => {
-                // Durable effect roots stay concrete (not hashed) and must be
-                // freshly normalized, canonicalized, and reauthorized before
-                // any write — admit-time membership/branch are never reused.
-                self.apply_branch_effect(
-                    &cg,
-                    &effect_root,
-                    root,
-                    branch,
-                    Some(agent),
-                    BranchEffectPolicy {
-                        refresh: BranchTokenMapRefresh::AnyOutcomeWhenRequested,
-                        reopen_on_added: false,
-                    },
-                )
-                .await
-            }
-            HookEventPlan::SyncCurrentBranch { branch, agent } => {
-                // Session/workspace sync plans capture branch at admit time;
-                // revalidate live root + current branch immediately before effect.
-                self.apply_branch_effect(
-                    &cg,
-                    root,
-                    root,
-                    branch,
-                    Some(agent),
-                    BranchEffectPolicy {
-                        refresh: BranchTokenMapRefresh::AlreadyTrackedWhenRequested,
-                        reopen_on_added: true,
-                    },
-                )
-                .await
-            }
+            // A host event without exact changed paths cannot authorize a
+            // repository scan. Startup and scheduler-owned reconciliation own
+            // convergence; this receipt only records the coalesced hint.
             HookEventPlan::DebouncedIncrementalSync(_) => {
                 HostAdmissionOutcome::replay_completed(false, true)
             }
@@ -320,6 +170,8 @@ impl McpServer {
         let Some(payload) = payload.as_object_mut() else {
             return Err(());
         };
+        // The root is supplied only at replay from the mounted daemon. It is
+        // deliberately not persisted in the host admission frame.
         payload.insert(
             "cwd".to_owned(),
             Value::String(root.to_string_lossy().into_owned()),
@@ -423,25 +275,13 @@ impl McpServer {
         let Some(sink) = &self.code_index_hook_sink else {
             return HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable");
         };
+        // The daemon-owned activation owner accepts this exact path hint and
+        // coalesces scheduling. The hook replay path never reads repository
+        // state, calls `cg.sync`, or acquires an index/database writer.
         if sink(root.to_path_buf(), rel_paths).await {
             HostAdmissionOutcome::replay_completed(true, false)
         } else {
             HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")
-        }
-    }
-
-    pub(crate) async fn run_hook_incremental_sync(
-        &self,
-        cg: Arc<TraceDecay>,
-        agent: HookAgent,
-    ) -> HostAdmissionOutcome {
-        match run_hook_incremental_sync_direct(&cg, agent).await {
-            Ok(true) => {
-                self.refresh_file_token_map().await;
-                HostAdmissionOutcome::replay_completed(true, false)
-            }
-            Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
-            Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
         }
     }
 }

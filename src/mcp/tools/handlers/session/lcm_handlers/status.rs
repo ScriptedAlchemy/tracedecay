@@ -1,7 +1,5 @@
 use super::super::lcm_args::*;
-use super::super::lcm_storage::{
-    LcmHandlerContext, LcmOpenMode, LcmStorageResolution, open_lcm_storage,
-};
+use super::super::lcm_storage::{LcmHandlerContext, LcmStorageResolution, resolve_lcm_storage};
 use super::super::*;
 
 use super::shared::lcm_status_payload;
@@ -13,14 +11,18 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_status(
     let provider = provider_or_all_arg(&args)?;
     let session_id = string_arg(&args, "session_id");
     let deep = bool_arg(&args, "deep")?.unwrap_or(false);
-    let gc_config = lcm_gc_config(&args)?;
-    let storage = match open_lcm_storage(context, &args, LcmOpenMode::ReadOnlyOrMissing).await {
+    if args.get("gc_config").is_some() {
+        return Err(argument_error(
+            "unknown parameter `gc_config` for read-only LCM status",
+        ));
+    }
+    let storage = match resolve_lcm_storage(context, &args) {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
     let status = storage
         .db
-        .lcm_status_with_options(provider, session_id, deep, &gc_config)
+        .lcm_status_with_options(provider, session_id, deep, &Default::default())
         .await
         .map_err(lcm_error)?;
     Ok(tool_json(
@@ -36,80 +38,29 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_doctor(
 ) -> Result<ToolResult> {
     let provider = required_specific_provider_arg(&args)?;
     let session_id = string_arg(&args, "session_id");
+    for removed in [
+        "apply",
+        "doctor_clean_apply_enabled",
+        "lcm_gc_apply_enabled",
+        "gc_config",
+        "ignore_session_patterns",
+        "stateless_session_patterns",
+        "ignore_message_patterns",
+    ] {
+        if args.get(removed).is_some() {
+            return Err(argument_error(format!(
+                "unknown parameter `{removed}` for read-only LCM doctor"
+            )));
+        }
+    }
     let mode = lcm_doctor_mode(&args)?;
-    let apply = bool_arg(&args, "apply")?.unwrap_or(false);
-    let clean_apply_enabled = lcm_doctor_clean_apply_enabled(&args)?;
-    let gc_apply_enabled = lcm_gc_apply_enabled(&args)?;
-    if mode == "clean" && apply && !clean_apply_enabled {
-        return Ok(tool_json(
-            context.project_root,
-            &args,
-            &json!({
-                "status": "denied",
-                "provider": provider,
-                "session_id": session_id,
-                "mode": mode,
-                "dry_run": false,
-                "apply": true,
-                "error": "destructive cleanup is disabled by default",
-                "note": "set LCM_DOCTOR_CLEAN_APPLY_ENABLED=true only in trusted operator environments",
-                "repairs": {
-                    "planned_actions": [],
-                    "applied_actions": [],
-                    "backup": Value::Null,
-                    "unsafe_actions_skipped": [
-                        {
-                            "kind": "clean_lcm_noise",
-                            "safe": false,
-                            "reason": "doctor_clean_apply_disabled"
-                        }
-                    ]
-                }
-            }),
-        ));
-    }
-    if mode == "gc" && apply && !gc_apply_enabled {
-        return Ok(tool_json(
-            context.project_root,
-            &args,
-            &json!({
-                "status": "denied",
-                "provider": provider,
-                "session_id": session_id,
-                "mode": mode,
-                "dry_run": false,
-                "apply": true,
-                "error": "payload GC apply is disabled by default",
-                "note": "set LCM_GC_APPLY_ENABLED=true only in trusted operator environments",
-                "repairs": {
-                    "planned_actions": [],
-                    "applied_actions": [],
-                    "backup": Value::Null,
-                    "unsafe_actions_skipped": [
-                        {
-                            "kind": "payload_gc",
-                            "safe": false,
-                            "reason": "lcm_gc_apply_disabled"
-                        }
-                    ]
-                }
-            }),
-        ));
-    }
-    let clean_config = lcm_clean_config(&args)?;
-    let gc_config = lcm_gc_config(&args)?;
-    let open_mode = if matches!(mode, "repair" | "clean" | "gc") && apply {
-        LcmOpenMode::Writable
-    } else {
-        LcmOpenMode::ReadOnlyExisting
-    };
-    let storage = match open_lcm_storage(context, &args, open_mode).await {
+    let storage = match resolve_lcm_storage(context, &args) {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
     let mut payload = storage
         .db
-        .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
+        .lcm_doctor(provider, session_id, mode)
         .await
         .map_err(lcm_error)?;
     if let Some(object) = payload.as_object_mut()

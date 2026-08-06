@@ -1,8 +1,6 @@
 //! Session-temporal Doctor health lane.
 //!
-//! Diagnosis is production-mounted; repair helpers remain available for Doctor
-//! tests and exclusive-maintenance callers that are still landing.
-#![allow(dead_code)] // Doctor repair lane still landing; see module doc (Plan 23)
+//! Diagnosis is production-mounted and strictly read-only.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -13,7 +11,7 @@ use rusqlite::{Connection as RusqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::engine::{Error as EngineError, Executor, QueryExecutor};
+use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor};
 
 use super::schema::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -179,7 +177,6 @@ fn required_table_names() -> impl Iterator<Item = &'static str> {
 }
 
 const REQUIRED_INDEXES: &[&str] = &[
-    "idx_session_agent_hierarchy_edges_child",
     "idx_session_assertion_supersession_successor",
     "idx_session_assertions_generation_order",
     "idx_session_assertions_kind_order",
@@ -188,7 +185,6 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_session_current_entities_assertion",
     "idx_session_current_entities_occurrence",
     "idx_session_external_payload_manifests_session",
-    "idx_session_logical_copy_edges_target",
     "idx_session_occurrences_agent",
     "idx_session_occurrences_anchor_order",
     "idx_session_occurrences_generation_order",
@@ -205,14 +201,10 @@ const REQUIRED_INDEXES: &[&str] = &[
     "idx_session_summary_availability_generation",
     "idx_session_summary_nodes_root_created_order",
     "idx_session_summary_nodes_session_created",
-    "idx_session_summary_sources_anchor",
-    "idx_session_summary_sources_summary",
-    "idx_session_summary_successors_successor",
     "idx_session_temporal_generations_one_active",
     "idx_session_temporal_generations_session_state",
-    "idx_session_temporal_migration_receipts_source",
+    "idx_session_temporal_ingest_receipts_source",
     "idx_session_temporal_observation_effects_session",
-    "idx_session_thread_hierarchy_edges_child",
     "idx_session_turn_members_occurrence",
 ];
 
@@ -299,73 +291,18 @@ const CHECKS: &[HealthCheck] = &[
         sql: SUMMARY_FTS_CHECK_SQL,
     },
     HealthCheck {
-        kind: SessionTemporalHealthFindingKind::SummaryCycle,
-        tables: &["session_summary_sources"],
-        sql: "WITH RECURSIVE reachable(origin, current) AS (
-                SELECT summary_id, source_summary_id
-                FROM session_summary_sources
-                WHERE source_summary_id IS NOT NULL
-                UNION
-                SELECT reachable.origin, source.source_summary_id
-                FROM reachable
-                JOIN session_summary_sources AS source
-                  ON source.summary_id = reachable.current
-                WHERE source.source_summary_id IS NOT NULL
-            )
-            SELECT COUNT(*) FROM reachable WHERE origin = current",
-    },
-    HealthCheck {
-        kind: SessionTemporalHealthFindingKind::StaleClosure,
-        tables: &[
-            "session_summary_availability",
-            "session_summary_nodes",
-            "session_summary_sources",
-            "session_summary_successors",
-            "session_temporal_generations",
-        ],
-        sql: "WITH RECURSIVE expected_stale(session_id, summary_id) AS (
-                SELECT predecessor.session_id, dependent.summary_id
-                FROM session_summary_successors AS successor
-                JOIN session_summary_nodes AS predecessor
-                  ON predecessor.summary_id = successor.predecessor_summary_id
-                JOIN session_summary_sources AS dependent
-                  ON dependent.source_summary_id = successor.predecessor_summary_id
-                UNION
-                SELECT expected_stale.session_id, dependent.summary_id
-                FROM expected_stale
-                JOIN session_summary_sources AS dependent
-                  ON dependent.source_summary_id = expected_stale.summary_id
-            )
-            SELECT COUNT(*)
-            FROM expected_stale
-            JOIN session_temporal_generations AS generation
-              ON generation.session_id = expected_stale.session_id
-             AND generation.state = 'active'
-            LEFT JOIN session_summary_availability AS availability
-              ON availability.session_id = expected_stale.session_id
-             AND availability.generation = generation.generation
-             AND availability.summary_id = expected_stale.summary_id
-            WHERE availability.availability IS NULL
-               OR availability.availability <> 'stale'",
-    },
-    HealthCheck {
         kind: SessionTemporalHealthFindingKind::MissingAnchor,
         tables: &[
             "retrieval_anchors",
             "session_assertions",
             "session_occurrences",
             "session_summary_nodes",
-            "session_summary_sources",
         ],
         sql: "SELECT
             (SELECT COUNT(*) FROM session_summary_nodes AS node
              LEFT JOIN retrieval_anchors AS anchor
                ON anchor.anchor_id = node.summary_anchor_id
              WHERE anchor.anchor_id IS NULL)
-            + (SELECT COUNT(*) FROM session_summary_sources AS source
-               LEFT JOIN retrieval_anchors AS anchor
-                 ON anchor.anchor_id = source.source_anchor_id
-               WHERE source.source_kind = 'anchor' AND anchor.anchor_id IS NULL)
             + (SELECT COUNT(*) FROM session_occurrences AS occurrence
                LEFT JOIN retrieval_anchors AS anchor
                  ON anchor.anchor_id = occurrence.retrieval_anchor_id
@@ -509,31 +446,9 @@ const CHECKS: &[HealthCheck] = &[
             "session_refresh_bindings",
             "session_summary_availability",
             "session_summary_nodes",
-            "session_summary_sources",
-            "session_summary_successors",
         ],
         sql: "SELECT
             (SELECT COUNT(*)
-             FROM session_summary_sources AS source
-             JOIN session_summary_nodes AS owner
-               ON owner.summary_id = source.summary_id
-             LEFT JOIN session_summary_nodes AS dependency
-               ON dependency.summary_id = source.source_summary_id
-             WHERE source.source_kind = 'summary'
-               AND (
-                   dependency.summary_id IS NULL
-                   OR owner.session_id IS NOT dependency.session_id
-               ))
-            + (SELECT COUNT(*)
-               FROM session_summary_successors AS edge
-               LEFT JOIN session_summary_nodes AS predecessor
-                 ON predecessor.summary_id = edge.predecessor_summary_id
-               LEFT JOIN session_summary_nodes AS successor
-                 ON successor.summary_id = edge.successor_summary_id
-               WHERE predecessor.summary_id IS NULL
-                  OR successor.summary_id IS NULL
-                  OR predecessor.session_id IS NOT successor.session_id)
-            + (SELECT COUNT(*)
                FROM session_summary_availability AS availability
                LEFT JOIN session_summary_nodes AS summary
                  ON summary.summary_id = availability.summary_id
@@ -663,7 +578,7 @@ pub enum SessionTemporalHealthFindingKind {
     StuckBinding,
     StuckProgress,
     StuckReceipt,
-    MigrationGap,
+    SchemaMismatch,
     CompatibilityDrift,
 }
 
@@ -710,15 +625,6 @@ impl SessionTemporalHealthReport {
     #[cfg(any(test, feature = "test-helpers"))]
     pub const fn is_fts_virtual_table_error_code_for_test(code: i32) -> bool {
         code == SQLITE_CORRUPT_VTAB
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn is_allowed_fts_quick_check_for_test(
-        message: &str,
-        repair_occurrences: bool,
-        repair_summaries: bool,
-    ) -> bool {
-        is_allowed_fts_quick_check(message, repair_occurrences, repair_summaries)
     }
 }
 
@@ -815,105 +721,6 @@ impl RegisteredGlobalDb {
         }
         report
     }
-
-    /// Rebuilds only temporal FTS derived indexes after an explicit request.
-    ///
-    /// Diagnosis remains non-mutating. A dry run reports the bounded plan
-    /// without acquiring the writer lane. Apply mode is the sole effectful
-    /// path: it refuses ambiguous database, schema, trigger, or authority
-    /// failures and verifies both source preservation and FTS integrity before
-    /// committing the single writer-lane transaction.
-    pub async fn repair_session_temporal_fts(
-        &self,
-        apply: bool,
-    ) -> tracedecay_runtime_core::db::engine::Result<(usize, usize)> {
-        let report = self.session_temporal_doctor_health().await;
-        if report.status != SessionTemporalHealthStatus::Complete {
-            return Err(repair_refused(
-                "temporal health is unavailable, partial, or locked",
-            ));
-        }
-        if report.findings.iter().any(|finding| {
-            !matches!(
-                finding.kind,
-                SessionTemporalHealthFindingKind::OccurrenceFtsCorruption
-                    | SessionTemporalHealthFindingKind::SummaryFtsCorruption
-            )
-        }) {
-            return Err(repair_refused(
-                "non-FTS temporal findings require daemon-owned recovery",
-            ));
-        }
-
-        let repair_occurrences = report.findings.iter().any(|finding| {
-            finding.kind == SessionTemporalHealthFindingKind::OccurrenceFtsCorruption
-        });
-        let repair_summaries = report
-            .findings
-            .iter()
-            .any(|finding| finding.kind == SessionTemporalHealthFindingKind::SummaryFtsCorruption);
-        let planned = usize::from(repair_occurrences) + usize::from(repair_summaries);
-        if !apply || planned == 0 {
-            return Ok((planned, 0));
-        }
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| EngineError::Runtime(error.to_string()))?;
-        require_quick_check(&transaction, repair_occurrences, repair_summaries).await?;
-        let occurrence_sources = connection_count(&transaction, "session_occurrences").await?;
-        let summary_sources = connection_count(&transaction, "session_summary_nodes").await?;
-
-        if repair_occurrences {
-            Executor::execute(
-                &transaction,
-                "INSERT INTO session_occurrences_fts(session_occurrences_fts)
-                     VALUES ('rebuild')",
-                (),
-            )
-            .await?;
-            verify_fts_repair(
-                &transaction,
-                "INSERT INTO session_occurrences_fts(session_occurrences_fts, rank)
-                 VALUES ('integrity-check', 1)",
-                OCCURRENCE_FTS_CHECK_SQL,
-            )
-            .await?;
-        }
-        if repair_summaries {
-            Executor::execute(
-                &transaction,
-                "INSERT INTO session_summary_nodes_fts(session_summary_nodes_fts)
-                     VALUES ('rebuild')",
-                (),
-            )
-            .await?;
-            verify_fts_repair(
-                &transaction,
-                "INSERT INTO session_summary_nodes_fts(session_summary_nodes_fts, rank)
-                 VALUES ('integrity-check', 1)",
-                SUMMARY_FTS_CHECK_SQL,
-            )
-            .await?;
-        }
-
-        if occurrence_sources != connection_count(&transaction, "session_occurrences").await?
-            || summary_sources != connection_count(&transaction, "session_summary_nodes").await?
-        {
-            return Err(repair_refused(
-                "authoritative temporal sources changed during FTS repair",
-            ));
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| EngineError::Runtime(error.to_string()))?;
-        self.checkpoint_result()
-            .await
-            .map_err(|_| repair_refused("temporal FTS repair checkpoint did not complete"))?;
-        Ok((planned, planned))
-    }
 }
 
 fn diagnose_connection(conn: &RusqliteConnection) -> SessionTemporalHealthReport {
@@ -930,7 +737,7 @@ fn diagnose_connection(conn: &RusqliteConnection) -> SessionTemporalHealthReport
         return SessionTemporalHealthReport {
             status: SessionTemporalHealthStatus::Unavailable,
             findings: vec![finding(
-                SessionTemporalHealthFindingKind::MigrationGap,
+                SessionTemporalHealthFindingKind::SchemaMismatch,
                 required_table_names().count() as u64,
             )],
             reason: None,
@@ -945,13 +752,13 @@ fn diagnose_connection(conn: &RusqliteConnection) -> SessionTemporalHealthReport
     if missing_tables > 0 {
         status = SessionTemporalHealthStatus::Partial;
         findings.push(finding(
-            SessionTemporalHealthFindingKind::MigrationGap,
+            SessionTemporalHealthFindingKind::SchemaMismatch,
             missing_tables,
         ));
     } else {
         match schema_version(conn) {
             Ok(Some(version)) if version == SESSION_TEMPORAL_SCHEMA_VERSION => {}
-            Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::MigrationGap, 1)),
+            Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::SchemaMismatch, 1)),
             Err(error) => {
                 if is_rusqlite_locked(&error) {
                     return unavailable_report(SessionTemporalHealthStatus::Locked);
@@ -983,7 +790,7 @@ fn diagnose_connection(conn: &RusqliteConnection) -> SessionTemporalHealthReport
         status = SessionTemporalHealthStatus::Partial;
         merge_finding(
             &mut findings,
-            SessionTemporalHealthFindingKind::MigrationGap,
+            SessionTemporalHealthFindingKind::SchemaMismatch,
             missing_indexes,
         );
     }
@@ -994,7 +801,7 @@ fn diagnose_connection(conn: &RusqliteConnection) -> SessionTemporalHealthReport
             status = SessionTemporalHealthStatus::Partial;
             merge_finding(
                 &mut findings,
-                SessionTemporalHealthFindingKind::MigrationGap,
+                SessionTemporalHealthFindingKind::SchemaMismatch,
                 drift,
             );
         }
@@ -1054,7 +861,7 @@ async fn diagnose_snapshot(conn: &impl QueryExecutor) -> SessionTemporalHealthRe
         return SessionTemporalHealthReport {
             status: SessionTemporalHealthStatus::Unavailable,
             findings: vec![finding(
-                SessionTemporalHealthFindingKind::MigrationGap,
+                SessionTemporalHealthFindingKind::SchemaMismatch,
                 required_table_names().count() as u64,
             )],
             reason: None,
@@ -1069,13 +876,13 @@ async fn diagnose_snapshot(conn: &impl QueryExecutor) -> SessionTemporalHealthRe
     if missing_tables > 0 {
         status = SessionTemporalHealthStatus::Partial;
         findings.push(finding(
-            SessionTemporalHealthFindingKind::MigrationGap,
+            SessionTemporalHealthFindingKind::SchemaMismatch,
             missing_tables,
         ));
     } else {
         match snapshot_schema_version(conn).await {
             Ok(Some(version)) if version == SESSION_TEMPORAL_SCHEMA_VERSION => {}
-            Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::MigrationGap, 1)),
+            Ok(_) => findings.push(finding(SessionTemporalHealthFindingKind::SchemaMismatch, 1)),
             Err(error) => {
                 if is_engine_locked(&error) {
                     return unavailable_report(SessionTemporalHealthStatus::Locked);
@@ -1107,7 +914,7 @@ async fn diagnose_snapshot(conn: &impl QueryExecutor) -> SessionTemporalHealthRe
         status = SessionTemporalHealthStatus::Partial;
         merge_finding(
             &mut findings,
-            SessionTemporalHealthFindingKind::MigrationGap,
+            SessionTemporalHealthFindingKind::SchemaMismatch,
             missing_indexes,
         );
     }
@@ -1118,7 +925,7 @@ async fn diagnose_snapshot(conn: &impl QueryExecutor) -> SessionTemporalHealthRe
             status = SessionTemporalHealthStatus::Partial;
             merge_finding(
                 &mut findings,
-                SessionTemporalHealthFindingKind::MigrationGap,
+                SessionTemporalHealthFindingKind::SchemaMismatch,
                 drift,
             );
         }
@@ -1297,8 +1104,8 @@ fn normalize_sql(sql: &str) -> String {
 
 fn schema_version(conn: &RusqliteConnection) -> Result<Option<i64>, rusqlite::Error> {
     conn.query_row(
-        "SELECT version FROM session_temporal_schema_migrations
-         WHERE name = 'session-temporal'",
+        "SELECT version FROM session_temporal_schema_state
+         WHERE domain = 'session-temporal'",
         [],
         |row| row.get(0),
     )
@@ -1310,8 +1117,8 @@ async fn snapshot_schema_version(
 ) -> tracedecay_runtime_core::db::engine::Result<Option<i64>> {
     let mut rows = conn
         .query(
-            "SELECT version FROM session_temporal_schema_migrations
-             WHERE name = 'session-temporal'",
+            "SELECT version FROM session_temporal_schema_state
+             WHERE domain = 'session-temporal'",
             (),
         )
         .await?;
@@ -1379,104 +1186,6 @@ fn is_rusqlite_fts_virtual_table_corruption(error: &rusqlite::Error) -> bool {
     error
         .sqlite_error()
         .is_some_and(|err| err.extended_code == SQLITE_CORRUPT_VTAB)
-}
-
-async fn require_quick_check(
-    conn: &impl Executor,
-    repair_occurrences: bool,
-    repair_summaries: bool,
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    let mut rows = match conn.query("PRAGMA quick_check", ()).await {
-        Ok(rows) => rows,
-        Err(error) if is_fts_virtual_table_corruption(&error) => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    let mut saw_result = false;
-    while let Some(row) = match rows.next().await {
-        Ok(row) => row,
-        Err(error) if is_fts_virtual_table_corruption(&error) => return Ok(()),
-        Err(error) => return Err(error),
-    } {
-        saw_result = true;
-        let message = row.get::<String>(0)?;
-        if message != "ok"
-            && !is_allowed_fts_quick_check(&message, repair_occurrences, repair_summaries)
-        {
-            return Err(repair_refused(&format!(
-                "whole-database quick check failed; FTS repair is unsafe: {message}"
-            )));
-        }
-    }
-    if saw_result {
-        Ok(())
-    } else {
-        Err(repair_refused("database quick check returned no result"))
-    }
-}
-
-fn is_allowed_fts_quick_check(
-    message: &str,
-    repair_occurrences: bool,
-    repair_summaries: bool,
-) -> bool {
-    (repair_occurrences
-        && (message == "malformed inverted index for FTS5 table main.session_occurrences_fts"
-            || is_exact_fts_blob_corruption(message, "session_occurrences_fts")))
-        || (repair_summaries
-            && (message
-                == "malformed inverted index for FTS5 table main.session_summary_nodes_fts"
-                || is_exact_fts_blob_corruption(message, "session_summary_nodes_fts")))
-}
-
-fn is_exact_fts_blob_corruption(message: &str, expected_table: &str) -> bool {
-    let Some(message) = message.strip_prefix("fts5: corruption found reading blob ") else {
-        return false;
-    };
-    let Some((blob, table)) = message.split_once(" from table \"") else {
-        return false;
-    };
-    blob.parse::<u64>().is_ok() && table.strip_suffix('"') == Some(expected_table)
-}
-
-async fn connection_count(
-    conn: &impl Executor,
-    table: &str,
-) -> tracedecay_runtime_core::db::engine::Result<i64> {
-    let sql = match table {
-        "session_occurrences" => "SELECT COUNT(*) FROM session_occurrences",
-        "session_summary_nodes" => "SELECT COUNT(*) FROM session_summary_nodes",
-        _ => return Err(repair_refused("unrecognized temporal source table")),
-    };
-    let mut rows = conn.query(sql, ()).await?;
-    let Some(row) = rows.next().await? else {
-        return Err(repair_refused("temporal source count returned no result"));
-    };
-    row.get(0)
-}
-
-async fn verify_fts_repair(
-    conn: &impl Executor,
-    integrity_sql: &str,
-    drift_sql: &str,
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    conn.execute(integrity_sql, ()).await?;
-    let mut rows = conn.query(drift_sql, ()).await?;
-    let Some(row) = rows.next().await? else {
-        return Err(repair_refused(
-            "temporal FTS verification returned no result",
-        ));
-    };
-    if row.get::<i64>(0)? == 0 {
-        Ok(())
-    } else {
-        Err(repair_refused(
-            "temporal FTS verification still reports derived-index drift",
-        ))
-    }
-}
-
-fn repair_refused(message: &str) -> EngineError {
-    EngineError::invalid_operation(message)
 }
 
 fn classify_rusqlite_error(

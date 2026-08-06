@@ -13,22 +13,6 @@ const STORE_STATUS_TOKEN_SCAN_MAX_BYTES: i64 = 1024 * 1024;
 /// typed partial estimate with a resume cursor instead.
 const STORE_STATUS_TOKEN_SCAN_BUDGET: i64 = 20_000;
 
-#[derive(Debug, Default, PartialEq, Eq)]
-struct StatusQueryWork {
-    status_query_calls: usize,
-    payload_health_scans: usize,
-}
-
-impl StatusQueryWork {
-    fn record_query(&mut self) {
-        self.status_query_calls += 1;
-    }
-
-    fn record_payload_health(&mut self) {
-        self.payload_health_scans += 1;
-    }
-}
-
 struct StatusCounts {
     provider_count: i64,
     raw_message_count: i64,
@@ -48,35 +32,10 @@ pub(super) async fn status_for_provider(
     deep: bool,
     gc_config: &LcmGcConfig,
 ) -> Result<LcmStatus, LcmError> {
-    let mut work = StatusQueryWork::default();
-    status_for_provider_with_work(
-        conn,
-        storage_root,
-        provider,
-        session_id,
-        deep,
-        gc_config,
-        &mut work,
-    )
-    .await
-}
-
-async fn status_for_provider_with_work(
-    conn: &(impl QueryExecutor + ?Sized),
-    storage_root: &Path,
-    provider: &str,
-    session_id: Option<&str>,
-    deep: bool,
-    gc_config: &LcmGcConfig,
-    work: &mut StatusQueryWork,
-) -> Result<LcmStatus, LcmError> {
-    work.record_query();
     let schema_version = schema::schema_version(conn)
         .await
         .unwrap_or(LCM_SCHEMA_VERSION);
-    work.record_query();
     let counts = status_counts(conn, provider, session_id).await?;
-    work.record_payload_health();
     let payload_health = if deep {
         payload_health_detail(
             conn,
@@ -91,11 +50,8 @@ async fn status_for_provider_with_work(
     } else {
         payload_health_summary(conn, storage_root, provider, session_id, gc_config).await?
     };
-    work.record_query();
     let lifecycle_metadata = load_lifecycle_metadata(conn, provider, session_id).await?;
-    work.record_query();
     let store = store_status(conn, provider, session_id).await?;
-    work.record_query();
     let dag = dag_status(conn, provider, session_id).await?;
 
     Ok(status_from_parts(
@@ -115,40 +71,20 @@ pub(super) async fn aggregate_provider_status(
     deep: bool,
     gc_config: &LcmGcConfig,
 ) -> Result<LcmStatus, LcmError> {
-    Ok(
-        aggregate_provider_status_with_work(conn, storage_root, session_id, deep, gc_config)
-            .await?
-            .0,
-    )
-}
-
-async fn aggregate_provider_status_with_work(
-    conn: &(impl QueryExecutor + ?Sized),
-    storage_root: &Path,
-    session_id: Option<&str>,
-    deep: bool,
-    gc_config: &LcmGcConfig,
-) -> Result<(LcmStatus, StatusQueryWork), LcmError> {
-    let mut work = StatusQueryWork::default();
-    work.record_query();
     let schema_version = schema::schema_version(conn)
         .await
         .unwrap_or(LCM_SCHEMA_VERSION);
-    work.record_query();
     let counts = status_counts(conn, "all", session_id).await?;
     if counts.provider_count == 0 {
-        return Ok((empty_status(schema_version, gc_config), work));
+        return Ok(empty_status(schema_version, gc_config));
     }
 
-    work.record_payload_health();
     let payload_health = if deep {
         payload_health_detail(conn, storage_root, "all", session_id, true, 20, gc_config).await?
     } else {
         payload_health_summary(conn, storage_root, "all", session_id, gc_config).await?
     };
-    work.record_query();
     let store = store_status(conn, "all", session_id).await?;
-    work.record_query();
     let dag = dag_status(conn, "all", session_id).await?;
     let status = status_from_parts(
         schema_version,
@@ -158,7 +94,7 @@ async fn aggregate_provider_status_with_work(
         payload_health,
         LcmLifecycleMetadata::default(),
     );
-    Ok((status, work))
+    Ok(status)
 }
 
 async fn status_counts(
@@ -925,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_status_batches_queries_and_preserves_legacy_output() {
+    async fn aggregate_status_preserves_provider_aggregate_output() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
         for index in 0..3 {
@@ -936,7 +872,7 @@ mod tests {
             .collect::<Vec<_>>();
         for deep in [false, true] {
             let expected = legacy_aggregate(&conn, storage.path(), &providers, deep).await;
-            let (actual, work) = aggregate_provider_status_with_work(
+            let actual = aggregate_provider_status(
                 &*conn,
                 storage.path(),
                 None,
@@ -947,43 +883,6 @@ mod tests {
             .expect("load batched aggregate status");
 
             assert_eq!(actual, expected);
-            assert_eq!(work.status_query_calls, 4);
-            assert_eq!(work.payload_health_scans, 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn aggregate_status_work_is_provider_independent_across_thirty_runs() {
-        let (_database_dir, conn) = test_lcm_connection().await;
-        let storage = TempDir::new().expect("storage tempdir");
-        seed_provider(&conn, 0).await;
-        let (_, baseline) = aggregate_provider_status_with_work(
-            &*conn,
-            storage.path(),
-            None,
-            false,
-            &LcmGcConfig::default(),
-        )
-        .await
-        .expect("load one-provider aggregate status");
-        assert_eq!(baseline.status_query_calls, 4);
-        assert_eq!(baseline.payload_health_scans, 1);
-
-        for index in 1..12 {
-            seed_provider(&conn, index).await;
-        }
-        for _ in 0..30 {
-            let (status, work) = aggregate_provider_status_with_work(
-                &*conn,
-                storage.path(),
-                None,
-                false,
-                &LcmGcConfig::default(),
-            )
-            .await
-            .expect("load multi-provider aggregate status");
-            assert_eq!(status.raw_message_count, 12);
-            assert_eq!(work, baseline);
         }
     }
 
@@ -1253,15 +1152,12 @@ mod tests {
         .await
         .unwrap();
 
-        let (status, _work) = aggregate_provider_status_with_work(
-            &*conn,
-            storage.path(),
-            None,
-            false,
-            &LcmGcConfig::default(),
-        )
-        .await
-        .expect("aggregate status must page instead of exceeding the materialization limit");
+        let status =
+            aggregate_provider_status(&*conn, storage.path(), None, false, &LcmGcConfig::default())
+                .await
+                .expect(
+                    "aggregate status must page instead of exceeding the materialization limit",
+                );
 
         assert_eq!(status.raw_message_count, ROWS);
         assert_eq!(status.external_payload_count, ROWS);

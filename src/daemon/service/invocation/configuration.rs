@@ -917,6 +917,14 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
         ConfigurationError::PolicyWideningForbidden | ConfigurationError::Validation(_) => {
             invalid_configuration_request()
         }
+        ConfigurationError::ResetRequired => ApplicationProblem::Unavailable {
+            diagnostic: SafeDiagnostic {
+                code: "configuration.reset_required".to_owned(),
+                message: "The configuration store must be reset or recreated".to_owned(),
+            },
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
         ConfigurationError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "configuration.unavailable".to_owned(),
             message: "The configuration authority is unavailable".to_owned(),

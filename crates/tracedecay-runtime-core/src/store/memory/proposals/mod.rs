@@ -1,6 +1,4 @@
-//! Compatibility fact-proposal lifecycle, transitions, and legacy imports.
-//!
-//! Re-exports below preserve every path used outside this module.
+//! Compatibility fact-proposal lifecycle and transitions.
 
 mod lifecycle;
 mod records;

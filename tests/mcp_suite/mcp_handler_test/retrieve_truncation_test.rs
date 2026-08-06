@@ -419,16 +419,20 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
     );
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_compress_oversized_needs_summary_uses_retrievable_full_payload() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
     let huge_source = "alpha oversized context ".repeat(1_000);
+    let runtime = open_active_project_session_db(&cg).await;
 
-    let compress = handle_tool_call(
+    let compress = handle_tool_call_with_runtime(
         &cg,
-        "tracedecay_lcm_compress",
+        &runtime,
+        "tracedecay_hook_runtime",
         json!({
+            "action": "lcm_compact",
             "provider": "cursor",
             "session_id": "lcm-oversized-needs-summary",
             "messages": [

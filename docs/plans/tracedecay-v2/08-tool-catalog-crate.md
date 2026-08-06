@@ -128,7 +128,7 @@ duplicating business logic.
   Lifecycle, framing, and document notifications remain protocol mechanics,
   not callable catalog capabilities. `prepareRename` and `rename` bind only to
   read-only candidate/preview UseCaseIds owned by
-  [34](34-workspace-refactoring-and-api-migration.md); they never bind directly
+  [34](34-workspace-refactoring-and-api-cutover.md); they never bind directly
   to `tracedecay_rename_symbol`, API-migration apply, another write-effect
   entry, `workspace/applyEdit`, or opaque server commands. No separate
   `lsp_*` capability is cataloged for them, and no binding may apply an edit
@@ -394,7 +394,7 @@ shipped apply operations remain independently callable base tools. Composed
 refactoring workflow bundles reference those canonical tools instead of copying
 handlers or schemas.
 
-[Workspace refactoring and API migration](34-workspace-refactoring-and-api-migration.md)
+[Workspace refactoring and API cutover](34-workspace-refactoring-and-api-cutover.md)
 owns the behavior and acceptance contract for apply-grade previews, atomic symbol
 rename, and semantic API migration. In particular:
 

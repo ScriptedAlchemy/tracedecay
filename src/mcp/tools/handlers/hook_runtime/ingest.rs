@@ -290,6 +290,125 @@ fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
     })
 }
 
+pub(super) async fn lcm_compact(args: &Value, db: &RegisteredGlobalDb) -> Result<Value> {
+    let provider = required_str(args, "provider")?;
+    let session_id = required_str(args, "session_id")?;
+    let summarizer_advisory = summarizer_pressure_advisory(args)?;
+    let response = db
+        .lcm_compress(lcm_compression_request(args, provider, session_id)?)
+        .await
+        .map_err(|error| config_error(format!("LCM compaction failed: {error}")))?;
+    Ok(json!({
+        "action": "lcm_compact",
+        "status": response.status,
+        "provider": provider,
+        "session_id": session_id,
+        "summarizer_advisory": summarizer_advisory,
+        "reason": response.reason,
+        "summary_nodes_created": response.summary_nodes_created,
+        "summary_nodes": response.summary_nodes,
+        "replay_messages": response.replay_messages,
+        "replay_token_estimate": response.replay_token_estimate,
+        "replay_over_budget": response.replay_over_budget,
+        "compression_attempts": response.compression_attempts,
+        "fallback_used": response.fallback_used,
+        "context_recovery_hint": response.context_recovery_hint,
+        "retry_status": response.retry_status,
+        "frontier": response.frontier,
+        "summary_request": response.summary_request,
+    }))
+}
+
+pub(super) async fn lcm_preflight(
+    args: &Value,
+    db: &RegisteredGlobalDb,
+    project_root: Option<&Path>,
+) -> Result<Value> {
+    let provider = required_str(args, "provider")?;
+    let session_id = required_str(args, "session_id")?;
+    let messages = value_array_arg(args, "messages")?;
+    let response = db
+        .lcm_preflight(lcm_preflight_request(
+            args,
+            provider,
+            session_id,
+            messages.clone(),
+        )?)
+        .await
+        .map_err(|error| config_error(format!("LCM preflight failed: {error}")))?;
+    if bool_arg(args, "transcript_projection")? == Some(true) {
+        crate::mcp::tools::handlers::session::live_projection::upsert_live_transcript_projection(
+            db,
+            project_root,
+            provider,
+            session_id,
+            &messages,
+        )
+        .await?;
+    }
+    Ok(json!({
+        "action": "lcm_preflight",
+        "status": response.status,
+        "provider": provider,
+        "session_id": session_id,
+        "should_compress": response.should_compress,
+        "reason": response.reason,
+        "replay_messages": response.replay_messages,
+    }))
+}
+
+pub(super) async fn lcm_session_boundary(args: &Value, db: &RegisteredGlobalDb) -> Result<Value> {
+    let provider = required_str(args, "provider")?;
+    let session_id = required_str(args, "session_id")?;
+    let response = db
+        .lcm_session_boundary(crate::sessions::lcm::LcmSessionBoundaryRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            old_session_id: string_arg(args, "old_session_id"),
+            boundary_reason: string_arg(args, "boundary_reason"),
+            bound_session_id: string_arg(args, "bound_session_id"),
+            boundary_skip_at: i64_arg(args, "boundary_skip_at")?,
+        })
+        .await
+        .map_err(|error| config_error(format!("LCM session boundary failed: {error}")))?;
+    Ok(json!({
+        "action": "lcm_session_boundary",
+        "status": response.status,
+        "provider": provider,
+        "session_id": session_id,
+        "recorded": response.recorded,
+        "reason": response.reason,
+    }))
+}
+
+fn lcm_preflight_request(
+    args: &Value,
+    provider: &str,
+    session_id: &str,
+    messages: Vec<Value>,
+) -> Result<crate::sessions::lcm::LcmPreflightRequest> {
+    Ok(crate::sessions::lcm::LcmPreflightRequest {
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        messages,
+        current_tokens: i64_arg(args, "current_tokens")?,
+        threshold_tokens: i64_arg(args, "threshold_tokens")?,
+        max_assembly_tokens: i64_arg(args, "max_assembly_tokens")?,
+        leaf_chunk_tokens: i64_arg(args, "leaf_chunk_tokens")?,
+        max_source_messages: usize_arg(args, "max_source_messages")?,
+        summary_fan_in: usize_arg(args, "summary_fan_in")?,
+        incremental_max_depth: i64_arg(args, "incremental_max_depth")?,
+        fresh_tail_count: usize_arg(args, "fresh_tail_count")?,
+        dynamic_leaf_chunk_enabled: bool_arg(args, "dynamic_leaf_chunk_enabled")?,
+        dynamic_leaf_chunk_max: i64_arg(args, "dynamic_leaf_chunk_max")?,
+        context_length: i64_arg(args, "context_length")?,
+        reserve_tokens_floor: i64_arg(args, "reserve_tokens_floor")?,
+        ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
+        stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
+        ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
+    })
+}
+
 fn event_i64(value: &Value, keys: &[&str]) -> Option<i64> {
     keys.iter().find_map(|key| {
         let value = value.get(*key)?;
@@ -336,6 +455,142 @@ fn cursor_lcm_request(
         reserve_tokens_floor: None,
         summarizer,
     }
+}
+
+fn lcm_compression_request(
+    args: &Value,
+    provider: &str,
+    session_id: &str,
+) -> Result<crate::sessions::lcm::LcmCompressionRequest> {
+    Ok(crate::sessions::lcm::LcmCompressionRequest {
+        provider: provider.to_string(),
+        session_id: session_id.to_string(),
+        messages: value_array_arg(args, "messages")?,
+        current_tokens: i64_arg(args, "current_tokens")?,
+        focus_topic: string_arg(args, "focus_topic"),
+        ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
+        stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
+        ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
+        expected_current_frontier_store_id: i64_arg(args, "expected_current_frontier_store_id")?,
+        threshold_tokens: i64_arg(args, "threshold_tokens")?,
+        max_assembly_tokens: i64_arg(args, "max_assembly_tokens")?,
+        leaf_chunk_tokens: i64_arg(args, "leaf_chunk_tokens")?,
+        max_source_messages: usize_arg(args, "max_source_messages")?,
+        summary_fan_in: usize_arg(args, "summary_fan_in")?,
+        incremental_max_depth: i64_arg(args, "incremental_max_depth")?,
+        fresh_tail_count: usize_arg(args, "fresh_tail_count")?,
+        dynamic_leaf_chunk_enabled: bool_arg(args, "dynamic_leaf_chunk_enabled")?,
+        dynamic_leaf_chunk_max: i64_arg(args, "dynamic_leaf_chunk_max")?,
+        context_length: i64_arg(args, "context_length")?,
+        reserve_tokens_floor: i64_arg(args, "reserve_tokens_floor")?,
+        summarizer: summarizer_arg(args)?,
+    })
+}
+
+fn string_arg(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn value_array_arg(args: &Value, key: &str) -> Result<Vec<Value>> {
+    match args.get(key) {
+        Some(Value::Array(values)) => Ok(values.clone()),
+        Some(_) => Err(config_error(format!("`{key}` must be an array"))),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn string_array_arg(args: &Value, key: &str) -> Result<Vec<String>> {
+    match args.get(key) {
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| config_error(format!("`{key}` entries must be strings")))
+            })
+            .collect(),
+        Some(_) => Err(config_error(format!("`{key}` must be an array"))),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn i64_arg(args: &Value, key: &str) -> Result<Option<i64>> {
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    parse_i64(value)
+        .map(Some)
+        .ok_or_else(|| config_error(format!("`{key}` must be an integer")))
+}
+
+fn usize_arg(args: &Value, key: &str) -> Result<Option<usize>> {
+    let Some(value) = i64_arg(args, key)? else {
+        return Ok(None);
+    };
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| config_error(format!("`{key}` must be a non-negative integer")))
+}
+
+fn bool_arg(args: &Value, key: &str) -> Result<Option<bool>> {
+    match args.get(key) {
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(config_error(format!("`{key}` must be a boolean"))),
+        None => Ok(None),
+    }
+}
+
+fn parse_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_str()?.parse().ok())
+}
+
+fn summarizer_arg(args: &Value) -> Result<crate::sessions::lcm::LcmSummarizerMode> {
+    match args.get("summarizer") {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|error| config_error(format!("invalid summarizer: {error}"))),
+        None => Ok(crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary),
+    }
+}
+
+fn summarizer_pressure_advisory(args: &Value) -> Result<Option<Value>> {
+    let mode = summarizer_arg(args)?;
+    if !matches!(mode, crate::sessions::lcm::LcmSummarizerMode::Noop)
+        || !hard_compression_pressure(args)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "code": "noop_summarizer_under_hard_pressure",
+        "message": "summarizer 'noop' was honored while the session is over its compression threshold; no summaries will be produced",
+        "requested_summarizer": "noop",
+        "recommended_summarizer": "hermes_auxiliary",
+    })))
+}
+
+fn hard_compression_pressure(args: &Value) -> Result<bool> {
+    let Some(current_tokens) = i64_arg(args, "current_tokens")? else {
+        return Ok(false);
+    };
+    if i64_arg(args, "threshold_tokens")?
+        .is_some_and(|threshold| threshold > 0 && current_tokens >= threshold)
+    {
+        return Ok(true);
+    }
+    let assembly_cap = crate::sessions::lcm::compression_decision::effective_assembly_token_cap(
+        crate::sessions::lcm::compression_decision::AssemblyCapInput {
+            max_assembly_tokens: i64_arg(args, "max_assembly_tokens")?,
+            context_length: i64_arg(args, "context_length")?,
+            reserve_tokens_floor: i64_arg(args, "reserve_tokens_floor")?,
+        },
+    );
+    Ok(assembly_cap.is_some_and(|cap| current_tokens >= cap))
 }
 
 pub(super) async fn accounting_receipt(

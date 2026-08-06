@@ -258,6 +258,8 @@ pub enum ConfigurationError {
     Validation(String),
     #[error("configuration authority is unavailable")]
     Unavailable,
+    #[error("configuration store is not the exact final shape; reset or recreate it")]
+    ResetRequired,
 }
 
 impl ConfigurationError {

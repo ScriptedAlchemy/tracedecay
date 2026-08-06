@@ -26,7 +26,7 @@ pub static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 /// fixture SQL defined in a test file).
 fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in include_bytes!("../../crates/tracedecay-runtime-core/src/db/migrations.rs")
+    for byte in include_bytes!("../../crates/tracedecay-runtime-core/src/db/schema.rs")
         .iter()
         .chain(include_bytes!(
             "../../crates/tracedecay-runtime-core/src/db/connection.rs"

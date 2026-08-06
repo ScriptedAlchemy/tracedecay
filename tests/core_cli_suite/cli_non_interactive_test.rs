@@ -10,7 +10,6 @@ use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionT
 use tracedecay::automation::run_ledger::{
     AutomationRunArtifactKind, AutomationRunLedgerRecord, append_run_record, write_run_artifact,
 };
-use tracedecay::branch_meta::BranchMeta;
 use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
@@ -332,7 +331,6 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     .join()
     .unwrap();
     write_sqlite_placeholder(&shard_root.join("sessions.db"));
-    write_branch_meta(&shard_root, &[], false);
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
         project_id: Some("proj_cli".to_string()),
@@ -342,7 +340,6 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         data_root: shard_root.clone(),
         graph_db_relpath: "tracedecay.db".into(),
         sessions_db_relpath: "sessions.db".into(),
-        branch_meta_relpath: "branch-meta.json".into(),
     };
     std::fs::write(
         shard_root.join(STORE_MANIFEST_FILENAME),
@@ -398,26 +395,6 @@ async fn register_profile_sharded_store(
         })
         .await
         .expect("store instance should upsert");
-}
-
-fn write_branch_meta(
-    shard_root: &std::path::Path,
-    tracked_branches: &[(&str, &str)],
-    create_branch_dbs: bool,
-) {
-    let mut meta = BranchMeta::new_for_dir(shard_root, "main");
-    for (name, rel_db_path) in tracked_branches {
-        meta.add_branch(name, rel_db_path, "main");
-        if create_branch_dbs {
-            let db_path = shard_root.join(rel_db_path);
-            write_empty_sqlite_fixture(&db_path);
-        }
-    }
-    std::fs::write(
-        shard_root.join("branch-meta.json"),
-        serde_json::to_string_pretty(&meta).unwrap(),
-    )
-    .unwrap();
 }
 
 fn child_output(mut child: Child, status: ExitStatus) -> Output {
@@ -1573,72 +1550,6 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
     );
 }
 
-#[test]
-fn list_all_reports_orphan_manifest_reconstructable_store() {
-    let home = TempDir::new().unwrap();
-    let project = tempfile::Builder::new()
-        .prefix("list-orphan-project-")
-        .tempdir_in(ephemeral_safe_fixture_base())
-        .unwrap();
-    git(project.path(), &["init"]);
-    write_profile_sharded_fixture(home.path(), project.path());
-    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
-    write_enrollment_marker(
-        project.path(),
-        &EnrollmentMarker {
-            project_id: "proj_cli".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
-    std::fs::create_dir_all(profile_root(home.path())).unwrap();
-
-    let report = tracedecay::migrate::registry::scan_profile_store_manifests(
-        &profile_root(home.path()),
-        tracedecay::tracedecay::current_timestamp(),
-    );
-    assert_eq!(report.plans.len(), 1, "{report:#?}");
-    assert_eq!(
-        report.plans[0].status,
-        tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible,
-        "{report:#?}"
-    );
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["list", "--all"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "list --all should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // The shard exists on disk with a reconstructable manifest but was never
-    // registered, so `list --all` must say exactly that. Reporting it as a
-    // plain `profile-sharded` row would promote an unregistered store to a
-    // registered-looking one — the ambient registry fallback this fixture
-    // exists to forbid. `list_all_uses_registry_profile_shard_when_enrollment_marker_missing`
-    // covers the registered spelling.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("[orphan manifest-reconstructable]"),
-        "unregistered reconstructable shard must be reported as an orphan\nstdout:\n{stdout}"
-    );
-    assert!(
-        stdout.contains(&canonical_temp_path(project.path()).display().to_string()),
-        "orphan row must name the project root\nstdout:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("stale"),
-        "a reconstructable shard is not stale\nstdout:\n{stdout}"
-    );
-    assert!(
-        !stdout.contains("[profile-sharded]"),
-        "unregistered shard must not be labelled as a registered profile shard\nstdout:\n{stdout}"
-    );
-}
-
 #[tokio::test]
 async fn list_all_uses_registry_profile_shard_when_enrollment_marker_missing() {
     let home = TempDir::new().unwrap();
@@ -1710,12 +1621,11 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
 }
 
 #[tokio::test]
-async fn branch_list_reads_profile_sharded_branch_meta() {
+async fn branch_list_reads_exact_git_snapshots() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
@@ -1732,26 +1642,13 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
         "fixture project should mount before branch metadata expands"
     );
 
-    let tracked_branches = (0..300)
+    let branches = (0..300)
         .map(|index| {
-            (
-                format!("feature/branch-{index:03}-with-enough-detail-to-exercise-status-bounds"),
-                format!("branches/feature_branch_{index:03}.db"),
-            )
+            format!("feature/branch-{index:03}-with-enough-detail-to-exercise-status-bounds")
         })
         .collect::<Vec<_>>();
-    for (name, _) in &tracked_branches {
+    for name in &branches {
         git(project.path(), &["branch", name]);
-    }
-    let tracked_branch_refs = tracked_branches
-        .iter()
-        .map(|(name, path)| (name.as_str(), path.as_str()))
-        .collect::<Vec<_>>();
-    write_branch_meta(&shard_root, &tracked_branch_refs, false);
-    for (_, path) in &tracked_branches {
-        let db_path = shard_root.join(path);
-        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
-        std::fs::write(db_path, b"branch fixture").unwrap();
     }
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
@@ -1766,16 +1663,12 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Default branch: main"),
-        "branch list should read profile-sharded branch metadata\nstderr:\n{stderr}"
+        stderr.lines().any(|line| line.starts_with("* main ")),
+        "branch list should mark the current Git snapshot\nstderr:\n{stderr}"
     );
     assert!(
         stderr.contains("feature/branch-299-with-enough-detail-to-exercise-status-bounds"),
-        "branch list should receive the complete explicitly requested branch diagnostics\nstderr:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("No branch tracking configured"),
-        "branch list should not fall back to repo-local metadata\nstderr:\n{stderr}"
+        "branch list should include every local Git snapshot\nstderr:\n{stderr}"
     );
 }
 
@@ -1900,174 +1793,6 @@ async fn automation_facts_list_reports_incompatible_proposal_bank_as_unavailable
 }
 
 #[test]
-fn branch_add_writes_new_branch_db_into_profile_shard() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let project_root = canonical_temp_path(project.path());
-    git(&project_root, &["init", "-b", "main"]);
-    std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
-    commit_all(&project_root, "initial commit");
-    init_project_fixture(home.path(), &project_root);
-    git(&project_root, &["checkout", "-b", "feature/new"]);
-    let project_id = default_profile_project_id(&project_root);
-    let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
-    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
-    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
-    command.args(["branch", "add", "feature/new"]);
-    let output = run_with_timeout(command, cli_timeout());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let copied_db = shard_root.join("branches/feature_new.db");
-
-    assert!(
-        output.status.success() || stderr.contains("file is not a database"),
-        "branch add should resolve and copy profile-sharded DB before sync\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        stderr
-    );
-    assert!(
-        copied_db.exists(),
-        "branch add should create branch DB under the profile shard"
-    );
-    assert!(
-        !stderr.contains("parent DB not found"),
-        "branch add should not look for parent DB in repo-local storage\nstderr:\n{stderr}"
-    );
-}
-
-#[test]
-fn branch_remove_deletes_branch_db_from_profile_shard() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_git_fixture(project.path());
-    write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[("feature/ui", "branches/feature_ui.db")],
-        true,
-    );
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["branch", "remove", "feature/ui"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "branch remove should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !shard_root.join("branches/feature_ui.db").exists(),
-        "branch remove should delete branch DB from profile shard"
-    );
-}
-
-#[tokio::test]
-async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_git_fixture(project.path());
-    write_profile_sharded_fixture(home.path(), project.path());
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
-        .await
-        .unwrap();
-    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
-    runtime.checkpoint_profile_database_for_test().await;
-    drop(runtime);
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[("feature/legacy-memory", "branches/feature_legacy_memory.db")],
-        true,
-    );
-    let branch_db = shard_root.join("branches/feature_legacy_memory.db");
-    rusqlite::Connection::open(&branch_db)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE memory_facts (fact_id TEXT PRIMARY KEY);
-             INSERT INTO memory_facts (fact_id) VALUES ('branch-local');",
-        )
-        .unwrap();
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["branch", "remove", "feature/legacy-memory"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "branch remove should not require a migration receipt\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !branch_db.exists(),
-        "branch remove should delete obsolete branch-local memory with its branch database"
-    );
-}
-
-#[test]
-fn branch_removeall_deletes_profile_shard_branch_dbs() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_git_fixture(project.path());
-    write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[
-            ("feature/one", "branches/feature_one.db"),
-            ("feature/two", "branches/feature_two.db"),
-        ],
-        true,
-    );
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["branch", "removeall"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "branch removeall should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !shard_root.join("branches/feature_one.db").exists()
-            && !shard_root.join("branches/feature_two.db").exists(),
-        "branch removeall should delete all non-default branch DBs from profile shard"
-    );
-}
-
-#[test]
-fn branch_gc_preserves_profile_shard_without_repository_evidence() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    write_profile_sharded_fixture(home.path(), project.path());
-    let shard_root = profile_shard_root(home.path());
-    write_branch_meta(
-        &shard_root,
-        &[("feature/stale", "branches/feature_stale.db")],
-        true,
-    );
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["branch", "gc"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "branch gc should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        shard_root.join("branches/feature_stale.db").exists(),
-        "branch gc must fail closed without repository branch evidence"
-    );
-}
-
-#[test]
 fn init_refuses_ephemeral_project_in_persistent_profile() {
     let home = TempDir::new().expect("home tempdir");
     let project = TempDir::new().expect("ephemeral project");
@@ -2116,12 +1841,12 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
     );
 }
 
-/// `migrate storage-report` is read-only and works against an explicit
+/// `storage report` is read-only and works against an explicit
 /// `--profile-root` without any daemon or registered project, reporting a
 /// real registered store's size and an unregistered directory's presence
 /// (plan 38 §7 — size observability reachable from a command).
 #[test]
-fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog() {
+fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let profile_root = profile_root(home.path());
@@ -2158,8 +1883,8 @@ fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog(
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args([
-        "migrate",
-        "storage-report",
+        "storage",
+        "report",
         "--profile-root",
         profile_root.to_str().unwrap(),
         "--json",
@@ -2181,7 +1906,7 @@ fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog(
 }
 
 #[tokio::test]
-async fn migrate_storage_report_uses_active_daemon_authority_without_hanging() {
+async fn storage_report_uses_active_daemon_authority_without_hanging() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
@@ -2211,7 +1936,7 @@ async fn migrate_storage_report_uses_active_daemon_authority_without_hanging() {
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
-    command.args(["migrate", "storage-report", "--json"]);
+    command.args(["storage", "report", "--json"]);
     let started = Instant::now();
     let output = run_with_timeout(command, Duration::from_secs(15));
 

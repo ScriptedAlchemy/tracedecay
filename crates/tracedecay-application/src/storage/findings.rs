@@ -29,7 +29,6 @@ use super::debris::IncidentDebrisScanV1;
 use super::identity::StoreKeyV1;
 use super::inventory::{
     CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
-    StaleBranchDbRecordV1,
 };
 use super::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, TableGrowthDoctorEvidenceV1,
@@ -41,7 +40,6 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
     match kind {
         DoctorStorageFindingKindV1::OverBudgetStore => "over_budget_store",
         DoctorStorageFindingKindV1::OrphanStore => "orphan_store",
-        DoctorStorageFindingKindV1::StaleBranchDbs => "stale_branch_dbs",
         DoctorStorageFindingKindV1::IncidentDebrisPresent => "incident_debris_present",
         DoctorStorageFindingKindV1::RetentionBacklog => "retention_backlog",
         DoctorStorageFindingKindV1::TableGrowth => "table_growth",
@@ -59,7 +57,6 @@ const fn owning_operation(kind: DoctorStorageFindingKindV1) -> &'static str {
         DoctorStorageFindingKindV1::OrphanStore => {
             "use-case.application.storage.collect-orphan-store"
         }
-        DoctorStorageFindingKindV1::StaleBranchDbs => "use-case.application.storage.branch-gc",
         DoctorStorageFindingKindV1::IncidentDebrisPresent => {
             "use-case.application.storage.quarantine-and-collect-debris"
         }
@@ -394,40 +391,6 @@ pub fn orphan_store_finding(
     DoctorStorageFindingV1::new(kind, finding)
 }
 
-/// Produce the `StaleBranchDbs` finding from a branch-DB inventory record.
-///
-/// A branch DB whose ref is gone is `Stale` — its evidence is behind the live
-/// git-ref watermark — and references the branch-GC operation.
-pub fn stale_branch_dbs_finding(
-    record: &StaleBranchDbRecordV1,
-    completeness: DoctorCoverageCompletenessV1,
-) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
-    let kind = DoctorStorageFindingKindV1::StaleBranchDbs;
-    let finding = if record.is_stale() {
-        problem_finding(
-            kind,
-            &record.store,
-            DoctorEvidenceStateV1::Stale,
-            completeness,
-            &format!(
-                "branch-{}.size-{}b",
-                truncate_at_char_boundary(record.branch.as_str(), 120),
-                record.size_bytes.get()
-            ),
-            "branch-scoped store whose git ref is gone awaits lifecycle removal",
-        )?
-    } else {
-        clean_finding(
-            kind,
-            &record.store,
-            completeness,
-            "branch-ref-present",
-            "branch-scoped store's git ref is still live",
-        )?
-    };
-    DoctorStorageFindingV1::new(kind, finding)
-}
-
 /// Produce the `IncidentDebrisPresent` finding from a debris scan.
 ///
 /// Present debris is `Degraded`. An empty scan is healthy only when the sibling
@@ -572,9 +535,7 @@ pub fn code_generation_retention_finding(
 mod tests {
     use super::*;
     use crate::storage::debris::{IncidentDebrisArtifactV1, IncidentDebrisScanV1};
-    use crate::storage::identity::{
-        BranchRefV1, RelativeArtifactPathV1, StorageByteSizeV1, TableNameV1,
-    };
+    use crate::storage::identity::{RelativeArtifactPathV1, StorageByteSizeV1, TableNameV1};
     use crate::storage::telemetry::{StoreSizeSampleV1, TableGrowthDoctorEvidenceV1};
     use tracedecay_domain::UtcMicros;
 
@@ -765,36 +726,6 @@ mod tests {
         assert!(finding.finding().state().is_healthy_complete());
     }
 
-    // --- StaleBranchDbs ------------------------------------------------------
-
-    #[test]
-    fn stale_branch_dbs_produces_stale_finding() {
-        let record = StaleBranchDbRecordV1 {
-            store: StoreKeyV1::new("branches/feature-x").expect("valid"),
-            branch: BranchRefV1::new("feature-x").expect("valid"),
-            ref_present: false,
-            size_bytes: StorageByteSizeV1(40_000_000_000),
-        };
-        let finding = stale_branch_dbs_finding(&record, DoctorCoverageCompletenessV1::Complete)
-            .expect("finding");
-        assert_eq!(finding.kind(), DoctorStorageFindingKindV1::StaleBranchDbs);
-        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Stale);
-        assert!(only_evidence(&finding).starts_with("storage.stale_branch_dbs."));
-    }
-
-    #[test]
-    fn live_branch_produces_healthy_finding() {
-        let record = StaleBranchDbRecordV1 {
-            store: StoreKeyV1::new("branches/main").expect("valid"),
-            branch: BranchRefV1::new("main").expect("valid"),
-            ref_present: true,
-            size_bytes: StorageByteSizeV1(1_000),
-        };
-        let finding = stale_branch_dbs_finding(&record, DoctorCoverageCompletenessV1::Complete)
-            .expect("finding");
-        assert!(finding.finding().state().is_healthy_complete());
-    }
-
     // --- IncidentDebrisPresent ----------------------------------------------
 
     fn debris_artifact(bytes: u64) -> IncidentDebrisArtifactV1 {
@@ -952,7 +883,7 @@ mod tests {
     // --- Cross-cutting -------------------------------------------------------
 
     #[test]
-    fn all_five_finding_kinds_are_producible_and_family_storage() {
+    fn all_finding_kinds_are_producible_and_family_storage() {
         let over = over_budget_finding(
             &budget(1),
             &StorageTelemetryReadV1::Observed {
@@ -972,16 +903,6 @@ mod tests {
             DoctorCoverageCompletenessV1::Complete,
         )
         .expect("orphan");
-        let stale = stale_branch_dbs_finding(
-            &StaleBranchDbRecordV1 {
-                store: store(),
-                branch: BranchRefV1::new("gone").expect("valid"),
-                ref_present: false,
-                size_bytes: StorageByteSizeV1(1),
-            },
-            DoctorCoverageCompletenessV1::Complete,
-        )
-        .expect("stale");
         let debris = incident_debris_finding(&IncidentDebrisScanV1 {
             store: store(),
             artifacts: vec![debris_artifact(1)],
@@ -1004,14 +925,13 @@ mod tests {
         // review S1) — the kind is recovered by value, not by parsing evidence.
         assert_eq!(over.kind(), DoctorStorageFindingKindV1::OverBudgetStore);
         assert_eq!(orphan.kind(), DoctorStorageFindingKindV1::OrphanStore);
-        assert_eq!(stale.kind(), DoctorStorageFindingKindV1::StaleBranchDbs);
         assert_eq!(
             debris.kind(),
             DoctorStorageFindingKindV1::IncidentDebrisPresent
         );
         assert_eq!(backlog.kind(), DoctorStorageFindingKindV1::RetentionBacklog);
 
-        for finding in [&over, &orphan, &stale, &debris, &backlog] {
+        for finding in [&over, &orphan, &debris, &backlog] {
             assert_eq!(finding.finding().family(), DoctorFindingFamilyV1::Storage);
             assert!(!finding.finding().state().is_healthy_complete());
             assert!(finding.finding().remediation().is_some());

@@ -21,6 +21,94 @@ fn projectless_runtime_rejects_project_database_actions() {
         "ingest_transcript",
         &json!({ "user_scope": true }),
     ));
+    for action in ["lcm_preflight", "lcm_compact", "lcm_session_boundary"] {
+        assert!(!projectless_action_allowed(action, &json!({})));
+        assert!(!projectless_action_allowed(
+            action,
+            &json!({ "storage_scope": "project" }),
+        ));
+        assert!(projectless_action_allowed(
+            action,
+            &json!({ "storage_scope": "user" }),
+        ));
+    }
+}
+
+#[test]
+fn temporal_refresh_directive_tracks_committed_hook_mutations() {
+    assert_eq!(
+        temporal_refresh_after_success(&json!({
+            "action": "lcm_preflight",
+            "transcript_projection": true,
+        })),
+        Some(HookRuntimeTemporalRefresh {
+            scope: HookRuntimeTemporalScope::Project,
+            wait_until_idle: true,
+        })
+    );
+    assert_eq!(
+        temporal_refresh_after_success(&json!({
+            "action": "lcm_preflight",
+            "storage_scope": "user",
+            "transcript_projection": true,
+        })),
+        Some(HookRuntimeTemporalRefresh {
+            scope: HookRuntimeTemporalScope::User,
+            wait_until_idle: true,
+        })
+    );
+    assert_eq!(
+        temporal_refresh_after_success(&json!({
+            "action": "lcm_compact",
+            "storage_scope": "user",
+        })),
+        Some(HookRuntimeTemporalRefresh {
+            scope: HookRuntimeTemporalScope::User,
+            wait_until_idle: false,
+        })
+    );
+    assert_eq!(
+        temporal_refresh_after_success(&json!({
+            "action": "ingest_transcript",
+            "user_scope": false,
+        })),
+        Some(HookRuntimeTemporalRefresh {
+            scope: HookRuntimeTemporalScope::Project,
+            wait_until_idle: false,
+        })
+    );
+    assert_eq!(
+        temporal_refresh_after_success(&json!({
+            "action": "ingest_transcript",
+            "user_scope": true,
+        })),
+        Some(HookRuntimeTemporalRefresh {
+            scope: HookRuntimeTemporalScope::User,
+            wait_until_idle: false,
+        })
+    );
+    for action in [
+        "codex_compact",
+        "cursor_compact",
+        "lcm_compact",
+        "lcm_session_boundary",
+    ] {
+        assert_eq!(
+            temporal_refresh_after_success(&json!({ "action": action })),
+            Some(HookRuntimeTemporalRefresh {
+                scope: HookRuntimeTemporalScope::Project,
+                wait_until_idle: false,
+            })
+        );
+    }
+    for read_or_unrelated in [
+        json!({ "action": "lcm_preflight" }),
+        json!({ "action": "lcm_preflight", "transcript_projection": false }),
+        json!({ "action": "hermes_receipt" }),
+        json!({ "action": "unknown" }),
+    ] {
+        assert_eq!(temporal_refresh_after_success(&read_or_unrelated), None);
+    }
 }
 
 #[test]

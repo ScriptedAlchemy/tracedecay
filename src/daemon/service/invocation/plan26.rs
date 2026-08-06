@@ -130,6 +130,7 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
                 OperationTermination::Completed => Plan26FeedbackOutcomeV1::Completed,
                 OperationTermination::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
                 OperationTermination::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
+                OperationTermination::Unavailable => Plan26FeedbackOutcomeV1::Unavailable,
                 OperationTermination::Failed | OperationTermination::EffectUnknown => {
                     Plan26FeedbackOutcomeV1::Failed
                 }

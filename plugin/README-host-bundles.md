@@ -38,8 +38,9 @@ never replaced wholesale.
   checked-in host fixtures exist.
 - **Kimi Code:** the managed plugin manifest keeps MCP, skills, and commands
   together and registers native `PostToolUse` and `Stop` hooks. Hook commands
-  consume no host payload: edit completion triggers incremental sync and stop
-  triggers supported transcript ingest.
+  send only bounded lifecycle events to the daemon hook-runtime endpoint.
+  Index scheduling, transcript capture, LCM boundaries, and compaction remain
+  daemon-owned; hooks never run `sync`, open a store, or invoke a model.
 - **OpenCode:** a typed `@opencode-ai/plugin` module under
   `~/.config/opencode/plugins/` (or `.opencode/plugins/` locally) consumes
   `file.edited`, `tool.execute.after`, and `session.idle` without forwarding

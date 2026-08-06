@@ -310,44 +310,6 @@ impl ProductionProjectCompositionHarnessV1 {
             .clone())
     }
 
-    pub async fn track_worktree_branch(
-        &self,
-        project_root: impl AsRef<Path>,
-        worktree_root: impl AsRef<Path>,
-        branch: &str,
-    ) -> Result<crate::branch::BranchAddOutcome> {
-        self.server(project_root)?
-            .cg()
-            .await
-            .track_worktree_branch(worktree_root.as_ref(), branch)
-            .await
-    }
-
-    pub async fn sync_tracked_worktree_branch(
-        &self,
-        project_root: impl AsRef<Path>,
-        worktree_root: impl AsRef<Path>,
-        branch: &str,
-        query: &str,
-    ) -> Result<(Option<String>, Option<String>, bool, bool)> {
-        let graph = self.server(project_root)?.cg().await;
-        let (database_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
-            graph.project_root(),
-            &graph.store_layout().data_root,
-            Some(branch),
-        );
-        let branch_graph = graph
-            .sync_retained_worktree_branch(worktree_root.as_ref(), branch, &database_path)
-            .await?;
-        let contains_query = !branch_graph.search(query, 10).await?.is_empty();
-        Ok((
-            branch_graph.active_branch().map(str::to_owned),
-            branch_graph.serving_branch().map(str::to_owned),
-            branch_graph.is_fallback(),
-            contains_query,
-        ))
-    }
-
     pub async fn call_tool(
         &self,
         project_root: impl AsRef<Path>,
@@ -396,7 +358,19 @@ async fn wait_for_production_composition_code_index(
                 .await
                 .is_some()
             {
-                return;
+                return Ok(());
+            }
+            if let Some(failure) = invocation
+                .code_index_schedulers
+                .last_reconcile_failure(project_root)
+                .await
+            {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "production-composition code index failed for '{}': {failure}",
+                        project_root.display()
+                    ),
+                });
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -407,7 +381,7 @@ async fn wait_for_production_composition_code_index(
             "production-composition code index did not publish for '{}'",
             project_root.display()
         ),
-    })
+    })?
 }
 
 #[cfg(any(test, feature = "test-transport"))]

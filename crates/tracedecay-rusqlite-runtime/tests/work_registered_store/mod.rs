@@ -10,6 +10,10 @@ use std::path::PathBuf;
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
+use tracedecay_graph_db::{
+    GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion,
+    NeverCancelled,
+};
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
 use tracedecay_rusqlite_runtime::work::{WorkSqliteStorage, install_work_schema};
@@ -50,6 +54,7 @@ impl ReaderQueryExecutor for NoTypedReads {
 /// them. Dropping it stops both actors and removes the directory.
 pub struct RegisteredWorkStore {
     storage: WorkSqliteStorage,
+    graph: GraphDb,
     path: PathBuf,
     _writer: PersistentWriter,
     _readers: ReaderPool<NoTypedReads>,
@@ -73,7 +78,7 @@ impl RegisteredWorkStore {
             setup(&connection);
         }
         let path = path.canonicalize().expect("canonicalize work store");
-        Self::open(name, path, directory)
+        Self::open(name, path, directory, None)
     }
 
     /// Stops this store and starts a new one over the same file, the way a
@@ -81,6 +86,7 @@ impl RegisteredWorkStore {
     pub fn restart(self, name: &str) -> Self {
         let Self {
             storage,
+            graph,
             path,
             _writer: writer,
             _readers: readers,
@@ -89,10 +95,10 @@ impl RegisteredWorkStore {
         drop(storage);
         drop(readers);
         drop(writer);
-        Self::open(name, path, directory)
+        Self::open(name, path, directory, Some(graph))
     }
 
-    fn open(name: &str, path: PathBuf, directory: TempDir) -> Self {
+    fn open(name: &str, path: PathBuf, directory: TempDir, graph: Option<GraphDb>) -> Self {
         let binding = binding(name);
         let locator = locator(&binding);
         let writer = PersistentWriter::start(
@@ -110,8 +116,19 @@ impl RegisteredWorkStore {
         )
         .expect("start work store readers");
         let handle = ExactSqlHandle::attach(&writer, &readers).expect("attach work store");
+        let graph = graph.unwrap_or_else(|| {
+            let graph_path = directory.path().join(format!("{name}.grafeo"));
+            GraphDb::open(GraphDbOpenOptions {
+                location: GraphDbLocation::Persistent(graph_path),
+                expected_format: GraphFormatVersion::new(2).expect("graph format"),
+                durability: GraphDurability::Sync,
+                cancellation: std::sync::Arc::new(NeverCancelled),
+            })
+            .expect("open Work graph")
+        });
         Self {
-            storage: WorkSqliteStorage::from_registered(handle),
+            storage: WorkSqliteStorage::from_registered(handle, graph.clone()),
+            graph,
             path,
             _writer: writer,
             _readers: readers,

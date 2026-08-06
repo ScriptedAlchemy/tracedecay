@@ -474,6 +474,9 @@ Examples:
   tracedecay sessions search \"auth refactor\"     Full-text transcript search
   tracedecay sessions search \"bug\" --limit 5 --provider cursor
   tracedecay sessions search \"plan\" --project-path /path/to/repo
+  tracedecay sessions search \"plan\" --cursor opaque.cursor --json
+  tracedecay sessions search \"history\" --temporal-mode forensic --grain occurrence
+  tracedecay sessions search \"decision\" --project-scope all_registered --json
   tracedecay sessions refresh start --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
   tracedecay sessions refresh join --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
   tracedecay sessions refresh resume --project-id project.id --session-id session.id --provider cursor --source 4 --target 9
@@ -526,17 +529,15 @@ Related: tracedecay status --project-id, tracedecay list (path-relative
 view), tracedecay tool project_search (MCP twin).";
 
 pub(crate) const BRANCH_LONG_ABOUT: &str = "\
-Manages per-branch code-graph databases so queries reflect the branch you \
-are on. Adding a branch copies the nearest ancestor's DB and syncs \
-incrementally; gc removes DBs for branches deleted from git. Cross-branch \
-queries are served by the branch_search/branch_diff MCP tools.";
+Inspects exact Git branch snapshots in the project-wide code graph and \
+configures daemon PR-ref tracking. Branches, refs, and worktrees are selectors \
+and provenance inside one project store.";
 
 pub(crate) const BRANCH_AFTER_HELP: &str = "\
 Examples:
-  tracedecay branch list                         Tracked branches and DB sizes
-  tracedecay branch add feature/login            Track a branch explicitly
-  tracedecay branch gc                           Drop DBs for deleted branches
-  tracedecay branch remove feature/login
+  tracedecay branch list                         Local branches and commit snapshots
+  tracedecay branch autotrack status             PR-ref tracking status
+  tracedecay branch autotrack enable             Enable PR-ref tracking
 
 Related: tracedecay tool branch_search / branch_diff / branch_list
 (cross-branch queries without switching checkout).";
@@ -579,16 +580,12 @@ Examples:
 Related: tracedecay install --agent codex --automation (enable at install),
 tracedecay dashboard (review UI), tracedecay memory curate.";
 
-pub(crate) const MIGRATE_LONG_ABOUT: &str = "\
-Profile-storage maintenance: read-only per-store size and retention reporting, \
-complete profile backup, and backup restore rehearsal. TraceDecay V2 stores are \
-created at their final shape, so there is no cross-version migration workflow.";
+pub(crate) const STORAGE_LONG_ABOUT: &str = "\
+Read-only final-V2 per-store size, free-page ratio, and retention reporting.";
 
-pub(crate) const MIGRATE_AFTER_HELP: &str = "\
+pub(crate) const STORAGE_AFTER_HELP: &str = "\
 Examples:
-  tracedecay migrate storage-report              Per-store size / free-page ratio (read-only)
-  tracedecay migrate backup-profile --to <dir> --backup-id <id>
-  tracedecay migrate rehearse-profile-backup --backup <dir> --restore <dir>
+  tracedecay storage report                       Per-store size / free-page ratio
 
 Related: tracedecay projects (registry view), tracedecay wipe.";
 

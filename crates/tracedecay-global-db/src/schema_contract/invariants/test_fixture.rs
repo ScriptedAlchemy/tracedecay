@@ -1,6 +1,6 @@
 //! Shared authority-row fixtures for the invariant tests.
 //!
-//! Test-only scaffolding: the repair, row-audit, and trigger tests all need the
+//! Test-only scaffolding: the row-audit and trigger tests both need the
 //! same committed observation shape, so it is built once here rather than
 //! diverging three ways. The payload is the checked-in Codex envelope, so a
 //! seeded row decodes through the same contract the production audit uses.
@@ -138,18 +138,4 @@ pub(super) fn shift(cursor: &ObservationSourceCursorV1, delta: i64) -> Observati
         position,
     )
     .expect("shifted source cursor")
-}
-
-pub(super) async fn write_cursor(conn: &impl Executor, cursor: &ObservationSourceCursorV1) {
-    conn.execute(
-        "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
-         VALUES (?1, ?2, ?3)",
-        params![
-            serde_json::to_string(cursor.source()).unwrap(),
-            serde_json::to_string(cursor.scope()).unwrap(),
-            serde_json::to_string(cursor).unwrap()
-        ],
-    )
-    .await
-    .expect("seed stored source cursor");
 }

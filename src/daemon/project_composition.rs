@@ -22,32 +22,6 @@ pub(super) enum ProductionProjectCompositionRuntime {
 }
 
 impl ProductionProjectCompositionRuntime {
-    fn database_owner_reconciler(
-        &self,
-        _store_administration: &StoreAdministration,
-        current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        _current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
-        route_registered: Arc<AtomicBool>,
-        handshake: DaemonHandshake,
-    ) -> crate::mcp::DatabaseOwnerReconciler {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(engine) => engine.database_owner_reconciler(
-                current_key,
-                _current_project_path,
-                route_registered,
-                handshake,
-            ),
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable { .. } => portable_database_owner_reconciler(
-                _store_administration.clone(),
-                current_key,
-                route_registered,
-                handshake,
-            ),
-        }
-    }
-
     fn automation_scheduler_reconciler(
         &self,
         _current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
@@ -233,6 +207,7 @@ pub(super) async fn production_project_server(
     project_open_cancellation_checkpoint(cancellation)?;
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await?;
+    let project_store_root = cg.store_layout().data_root.clone();
     let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");
     let runtime_configuration = cg
         .configuration_runtime()
@@ -292,13 +267,6 @@ pub(super) async fn production_project_server(
         canonical_project_path.to_path_buf(),
     ));
     let route_registered = Arc::new(AtomicBool::new(true));
-    let database_owner_reconciler = runtime.database_owner_reconciler(
-        store_administration,
-        Arc::clone(&current_key),
-        Arc::clone(&current_project_path),
-        Arc::clone(&route_registered),
-        handshake.clone(),
-    );
     let automation_scheduler_reconciler = runtime.automation_scheduler_reconciler(
         Arc::clone(&current_key),
         Arc::clone(&current_project_path),
@@ -349,7 +317,7 @@ pub(super) async fn production_project_server(
         let invocation = invocation.clone();
         let project_id = code_search_project_id.clone();
         let project_root = canonical_project_path.to_path_buf();
-        let store_root = code_index_store_root.clone();
+        let store_root = project_store_root.clone();
         let semantic_runtime = semantic_runtime.clone();
         let semantic_database = Arc::clone(&semantic_database);
         let semantic_lifecycle = semantic_lifecycle.clone();
@@ -553,6 +521,11 @@ pub(super) async fn production_project_server(
                 Arc::new(tokio::sync::Mutex::new(broker))
             }
         };
+    let code_index_branch_diff_executor = code_index_branch_diff_executor(
+        invocation.code_index_schedulers.clone(),
+        code_search_project_id.clone(),
+        read_admission_provider.clone(),
+    );
     let code_index_search_executor = code_index_search_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
@@ -585,12 +558,9 @@ pub(super) async fn production_project_server(
             transcript_source_home: transcript_source_home.clone(),
             accounting: accounting_db.clone(),
             registry: Arc::clone(&registry_db),
-            database_owner_reconciler: Arc::clone(&database_owner_reconciler),
             project_routes: store_administration.project_routes(),
             writers: crate::mcp::server::McpServerWriters::daemon_owned(
                 coordinated_dashboard_automation_writer(store_administration.clone()),
-                coordinated_hook_branch_writer(store_administration.clone()),
-                coordinated_background_refresh_writer(store_administration.clone()),
             ),
         },
     )
@@ -600,6 +570,7 @@ pub(super) async fn production_project_server(
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
     .with_code_index_publication_identity(Arc::clone(&code_index_publication_identity))
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
+    .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
     .with_code_index_search_authority(code_search_authority.clone())
     .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(Arc::clone(&application_invocation_executor))
@@ -781,6 +752,19 @@ pub(super) async fn production_project_server(
                 .await?
                 .broker()
                 .cloned();
+            let embedded_graph = invocation
+                .resolve_project_graph(&code_search_project_id, &cg.store_layout().data_root)
+                .await?;
+            session_db
+                .bind_session_relation_graph(
+                    code_search_project_id.clone(),
+                    Arc::clone(&embedded_graph),
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "project session relation graph binding failed: {error}"
+                    ),
+                })?;
             let project_session_refresh_wake = store_administration
                 .session_temporal_refresh_schedulers()
                 .ensure_project(key.owner.clone(), Arc::clone(&session_db))
@@ -797,6 +781,7 @@ pub(super) async fn production_project_server(
                 code_search_project_id.clone(),
                 cg.store_layout().clone(),
                 cg.db().clone(),
+                Arc::clone(&embedded_graph),
                 Arc::clone(&registry_db),
                 Arc::clone(&user_session_db),
                 Arc::clone(&session_db),
@@ -850,12 +835,9 @@ pub(super) async fn production_project_server(
                     host_admission_broker,
                     project_session_refresh_wake,
                     user_session_refresh_wake,
-                    database_owner_reconciler,
                     project_routes: store_administration.project_routes(),
                     writers: crate::mcp::server::McpServerWriters::daemon_owned(
                         coordinated_dashboard_automation_writer(store_administration.clone()),
-                        coordinated_hook_branch_writer(store_administration.clone()),
-                        coordinated_background_refresh_writer(store_administration.clone()),
                     ),
                 },
             )
@@ -867,6 +849,7 @@ pub(super) async fn production_project_server(
             .with_code_index_hook_sink(code_index_hook_sink)
             .with_code_index_publication_identity(code_index_publication_identity)
             .with_code_index_search_executor(code_index_search_executor)
+            .with_code_index_branch_diff_executor(code_index_branch_diff_executor)
             .with_code_index_search_authority(code_search_authority)
             .with_project_server_live(Arc::clone(&route_registered))
             .with_application_invocation_executor(application_invocation_executor)

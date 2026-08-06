@@ -144,6 +144,10 @@ pub enum HttpSseEvent<T> {
         sequence: u64,
         terminal: StreamTermination,
     },
+    Unavailable {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
     Failed {
         sequence: u64,
         terminal: StreamTermination,
@@ -168,6 +172,7 @@ impl<T> HttpSseEvent<T> {
             Self::Completed { .. } => "completed",
             Self::Cancelled { .. } => "cancelled",
             Self::TimedOut { .. } => "timed_out",
+            Self::Unavailable { .. } => "unavailable",
             Self::Failed { .. } => "failed",
             Self::Partial { .. } => "partial",
             Self::EffectUnknown { .. } => "effect_unknown",
@@ -183,6 +188,7 @@ impl<T> HttpSseEvent<T> {
             | Self::Completed { sequence, .. }
             | Self::Cancelled { sequence, .. }
             | Self::TimedOut { sequence, .. }
+            | Self::Unavailable { sequence, .. }
             | Self::Failed { sequence, .. }
             | Self::Partial { sequence, .. }
             | Self::EffectUnknown { sequence, .. } => Some(*sequence),
@@ -195,6 +201,7 @@ impl<T> HttpSseEvent<T> {
             Self::Completed { .. }
                 | Self::Cancelled { .. }
                 | Self::TimedOut { .. }
+                | Self::Unavailable { .. }
                 | Self::Failed { .. }
                 | Self::Partial { .. }
                 | Self::EffectUnknown { .. }
@@ -217,6 +224,7 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
                 OperationTermination::Completed => Self::Completed { sequence, terminal },
                 OperationTermination::Cancelled => Self::Cancelled { sequence, terminal },
                 OperationTermination::TimedOut => Self::TimedOut { sequence, terminal },
+                OperationTermination::Unavailable => Self::Unavailable { sequence, terminal },
                 OperationTermination::Failed => Self::Failed { sequence, terminal },
                 OperationTermination::Partial => Self::Partial { sequence, terminal },
                 OperationTermination::EffectUnknown => Self::EffectUnknown { sequence, terminal },

@@ -1,15 +1,21 @@
 use std::path::Path;
 
+use tempfile::TempDir;
+
 use super::super::super::*;
 use super::super::shared::lcm_status_payload;
 use super::super::test_support::*;
 use super::*;
 
 #[tokio::test]
-async fn malformed_doctor_controls_are_rejected_before_storage_open() {
+async fn non_read_only_doctor_controls_are_rejected_before_storage_open() {
     for (args, field) in [
         (
             json!({"provider": "claude", "mode": false, "format": "json"}),
+            "mode",
+        ),
+        (
+            json!({"provider": "claude", "mode": "repair", "format": "json"}),
             "mode",
         ),
         (
@@ -25,6 +31,34 @@ async fn malformed_doctor_controls_are_rejected_before_storage_open() {
         .unwrap_err();
         assert!(error.to_string().contains(field), "{error}");
     }
+
+    let error = handle_lcm_status(
+        LcmHandlerContext::user(Path::new("/missing"), None, None),
+        json!({"gc_config": {}, "format": "json"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("gc_config"), "{error}");
+}
+
+#[tokio::test]
+async fn status_without_registered_authority_is_fast_and_does_not_open_a_store() {
+    let temp = TempDir::new().unwrap();
+    let missing = temp.path().join("sessions.db");
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        handle_lcm_status(
+            LcmHandlerContext::user(&missing, None, None),
+            json!({"format": "json"}),
+        ),
+    )
+    .await
+    .expect("unavailable LCM status should finish within the fast-path budget")
+    .expect("unavailable LCM status is a typed response");
+    eprintln!("unavailable LCM status latency: {:?}", started.elapsed());
+    assert_eq!(payload(response)["status"], "unavailable");
+    assert!(!missing.exists());
 }
 
 #[test]

@@ -420,10 +420,12 @@ impl RegisteredGlobalDb {
                 "database write failed",
             ));
         }
-        Self::upsert_lcm_summary_for_transcript_summary(conn, &canonical_message).await
+        self.upsert_lcm_summary_for_transcript_summary(conn, &canonical_message)
+            .await
     }
 
     async fn upsert_lcm_summary_for_transcript_summary(
+        &self,
         conn: &impl Executor,
         message: &SessionMessageRecord,
     ) -> Result<(), TranscriptPersistenceError> {
@@ -481,14 +483,118 @@ impl RegisteredGlobalDb {
             expand_hint: Some("Codex context compaction boundary".to_string()),
             metadata_json: summary_metadata_json.or_else(|| Some(metadata_json.to_string())),
         };
+        let relation_projection = self
+            .lcm_relation_projection_seed_in_transaction(conn, &message.session_id)
+            .await?;
         let publisher =
-            crate::session_temporal_operations::GlobalDbLcmSummaryPublication::new(conn);
+            crate::session_temporal_operations::GlobalDbLcmSummaryPublication::for_project(
+                conn,
+                relation_projection,
+            );
         tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft)
             .await
             .map(|_| ())
             .map_err(|error| {
                 TranscriptPersistenceError::storage("upsert transcript summary projection", error)
             })
+    }
+
+    async fn lcm_relation_projection_seed_in_transaction(
+        &self,
+        conn: &impl Executor,
+        session_id: &str,
+    ) -> Result<
+        crate::session_temporal::relations::SessionRelationProjection,
+        TranscriptPersistenceError,
+    > {
+        let binding_project_id = self.binding().shard_id.scope.project_id().ok_or_else(|| {
+            TranscriptPersistenceError::message(
+                "bind transcript relation graph",
+                "transcript relation authority requires a registered project shard",
+            )
+        })?;
+        let (project_id, graph) = self.session_relation_graph().map_err(|error| {
+            TranscriptPersistenceError::storage("bind transcript relation graph", error)
+        })?;
+        if project_id != binding_project_id {
+            return Err(TranscriptPersistenceError::message(
+                "bind transcript relation graph",
+                "project identity does not match the registered session shard",
+            ));
+        }
+        let session_id = tracedecay_domain::SessionId::new(session_id).map_err(|error| {
+            TranscriptPersistenceError::storage("decode transcript relation session", error)
+        })?;
+        let mut rows = conn
+            .query(
+                "SELECT generation FROM session_temporal_generations
+                 WHERE session_id = ?1 AND state = 'active' ORDER BY generation",
+                params![session_id.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "read transcript relation active generation",
+                    error,
+                )
+            })?;
+        let active = rows
+            .next()
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "read transcript relation active generation",
+                    error,
+                )
+            })?
+            .map(|row| {
+                row.get::<i64>(0).map_err(|error| {
+                    TranscriptPersistenceError::storage(
+                        "decode transcript relation active generation",
+                        error,
+                    )
+                })
+            })
+            .transpose()?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "read transcript relation active generation",
+                    error,
+                )
+            })?
+            .is_some()
+        {
+            return Err(TranscriptPersistenceError::message(
+                "read transcript relation active generation",
+                "session has multiple active generations",
+            ));
+        }
+        drop(rows);
+        let Some(active) = active else {
+            return Ok(
+                crate::session_temporal::relation_publication::empty_projection(
+                    project_id.clone(),
+                    session_id,
+                    0,
+                ),
+            );
+        };
+        let active = u64::try_from(active).map_err(|error| {
+            TranscriptPersistenceError::storage(
+                "decode transcript relation active generation",
+                error,
+            )
+        })?;
+        crate::session_temporal::relations::SessionRelationGraphStore::new(std::sync::Arc::clone(
+            graph,
+        ))
+        .load_projection(project_id, &session_id, active)
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("load transcript relation projection", error)
+        })
     }
 
     async fn transcript_summary_sources(
@@ -755,6 +861,24 @@ impl RegisteredGlobalDb {
         parse_offset: ParseOffset,
         policy: TranscriptWritePolicy,
     ) -> Result<(), TranscriptPersistenceError> {
+        let relation_sessions = batches
+            .iter()
+            .flat_map(|batch| batch.messages.iter())
+            .filter(|message| message.kind.as_deref() == Some("summary"))
+            .filter_map(|message| {
+                serde_json::from_str::<JsonValue>(message.metadata_json.as_deref()?)
+                    .ok()
+                    .filter(|metadata| {
+                        metadata.get("source").and_then(JsonValue::as_str)
+                            == Some("codex_context_compacted")
+                    })
+                    .map(|_| message.session_id.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let may_stage_git_graph_evidence = commit_records.iter().any(|record| {
+            record.relation
+                == tracedecay_sessions::runtime::git_correlation::CommitRelation::Produced
+        });
         let transaction = self.begin_transcript_transaction().await?;
         let storage_root = self
             .db_path()
@@ -848,6 +972,31 @@ impl RegisteredGlobalDb {
             TranscriptPersistenceError::storage("commit transcript batch", error)
         })?;
         payload_rollback.disarm();
+        if may_stage_git_graph_evidence {
+            self.wake_session_git_graph_publications();
+        }
+        if self.binding().shard_id.scope.project_id().is_some() {
+            for session_id in relation_sessions {
+                let session_id =
+                    tracedecay_domain::SessionId::new(session_id).map_err(|error| {
+                        TranscriptPersistenceError::storage(
+                            "decode transcript relation session",
+                            error,
+                        )
+                    })?;
+                crate::session_temporal::relation_publication::apply_and_activate_latest_lcm_intent(
+                    self,
+                    &session_id,
+                )
+                .await
+                .map_err(|error| {
+                    TranscriptPersistenceError::storage(
+                        "activate transcript relation generation",
+                        error,
+                    )
+                })?;
+            }
+        }
         Ok(())
     }
 

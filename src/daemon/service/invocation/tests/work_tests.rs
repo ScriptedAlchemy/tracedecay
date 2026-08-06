@@ -105,6 +105,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         .register(
             project.path().to_path_buf(),
             database,
+            Arc::new(test_graph()),
             authority,
             actor,
             grant,
@@ -440,6 +441,7 @@ for line in sys.stdin:
         .register(
             project.path().to_path_buf(),
             Arc::clone(&database),
+            Arc::new(test_graph()),
             authority.clone(),
             actor.clone(),
             grant,
@@ -613,7 +615,7 @@ for line in sys.stdin:
     assert_eq!(first_checkpoint.children.len(), 1);
     let child_attempt = &first_checkpoint.children[0].attempt_identity;
     let stored_attempt = database
-        .work_storage()
+        .work_storage(test_graph())
         .expect("Work storage")
         .execution_attempt(&authority, child_attempt)
         .expect("stored Work attempt")
@@ -636,6 +638,7 @@ for line in sys.stdin:
         .register(
             project.path().to_path_buf(),
             Arc::clone(&database),
+            Arc::new(test_graph()),
             authority.clone(),
             actor.clone(),
             registration_grant,
@@ -695,7 +698,7 @@ for line in sys.stdin:
         DaemonInvocationOutcome::ApplicationProblem { .. }
     ));
     let settled_attempt = database
-        .work_storage()
+        .work_storage(test_graph())
         .expect("Work storage")
         .execution_attempt(&authority, &settled_plan.children[0].attempt_identity)
         .expect("settled attempt read")
@@ -759,7 +762,7 @@ for line in sys.stdin:
         DaemonInvocationOutcome::ApplicationProblem { .. }
     ));
     let interrupted_attempt = database
-        .work_storage()
+        .work_storage(test_graph())
         .expect("Work storage")
         .execution_attempt(&authority, &interrupted_plan.children[0].attempt_identity)
         .expect("interrupted attempt read")
@@ -836,7 +839,7 @@ for line in sys.stdin:
     ));
     assert!(
         database
-            .work_storage()
+            .work_storage(test_graph())
             .expect("Work storage")
             .execution_attempt(&authority, &cancelled_plan.children[0].attempt_identity)
             .expect("cancelled attempt read")
@@ -925,7 +928,7 @@ for line in sys.stdin:
         tracedecay_application::WorkflowExecutionTruthV1::Failed { .. }
     ));
     let failed_attempt = database
-        .work_storage()
+        .work_storage(test_graph())
         .expect("Work storage")
         .execution_attempt(&authority, &failed_plan.children[0].attempt_identity)
         .expect("failed attempt read")
@@ -936,7 +939,7 @@ for line in sys.stdin:
     );
     assert!(
         database
-            .work_storage()
+            .work_storage(test_graph())
             .expect("Work storage")
             .execution_attempt(&authority, &failed_plan.children[1].attempt_identity)
             .expect("pending fail-fast attempt read")

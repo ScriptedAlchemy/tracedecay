@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
@@ -14,11 +14,9 @@ use crate::mcp::tools::{MAX_RESPONSE_CHARS, ToolResult};
 use crate::sessions::git_correlation::{
     CommitRelationFilter, GitRefFilter, GitScopeFilter, SessionsForQuery,
 };
-use crate::sessions::lcm::compression_decision::{self, AssemblyCapInput};
 use crate::sessions::lcm::{
-    LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmCleanConfig, LcmCompressionRequest,
-    LcmContentSlice, LcmDescribeTarget, LcmExpandQueryRequest, LcmExpandTarget, LcmGcConfig,
-    LcmGrepSort, LcmPreflightRequest, LcmScope, LcmSessionBoundaryRequest, LcmSummarizerMode,
+    LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmContentSlice, LcmDescribeTarget,
+    LcmExpandQueryRequest, LcmExpandTarget, LcmGrepSort, LcmPreflightRequest, LcmScope,
 };
 use crate::sessions::shared::{content_storage_text_and_tools, preview_title};
 use crate::sessions::{
@@ -32,15 +30,14 @@ mod lcm_args;
 mod lcm_compact;
 mod lcm_handlers;
 mod lcm_storage;
-mod live_projection;
+pub(in crate::mcp::tools::handlers) mod live_projection;
 pub(crate) mod message_search;
 mod session_refresh;
 mod sessions_for;
 
 pub(super) use lcm_handlers::{
-    handle_lcm_compress, handle_lcm_describe, handle_lcm_doctor, handle_lcm_expand,
-    handle_lcm_expand_query, handle_lcm_grep, handle_lcm_load_session, handle_lcm_preflight,
-    handle_lcm_session_boundary, handle_lcm_status,
+    handle_lcm_describe, handle_lcm_doctor, handle_lcm_expand, handle_lcm_expand_query,
+    handle_lcm_grep, handle_lcm_load_session, handle_lcm_preflight, handle_lcm_status,
 };
 pub(super) use lcm_storage::LcmHandlerContext;
 pub(crate) use session_refresh::{

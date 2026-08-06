@@ -1,7 +1,7 @@
 //! Read-only, cheap-to-query storage observability (plan 38 §7): per-store
 //! size and free-page ratio for every registered profile-sharded store under
 //! a profile root, plus an unregistered-directory backlog summary —
-//! reachable from `tracedecay migrate storage-report` without a live daemon
+//! reachable from `tracedecay storage report` without a live daemon
 //! or any [`crate::global_db::RegisteredGlobalDb`] writer authority.
 //!
 //! # Why this does not snapshot stores in place
@@ -31,17 +31,14 @@ use tracedecay_runtime_core::sqlite_read_snapshot::{
 };
 
 use super::code_index_generations::{
-    CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-    GenerationDigestVerificationV1, plan_code_generation_retention_with_verification,
-    scoped_code_index_store_root,
+    CodeGenerationRetentionGenerationV1, scoped_code_index_store_root,
 };
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
 const PROJECT_CURSOR_PREFIX: &str = "projects:";
 const DIRECTORY_CURSOR_PREFIX: &str = "directories:";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
-const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
-const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
+const CODE_GENERATIONS_DIRECTORY: &str = "code-generations";
 
 /// One registered profile-sharded store's size/free-page snapshot.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -536,129 +533,24 @@ fn append_project_report(
     let code_index_store_root =
         scoped_code_index_store_root(&data_root.join("code-index-v1"), Path::new(canonical_root));
     if !code_index_store_root
-        .join("active-code-generation-v1.json")
+        .join("active-code-generation.json")
         .is_file()
     {
         return Ok(());
     }
-    let digest_scan_exceeds_budget = match generation_digest_scan_exceeds_budget(
-        &code_index_store_root,
-        CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES,
-    ) {
-        Ok(exceeds_budget) => exceeds_budget,
-        Err(_) => {
-            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-                project_id: project_id.to_owned(),
-                store_root: code_index_store_root.display().to_string(),
-                state: StorageReportAvailabilityState::Unavailable,
-                reason: Some("generation_retention_scan_unavailable".to_owned()),
-            });
-            return Ok(());
-        }
-    };
-    // Exceeding the digest budget bounds how hard the census may *verify*, not
-    // whether it may run. A single sealed generation is routinely larger than
-    // any budget cheap enough to be worth having, so treating this as
-    // "unavailable" reported nothing at all on exactly the profiles that had
-    // something to report.
-    let verification = if digest_scan_exceeds_budget {
-        GenerationDigestVerificationV1::MetadataOnly
-    } else {
-        GenerationDigestVerificationV1::Full
-    };
-    let readable_sources = match crate::store::vector_generations::retained_readable_sources_from_read_only_project_store(
-            &data_root,
-        ) {
-        Ok(readable_sources) => readable_sources,
-        Err(_) => {
-            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-                project_id: project_id.to_owned(),
-                store_root: code_index_store_root.display().to_string(),
-                state: StorageReportAvailabilityState::Unavailable,
-                reason: Some("generation_retention_liveness_unavailable".to_owned()),
-            });
-            return Ok(());
-        }
-    };
-    let plan = match plan_code_generation_retention_with_verification(
-        &code_index_store_root,
-        &readable_sources,
-        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        verification,
-    ) {
-        Ok(plan) => plan,
-        Err(_) => {
-            code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
-                project_id: project_id.to_owned(),
-                store_root: code_index_store_root.display().to_string(),
-                state: StorageReportAvailabilityState::Unavailable,
-                reason: Some("generation_retention_plan_unavailable".to_owned()),
-            });
-            return Ok(());
-        }
-    };
-    code_generation_retention.push(CodeGenerationRetentionDryRunEntry {
-        project_id: project_id.to_owned(),
-        store_root: code_index_store_root.display().to_string(),
-        active_generation_id: plan.active_generation_id.as_str().to_owned(),
-        active_generation_file: plan.active_generation_file().to_owned(),
-        vector_readable_sources: plan
-            .vector_readable_sources
-            .iter()
-            .map(|source| source.as_str().to_owned())
-            .collect(),
-        rollback_floor: plan.rollback_floor,
-        superseded_generation_count: plan.superseded_generations.len(),
-        superseded_generation_bytes: plan.superseded_generation_bytes(),
-        collectable_generation_count: plan.collectable_generations.len(),
-        collectable_generation_bytes: plan.collectable_generation_bytes(),
-        collectable_generations: plan.collectable_generations,
-        digest_verified: verification == GenerationDigestVerificationV1::Full,
-    });
-    let (state, reason) = match verification {
-        GenerationDigestVerificationV1::Full => (StorageReportAvailabilityState::Available, None),
-        GenerationDigestVerificationV1::MetadataOnly => (
-            StorageReportAvailabilityState::MetadataOnly,
-            Some("generation_digest_scan_budget_exceeded".to_owned()),
-        ),
-    };
+    // The offline report intentionally has no daemon-owned Grafeo handle.
+    // Without that authority it cannot prove which code generations remain
+    // reachable from published vector projections, so it reports the census
+    // as unavailable instead of consulting a removed SQLite inventory or
+    // fabricating an empty pin set. Live Doctor and daemon maintenance perform
+    // this census through the embedded graph registry.
     code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
         project_id: project_id.to_owned(),
         store_root: code_index_store_root.display().to_string(),
-        state,
-        reason,
+        state: StorageReportAvailabilityState::Unavailable,
+        reason: Some("generation_retention_requires_daemon_graph_authority".to_owned()),
     });
     Ok(())
-}
-
-fn generation_digest_scan_exceeds_budget(
-    store_root: &Path,
-    maximum_bytes: u64,
-) -> crate::errors::Result<bool> {
-    let entries = std::fs::read_dir(store_root.join(CODE_GENERATIONS_DIRECTORY))
-        .map_err(|error| report_error("list code-generation retention files", error))?;
-    let mut bytes = 0u64;
-    for entry in entries {
-        let entry =
-            entry.map_err(|error| report_error("read code-generation retention entry", error))?;
-        if !entry
-            .file_type()
-            .map_err(|error| report_error("read code-generation retention file type", error))?
-            .is_file()
-        {
-            continue;
-        }
-        bytes = bytes.saturating_add(
-            entry
-                .metadata()
-                .map_err(|error| report_error("size code-generation retention file", error))?
-                .len(),
-        );
-        if bytes > maximum_bytes {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// A store's sampled size. `total_bytes` is always available (filesystem
@@ -1279,7 +1171,7 @@ mod tests {
         let store_root =
             scoped_code_index_store_root(&data_root.join("code-index-v1"), canonical_root);
         std::fs::create_dir_all(store_root.join(CODE_GENERATIONS_DIRECTORY)).unwrap();
-        std::fs::write(store_root.join("active-code-generation-v1.json"), b"{}").unwrap();
+        std::fs::write(store_root.join("active-code-generation.json"), b"{}").unwrap();
 
         let report = build_project_storage_report(&profile_root, "proj_a", canonical_root).unwrap();
 
@@ -1319,9 +1211,9 @@ mod tests {
         let data_root = profile_root.join("projects").join("proj_a");
         let store_root =
             scoped_code_index_store_root(&data_root.join("code-index-v1"), canonical_root);
-        let generations = store_root.join("code-generations-v1");
+        let generations = store_root.join("code-generations");
         std::fs::create_dir_all(&generations).unwrap();
-        std::fs::write(store_root.join("active-code-generation-v1.json"), b"{}").unwrap();
+        std::fs::write(store_root.join("active-code-generation.json"), b"{}").unwrap();
         let oversized = std::fs::File::create(generations.join("generation-oversized.json"))
             .expect("oversized generation fixture");
         oversized

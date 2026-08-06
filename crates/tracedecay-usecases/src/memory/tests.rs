@@ -3,16 +3,17 @@ use std::sync::Mutex;
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId, Confidence,
     CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionId, FactEventId,
-    FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, ObservationScopeV1,
-    PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
-    ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, SourceStoreId,
-    UtcMicros, VectorWatermark,
+    FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FeedbackResultId,
+    ObservationScopeV1, PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectId, ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorId, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId,
+    SourceStoreId, UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
-    FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
-    FactLineageCursor, FactLineageResponseV1, FactProposalPromotionStateV1, FactQueryCoverageV1,
-    FactStoreResult,
+    CompatibilityFactFeedbackActionV1, FactAsOfResponseV1, FactCommitReceipt,
+    FactContradictionStateV1, FactCurrentResponseV1, FactFeedbackDetailsAvailability,
+    FactFeedbackHistoryEntry, FactLineageCursor, FactLineageResponseV1,
+    FactProposalPromotionStateV1, FactQueryCoverageV1, FactStoreResult,
 };
 
 use super::*;
@@ -35,7 +36,7 @@ struct FakeAuthority {
     legacy_queries: Mutex<Vec<LegacyFactQuery>>,
     legacy_result: Mutex<Option<FactId>>,
     anchor_queries: Mutex<Vec<RetrievalAnchorId>>,
-    feedback_history: Mutex<Option<CompatibilityFactFeedbackHistoryV1>>,
+    feedback_history: Mutex<Option<FactFeedbackHistoryPage>>,
     feedback_requests: Mutex<Vec<CompatibilityFactFeedbackCommandV1>>,
     compatibility_calls: Mutex<Vec<&'static str>>,
 }
@@ -152,6 +153,21 @@ impl FactStore for FakeAuthority {
         let events = self.query_fact_lineage(query).await?;
         let (coverage, contradiction) = unmeasured_response_metadata(!events.is_empty());
         Ok(FactLineageResponseV1::new(events, coverage, contradiction))
+    }
+
+    async fn query_fact_feedback_history(
+        &self,
+        _query: FactFeedbackHistoryQuery,
+    ) -> FactStoreResult<FactFeedbackHistoryPage> {
+        self.compatibility_calls
+            .lock()
+            .unwrap()
+            .push("feedback-history");
+        self.feedback_history
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(FactStoreError::InvalidQueryLimit { limit: 0, max: 1 })
     }
 
     async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {
@@ -349,21 +365,6 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn compatibility_fact_feedback_history(
-        &self,
-        _query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> Result<CompatibilityFactFeedbackHistoryV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("feedback-history");
-        self.feedback_history
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(compatibility_fixture_error)
-    }
-
     async fn find_compatibility_fact_by_content_digest(
         &self,
         _query: CompatibilityFactContentDigestQueryV1,
@@ -513,17 +514,6 @@ impl FactCompatibilityStore for FakeAuthority {
             .lock()
             .unwrap()
             .push("proposal-reject");
-        Err(compatibility_fixture_error())
-    }
-
-    async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        _request: CompatibilityFactProposalImportV1,
-    ) -> Result<CompatibilityFactProposalImportReceiptV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-import");
         Err(compatibility_fixture_error())
     }
 
@@ -1188,41 +1178,31 @@ async fn v1_feedback_defaults_an_omitted_source_to_mcp() {
 }
 
 #[tokio::test]
-async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
+async fn fact_trust_history_reads_the_canonical_feedback_page() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    *application.authority.feedback_history.lock().unwrap() = Some(
-        CompatibilityFactFeedbackHistoryV1::new_with_repair_progress(
-            owner(),
-            vec![],
-            None,
-            CompatibilityFeedbackRepairProgressV1::Incomplete {
-                processed: 1,
-                remaining: Some(2),
-            },
-        )
-        .unwrap(),
-    );
+    let canonical_fact_id = fact_id(owner(), "operation.feedback.history");
+    let result_id = FeedbackResultId::new("fact-event.v1.fixture-feedback-result").unwrap();
+    let entry = FactFeedbackHistoryEntry::new(
+        result_id.clone(),
+        UtcMicros(17),
+        CompatibilityFactFeedbackActionV1::Helpful,
+        Confidence::new(0.5).unwrap(),
+        Confidence::new(0.55).unwrap(),
+        Some("mcp".to_owned()),
+        Some("confirmed".to_owned()),
+        FactFeedbackDetailsAvailability::Available,
+    )
+    .unwrap();
+    *application.authority.legacy_result.lock().unwrap() = Some(canonical_fact_id);
+    *application.authority.feedback_history.lock().unwrap() =
+        Some(FactFeedbackHistoryPage::new(owner(), vec![entry], None).unwrap());
 
-    let typed = application
-        .fact_trust_history_with_progress_v1(1, 10)
-        .await
-        .unwrap();
-    assert!(typed.entries.is_empty());
-    assert!(matches!(
-        typed.repair_progress,
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
-            processed: 1,
-            remaining: Some(2)
-        }
-    ));
-
-    let error = application.fact_trust_history_v1(1, 10).await.unwrap_err();
-    assert!(matches!(
-        error,
-        MemoryApplicationError::FeedbackHistoryUnavailable {
-            progress: CompatibilityFeedbackRepairProgressV1::Incomplete { .. }
-        }
-    ));
+    let history = application.fact_trust_history_v1(1, 10).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].result_id, result_id);
+    assert_eq!(history[0].action, FeedbackAction::Helpful);
+    assert_eq!(history[0].source, "mcp");
+    assert_eq!(history[0].note.as_deref(), Some("confirmed"));
     assert_eq!(
         application
             .authority
@@ -1230,7 +1210,7 @@ async fn v1_trust_history_never_claims_incomplete_repair_is_complete() {
             .lock()
             .unwrap()
             .as_slice(),
-        ["feedback-history", "feedback-history"]
+        ["feedback-history"]
     );
 }
 

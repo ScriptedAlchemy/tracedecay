@@ -333,6 +333,10 @@ impl McpToolDispatchControl {
         self.inner.policy.externally_cancellable
     }
 
+    pub(crate) fn cancel_from_transport(&self) -> bool {
+        self.externally_cancellable() && self.terminate(McpRequestTermination::Cancelled)
+    }
+
     pub(crate) fn check(&self, stage: McpToolDispatchStage) -> Result<()> {
         if stage != McpToolDispatchStage::ResponseWrite
             && (McpRequestTermination::from_raw(self.inner.termination.load(Ordering::Acquire))

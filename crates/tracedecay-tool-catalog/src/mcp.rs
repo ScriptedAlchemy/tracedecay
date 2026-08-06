@@ -4,7 +4,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    CancellationContract, CatalogDigest, EffectClass, PaginationContract, StreamingContract,
+    CancellationContract, CatalogDigest, DeadlineBehavior, DeadlineContract, EffectClass,
+    PaginationContract, StreamingContract,
 };
 
 pub const MCP_DISPATCH_CONTRACT_VERSION: u32 = 1;
@@ -28,6 +29,7 @@ impl McpDispatchAvailability {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpDispatchUnavailableReason {
+    SurfaceNotMounted,
     EffectJourneyUnverified,
 }
 
@@ -65,30 +67,12 @@ pub enum McpTerminalState {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct McpDeadlineContractV1 {
-    maximum_millis: u64,
-}
-
-impl McpDeadlineContractV1 {
-    pub fn new(maximum_millis: u64) -> Result<Self, McpDispatchCatalogError> {
-        if maximum_millis == 0 {
-            return Err(McpDispatchCatalogError::InvalidDeadline);
-        }
-        Ok(Self { maximum_millis })
-    }
-
-    pub const fn maximum_millis(self) -> u64 {
-        self.maximum_millis
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct McpDispatchContractInputV1 {
     pub tool_name: String,
     pub availability: McpDispatchAvailability,
     pub effect: EffectClass,
-    pub deadline: McpDeadlineContractV1,
+    pub deadline: DeadlineContract,
     pub idempotency: McpIdempotencyContract,
     pub inverse: McpInverseContract,
     pub cancellation: CancellationContract,
@@ -103,7 +87,7 @@ pub struct McpDispatchContractV1 {
     availability: McpDispatchAvailability,
     effect: EffectClass,
     read_only: bool,
-    deadline: McpDeadlineContractV1,
+    deadline: DeadlineContract,
     idempotency: McpIdempotencyContract,
     inverse: McpInverseContract,
     cancellation: CancellationContract,
@@ -165,6 +149,16 @@ impl McpDispatchContractV1 {
                 tool_name: input.tool_name,
             });
         }
+        let deadline_matches_effect = matches!(
+            (input.effect.is_read_only(), input.deadline.behavior()),
+            (true, DeadlineBehavior::ReturnOperationReceipt)
+                | (false, DeadlineBehavior::ReturnEffectReceipt)
+        );
+        if !deadline_matches_effect {
+            return Err(McpDispatchCatalogError::InvalidDeadlineBehavior {
+                tool_name: input.tool_name,
+            });
+        }
         Ok(Self {
             read_only: input.effect.is_read_only(),
             tool_name: input.tool_name,
@@ -196,8 +190,8 @@ impl McpDispatchContractV1 {
         self.read_only
     }
 
-    pub const fn deadline(&self) -> McpDeadlineContractV1 {
-        self.deadline
+    pub const fn deadline(&self) -> &DeadlineContract {
+        &self.deadline
     }
 
     pub const fn idempotency(&self) -> McpIdempotencyContract {
@@ -274,8 +268,6 @@ impl McpDispatchCatalogV1 {
 pub enum McpDispatchCatalogError {
     #[error("MCP dispatch catalog cannot be empty")]
     EmptyCatalog,
-    #[error("MCP dispatch deadline must be greater than zero")]
-    InvalidDeadline,
     #[error("MCP dispatch tool name cannot be empty")]
     EmptyToolName,
     #[error("MCP dispatch tool '{tool_name}' has no terminal states")]
@@ -291,6 +283,8 @@ pub enum McpDispatchCatalogError {
     InvalidCancellationTerminal { tool_name: String },
     #[error("MCP dispatch tool '{tool_name}' has an inverse inconsistent with its effect")]
     InvalidInverse { tool_name: String },
+    #[error("MCP dispatch tool '{tool_name}' has deadline behavior inconsistent with its effect")]
+    InvalidDeadlineBehavior { tool_name: String },
     #[error("MCP dispatch tool '{tool_name}' is declared more than once")]
     DuplicateToolName { tool_name: String },
     #[error("MCP dispatch catalog fingerprint serialization failed: {0}")]
@@ -307,7 +301,8 @@ mod tests {
             tool_name: name.to_owned(),
             availability: McpDispatchAvailability::Available,
             effect: EffectClass::Read,
-            deadline: McpDeadlineContractV1::new(1_000).unwrap(),
+            deadline: DeadlineContract::new(1_000, crate::DeadlineBehavior::ReturnOperationReceipt)
+                .unwrap(),
             idempotency: McpIdempotencyContract::NotProvided,
             inverse: McpInverseContract::NotApplicable,
             cancellation: CancellationContract::cooperative(vec![
@@ -336,12 +331,23 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_contract_preserves_canonical_deadline_behavior() {
+        let serialized = serde_json::to_value(contract("read")).unwrap();
+        assert_eq!(serialized["deadline"]["maximum_millis"], 1_000);
+        assert_eq!(
+            serialized["deadline"]["behavior"],
+            "return_operation_receipt"
+        );
+    }
+
+    #[test]
     fn read_contract_rejects_callable_inverse() {
         let mut input = McpDispatchContractInputV1 {
             tool_name: "read".to_owned(),
             availability: McpDispatchAvailability::Available,
             effect: EffectClass::Read,
-            deadline: McpDeadlineContractV1::new(1_000).unwrap(),
+            deadline: DeadlineContract::new(1_000, crate::DeadlineBehavior::ReturnOperationReceipt)
+                .unwrap(),
             idempotency: McpIdempotencyContract::NotProvided,
             inverse: McpInverseContract::Tool {
                 tool_name: "write".to_owned(),
@@ -362,6 +368,45 @@ mod tests {
             Err(McpDispatchCatalogError::InvalidInverse { .. })
         ));
         input.effect = EffectClass::Administrative;
+        input.deadline =
+            DeadlineContract::new(1_000, crate::DeadlineBehavior::ReturnEffectReceipt).unwrap();
         assert!(McpDispatchContractV1::new(input).is_ok());
+    }
+
+    #[test]
+    fn dispatch_contract_rejects_deadline_behavior_for_the_wrong_effect_class() {
+        let mut input = McpDispatchContractInputV1 {
+            tool_name: "effect".to_owned(),
+            availability: McpDispatchAvailability::Available,
+            effect: EffectClass::Administrative,
+            deadline: DeadlineContract::new(1_000, crate::DeadlineBehavior::ReturnOperationReceipt)
+                .unwrap(),
+            idempotency: McpIdempotencyContract::NotProvided,
+            inverse: McpInverseContract::Unavailable {
+                reason: McpInverseUnavailableReason::NoVerifiedInverse,
+            },
+            cancellation: CancellationContract::NotCancellable,
+            terminal_states: vec![
+                McpTerminalState::Completed,
+                McpTerminalState::DeadlineExceeded,
+                McpTerminalState::Denied,
+                McpTerminalState::Failed,
+                McpTerminalState::Unavailable,
+            ],
+            pagination: None,
+            streaming: None,
+        };
+        assert!(matches!(
+            McpDispatchContractV1::new(input.clone()),
+            Err(McpDispatchCatalogError::InvalidDeadlineBehavior { .. })
+        ));
+        input.effect = EffectClass::Read;
+        input.inverse = McpInverseContract::NotApplicable;
+        input.deadline =
+            DeadlineContract::new(1_000, crate::DeadlineBehavior::ReturnEffectReceipt).unwrap();
+        assert!(matches!(
+            McpDispatchContractV1::new(input),
+            Err(McpDispatchCatalogError::InvalidDeadlineBehavior { .. })
+        ));
     }
 }

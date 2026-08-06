@@ -64,6 +64,34 @@ async fn malformed_unsupported_filters_are_rejected_without_broadening() {
 }
 
 #[tokio::test]
+async fn deadline_and_cancellation_render_distinct_lcm_terminals() {
+    for (outcome, status, code) in [
+        (
+            SessionRetrievalServiceOutcome::Cancelled,
+            "cancelled",
+            "lcm_retrieval_cancelled",
+        ),
+        (
+            SessionRetrievalServiceOutcome::DeadlineExceeded,
+            "timed_out",
+            "lcm_retrieval_deadline_exceeded",
+        ),
+    ] {
+        let service = RecordingService::new(outcome);
+        let response = payload(
+            handle_lcm_grep(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({"query": "bounded", "format": "json"}),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(response["status"], status);
+        assert_eq!(response["error"]["code"], code);
+    }
+}
+
+#[tokio::test]
 async fn cursor_failures_and_legacy_numeric_cursor_are_typed_without_db_fallback() {
     let denied = RecordingService::new(SessionRetrievalServiceOutcome::Denied);
     let denied_context = LcmHandlerContext::user(Path::new("/missing"), None, Some(&denied));

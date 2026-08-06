@@ -73,8 +73,8 @@ pub(super) fn fixture() -> Fixture {
                   'inline', 'one', 'one'),
                  ('codex', 'message-2', 'session-1', 'assistant', 1, 'two', 'hash-2',
                   'inline', 'two', 'two');
-             INSERT INTO session_temporal_schema_migrations
-             VALUES ('session-temporal', 3, 1);
+             INSERT INTO session_temporal_schema_state
+             VALUES ('session-temporal', 1, 1);
              INSERT INTO session_temporal_generations(
                  session_id, generation, state, frozen_watermarks_json, created_at
              ) VALUES ('session-1', 1, 'ready', '{}', 1);

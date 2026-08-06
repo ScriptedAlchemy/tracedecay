@@ -1,10 +1,3 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
-
-use crate::global_db_operation_error;
-
-use super::rows::authority_violation;
-use super::{OPERATION, normalize_trigger_sql};
-
 pub(in crate::schema_contract) struct Trigger {
     pub(in crate::schema_contract) name: &'static str,
     pub(in crate::schema_contract) table: &'static str,
@@ -70,183 +63,6 @@ const SOURCE_CURSOR_ADVANCE_IMMUTABILITY: &[Trigger] = &[
         create_sql: "CREATE TRIGGER source_cursor_advances_immutable_delete_v1
             BEFORE DELETE ON source_cursor_advances BEGIN
                 SELECT RAISE(ABORT, 'source cursor advances are immutable');
-            END",
-    },
-];
-
-const PROJECTION_AUDIT_INVALIDATION: &[Trigger] = &[
-    Trigger {
-        name: "receipt_audit_invalidate_nonappend_insert_v1",
-        table: "sanitization_receipts",
-        create_sql: "CREATE TRIGGER receipt_audit_invalidate_nonappend_insert_v1
-            AFTER INSERT ON sanitization_receipts
-            WHEN NEW.rowid <= COALESCE((
-                SELECT receipt_rowid FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority'
-            ), 0) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "observation_audit_invalidate_nonappend_insert_v1",
-        table: "observations",
-        create_sql: "CREATE TRIGGER observation_audit_invalidate_nonappend_insert_v1
-            AFTER INSERT ON observations
-            WHEN NEW.sequence <= COALESCE((
-                SELECT observation_sequence FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority'
-            ), 0) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "source_cursor_audit_invalidate_key_update_v1",
-        table: "source_cursors",
-        create_sql: "CREATE TRIGGER source_cursor_audit_invalidate_key_update_v1
-            AFTER UPDATE OF source_json, scope_json ON source_cursors BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "source_cursor_audit_invalidate_delete_v1",
-        table: "source_cursors",
-        create_sql: "CREATE TRIGGER source_cursor_audit_invalidate_delete_v1
-            AFTER DELETE ON source_cursors BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_provenance_audit_invalidate_update_v1",
-        table: "observation_projection_provenance",
-        create_sql: "CREATE TRIGGER projection_provenance_audit_invalidate_update_v1
-            AFTER UPDATE ON observation_projection_provenance BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_provenance_audit_invalidate_delete_v1",
-        table: "observation_projection_provenance",
-        create_sql: "CREATE TRIGGER projection_provenance_audit_invalidate_delete_v1
-            AFTER DELETE ON observation_projection_provenance BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "workflow_fact_audit_invalidate_insert_v1",
-        table: "observation_workflow_facts",
-        create_sql: "CREATE TRIGGER workflow_fact_audit_invalidate_insert_v1
-            AFTER INSERT ON observation_workflow_facts BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "workflow_fact_audit_invalidate_update_v1",
-        table: "observation_workflow_facts",
-        create_sql: "CREATE TRIGGER workflow_fact_audit_invalidate_update_v1
-            AFTER UPDATE ON observation_workflow_facts BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "workflow_fact_audit_invalidate_delete_v1",
-        table: "observation_workflow_facts",
-        create_sql: "CREATE TRIGGER workflow_fact_audit_invalidate_delete_v1
-            AFTER DELETE ON observation_workflow_facts BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_disposition_audit_invalidate_update_v1",
-        table: "observation_projection_dispositions",
-        create_sql: "CREATE TRIGGER projection_disposition_audit_invalidate_update_v1
-            AFTER UPDATE ON observation_projection_dispositions BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_disposition_audit_invalidate_delete_v1",
-        table: "observation_projection_dispositions",
-        create_sql: "CREATE TRIGGER projection_disposition_audit_invalidate_delete_v1
-            AFTER DELETE ON observation_projection_dispositions BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_alias_audit_invalidate_update_v1",
-        table: "observation_projection_aliases",
-        create_sql: "CREATE TRIGGER projection_alias_audit_invalidate_update_v1
-            AFTER UPDATE ON observation_projection_aliases BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_alias_audit_invalidate_delete_v1",
-        table: "observation_projection_aliases",
-        create_sql: "CREATE TRIGGER projection_alias_audit_invalidate_delete_v1
-            AFTER DELETE ON observation_projection_aliases BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_output_audit_invalidate_update_v1",
-        table: "session_messages",
-        create_sql: "CREATE TRIGGER projection_output_audit_invalidate_update_v1
-            AFTER UPDATE ON session_messages
-            WHEN EXISTS (
-                SELECT 1 FROM observation_projection_provenance
-                WHERE projector_version = 'claude-session-message-v4'
-                  AND output_provider = OLD.provider
-                  AND output_message_id = OLD.message_id
-            ) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_output_audit_invalidate_delete_v1",
-        table: "session_messages",
-        create_sql: "CREATE TRIGGER projection_output_audit_invalidate_delete_v1
-            AFTER DELETE ON session_messages
-            WHEN EXISTS (
-                SELECT 1 FROM observation_projection_provenance
-                WHERE projector_version = 'claude-session-message-v4'
-                  AND output_provider = OLD.provider
-                  AND output_message_id = OLD.message_id
-            ) BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_checkpoint_audit_invalidate_regression_v1",
-        table: "observation_projection_checkpoints",
-        create_sql: "CREATE TRIGGER projection_checkpoint_audit_invalidate_regression_v1
-            AFTER UPDATE OF last_sequence ON observation_projection_checkpoints
-            WHEN NEW.last_sequence < OLD.last_sequence BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
-            END",
-    },
-    Trigger {
-        name: "projection_checkpoint_audit_invalidate_delete_v1",
-        table: "observation_projection_checkpoints",
-        create_sql: "CREATE TRIGGER projection_checkpoint_audit_invalidate_delete_v1
-            AFTER DELETE ON observation_projection_checkpoints BEGIN
-                DELETE FROM authority_audit_checkpoints
-                WHERE audit_name = 'observation-authority';
             END",
     },
 ];
@@ -431,38 +247,6 @@ const SESSION_SUMMARY_AUTHORITY_IMMUTABILITY: &[Trigger] = &[
             END",
     },
     Trigger {
-        name: "session_summary_sources_immutable_update_v1",
-        table: "session_summary_sources",
-        create_sql: "CREATE TRIGGER session_summary_sources_immutable_update_v1
-            BEFORE UPDATE ON session_summary_sources BEGIN
-                SELECT RAISE(ABORT, 'session summary sources are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_summary_sources_immutable_delete_v1",
-        table: "session_summary_sources",
-        create_sql: "CREATE TRIGGER session_summary_sources_immutable_delete_v1
-            BEFORE DELETE ON session_summary_sources BEGIN
-                SELECT RAISE(ABORT, 'session summary sources are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_summary_successors_immutable_update_v1",
-        table: "session_summary_successors",
-        create_sql: "CREATE TRIGGER session_summary_successors_immutable_update_v1
-            BEFORE UPDATE ON session_summary_successors BEGIN
-                SELECT RAISE(ABORT, 'session summary successors are immutable');
-            END",
-    },
-    Trigger {
-        name: "session_summary_successors_immutable_delete_v1",
-        table: "session_summary_successors",
-        create_sql: "CREATE TRIGGER session_summary_successors_immutable_delete_v1
-            BEFORE DELETE ON session_summary_successors BEGIN
-                SELECT RAISE(ABORT, 'session summary successors are immutable');
-            END",
-    },
-    Trigger {
         name: "session_external_payload_manifests_immutable_update_v1",
         table: "session_external_payload_manifests",
         create_sql: "CREATE TRIGGER session_external_payload_manifests_immutable_update_v1
@@ -630,35 +414,35 @@ const SESSION_RECEIPT_IMMUTABILITY: &[Trigger] = &[
             END",
     },
     Trigger {
-        name: "session_temporal_migration_receipts_immutable_update_v1",
-        table: "session_temporal_migration_receipts",
-        create_sql: "CREATE TRIGGER session_temporal_migration_receipts_immutable_update_v1
-            BEFORE UPDATE ON session_temporal_migration_receipts BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration receipts are immutable');
+        name: "session_temporal_ingest_receipts_immutable_update_v1",
+        table: "session_temporal_ingest_receipts",
+        create_sql: "CREATE TRIGGER session_temporal_ingest_receipts_immutable_update_v1
+            BEFORE UPDATE ON session_temporal_ingest_receipts BEGIN
+                SELECT RAISE(ABORT, 'session temporal ingest receipts are immutable');
             END",
     },
     Trigger {
-        name: "session_temporal_migration_receipts_immutable_delete_v1",
-        table: "session_temporal_migration_receipts",
-        create_sql: "CREATE TRIGGER session_temporal_migration_receipts_immutable_delete_v1
-            BEFORE DELETE ON session_temporal_migration_receipts BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration receipts are immutable');
+        name: "session_temporal_ingest_receipts_immutable_delete_v1",
+        table: "session_temporal_ingest_receipts",
+        create_sql: "CREATE TRIGGER session_temporal_ingest_receipts_immutable_delete_v1
+            BEFORE DELETE ON session_temporal_ingest_receipts BEGIN
+                SELECT RAISE(ABORT, 'session temporal ingest receipts are immutable');
             END",
     },
     Trigger {
-        name: "session_temporal_migration_dispositions_immutable_update_v1",
-        table: "session_temporal_migration_dispositions",
-        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_update_v1
-            BEFORE UPDATE ON session_temporal_migration_dispositions BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
+        name: "session_temporal_ingest_dispositions_immutable_update_v1",
+        table: "session_temporal_ingest_dispositions",
+        create_sql: "CREATE TRIGGER session_temporal_ingest_dispositions_immutable_update_v1
+            BEFORE UPDATE ON session_temporal_ingest_dispositions BEGIN
+                SELECT RAISE(ABORT, 'session temporal ingest dispositions are immutable');
             END",
     },
     Trigger {
-        name: "session_temporal_migration_dispositions_immutable_delete_v1",
-        table: "session_temporal_migration_dispositions",
-        create_sql: "CREATE TRIGGER session_temporal_migration_dispositions_immutable_delete_v1
-            BEFORE DELETE ON session_temporal_migration_dispositions BEGIN
-                SELECT RAISE(ABORT, 'session temporal migration dispositions are immutable');
+        name: "session_temporal_ingest_dispositions_immutable_delete_v1",
+        table: "session_temporal_ingest_dispositions",
+        create_sql: "CREATE TRIGGER session_temporal_ingest_dispositions_immutable_delete_v1
+            BEFORE DELETE ON session_temporal_ingest_dispositions BEGIN
+                SELECT RAISE(ABORT, 'session temporal ingest dispositions are immutable');
             END",
     },
 ];
@@ -879,9 +663,6 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                                 (SELECT COUNT(*) FROM session_occurrences
                                  WHERE session_id = binding.session_id
                                    AND generation = binding.generation)
-                                + (SELECT COUNT(*) FROM session_logical_copy_edges
-                                   WHERE session_id = binding.session_id
-                                     AND generation = binding.generation)
                                 + (SELECT COUNT(*) FROM session_assertions
                                    WHERE session_id = binding.session_id
                                      AND generation = binding.generation)
@@ -1057,9 +838,6 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                                 (SELECT COUNT(*) FROM session_occurrences
                                  WHERE session_id = binding.session_id
                                    AND generation = binding.generation)
-                                + (SELECT COUNT(*) FROM session_logical_copy_edges
-                                   WHERE session_id = binding.session_id
-                                     AND generation = binding.generation)
                                 + (SELECT COUNT(*) FROM session_assertions
                                    WHERE session_id = binding.session_id
                                      AND generation = binding.generation)
@@ -1215,34 +993,6 @@ const SESSION_CURSOR_KEY_GUARDS: &[Trigger] = &[
 
 const SESSION_SUMMARY_OWNER_GUARDS: &[Trigger] = &[
     Trigger {
-        name: "session_summary_sources_owner_guard_v1",
-        table: "session_summary_sources",
-        create_sql: "CREATE TRIGGER session_summary_sources_owner_guard_v1
-            BEFORE INSERT ON session_summary_sources
-            WHEN NEW.source_summary_id IS NOT NULL AND NOT EXISTS (
-                SELECT 1
-                FROM session_summary_nodes AS target
-                JOIN session_summary_nodes AS source
-                  ON source.summary_id = NEW.source_summary_id
-                WHERE target.summary_id = NEW.summary_id
-                  AND target.session_id = source.session_id
-            ) BEGIN SELECT RAISE(ABORT, 'session summary source crosses sessions'); END",
-    },
-    Trigger {
-        name: "session_summary_successors_owner_guard_v1",
-        table: "session_summary_successors",
-        create_sql: "CREATE TRIGGER session_summary_successors_owner_guard_v1
-            BEFORE INSERT ON session_summary_successors
-            WHEN NOT EXISTS (
-                SELECT 1
-                FROM session_summary_nodes AS predecessor
-                JOIN session_summary_nodes AS successor
-                  ON successor.summary_id = NEW.successor_summary_id
-                WHERE predecessor.summary_id = NEW.predecessor_summary_id
-                  AND predecessor.session_id = successor.session_id
-            ) BEGIN SELECT RAISE(ABORT, 'session summary successor crosses sessions'); END",
-    },
-    Trigger {
         name: "session_external_payload_manifests_owner_guard_v1",
         table: "session_external_payload_manifests",
         create_sql: "CREATE TRIGGER session_external_payload_manifests_owner_guard_v1
@@ -1355,11 +1105,6 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
         triggers: RECEIPT_IMMUTABILITY,
         audit_query: None,
         violation: "sanitization receipt immutability trigger contract is unavailable",
-    },
-    Invariant {
-        triggers: PROJECTION_AUDIT_INVALIDATION,
-        audit_query: None,
-        violation: "projection authority audit invalidation contract is unavailable",
     },
     Invariant {
         triggers: STORE_PROJECT_IMMUTABILITY,
@@ -1480,17 +1225,8 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
     },
     Invariant {
         triggers: SESSION_SUMMARY_AUTHORITY_IMMUTABILITY,
-        audit_query: Some(
-            "SELECT 1
-             FROM session_summary_successors AS edge
-             JOIN session_summary_nodes AS predecessor
-               ON predecessor.summary_id = edge.predecessor_summary_id
-             JOIN session_summary_nodes AS successor
-               ON successor.summary_id = edge.successor_summary_id
-             WHERE predecessor.session_id <> successor.session_id
-             LIMIT 1",
-        ),
-        violation: "session summary authority is mutable or crosses sessions",
+        audit_query: None,
+        violation: "session summary SQL content authority is mutable",
     },
     Invariant {
         triggers: SESSION_RECEIPT_IMMUTABILITY,
@@ -1691,111 +1427,6 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
         violation: "session temporal full-text trigger contract is unavailable",
     },
 ];
-
-pub(super) async fn replace_trigger(
-    conn: &impl Executor,
-    trigger: &Trigger,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    conn.execute_batch(trigger.create_sql)
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))
-}
-
-pub(super) async fn trigger_contracts_intact(
-    conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
-    for invariant in INVARIANTS {
-        for trigger in invariant.triggers {
-            if !trigger_matches(conn, trigger).await? {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
-}
-
-async fn trigger_matches(
-    conn: &impl QueryExecutor,
-    trigger: &Trigger,
-) -> tracedecay_runtime_core::errors::Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT tbl_name, sql FROM sqlite_master
-             WHERE type = 'trigger' AND name = ?1 COLLATE NOCASE",
-            params![trigger.name],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    else {
-        return Ok(false);
-    };
-    let table = row
-        .get::<String>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let sql = row
-        .get::<String>(1)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(table.eq_ignore_ascii_case(trigger.table)
-        && normalize_trigger_sql(&sql) == normalize_trigger_sql(trigger.create_sql))
-}
-
-pub async fn suspend_immutability_for_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
-        if !trigger_matches(conn, trigger).await? {
-            return Err(authority_violation(format!(
-                "cannot suspend incompatible canonical authority trigger '{}'",
-                trigger.name
-            )));
-        }
-    }
-    for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
-        conn.execute(&format!("DROP TRIGGER \"{}\"", trigger.name), ())
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    }
-    Ok(())
-}
-
-pub async fn restore_immutability_after_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    for trigger in OBSERVATION_IMMUTABILITY.iter().chain(RECEIPT_IMMUTABILITY) {
-        replace_trigger(conn, trigger).await?;
-        if !trigger_matches(conn, trigger).await? {
-            return Err(authority_violation(format!(
-                "canonical authority trigger '{}' was not restored",
-                trigger.name
-            )));
-        }
-    }
-    Ok(())
-}
-
-pub async fn suspend_session_invariants_for_schema_upgrade(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    for invariant in INVARIANTS {
-        for trigger in invariant
-            .triggers
-            .iter()
-            .filter(|trigger| trigger.table.starts_with("session_"))
-        {
-            conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        }
-    }
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

@@ -10,8 +10,8 @@ use tracedecay::global_db::{
     GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay::storage::{
-    BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, write_store_manifest_to_path,
+    SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
+    write_store_manifest_to_path,
 };
 
 static GLOBAL_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
@@ -73,7 +73,6 @@ fn write_observation_store_manifest(
             data_root: paths.0.clone(),
             graph_db_relpath: PathBuf::from("tracedecay.db"),
             sessions_db_relpath: PathBuf::from(SESSIONS_DB_FILENAME),
-            branch_meta_relpath: PathBuf::from(BRANCH_META_FILENAME),
         },
     )
     .unwrap();
@@ -976,21 +975,16 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
     upsert_test_store(&db, "proj_retained", "store_retained").await;
     close_profile_runtime(db).await;
 
-    let runtime = tracedecay::migrate::registry::MigrationRegistryRuntime::open(profile.path())
+    let runtime = tracedecay::daemon::ProfileRegistryMaintenance::try_open_existing(profile.path())
         .await
+        .unwrap()
         .unwrap();
-    let preview = runtime
-        .registry_gc(profile.path(), None, false)
-        .await
-        .unwrap();
+    let preview = runtime.registry_gc(None, false).await.unwrap();
     assert_eq!(preview.code_project_candidate_count, 1);
     assert_eq!(preview.storage_project_candidate_count, 2);
     assert_eq!(preview.protected_code_project_count, 1);
 
-    let applied = runtime
-        .registry_gc(profile.path(), None, true)
-        .await
-        .unwrap();
+    let applied = runtime.registry_gc(None, true).await.unwrap();
     assert_eq!(applied.deleted_code_project_count, 1);
     assert_eq!(applied.deleted_storage_project_count, 2);
     drop(runtime);

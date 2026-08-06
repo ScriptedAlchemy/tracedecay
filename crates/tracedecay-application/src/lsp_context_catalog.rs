@@ -116,6 +116,7 @@ pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, Appli
                 TerminalState::Completed,
                 TerminalState::Cancelled,
                 TerminalState::TimedOut,
+                TerminalState::Unavailable,
                 TerminalState::Failed,
                 TerminalState::Partial,
             ])?,

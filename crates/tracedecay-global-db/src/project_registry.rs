@@ -311,79 +311,6 @@ fn native_project_path_alias_decode_error(error: String) -> String {
     }
 }
 
-/// Row batch size for the canonical-key migration's upsert/delete statements.
-/// Each upserted row binds 2 params and each deleted row binds 1, so this
-/// stays well under SQLite's default `SQLITE_LIMIT_VARIABLE_NUMBER` (999).
-const CANONICAL_KEY_MIGRATION_CHUNK: usize = 400;
-
-pub(super) async fn migrate_project_rows_to_canonical_keys(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::db::engine::Result<()> {
-    let mut rows = conn
-        .query("SELECT path, tokens_saved FROM projects", ())
-        .await?;
-    let mut replacements = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let old_path = row.get::<String>(0)?;
-        let tokens_saved = row.get::<i64>(1)?;
-        let canonical_path = canonical_project_path(Path::new(&old_path))
-            .to_string_lossy()
-            .into_owned();
-        if old_path != canonical_path {
-            replacements.push((old_path, canonical_path, tokens_saved));
-        }
-    }
-    drop(rows);
-    if replacements.is_empty() {
-        return Ok(());
-    }
-
-    // Multiple drifted paths can canonicalize to the same target (e.g. two
-    // differently-cased aliases of one project), and that target may already
-    // have its own row. The old per-row loop merged these one at a time via
-    // `INSERT ... ON CONFLICT DO UPDATE SET tokens_saved = MAX(...)`, so each
-    // upsert's MAX ran against whatever the target held after the previous
-    // one. MAX is associative and commutative, so pre-merging every drifted
-    // row's `tokens_saved` per canonical target here (before the batched
-    // upsert) reaches the identical final value in one pass.
-    let mut merged_by_canonical: BTreeMap<String, i64> = BTreeMap::new();
-    let mut old_paths = Vec::with_capacity(replacements.len());
-    for (old_path, canonical_path, tokens_saved) in replacements {
-        merged_by_canonical
-            .entry(canonical_path)
-            .and_modify(|existing| *existing = (*existing).max(tokens_saved))
-            .or_insert(tokens_saved);
-        old_paths.push(old_path);
-    }
-    let merged = merged_by_canonical.into_iter().collect::<Vec<_>>();
-
-    for chunk in merged.chunks(CANONICAL_KEY_MIGRATION_CHUNK) {
-        let placeholders = vec!["(?, ?)"; chunk.len()].join(",");
-        let sql = format!(
-            "INSERT INTO projects (path, tokens_saved) VALUES {placeholders}
-             ON CONFLICT(path) DO UPDATE SET
-                tokens_saved = MAX(tokens_saved, excluded.tokens_saved)"
-        );
-        let mut values = Vec::with_capacity(chunk.len() * 2);
-        for (canonical_path, tokens_saved) in chunk {
-            values.push(Value::Text(canonical_path.clone()));
-            values.push(Value::Integer(*tokens_saved));
-        }
-        conn.execute(&sql, values).await?;
-    }
-
-    for chunk in old_paths.chunks(CANONICAL_KEY_MIGRATION_CHUNK) {
-        let placeholders = vec!["?"; chunk.len()].join(",");
-        let sql = format!("DELETE FROM projects WHERE path IN ({placeholders})");
-        let values = chunk
-            .iter()
-            .map(|old_path| Value::Text(old_path.clone()))
-            .collect::<Vec<_>>();
-        conn.execute(&sql, values).await?;
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy)]
 struct ProjectRegistryDatabase<'db>(&'db RegisteredGlobalDb);
 
@@ -1494,7 +1421,7 @@ impl RegisteredGlobalDb {
     ///
     /// A missing path is *not* evidence that data is disposable. An authority
     /// whose store directory still exists on disk is always retained with a
-    /// reason: that store may hold facts, sessions, or branch graphs that
+    /// reason: that store may hold facts, sessions, or project graph data that
     /// exist nowhere else, and reclaiming it is a separate, verified
     /// operation. Nothing in planning or applying a reap deletes a file.
     ///

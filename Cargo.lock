@@ -2110,11 +2110,13 @@ checksum = "752493cd4b1d5eaaa0138a7493f65c96863fefa990fc021e0e519579e389ab20"
 dependencies = [
  "bytes",
  "crc32fast",
+ "crossbeam-channel",
  "gix-path",
  "gix-trace",
  "gix-utils",
  "libc",
  "once_cell",
+ "parking_lot",
  "prodash",
  "thiserror",
  "walkdir",
@@ -5696,11 +5698,11 @@ dependencies = [
  "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
  "tracedecay-jsonrpc",
  "tracedecay-lsp",
- "tracedecay-migrate",
  "tracedecay-policy",
  "tracedecay-query",
  "tracedecay-runtime-core",
@@ -5919,6 +5921,7 @@ dependencies = [
  "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-domain",
+ "tracedecay-graph-db",
  "tracedecay-query",
  "tracedecay-runtime-core",
  "tracedecay-rusqlite-runtime",
@@ -5990,34 +5993,6 @@ dependencies = [
  "tokio",
  "tracedecay-domain",
  "url",
-]
-
-[[package]]
-name = "tracedecay-migrate"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "fs2",
- "getrandom 0.2.17",
- "gix",
- "hex",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "tokio",
- "tracedecay-agent-hosts",
- "tracedecay-application",
- "tracedecay-automation",
- "tracedecay-domain",
- "tracedecay-global-db",
- "tracedecay-runtime-core",
- "tracedecay-rusqlite-runtime",
- "tracedecay-sessions",
- "tracedecay-store",
- "tracedecay-usecases",
- "tracing",
 ]
 
 [[package]]
@@ -6118,6 +6093,7 @@ dependencies = [
  "tokio",
  "tracedecay-application",
  "tracedecay-domain",
+ "tracedecay-graph-db",
  "tracedecay-store",
  "tracedecay-tool-catalog",
 ]
@@ -6286,6 +6262,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
  "tracedecay-lsp",

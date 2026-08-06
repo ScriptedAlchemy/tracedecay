@@ -24,7 +24,7 @@ pub enum SessionStoreTable {
     SessionMessages,
     SessionSchemaMigrations,
     LcmRawMessages,
-    SessionTemporalSchemaMigrations,
+    SessionTemporalSchemaState,
     SessionTemporalGenerations,
     SessionTemporalObservationEffects,
     SessionTemporalProjectionReceipts,
@@ -54,7 +54,7 @@ impl SessionStoreTable {
             Self::Observations | Self::SourceCursors => SessionStoreFamily::Observation,
             Self::Sessions | Self::SessionMessages => SessionStoreFamily::Transcript,
             Self::SessionSchemaMigrations | Self::LcmRawMessages => SessionStoreFamily::Lcm,
-            Self::SessionTemporalSchemaMigrations
+            Self::SessionTemporalSchemaState
             | Self::SessionTemporalGenerations
             | Self::SessionTemporalObservationEffects
             | Self::SessionTemporalProjectionReceipts
@@ -86,7 +86,8 @@ impl SessionStoreTable {
             Self::SourceCursors => &["source_json", "scope_json"],
             Self::Sessions => &["provider", "session_id"],
             Self::SessionMessages => &["provider", "session_id", "ordinal", "message_id"],
-            Self::SessionSchemaMigrations | Self::SessionTemporalSchemaMigrations => &["name"],
+            Self::SessionSchemaMigrations => &["name"],
+            Self::SessionTemporalSchemaState => &["domain"],
             Self::LcmRawMessages => &["store_id"],
             Self::SessionTemporalGenerations => &["session_id", "generation"],
             Self::SessionTemporalObservationEffects => &["observation_sequence"],
@@ -146,8 +147,8 @@ pub enum SessionStoreCursor {
     LcmRawMessages {
         store_id: i64,
     },
-    SessionTemporalSchemaMigrations {
-        name: String,
+    SessionTemporalSchemaState {
+        domain: String,
     },
     SessionTemporalGenerations {
         session_id: String,
@@ -326,8 +327,8 @@ pub enum SessionStoreRow {
         content_hash: String,
         row_digest: String,
     },
-    SessionTemporalSchemaMigrations {
-        name: String,
+    SessionTemporalSchemaState {
+        domain: String,
         version: i64,
         row_digest: String,
     },
@@ -569,10 +570,10 @@ fn validate_page_cursor(
             *store_id > 0
         }
         (
-            SessionStoreTable::SessionTemporalSchemaMigrations,
-            SessionStoreCursor::SessionTemporalSchemaMigrations { name },
+            SessionStoreTable::SessionTemporalSchemaState,
+            SessionStoreCursor::SessionTemporalSchemaState { domain },
         ) => {
-            validate_cursor_text("name", name)?;
+            validate_cursor_text("domain", domain)?;
             true
         }
         (

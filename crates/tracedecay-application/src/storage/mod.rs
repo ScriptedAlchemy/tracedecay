@@ -35,7 +35,7 @@ pub use debris::{
 };
 pub use findings::{
     code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
-    over_budget_finding, retention_backlog_finding, stale_branch_dbs_finding, table_growth_finding,
+    over_budget_finding, retention_backlog_finding, table_growth_finding,
 };
 pub use identity::{
     BranchRefV1, FreePageRatioV1, QuarantineLocationV1, RelativeArtifactPathV1, StorageByteSizeV1,
@@ -43,7 +43,6 @@ pub use identity::{
 };
 pub use inventory::{
     CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
-    StaleBranchDbRecordV1,
 };
 pub use telemetry::{
     SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES, SIGNIFICANT_TABLE_GROWTH_PERCENT,

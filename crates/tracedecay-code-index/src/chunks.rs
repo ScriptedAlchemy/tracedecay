@@ -30,7 +30,7 @@ use tracedecay_domain::{
 use super::{
     extract::{ExtractedCodeFileV1, ExtractionCancellation},
     intake::ReceiptBoundCodeFileV1,
-    lineage::LineageSymbolRecordV1,
+    lineage::LineageSymbolRecord,
 };
 use tracedecay_domain::{Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef};
 
@@ -79,7 +79,7 @@ pub struct CodeFileChunksV1 {
 #[serde(deny_unknown_fields)]
 pub struct CodeFileIndexArtifactsV1 {
     pub chunks: CodeFileChunksV1,
-    pub symbols: Vec<LineageSymbolRecordV1>,
+    pub symbols: Vec<LineageSymbolRecord>,
     pub edges: Vec<CanonicalRelationEdgeV1>,
     pub edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
 }
@@ -1541,7 +1541,7 @@ impl DeterministicCodeChunker {
         source: &str,
         file_identity: &FileIdentityDigest,
         rows: &[SymbolRow],
-    ) -> Result<Vec<LineageSymbolRecordV1>, ChunkingFailureV1> {
+    ) -> Result<Vec<LineageSymbolRecord>, ChunkingFailureV1> {
         let mut symbols = Vec::with_capacity(rows.len());
         for row in rows {
             let start = usize::try_from(row.span.start_byte).map_err(|error| {
@@ -1559,7 +1559,7 @@ impl DeterministicCodeChunker {
                     "symbol span is not a valid UTF-8 source range".to_owned(),
                 )
             })?;
-            symbols.push(LineageSymbolRecordV1 {
+            symbols.push(LineageSymbolRecord {
                 occurrence: row.occurrence.clone(),
                 identity: row.identity.clone(),
                 qualified_name: row.qualified_name.clone(),

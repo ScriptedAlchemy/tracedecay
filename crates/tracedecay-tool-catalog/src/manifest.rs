@@ -407,6 +407,7 @@ pub enum TerminalState {
     Completed,
     Cancelled,
     TimedOut,
+    Unavailable,
     Failed,
     EffectUnknown,
     Partial,
@@ -777,6 +778,7 @@ impl CapabilityManifestV1 {
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::Partial,
         ];
@@ -784,7 +786,9 @@ impl CapabilityManifestV1 {
             .iter()
             .any(|state| !self.terminal_states.contains(*state))
         {
-            return Err(self.invalid("terminal states must preserve completed, cancelled, timed out, failed, and partial"));
+            return Err(self.invalid(
+                "terminal states must preserve completed, cancelled, timed out, unavailable, failed, and partial",
+            ));
         }
 
         if self.effect.is_effect() {

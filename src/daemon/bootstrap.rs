@@ -65,17 +65,18 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let sync_config = crate::config::SyncConfig::default();
     let profile_database = store_administration.registered_profile_database().await?;
+    let invocation = DaemonInvocationState::default();
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
         profile_database,
         store_administration.clone(),
+        invocation.embedded_graph_runtime.clone(),
         sync_config.retention,
     )
     .await;
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
-    let invocation = DaemonInvocationState::default();
     invocation.configure_github_read_only_credentials(authority.profile_identity());
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
@@ -233,7 +234,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
     let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
-    let sync_config = crate::config::SyncConfig::default().with_env_overrides();
+    let sync_config = crate::config::SyncConfig::default();
     let profile_database = engine
         .store_administration
         .registered_profile_database()
@@ -242,16 +243,18 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         profile_root.clone(),
         Arc::clone(&profile_database),
         engine.store_administration.clone(),
+        engine.invocation.embedded_graph_runtime.clone(),
         sync_config.retention.clone(),
     )
     .await;
     // Install the git-metadata watcher (design D3/D5). The daemon has no single
-    // project root, so it uses the default `[sync]` config plus env overrides.
+    // project root, so it uses the registry-equivalent default sync policy.
     // When `auto_watch` is off the watcher is inert. The watcher shares the
     // engine's administration coordinator before it can spawn any writer.
     let git_watcher = git_watch::GitWatcher::new_with_administration(
         sync_config,
         engine.store_administration.clone(),
+        engine.invocation.code_index_schedulers.clone(),
         maintenance.clone(),
     );
     if git_watcher.is_enabled() {
@@ -263,6 +266,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     let pr_autotrack_task = pr_autotrack::spawn_with_administration(
         crate::global_db::global_db_path(),
         engine.store_administration.clone(),
+        engine.invocation.code_index_schedulers.clone(),
     );
     let engine = engine
         .with_git_watcher(git_watcher)

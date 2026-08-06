@@ -2,10 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::db::engine::Executor;
-
 use super::super::util;
-use super::{LcmError, LcmGcConfig, LcmGcReport, payload, stage_payload_delete};
+use super::{LcmError, LcmGcConfig, LcmGcReport, payload};
 
 pub(super) fn preview_orphan_files(
     dir: &Path,
@@ -107,43 +105,6 @@ where
     candidates
 }
 
-pub(super) async fn stage_orphan_files(
-    conn: &(impl Executor + ?Sized),
-    dir: &Path,
-    metadata_refs: &BTreeSet<String>,
-    now: i64,
-    cfg: &LcmGcConfig,
-    remaining: &mut usize,
-    report: &mut LcmGcReport,
-) -> Result<(), LcmError> {
-    let candidates = orphan_file_candidates(dir, metadata_refs, now, cfg, report)?;
-    for (payload_ref, _bytes) in candidates {
-        if *remaining == 0 {
-            report.batch_cap(1);
-            continue;
-        }
-        let (content_hash, verified_bytes, verified_chars) =
-            match payload::payload_file_fingerprint(dir, &payload_ref) {
-                Ok(fingerprint) => fingerprint,
-                Err(err) => {
-                    report.add_error(&payload_ref, "orphan_stage_failed", err.to_string());
-                    continue;
-                }
-            };
-        stage_payload_delete(
-            conn,
-            &payload_ref,
-            Some(&content_hash),
-            verified_bytes,
-            verified_chars,
-        )
-        .await?;
-        report.orphans.add(&payload_ref, verified_bytes);
-        *remaining -= 1;
-    }
-    Ok(())
-}
-
 /// True when the payload file exists as a regular (non-symlink) file; a
 /// missing payload directory means no payload file can exist.
 pub(super) fn payload_file_present(
@@ -220,7 +181,7 @@ mod tests {
             ..Default::default()
         }
         .normalized();
-        let mut report = LcmGcReport::new(PROVIDER, None, &cfg, false, mtime);
+        let mut report = LcmGcReport::new(PROVIDER, None, &cfg, mtime);
         let entries = vec![
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,

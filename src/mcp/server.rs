@@ -46,7 +46,6 @@ mod connection;
 mod connection_tests;
 mod construction;
 mod hook_dispatch;
-mod hook_writes;
 mod ledger;
 mod lifecycle;
 mod project_registry;
@@ -68,14 +67,14 @@ pub(crate) use request_lifecycle::{
     McpToolLifecyclePolicy, McpWorkerReaperShutdown,
 };
 pub(crate) use request_receipts::{
-    finish_transport_cancelled_tool_call_response, is_project_retirement_reason_code,
+    APPLICATION_TERMINAL_KEY, McpToolCallTerminal, finish_transport_cancelled_tool_call_response,
+    is_project_retirement_reason_code,
 };
 
 pub(crate) use project_registry::DaemonProjectRegistryReadService;
 pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
 
 pub(crate) use construction::*;
-pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::{
     ProjectServerResponseLifecycle, StartupCatchUpMachineV1, VersionCheckState,
@@ -223,24 +222,8 @@ pub(crate) fn dashboard_retained_project_graph_resolver(
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
-    /// The served code graph. Guarded so a mid-session `git checkout` can
-    /// hot-swap the instance onto the new branch's DB
-    /// ([`Self::reopen_if_branch_drifted`]). Readers clone the `Arc` out and
-    /// drop the lock immediately — no read guard is ever held across a
-    /// handler await, so a swap never contends with in-flight calls. Calls
-    /// already running when a swap lands finish against the old snapshot;
-    /// each call is internally consistent.
-    /// `Arc` so the detached branch-reopen task can hold a cheap clone and swap
-    /// the freshly opened instance in when it lands.
+    /// The project graph shared by every branch/worktree selector.
     cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
-    /// Single-flights branch reopen work. Held by the detached reopen task, not
-    /// by the request that noticed the drift: a reopen is a full DB open plus a
-    /// sealed restore, and no caller ever waits on it.
-    branch_reopen: Arc<tokio::sync::Mutex<()>>,
-    /// Count of completed branch reopens (success or failure). Lets tests and
-    /// callers observe that a detached swap has landed without exposing the
-    /// task handle.
-    branch_reopen_completions: Arc<AtomicU64>,
     stats: ServerStats,
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
@@ -285,10 +268,6 @@ pub struct McpServer {
     user_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     project_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     user_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
-    #[cfg(test)]
-    project_session_retrieval_calls: Arc<AtomicU64>,
-    #[cfg(test)]
-    user_session_retrieval_calls: Arc<AtomicU64>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
     /// [`Self::shutdown`] so Unix and Windows drain the same way.
     project_host_admission_replay:
@@ -301,7 +280,6 @@ pub struct McpServer {
     /// projects through a port instead of holding [`Self::registry_db`].
     project_registry_reads: Option<Arc<dyn ProjectRegistryReadPort>>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
-    database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     doctor_report_published: AtomicBool,
@@ -310,8 +288,6 @@ pub struct McpServer {
     dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
-    hook_branch_writer: HookBranchWriter,
-    background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
     code_index_hook_sink: Option<CodeIndexHookSink>,
@@ -321,6 +297,8 @@ pub struct McpServer {
     code_index_publication_identity: Option<CodeIndexPublicationIdentityResolver>,
     /// Daemon-owned, authority-gated search bridge.
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
+    /// Daemon-owned, generation-bound branch comparison bridge.
+    code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -350,11 +328,6 @@ pub struct McpServer {
     /// field measuring the handler's pure execution time. Toggled by
     /// `tracedecay serve --timings`. Off by default to keep responses clean.
     timings_enabled: AtomicBool,
-    /// UNIX timestamp (secs) of the most recent staleness check started by
-    /// the server. Read-modify-update via `compare_exchange` in
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so concurrent
-    /// tool calls don't pile on the same walk.
-    last_staleness_check_at: AtomicI64,
     /// UNIX timestamp (secs) of the most recent staged-automation notice
     /// check. Same `compare_exchange` cooldown pattern as
     /// [`last_staleness_check_at`](Self::last_staleness_check_at) so the
@@ -374,26 +347,6 @@ pub struct McpServer {
     /// previous flag soup carried. `Arc` so the detached ingest task can
     /// settle the same machine that waiters and shutdown read.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
-    /// `true` while a detached sync-on-read refresh (D4) is in flight.
-    /// Single-flights the background refresh: `compare_exchange`d to `true`
-    /// before spawning and cleared on completion. Also read by the D7
-    /// staleness banner so an in-progress refresh emits the informational
-    /// "refresh in progress" note instead of the manual-sync warning.
-    /// `Arc` so the detached refresh task holds a cheap clone to clear it on
-    /// completion.
-    background_refresh_running: Arc<AtomicBool>,
-    /// UNIX timestamp (secs) of the most recent sync-on-read background
-    /// refresh spawn (D4). Gates the read-refresh cooldown independently of
-    /// [`last_staleness_check_at`](Self::last_staleness_check_at), which
-    /// gates the *blocking* edit-tool path — the two cooldowns must not
-    /// share a stamp or one path would starve the other.
-    last_background_refresh_at: AtomicI64,
-    /// UNIX timestamp (secs) at which the most recent background refresh (D4)
-    /// *completed*. `0` = never. Read by the D7 staleness banner so a refresh
-    /// that finished within `read_cooldown_secs` suppresses the banner
-    /// entirely (the index is as fresh as auto-sync can make it). `Arc` so
-    /// the detached refresh task can stamp it on completion.
-    last_background_refresh_done_at: Arc<AtomicI64>,
     /// The `[sync]` config resolved once at construction from the project
     /// root (plus `TRACEDECAY_SYNC_*` env overrides). Cached so the read
     /// hot path never re-reads the config file per `tools/call`.
@@ -461,17 +414,7 @@ impl McpServer {
         self.doctor_report_published.store(true, Ordering::Release);
     }
 
-    /// Creates a new MCP server backed by the given code graph.
-    ///
-    /// Index freshness for source-editing tools is maintained by a lazy
-    /// staleness check ([`maybe_sync_if_stale`](Self::maybe_sync_if_stale))
-    /// gated by a 30 s cooldown — there is no background watcher task. This
-    /// replaces the
-    /// `notify-debouncer-full` watcher removed in v6.x (#80), which was
-    /// the source of severe CPU and memory pressure on large monorepos
-    /// where nested ignored directories (`apps/*/node_modules`,
-    /// `packages/*/target`) drove unbounded event traffic and `FileId`
-    /// cache growth.
+    /// Creates a new MCP server backed by the given project graph.
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
@@ -694,18 +637,16 @@ impl McpServer {
             own_project_host_admission_replay,
             startup_catch_up_enabled,
             automation_scheduler_reconciler,
-            database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
             diagnostics_lsp,
-            hook_branch_writer,
-            background_refresh_writer,
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
+            code_index_branch_diff_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
             project_routes,
@@ -820,8 +761,6 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
         });
-        let project_session_retrieval_calls = Arc::new(AtomicU64::new(0));
-        let user_session_retrieval_calls = Arc::new(AtomicU64::new(0));
         let project_session_retrieval_service = session_db
             .as_ref()
             .zip(project_session_retrieval_root)
@@ -830,13 +769,11 @@ impl McpServer {
                     Arc::clone(database),
                     Arc::clone(registered),
                     root,
-                    Arc::clone(&project_session_retrieval_calls),
                     project_session_refresh_wake.clone(),
                 ),
                 None => DaemonSessionRetrievalService::new(
                     Arc::clone(database),
                     root,
-                    Arc::clone(&project_session_retrieval_calls),
                     project_session_refresh_wake.clone(),
                 ),
             })
@@ -850,23 +787,15 @@ impl McpServer {
                         Arc::clone(database),
                         Arc::clone(registered),
                         root,
-                        Arc::clone(&user_session_retrieval_calls),
                         None,
                     ),
-                    None => DaemonSessionRetrievalService::new(
-                        Arc::clone(database),
-                        root,
-                        Arc::clone(&user_session_retrieval_calls),
-                        None,
-                    ),
+                    None => DaemonSessionRetrievalService::new(Arc::clone(database), root, None),
                 },
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
         let server = Arc::new(Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
-            branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
-            branch_reopen_completions: Arc::new(AtomicU64::new(0)),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),
@@ -896,24 +825,18 @@ impl McpServer {
             user_session_refresh_service,
             project_session_retrieval_service,
             user_session_retrieval_service,
-            #[cfg(test)]
-            project_session_retrieval_calls,
-            #[cfg(test)]
-            user_session_retrieval_calls,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
             automation_scheduler_reconciler,
-            database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             doctor_report_published: AtomicBool::new(false),
             dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
-            hook_branch_writer,
-            background_refresh_writer,
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
+            code_index_branch_diff_executor,
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
@@ -930,13 +853,9 @@ impl McpServer {
             scope_prefix,
             shutdown_done: AtomicBool::new(false),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
-            last_staleness_check_at: AtomicI64::new(0),
             last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up: Arc::new(StartupCatchUpMachineV1::default()),
-            background_refresh_running: Arc::new(AtomicBool::new(false)),
-            last_background_refresh_at: AtomicI64::new(0),
-            last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
             sync_config,
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
@@ -1053,10 +972,7 @@ impl McpServer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Test-only accessor for the backing `TraceDecay`. Exposed so
-    /// integration tests can drive the staleness pipeline directly,
-    /// bypassing the 30 s cooldown in
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
+    /// Test-only accessor for the backing `TraceDecay`.
     #[doc(hidden)]
     pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await
@@ -1271,25 +1187,9 @@ mod lcm_claude_recall_tests;
 
 mod project_host_admission_replay;
 
-/// D7 (staleness UX) + D1/D4 (startup catch-up + sync-on-read) behavioural
-/// tests. The pure-logic banner tests need no server; the server tests build
-/// a real indexed `TraceDecay` over a temp git repo, mirroring the
-/// `indexing.rs` test idiom.
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod background_refresh_writer_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod freshness_tests;
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod hook_boundary_failure_matrix_tests;
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod hook_branch_writer_tests;
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod host_admission_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod query_scope_tests;

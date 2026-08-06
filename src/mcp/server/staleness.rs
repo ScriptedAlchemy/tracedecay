@@ -17,21 +17,6 @@ pub(crate) fn humanize_age(secs: i64) -> String {
     }
 }
 
-pub(crate) fn needs_lazy_sync_before_dispatch(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_ast_grep_rewrite"
-            | "tracedecay_insert_at"
-            | "tracedecay_insert_at_symbol"
-            | "tracedecay_move_symbol"
-            | "tracedecay_api_migration_plan"
-            | "tracedecay_api_migration_apply"
-            | "tracedecay_multi_str_replace"
-            | "tracedecay_replace_symbol"
-            | "tracedecay_str_replace"
-    )
-}
-
 /// Build the per-file staleness banner inserted at the top of any tool
 /// response that referenced files the in-line sync couldn't refresh.
 ///
@@ -88,10 +73,8 @@ fn file_mtime_secs(project_root: &std::path::Path, relative_path: &str) -> Optio
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StalenessBannerInputs {
     pub(crate) age_secs: i64,
-    /// `SyncConfig.auto_watch || SyncConfig.read_refresh`.
+    /// Whether scheduler-owned convergence is enabled.
     pub(crate) auto_sync_on: bool,
-    /// Serving a read-only fallback/ancestor store (`fallback_warning().is_some()`).
-    pub(crate) fallback_store: bool,
     /// A background refresh is currently in flight.
     pub(crate) refresh_running: bool,
     /// A background refresh completed within `read_cooldown_secs`.
@@ -115,15 +98,15 @@ pub(crate) fn format_index_age_phrase(age_secs: i64) -> String {
 /// should be emitted. The age guard (`> 3600s`) is applied by the caller.
 ///
 /// Rules:
-/// - Auto-sync on and not a fallback store: emit an informational "refresh in
+/// - Auto-sync on: emit an informational "refresh in
 ///   progress / scheduled" note (or nothing if a refresh just completed);
 ///   NEVER instruct `tracedecay sync`.
-/// - Auto-repair impossible (fallback store, or auto-sync fully disabled):
+/// - Auto-repair disabled:
 ///   fall back to the manual `tracedecay sync` instruction.
 pub(crate) fn staleness_banner(inputs: StalenessBannerInputs) -> Option<String> {
     let age_phrase = format_index_age_phrase(inputs.age_secs);
     let stale_mins = inputs.age_secs / 60;
-    if inputs.auto_sync_on && !inputs.fallback_store {
+    if inputs.auto_sync_on {
         if inputs.refresh_running {
             Some(format!(
                 "Note: index refresh in progress (was {stale_mins}m stale); \

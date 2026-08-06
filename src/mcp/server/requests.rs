@@ -110,14 +110,14 @@ struct ApplicationSurfaceDispatch<'a> {
 }
 
 /// Hand-maintained schema documentation for the `tracedecay://schema` resource.
-/// Mirrors `src/db/migrations.rs::create_schema`. Update both together.
+/// Mirrors `db::schema::create_schema`. Update both together.
 const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
 
 The active project database lives in the user-level TraceDecay profile store
 (`~/.tracedecay/projects/<project_id>/tracedecay.db` by default), scoped to the
-current project. Per-branch variants live beside it under the same store. All
-tables are plain SQLite; safe to query with any client. WAL mode is used, so
-readers do not block writers.
+current project. Branch, ref, commit, and worktree values are provenance
+selectors over this one project store. All tables are plain SQLite; safe to
+query with any client. WAL mode is used, so readers do not block writers.
 
 ## Tables
 
@@ -179,9 +179,9 @@ Common keys: `tokens_saved`, schema-version markers.
 - primary key: `(project_id, session_id, file_path, mode, args_hash)`
 - stores `mtime_ns`, `digest`, rendered `body` BLOB, token count, and `created_at`
 
-### v11: `memory_facts`, `memory_entities`, `memory_fact_entities`, `memory_banks`, `memory_feedback_events`
-The holographic fact store replaces narrow decision rows with durable facts
-linked to named entities:
+### Final memory authority
+Canonical facts, lineage, assertions, feedback history, and compatibility
+projections live in the `memory_v2_*` tables:
 
 - `memory_facts` — numeric `fact_id`, unique fact content, category, source,
   tags JSON, computed trust score, retrieval/feedback counts, timestamps, and
@@ -194,11 +194,8 @@ linked to named entities:
 - `memory_banks` — optional holographic memory-bank vectors by category or
   bank name (`bank_name`, `vector`, `hrr_algebra`, `hrr_dim`, `fact_count`,
   `updated_at`).
-- `memory_feedback_events` — append-only `helpful`/`unhelpful` audit events
-  keyed by numeric `fact_id`, with source, note, old/new trust, and trust delta.
-
-Older `memory_decisions` / `memory_code_areas` tables are migration-only inputs:
-v11 backfills them into `memory_facts` and then drops the legacy tables.
+- `memory_v2_feedback_history` — append-only `helpful`/`unhelpful` outcomes
+  keyed by typed result identity, with privacy-aware details and trust change.
 
 ## Recipes
 
@@ -442,9 +439,8 @@ impl McpServer {
             Self::report_host_admission_outcome(outcome);
             return outcome;
         };
-        // R4: one branch resolution for this notification — the drift check
-        // below and the hook-plan branch label both read it.
-        let (cg, live_branch) = self.reopen_if_branch_drifted_memoized().await;
+        let cg = self.cg_snapshot().await;
+        let live_branch = cg.branch_memo();
         let root = cg.project_root().to_path_buf();
         // Live-activity tap: a host hook arriving here IS an agent working in
         // this project, so publish it at the observation point carrying this
@@ -465,31 +461,9 @@ impl McpServer {
             )
             .await;
         }
-        // Primary incremental-index hint: deliver the exact touched paths into
-        // the daemon-owned code-index scheduler queue as soon as the routing
-        // event is observed. Independent of host-admission durability so an
-        // after-edit reaches indexing even when effect processing is deferred.
-        // Best-effort: a `false` return (no mounted worktree) is not an error.
-        if !event.rel_paths.is_empty()
-            && let Some(sink) = &self.code_index_hook_sink
-        {
-            // A `true` return means the paths really entered a mounted
-            // worktree's incremental queue — the exact moment indexing work is
-            // created for this project, and the only condition worth lighting.
-            if sink(root.clone(), event.rel_paths.clone()).await
-                && let Some(activity_db) = self.session_db.as_deref()
-            {
-                crate::application::event_lane::publish(
-                    activity_db,
-                    crate::application::event_lane::ActivityFamilyV1::CodeIndex,
-                    &root,
-                    activity_project_id.as_deref(),
-                    event.rel_paths.len() as u64,
-                    Some(event.kind.as_key()),
-                )
-                .await;
-            }
-        }
+        // Exact changed paths stay inside the durable plan. Replay wakes the
+        // canonical code-index scheduler only after the host admission frame
+        // commits, so this notification never races a second legacy sync path.
         let current_branch = live_branch.resolve_for(&root);
         let plan = hook_events::plan_hook_event(&event, &root, current_branch.as_deref());
         let Ok(payload) = hook_events::encode_durable_hook_event_plan(&plan) else {
@@ -677,14 +651,14 @@ impl McpServer {
     }
 
     /// Returns the `SQLite` schema documentation as a markdown resource.
-    /// Sourced from `src/db/migrations.rs::create_schema` — keep in sync.
+    /// Sourced from `db::schema::create_schema` — keep in sync.
     pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
         Self::resource_contents(id, "tracedecay://schema", "text/markdown", SCHEMA_MARKDOWN)
     }
 
     /// Returns graph statistics as a JSON resource.
     pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
-        let cg = self.reopen_if_branch_drifted().await;
+        let cg = self.cg_snapshot().await;
         match cg.get_stats().await {
             Ok(stats) => {
                 let mut output = serde_json::to_value(&stats).unwrap_or(json!({}));
@@ -785,34 +759,7 @@ impl McpServer {
 
     pub(crate) async fn read_resource_branches(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
-        let tracedecay_dir = &cg.store_layout().data_root;
-        let current = cg.active_branch();
-
-        let branches: Vec<Value> = match crate::branch_meta::load_branch_meta(tracedecay_dir) {
-            Some(meta) => meta
-                .branches
-                .iter()
-                .map(|(name, entry)| {
-                    let db_path = tracedecay_dir.join(&entry.db_file);
-                    let size_bytes = db_path.metadata().map_or(0, |m| m.len());
-                    json!({
-                        "name": name,
-                        "db_file": entry.db_file,
-                        "parent": entry.parent,
-                        "size_bytes": size_bytes,
-                        "last_synced_at": entry.last_synced_at,
-                        "is_current": current == Some(name.as_str()),
-                        "is_default": name == &meta.default_branch,
-                    })
-                })
-                .collect(),
-            None => vec![],
-        };
-
-        let output = json!({
-            "branch_count": branches.len(),
-            "branches": branches,
-        });
+        let output = serde_json::to_value(cg.branch_diagnostics()).unwrap_or_default();
         let text = serde_json::to_string_pretty(&output).unwrap_or_default();
         Self::resource_contents(id, "tracedecay://branches", "application/json", &text)
     }
@@ -963,6 +910,7 @@ impl McpServer {
                 application_cancellation: Some(dispatch_control.cancellation()),
                 code_index_publication_identity: self.code_index_publication_identity.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
+                code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
                 source_edit_executor: self.source_edit_executor.get().cloned(),
                 source_edit_reconciliation_executor: self
                     .source_edit_reconciliation_executor
@@ -1056,14 +1004,8 @@ impl McpServer {
         dispatch_control: McpToolDispatchControl,
         publish_activity: bool,
     ) -> DispatchedToolCall {
-        // Branch-drift hot-swap: if the working tree switched branches since
-        // the served instance opened, reopen onto the live branch's DB so
-        // this call reads the right index. Cheap no-op check when no drift.
-        let (active_cg, live_branch) = match dispatch_control
-            .run_value(
-                McpToolDispatchStage::Readiness,
-                self.reopen_if_branch_drifted_memoized(),
-            )
+        let active_cg = match dispatch_control
+            .run_value(McpToolDispatchStage::Readiness, self.cg_snapshot())
             .await
         {
             Ok(value) => value,
@@ -1115,16 +1057,14 @@ impl McpServer {
         let project_reader_preselected = routed.selected_project.is_some();
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
-        let fast_cursor_admission = is_fast_cursor_admission(tool_name, &routed.arguments);
 
+        let fast_cursor_admission = is_fast_cursor_admission(tool_name, &routed.arguments);
         if let Err(error) = dispatch_control
             .run_value(
                 McpToolDispatchStage::Readiness,
                 self.begin_tool_dispatch(
                     tool_name,
                     &cg,
-                    &live_branch,
-                    project_reader_preselected,
                     publish_activity && !fast_cursor_admission,
                 ),
             )
@@ -1196,27 +1136,8 @@ impl McpServer {
         &self,
         tool_name: &str,
         cg: &Arc<TraceDecay>,
-        live_branch: &crate::branch::BranchMemo,
-        project_reader_preselected: bool,
         publish_activity: bool,
     ) {
-        // Notification-free freshness is useful before tools that edit source
-        // files in the index. Read-only graph queries should not block behind
-        // a full project walk; on very large indexes (especially when
-        // node_modules was intentionally included) that turns diagnostics and
-        // search into sync operations.
-        if !project_reader_preselected && needs_lazy_sync_before_dispatch(tool_name) {
-            self.maybe_sync_if_stale().await;
-        } else if !project_reader_preselected {
-            // D4: sync-on-read (never blocking). Read tools serve the current
-            // answer IMMEDIATELY and, when the read-refresh cooldown has
-            // elapsed, kick a single-flighted background refresh so the *next*
-            // read sees fresh data. This heals read-only sessions that never
-            // touch an edit tool without ever making a query wait behind a
-            // project walk.
-            self.maybe_spawn_read_refresh(cg, live_branch);
-        }
-
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
         tracing::trace!(tool_name, "dispatching MCP tool call");
         *recover_lock(&self.tool_call_counts)
@@ -1538,18 +1459,6 @@ impl McpServer {
         include_connection_worktree_warning: bool,
         result: &mut ToolResult,
     ) {
-        // Warn if serving from a fallback (ancestor) branch DB.
-        if let Some(warning) = cg.fallback_warning() {
-            let warning = format!("WARNING: {warning}");
-            if let Some(content) = result
-                .value
-                .get_mut("content")
-                .and_then(|c| c.as_array_mut())
-            {
-                content.insert(0, json!({"type": "text", "text": &warning}));
-            }
-        }
-
         // Check overall index age (warn if older than 1 hour).
         // Uses `last_sync_timestamp` (sync execution time) not the
         // max file `indexed_at` — a no-change sync still updates the
@@ -1557,33 +1466,15 @@ impl McpServer {
         // so a per-file fallback fires the warning forever on quiet
         // repos (#86).
         //
-        // D7 staleness-warning UX: with auto-sync on (the normal
-        // case), a stale index self-heals — the D4 background refresh
-        // above was already kicked for this read. So instead of the
-        // old "Run `tracedecay sync`" nag, we emit an informational
-        // "refresh in progress" note (or nothing at all if a refresh
-        // just completed). The manual-sync instruction is reserved
-        // for the cases where auto-repair genuinely can't help:
-        //   - serving a read-only fallback/ancestor store, or
-        //   - the user disabled both auto_watch and read_refresh.
         let last_time = cg.last_sync_timestamp().await;
         let now = crate::tracedecay::current_timestamp();
         let age_secs = now - last_time;
         if last_time > 0 && age_secs > 3600 {
-            let refreshed_recently = {
-                let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
-                done > 0 && now.saturating_sub(done) < self.sync_config.read_cooldown_secs as i64
-            };
             let banner = staleness_banner(StalenessBannerInputs {
                 age_secs,
-                // Auto-sync is "on" when either the daemon watcher
-                // or sync-on-read can repair this.
-                auto_sync_on: self.sync_config.auto_watch || self.sync_config.read_refresh,
-                // A read-only fallback store can never be written,
-                // so no background refresh can heal it.
-                fallback_store: cg.fallback_warning().is_some(),
-                refresh_running: self.background_refresh_running.load(Ordering::Acquire),
-                refreshed_recently,
+                auto_sync_on: self.sync_config.auto_watch,
+                refresh_running: false,
+                refreshed_recently: false,
             });
 
             if let Some(banner) = banner
@@ -1670,7 +1561,7 @@ impl McpServer {
                     .await;
                 mark_semantic_tool_error(&mut result);
                 if selected_owner.is_none() {
-                    self.refresh_after_live_transcript_projection(
+                    self.refresh_after_hook_runtime_mutation(
                         &tool_name,
                         &analytics_arguments,
                         &result,
@@ -1699,31 +1590,36 @@ impl McpServer {
         }
     }
 
-    async fn refresh_after_live_transcript_projection(
+    async fn refresh_after_hook_runtime_mutation(
         &self,
         tool_name: &str,
         arguments: &Value,
         result: &ToolResult,
     ) {
-        if tool_name != "tracedecay_lcm_preflight"
-            || arguments
-                .get("transcript_projection")
-                .and_then(Value::as_bool)
-                != Some(true)
-            || tool_result_has_semantic_error(result)
-        {
+        if tool_name != "tracedecay_hook_runtime" || tool_result_has_semantic_error(result) {
             return;
         }
-        let user_scope = arguments.get("storage_scope").and_then(Value::as_str) == Some("user");
-        let wake = if user_scope {
-            self.user_session_refresh_wake.as_ref()
-        } else {
-            self.project_session_refresh_wake.as_ref()
+        let Some(refresh) =
+            crate::mcp::tools::handlers::hook_runtime::temporal_refresh_after_success(arguments)
+        else {
+            return;
+        };
+        let wake = match refresh.scope {
+            crate::mcp::tools::handlers::hook_runtime::HookRuntimeTemporalScope::Project => {
+                self.project_session_refresh_wake.as_ref()
+            }
+            crate::mcp::tools::handlers::hook_runtime::HookRuntimeTemporalScope::User => {
+                self.user_session_refresh_wake.as_ref()
+            }
         };
         if let Some(wake) = wake {
-            let _ = wake
-                .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-                .await;
+            if refresh.wait_until_idle {
+                let _ = wake
+                    .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
+                    .await;
+            } else {
+                wake.wake();
+            }
         }
     }
 

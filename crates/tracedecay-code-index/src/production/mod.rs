@@ -125,6 +125,10 @@ pub struct CodeIndexBuildRequestV1 {
 pub trait CodeIndexExecutionControlV1: Sync {
     fn is_cancelled(&self) -> bool;
     fn is_deadline_exceeded(&self) -> bool;
+
+    fn begin_file_work(&self, _total_files: usize) {}
+
+    fn complete_file_work(&self) {}
 }
 
 /// The terminal reason an index run abstained before publication.
@@ -1566,8 +1570,9 @@ where
             .collect::<Vec<_>>();
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
+        control.begin_file_work(present_files.len());
         let files = collect_bounded_ordered(&present_files, |file| {
-            Self::extract_file(
+            let result = Self::extract_file(
                 config,
                 physical_artifacts,
                 intake,
@@ -1579,7 +1584,9 @@ where
                 captured_files,
                 control,
                 false,
-            )
+            );
+            control.complete_file_work();
+            result
         })?;
         // Parallel completion order is intentionally not cache authority.
         // Record artifacts in canonical snapshot order so bounded eviction and
@@ -1631,52 +1638,79 @@ where
             .collect::<BTreeMap<_, _>>();
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
+        control.begin_file_work(increment.files.len());
         let file_materializations = collect_bounded_ordered(
             &increment.files,
             |file_plan| -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
-                Self::checkpoint(control)?;
-                match &file_plan.action {
-                    FileExtractionActionV1::CarryForward {
-                        file_occurrence_id,
-                        prior_file_occurrence_id,
-                        ..
-                    } => {
-                        let prior = prior_by_occurrence
-                            .get(prior_file_occurrence_id)
-                            .ok_or_else(|| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "increment plan refers to a missing prior file".to_owned(),
+                let result = (|| {
+                    Self::checkpoint(control)?;
+                    match &file_plan.action {
+                        FileExtractionActionV1::CarryForward {
+                            file_occurrence_id,
+                            prior_file_occurrence_id,
+                            ..
+                        } => {
+                            let prior = prior_by_occurrence
+                                .get(prior_file_occurrence_id)
+                                .ok_or_else(|| {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "increment plan refers to a missing prior file".to_owned(),
+                                    )
+                                })?;
+                            let current_file = current_by_occurrence
+                                .get(file_occurrence_id)
+                                .ok_or_else(|| {
+                                    CodeIndexProductionErrorV1::Contract(
+                                        "increment plan refers to a missing current file"
+                                            .to_owned(),
+                                    )
+                                })?;
+                            let captured = captured_files
+                                .get(file_occurrence_id)
+                                .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
+                            let receipt_bound = intake
+                                .bind_file(
+                                    capability,
+                                    &config.project_id,
+                                    ValidatedCodeFileV1 {
+                                        generation_id: manifest.generation_id.clone(),
+                                        file: (**current_file).clone(),
+                                        snapshot_digest: capability
+                                            .snapshot()
+                                            .intake_digest
+                                            .clone(),
+                                        sanitized_bytes: captured.sanitized_bytes.clone(),
+                                    },
                                 )
-                            })?;
-                        let current_file = current_by_occurrence
-                            .get(file_occurrence_id)
-                            .ok_or_else(|| {
-                                CodeIndexProductionErrorV1::Contract(
-                                    "increment plan refers to a missing current file".to_owned(),
-                                )
-                            })?;
-                        let captured = captured_files
-                            .get(file_occurrence_id)
-                            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
-                        let receipt_bound = intake
-                            .bind_file(
-                                capability,
-                                &config.project_id,
-                                ValidatedCodeFileV1 {
-                                    generation_id: manifest.generation_id.clone(),
-                                    file: (**current_file).clone(),
-                                    snapshot_digest: capability.snapshot().intake_digest.clone(),
-                                    sanitized_bytes: captured.sanitized_bytes.clone(),
-                                },
-                            )
-                            .map_err(CodeIndexProductionErrorV1::Intake)?;
-                        if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
-                            Ok(IncrementFileMaterializationV1::CarryForward(artifact))
-                        } else {
-                            // Opaque exact evidence may refuse generation-local
-                            // occurrence rebinding. Re-extract through the parser
-                            // authority instead of rewriting that evidence.
-                            let file = current_file;
+                                .map_err(CodeIndexProductionErrorV1::Intake)?;
+                            if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
+                                Ok(IncrementFileMaterializationV1::CarryForward(artifact))
+                            } else {
+                                // Opaque exact evidence may refuse generation-local
+                                // occurrence rebinding. Re-extract through the parser
+                                // authority instead of rewriting that evidence.
+                                let file = current_file;
+                                let artifact = Self::extract_file(
+                                    config,
+                                    physical_artifacts,
+                                    intake,
+                                    capability,
+                                    manifest,
+                                    extractor,
+                                    chunker,
+                                    file,
+                                    captured_files,
+                                    control,
+                                    false,
+                                )?;
+                                Ok(IncrementFileMaterializationV1::ReExtracted {
+                                    file: (**file).clone(),
+                                    artifact,
+                                    fallback: true,
+                                })
+                            }
+                        }
+                        FileExtractionActionV1::ReExtract { file } => {
                             let artifact = Self::extract_file(
                                 config,
                                 physical_artifacts,
@@ -1691,36 +1725,18 @@ where
                                 false,
                             )?;
                             Ok(IncrementFileMaterializationV1::ReExtracted {
-                                file: (**file).clone(),
+                                file: file.clone(),
                                 artifact,
-                                fallback: true,
+                                fallback: false,
                             })
                         }
+                        FileExtractionActionV1::Deleted { .. } => {
+                            Ok(IncrementFileMaterializationV1::Deleted)
+                        }
                     }
-                    FileExtractionActionV1::ReExtract { file } => {
-                        let artifact = Self::extract_file(
-                            config,
-                            physical_artifacts,
-                            intake,
-                            capability,
-                            manifest,
-                            extractor,
-                            chunker,
-                            file,
-                            captured_files,
-                            control,
-                            false,
-                        )?;
-                        Ok(IncrementFileMaterializationV1::ReExtracted {
-                            file: file.clone(),
-                            artifact,
-                            fallback: false,
-                        })
-                    }
-                    FileExtractionActionV1::Deleted { .. } => {
-                        Ok(IncrementFileMaterializationV1::Deleted)
-                    }
-                }
+                })();
+                control.complete_file_work();
+                result
             },
         )?;
 

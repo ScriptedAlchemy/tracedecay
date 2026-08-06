@@ -14,9 +14,8 @@ use tracedecay_domain::configuration::{
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
     SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
     SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
@@ -27,29 +26,14 @@ use tracedecay_domain::{ProjectId, UtcMicros};
 use crate::application::configuration::ConfigurationControlStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
-use crate::global_db::configuration::{
-    CanonicalGenesisConfigurationV1, GlobalDbConfigurationControlStore,
-    migrate_legacy_configuration_inputs_with_genesis,
-};
+use crate::global_db::configuration::{GlobalDbConfigurationControlStore, resolve_project_genesis};
 
-pub use tracedecay_global_db::configuration::{
-    LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
-    decode_legacy_configuration_inputs, decode_legacy_environment_overrides, registry,
-    resolve_legacy_configuration_inputs, resolver,
-};
+pub use tracedecay_global_db::configuration::{registry, resolver};
 pub use tracedecay_usecases::config::retrieval;
 pub mod scope_control;
 pub mod topology;
 
-/// Name of the legacy configuration migration input stored inside the data
-/// directory. It is not a runtime authority and production code must never
-/// rewrite it.
-pub const CONFIG_FILENAME: &str = "config.json";
-
-/// Kernel-owned path primitives. The definitions live in
-/// `tracedecay_runtime_core::config` because the storage layout, database,
-/// branch-metadata, and store layers depend on them and moved into that crate;
-/// re-exporting here keeps every `crate::config::<item>` path intact.
+/// Kernel-owned path primitives shared by storage and runtime composition.
 pub use tracedecay_runtime_core::config::{
     DB_FILENAME, TRACEDECAY_DIR, USER_DATA_DIR_ENV, active_data_dir_name, db_filename,
     discover_project_root, get_project_db_path, get_tracedecay_dir, has_project_database,
@@ -75,17 +59,13 @@ pub const SYNC_RETENTION_SETTING_KEY: &str = "sync.retention.v1";
 
 /// Canonical pinned semantic runtime configuration.
 ///
-/// Re-exported from the global configuration authority so historical
-/// `crate::config::<item>` paths retain nominal type identity.
+/// Re-exported from the global configuration authority as the canonical
+/// runtime semantic selection.
 pub use tracedecay_global_db::configuration::semantic::{
     DEFAULT_FASTEMBED_MODEL_ID, SemanticConfig, SemanticProfileSelection, SemanticResourceCeilings,
 };
 
-/// The shared generated/vendored segment list and its membership test moved
-/// into `tracedecay_runtime_core::config`: the extracted migration inventory
-/// scanner consults them and cannot reach back into the root crate.
-/// Re-exported so every historical `crate::config::<item>` path keeps
-/// resolving.
+/// The shared generated/vendored segment list and its membership test.
 pub use tracedecay_runtime_core::config::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment};
 
 /// Returns `true` if any component of `path` is a generated/vendored
@@ -115,8 +95,8 @@ fn has_minified_suffix(path: &str) -> bool {
 /// - `.git/**`, `.tracedecay/**` — VCS and `TraceDecay`'s own metadata dirs;
 ///   these are tool/repo bookkeeping, not generated *code*, so they stay
 ///   local to the config's default patterns rather than joining
-///   [`GENERATED_DIR_SEGMENTS`] (which the migrate/scan/redundancy call
-///   sites also consult for non-config-driven decisions).
+///   [`GENERATED_DIR_SEGMENTS`] (which scan and redundancy call sites also
+///   consult for non-config-driven decisions).
 /// - `bin/**` — historically excluded here by default, but not treated as
 ///   "generated" elsewhere: a `bin/` directory can hold real source in some
 ///   project layouts, so it isn't added to the shared segment list.
@@ -135,13 +115,10 @@ fn default_exclude_patterns() -> Vec<String> {
     patterns
 }
 
-/// Legacy `config.json` representation and the materialized shape used by an
-/// already-pinned resolved configuration snapshot.
+/// Released materialized view of an already-pinned configuration snapshot.
 ///
-/// `version` and `root_dir` are legacy migration metadata only. Every runtime
-/// setting below is sourced from [`ConfigurationSnapshotV1`] before a project
-/// opens; serializing this type is retained solely for migration fixtures and
-/// backwards-compatible legacy input decoding.
+/// `version` and `root_dir` are display metadata. Every runtime setting below
+/// is sourced from [`ConfigurationSnapshotV1`] before a project opens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceDecayConfig {
     /// Schema version of the configuration.
@@ -168,7 +145,7 @@ pub struct TraceDecayConfig {
     /// Whether a cold `tracedecay_diagnostics` call prewarms in the background
     /// (detached dependency build + immediate `warming` status) instead of
     /// blocking for minutes. Environment precedence is resolved into the
-    /// pinned snapshot during legacy migration, never during a tool call.
+    /// pinned snapshot before admission, never during a tool call.
     #[serde(default)]
     pub diagnostics_prewarm: bool,
     /// Optional installed local semantic profile selection. Missing or
@@ -176,11 +153,10 @@ pub struct TraceDecayConfig {
     #[serde(default)]
     pub semantic: SemanticConfig,
     /// Index-freshness auto-sync settings (git-metadata watcher, serve-stale,
-    /// branch lifecycle). Absent in older `config.json` files, so defaulted.
+    /// branch lifecycle).
     #[serde(default)]
     pub sync: SyncConfig,
-    /// Analytics telemetry settings. Absent in older `config.json` files, so
-    /// defaulted.
+    /// Analytics telemetry settings.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 }
@@ -221,12 +197,6 @@ fn default_sync_full_sync_escalation_files() -> usize {
 }
 fn default_sync_max_concurrent_syncs() -> usize {
     2
-}
-fn default_sync_branch_gc_days() -> u64 {
-    14
-}
-fn default_sync_orphan_db_gc_days() -> u64 {
-    7
 }
 fn default_sync_auto_init() -> bool {
     true
@@ -413,12 +383,7 @@ impl Default for TelemetryConfig {
     }
 }
 
-/// Auto-sync / index-freshness knobs in the legacy migration shape.
-///
-/// Runtime consumers receive these values only from a pinned resolved
-/// configuration snapshot. `TRACEDECAY_SYNC_*` values are decoded as an
-/// explicit legacy environment layer during migration, rather than being read
-/// independently by each adapter.
+/// Auto-sync / index-freshness values materialized from a pinned snapshot.
 ///
 /// Every field carries a `#[serde(default = ...)]` so that a partial JSON
 /// object (only some keys present) still deserializes, and a missing `sync`
@@ -458,12 +423,6 @@ pub struct SyncConfig {
     /// Daemon-wide cap on concurrent syncs.
     #[serde(default = "default_sync_max_concurrent_syncs")]
     pub max_concurrent_syncs: usize,
-    /// Grace period before a dead tracked-branch store is GC'd (days).
-    #[serde(default = "default_sync_branch_gc_days")]
-    pub branch_gc_days: u64,
-    /// Grace period before an orphan branch DB is GC'd (days).
-    #[serde(default = "default_sync_orphan_db_gc_days")]
-    pub orphan_db_gc_days: u64,
     /// Auto-initialise never-indexed repos on first contact.
     #[serde(default = "default_sync_auto_init")]
     pub auto_init: bool,
@@ -505,94 +464,11 @@ impl Default for SyncConfig {
             backstop_interval_mins: default_sync_backstop_interval_mins(),
             full_sync_escalation_files: default_sync_full_sync_escalation_files(),
             max_concurrent_syncs: default_sync_max_concurrent_syncs(),
-            branch_gc_days: default_sync_branch_gc_days(),
-            orphan_db_gc_days: default_sync_orphan_db_gc_days(),
             auto_init: default_sync_auto_init(),
             auto_track_pr_branches: default_sync_auto_track_pr_branches(),
             auto_track_pr_poll_secs: default_sync_auto_track_pr_poll_secs(),
             retention: RetentionConfig::default(),
         }
-    }
-}
-
-/// Parses a boolean env value: `1`/`true` => true, `0`/`false` => false
-/// (case-insensitive). Any other value is ignored (returns `None`).
-fn parse_env_bool(raw: &str) -> Option<bool> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
-    }
-}
-
-/// Reads a `TRACEDECAY_<suffix>` env var and parses it as a bool.
-pub(crate) fn env_bool(suffix: &str) -> Option<bool> {
-    brand_env(suffix).as_deref().and_then(parse_env_bool)
-}
-
-/// Reads a `TRACEDECAY_<suffix>` env var and parses it as an integer of the
-/// caller's choosing.
-fn env_parse<T: std::str::FromStr>(suffix: &str) -> Option<T> {
-    brand_env(suffix)
-        .as_deref()
-        .and_then(|raw| raw.trim().parse::<T>().ok())
-}
-
-impl SyncConfig {
-    /// Applies legacy `TRACEDECAY_SYNC_*` environment overrides on top of
-    /// `self`. This remains for pre-store/bootstrap compatibility only; live
-    /// runtime adapters must consume [`PinnedRuntimeConfiguration`] instead.
-    #[must_use]
-    pub fn with_env_overrides(mut self) -> Self {
-        if let Some(value) = env_bool("SYNC_AUTO_WATCH") {
-            self.auto_watch = value;
-        }
-        if let Some(value) = env_parse("SYNC_WATCH_DEBOUNCE_MS") {
-            self.watch_debounce_ms = value;
-        }
-        if let Some(value) = env_parse("SYNC_WATCH_MAX_DELAY_MS") {
-            self.watch_max_delay_ms = value;
-        }
-        if let Some(value) = env_parse("SYNC_WATCH_MAX_PROJECTS") {
-            self.watch_max_projects = value;
-        }
-        if let Some(value) = env_bool("SYNC_READ_REFRESH") {
-            self.read_refresh = value;
-        }
-        if let Some(value) = env_parse("SYNC_READ_COOLDOWN_SECS") {
-            self.read_cooldown_secs = value;
-        }
-        if let Some(value) = env_bool("SYNC_SESSION_START_SYNC") {
-            self.session_start_sync = value;
-        }
-        if let Some(value) = env_parse("SYNC_SESSION_START_STALE_THRESHOLD_SECS") {
-            self.session_start_stale_threshold_secs = value;
-        }
-        if let Some(value) = env_parse("SYNC_BACKSTOP_INTERVAL_MINS") {
-            self.backstop_interval_mins = value;
-        }
-        if let Some(value) = env_parse("SYNC_FULL_SYNC_ESCALATION_FILES") {
-            self.full_sync_escalation_files = value;
-        }
-        if let Some(value) = env_parse("SYNC_MAX_CONCURRENT_SYNCS") {
-            self.max_concurrent_syncs = value;
-        }
-        if let Some(value) = env_parse("SYNC_BRANCH_GC_DAYS") {
-            self.branch_gc_days = value;
-        }
-        if let Some(value) = env_parse("SYNC_ORPHAN_DB_GC_DAYS") {
-            self.orphan_db_gc_days = value;
-        }
-        if let Some(value) = env_bool("SYNC_AUTO_INIT") {
-            self.auto_init = value;
-        }
-        if let Some(value) = env_bool("SYNC_AUTO_TRACK_PR_BRANCHES") {
-            self.auto_track_pr_branches = value;
-        }
-        if let Some(value) = env_parse("SYNC_AUTO_TRACK_PR_POLL_SECS") {
-            self.auto_track_pr_poll_secs = value;
-        }
-        self
     }
 }
 
@@ -624,8 +500,8 @@ pub struct RuntimeConfigurationTarget {
 }
 
 /// A complete resolved configuration pinned to one revision before a runtime
-/// component starts. No caller may re-read mutable legacy input after holding
-/// this value.
+/// component starts. No caller may substitute ambient input after holding this
+/// value.
 #[derive(Clone, Debug)]
 pub struct PinnedRuntimeConfiguration {
     pub target: RuntimeConfigurationTarget,
@@ -635,7 +511,7 @@ pub struct PinnedRuntimeConfiguration {
 }
 
 impl PinnedRuntimeConfiguration {
-    /// Materializes the legacy runtime shape from a complete typed snapshot.
+    /// Materializes the released runtime view from a complete typed snapshot.
     /// The conversion rejects missing or wrongly typed settings rather than
     /// adding adapter-local defaults.
     pub fn new(
@@ -831,9 +707,8 @@ pub fn runtime_configuration_for_layout(
 /// the daemon owns the durable configuration store, so a registered project that
 /// simply has not been opened in this process (a first operation, or the first
 /// after a daemon restart) is resolved and pinned rather than rejected. It never
-/// consults legacy `config.json` input and never migrates or writes the store; a
-/// genuinely uninitialized or unopenable configuration store still yields a
-/// typed error rather than a fabricated default authority.
+/// never consults ambient input and never writes the store; a genuinely
+/// uninitialized or unopenable store yields a typed error.
 pub(crate) async fn resolve_runtime_configuration_for_registered_database(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -842,17 +717,15 @@ pub(crate) async fn resolve_runtime_configuration_for_registered_database(
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
     if let Ok(configuration) = runtime_configuration_cache().for_project(&target.project_id) {
-        // The cache already holds a daemon-published pin (possibly a migrated
-        // durable revision). Retarget it to this operation's non-authoritative
+        // The cache already holds a daemon-published pin. Retarget it to this
+        // operation's non-authoritative
         // route and keep the fast path; do not reopen the store.
         let configuration = configuration.retarget(target)?;
         runtime_configuration_cache().insert(configuration.clone())?;
         return Ok(configuration);
     }
-    // Cold cache: resolve the durable current revision (read-only, no legacy
-    // input, no store mutation) and publish it. A store that was never made
-    // writable resolves to registry defaults in memory; an initialized-but-
-    // unreadable store surfaces a typed authority error.
+    // Cold cache: resolve the durable current revision read-only and publish
+    // it. Empty or incompatible stores require explicit reset/recreation.
     load_runtime_configuration_for_registered_database_read_only(project_root, layout, database)
         .await
 }
@@ -1014,7 +887,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
 /// Loads and publishes the durable current configuration for a resolved store
 /// layout.
 ///
-/// A fresh project receives one migration-backed registry-default revision.
+/// A fresh project receives one exact registry-default genesis revision.
 /// Once any revision exists, open always reads that durable current revision;
 /// a corrupt or ambiguous history is never replaced with local defaults.
 pub(crate) async fn open_runtime_configuration_for_registered_database(
@@ -1025,7 +898,7 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
     let target = runtime_configuration_target_for_layout(project_root, layout)?;
     validate_registered_configuration_database(&target, database.as_ref())?;
     let store = GlobalDbConfigurationControlStore::new_registered(database.as_ref());
-    let configuration = open_runtime_configuration_from_store(target, layout, &store).await?;
+    let configuration = open_runtime_configuration_from_store(target, &store).await?;
     Ok(OpenedRuntimeConfiguration {
         configuration,
         registered_database: database,
@@ -1034,45 +907,22 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
 
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
-    layout: &crate::storage::StoreLayout,
     store: &GlobalDbConfigurationControlStore<'_>,
 ) -> Result<PinnedRuntimeConfiguration> {
-    if let Err(error) = store.current().await {
-        if !store
-            .is_uninitialized()
-            .await
-            .map_err(map_configuration_error)?
-        {
-            return Err(map_configuration_error(error));
-        }
+    if store.is_empty().await.map_err(map_configuration_error)? {
         let registry = registry::ConfigurationRegistry::core().map_err(|error| {
             config_error(format!("configuration registry unavailable: {error}"))
         })?;
         let target_layer = ConfigurationLayerIdV1::Project {
             project_id: target.project_id.clone(),
         };
-        let initial_revision_id =
-            ConfigurationRevisionId::new("configuration.initial.migration.v1").map_err(
-                |error| config_error(format!("invalid initial configuration revision: {error}")),
-            )?;
-        let legacy_target = LegacyConfigurationDecodeTargetV1 {
-            target_layer: target_layer.clone(),
-            target_revision_id: initial_revision_id.clone(),
-        };
-        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        let legacy =
-            read_legacy_configuration_inputs(&layout.config_path, &environment, &legacy_target)?;
-        // The project's first durable revision states the one binding the
-        // daemon already owns for the project it just registered. Both
-        // components restate resolved identity the caller holds — the
-        // project's own id and its project-open locator digest — so this
-        // grants no authority that a later protected `BindSource` would be
-        // required to grant. Without it a fresh project has no binding at
-        // all and every source-authorized surface is unreachable.
-        let genesis = CanonicalGenesisConfigurationV1 {
+        let genesis_revision_id = ConfigurationRevisionId::new("configuration.genesis")
+            .map_err(|error| config_error(format!("invalid genesis revision: {error}")))?;
+        let resolution = resolve_project_genesis(
+            &registry,
             target_layer,
-            target_revision_id: initial_revision_id,
-            source_bindings: vec![
+            genesis_revision_id.clone(),
+            vec![
                 scope_control::daemon_owned_project_source_binding(
                     &target.project_id,
                     &target.project_root,
@@ -1083,38 +933,18 @@ async fn open_runtime_configuration_from_store(
                     ))
                 })?,
             ],
-        };
-        migrate_legacy_configuration_inputs_with_genesis(
-            &registry,
-            &legacy,
-            &genesis,
-            store,
-            current_utc_micros(),
         )
-        .await
         .map_err(|error| {
             config_error(format!(
-                "configuration initial migration could not commit: {error}"
+                "configuration genesis could not be resolved: {error}"
             ))
         })?;
+        store
+            .initialize_genesis(&genesis_revision_id, &resolution, current_utc_micros()?)
+            .await
+            .map_err(map_configuration_error)?;
     }
-    let daemon_binding = scope_control::daemon_owned_project_source_binding(
-        &target.project_id,
-        &target.project_root,
-    )
-    .map_err(|error| {
-        config_error(format!(
-            "daemon project source binding could not be derived: {error}"
-        ))
-    })?;
-    let current = store
-        .ensure_daemon_source_binding(daemon_binding, current_utc_micros())
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "daemon project source binding forward repair failed: {error}"
-            ))
-        })?;
+    let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone())?;
@@ -1138,8 +968,8 @@ pub(crate) async fn ensure_runtime_configuration_for_registered_database(
     )
 }
 
-/// Loads an already-persisted current configuration without creating a store,
-/// applying a migration, or publishing a fallback revision.
+/// Loads an already-persisted current configuration without creating or
+/// changing the store.
 pub(crate) async fn open_runtime_configuration_for_registered_database_read_only(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
@@ -1159,23 +989,10 @@ async fn open_runtime_configuration_read_only_from_store(
     target: RuntimeConfigurationTarget,
     store: &GlobalDbConfigurationControlStore<'_>,
 ) -> Result<PinnedRuntimeConfiguration> {
-    if store
-        .is_uninitialized()
-        .await
-        .map_err(map_configuration_error)?
-    {
-        // The durable store exists but holds no configuration revision or
-        // migration receipt yet — for example a consolidated destination whose
-        // configuration authority was never migrated in, reopened read-only
-        // after a repository move. Read-only inspection degrades to the
-        // registry-default snapshot exactly as it does for a never-writable
-        // store, rather than hard-erroring on the absent current revision. A
-        // non-empty store with an unreadable current revision is not
-        // uninitialized, so it still surfaces a typed authority error below and
-        // durable authority is never silently replaced.
-        let configuration = read_only_default_runtime_configuration(target)?;
-        install_pinned_runtime_configuration(configuration.clone())?;
-        return Ok(configuration);
+    if store.is_empty().await.map_err(map_configuration_error)? {
+        return Err(map_configuration_error(
+            crate::application::configuration::ConfigurationError::ResetRequired,
+        ));
     }
     let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
@@ -1198,27 +1015,6 @@ fn validate_registered_configuration_database(
             "configuration authority unavailable: registered database is not the exact project session shard",
         )),
     }
-}
-
-/// Builds the registry-default runtime configuration for a read-only open of a
-/// store that has no durable configuration history yet. This mirrors the
-/// snapshot a fresh writable open would migrate in, but stays entirely
-/// in-memory so inspecting a never-opened store never mutates it.
-fn read_only_default_runtime_configuration(
-    target: RuntimeConfigurationTarget,
-) -> Result<PinnedRuntimeConfiguration> {
-    let registry = registry::ConfigurationRegistry::core()
-        .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
-    let resolution = resolver::resolve_configuration(&registry, &[]).map_err(|error| {
-        config_error(format!(
-            "configuration authority unavailable: could not resolve default snapshot: {error}"
-        ))
-    })?;
-    let revision_id =
-        ConfigurationRevisionId::new("configuration.read_only.default.v1").map_err(|error| {
-            config_error(format!("invalid default configuration revision: {error}"))
-        })?;
-    PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)
 }
 
 pub(crate) async fn load_runtime_configuration_for_registered_database_read_only(
@@ -1268,20 +1064,27 @@ fn registered_configuration_database_required() -> TraceDecayError {
     )
 }
 
-fn current_utc_micros() -> UtcMicros {
-    UtcMicros(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| {
-                duration.as_micros().min(i64::MAX as u128) as i64
-            }),
-    )
+fn current_utc_micros() -> Result<UtcMicros> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| config_error(format!("configuration clock is invalid: {error}")))?;
+    let micros = i64::try_from(duration.as_micros())
+        .map_err(|_| config_error("configuration clock exceeds the supported range"))?;
+    Ok(UtcMicros(micros))
 }
 
 fn map_configuration_error(
     error: crate::application::configuration::ConfigurationError,
 ) -> TraceDecayError {
-    config_error(format!("configuration authority unavailable: {error}"))
+    match error {
+        crate::application::configuration::ConfigurationError::ResetRequired => {
+            TraceDecayError::reset_required(
+                "configuration",
+                "stored snapshot is missing, invalid, ambiguous, or not the exact final shape",
+            )
+        }
+        error => config_error(format!("configuration authority unavailable: {error}")),
+    }
 }
 
 /// Returns a cached configuration without resolving a layout, opening a
@@ -1291,7 +1094,7 @@ pub fn cached_runtime_configuration(project_root: &Path) -> Result<PinnedRuntime
 }
 
 /// Looks up a daemon-published snapshot by an already-authoritative project
-/// ID. The supplied root is only used to materialize legacy display metadata;
+/// ID. The supplied root is only used to materialize released display metadata;
 /// it never participates in authority resolution.
 pub fn cached_runtime_configuration_for_project_id(
     project_root: &Path,
@@ -1311,11 +1114,8 @@ pub fn cached_telemetry_config(project_root: &Path) -> Result<TelemetryConfig> {
     Ok(cached_runtime_configuration(project_root)?.config.telemetry)
 }
 
-/// Creates the only permitted pre-store runtime snapshot: registry defaults
-/// with a synthetic bootstrap revision. It does not read or write
-/// `config.json`, and a daemon must replace it with its migrated canonical
-/// snapshot before a subsequent process can serve the project.
-pub fn bootstrap_runtime_configuration(
+#[cfg(test)]
+pub(crate) fn install_fresh_runtime_configuration_for_test(
     project_root: &Path,
     layout: &crate::storage::StoreLayout,
 ) -> Result<PinnedRuntimeConfiguration> {
@@ -1331,25 +1131,30 @@ pub fn bootstrap_runtime_configuration(
 
     let registry = registry::ConfigurationRegistry::core()
         .map_err(|error| config_error(format!("configuration registry unavailable: {error}")))?;
-    let snapshot = resolver::resolve_configuration(&registry, &[])
-        .map_err(|error| {
-            config_error(format!(
-                "configuration bootstrap resolution failed: {error}"
-            ))
-        })?
-        .snapshot;
-    let revision_id =
-        ConfigurationRevisionId::new("configuration.bootstrap.default.v1").map_err(|error| {
-            config_error(format!("invalid bootstrap configuration revision: {error}"))
-        })?;
-    let configuration = PinnedRuntimeConfiguration::new(target, revision_id, snapshot)?;
+    let revision_id = ConfigurationRevisionId::new("configuration.genesis")
+        .map_err(|error| config_error(format!("invalid genesis revision: {error}")))?;
+    let resolution = resolve_project_genesis(
+        &registry,
+        ConfigurationLayerIdV1::Project {
+            project_id: target.project_id.clone(),
+        },
+        revision_id.clone(),
+        vec![
+            scope_control::daemon_owned_project_source_binding(
+                &target.project_id,
+                &target.project_root,
+            )
+            .map_err(|error| config_error(format!("derive test source binding: {error}")))?,
+        ],
+    )
+    .map_err(|error| config_error(format!("resolve test configuration genesis: {error}")))?;
+    let configuration = PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)?;
     runtime_configuration_cache().insert(configuration.clone())?;
     Ok(configuration)
 }
 
 /// Applies the typed diff between two runtime materializations through the
-/// installed daemon client. Missing client authority fails closed and cannot
-/// fall back to a legacy file write.
+/// installed daemon client. Missing client authority fails closed.
 pub async fn mutate_pinned_runtime_configuration(
     current: &PinnedRuntimeConfiguration,
     updated: TraceDecayConfig,
@@ -1403,7 +1208,7 @@ async fn commit_runtime_configuration_mutation(
     }
     // The daemon's target path is non-authoritative routing metadata. Retarget
     // the returned snapshot to the caller's already-authorized route before
-    // publishing it, which also re-materializes the legacy display fields from
+    // publishing it, which also re-materializes the released display fields from
     // the validated snapshot rather than trusting an adapter-provided shape.
     let next =
         PinnedRuntimeConfiguration::new(current.target.clone(), next.revision_id, next.snapshot)?;
@@ -1411,29 +1216,7 @@ async fn commit_runtime_configuration_mutation(
     Ok(next)
 }
 
-/// Decodes a legacy file only as migration input. This function never writes
-/// the file and callers must pass the already-authorized target layer/revision
-/// supplied by the control-plane migration.
-pub fn read_legacy_configuration_inputs(
-    config_path: &Path,
-    environment: &BTreeMap<String, String>,
-    target: &LegacyConfigurationDecodeTargetV1,
-) -> Result<crate::global_db::configuration::migration::ReadonlyLegacyConfigurationInputsV1> {
-    let config_json = if config_path.exists() {
-        fs::read_to_string(config_path).map_err(|error| {
-            config_error(format!(
-                "failed to read legacy config input '{}': {error}",
-                config_path.display()
-            ))
-        })?
-    } else {
-        "{}".to_owned()
-    };
-    decode_legacy_configuration_inputs(&config_json, environment, target)
-        .map_err(|error| config_error(format!("legacy configuration input is invalid: {error}")))
-}
-
-/// Converts a complete typed snapshot into the legacy runtime shape without
+/// Converts a complete typed snapshot into the released runtime view without
 /// defaults, file reads, or environment reads. This is intentionally public so
 /// daemon composition can validate snapshot-to-runtime parity before publish.
 pub fn runtime_config_from_snapshot(
@@ -1441,7 +1224,10 @@ pub fn runtime_config_from_snapshot(
     snapshot: &ConfigurationSnapshotV1,
 ) -> Result<TraceDecayConfig> {
     snapshot.validate().map_err(|error| {
-        config_error(format!("invalid resolved configuration snapshot: {error}"))
+        TraceDecayError::reset_required(
+            "configuration",
+            format!("final snapshot is invalid: {error}"),
+        )
     })?;
 
     Ok(TraceDecayConfig {
@@ -1476,8 +1262,6 @@ pub fn runtime_config_from_snapshot(
                 SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
             )?,
             max_concurrent_syncs: required_usize(snapshot, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY)?,
-            branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
-            orphan_db_gc_days: required_unsigned(snapshot, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)?,
             auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
             auto_track_pr_branches: required_bool(
                 snapshot,
@@ -1502,19 +1286,28 @@ fn semantic_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<S
         ))
     })?;
     let semantic = match snapshot.effective_values.get(&key) {
-        None => SemanticConfig::default(),
+        None => {
+            return Err(TraceDecayError::reset_required(
+                "configuration",
+                format!("final snapshot is missing '{SEMANTIC_RUNTIME_SETTING_KEY}'"),
+            ));
+        }
         Some(ConfigurationValueV1::Text(value)) => {
             serde_json::from_str(value).map_err(|error| {
-                config_error(format!(
-                    "resolved semantic runtime setting is invalid: {error}"
-                ))
+                TraceDecayError::reset_required(
+                    "configuration",
+                    format!("final semantic runtime setting is invalid: {error}"),
+                )
             })?
         }
         Some(value) => {
-            return Err(config_error(format!(
-                "resolved configuration setting '{SEMANTIC_RUNTIME_SETTING_KEY}' has wrong type: expected text, got {:?}",
-                value.kind()
-            )));
+            return Err(TraceDecayError::reset_required(
+                "configuration",
+                format!(
+                    "final setting '{SEMANTIC_RUNTIME_SETTING_KEY}' has wrong type: expected text, got {:?}",
+                    value.kind()
+                ),
+            ));
         }
     };
     semantic.validate()?;
@@ -1528,17 +1321,28 @@ fn retention_config_from_snapshot(snapshot: &ConfigurationSnapshotV1) -> Result<
         ))
     })?;
     let retention = match snapshot.effective_values.get(&key) {
-        None => RetentionConfig::default(),
+        None => {
+            return Err(TraceDecayError::reset_required(
+                "configuration",
+                format!("final snapshot is missing '{SYNC_RETENTION_SETTING_KEY}'"),
+            ));
+        }
         Some(ConfigurationValueV1::Text(value)) => {
             serde_json::from_str(value).map_err(|error| {
-                config_error(format!("resolved retention setting is invalid: {error}"))
+                TraceDecayError::reset_required(
+                    "configuration",
+                    format!("final retention setting is invalid: {error}"),
+                )
             })?
         }
         Some(value) => {
-            return Err(config_error(format!(
-                "resolved configuration setting '{SYNC_RETENTION_SETTING_KEY}' has wrong type: expected text, got {:?}",
-                value.kind()
-            )));
+            return Err(TraceDecayError::reset_required(
+                "configuration",
+                format!(
+                    "final setting '{SYNC_RETENTION_SETTING_KEY}' has wrong type: expected text, got {:?}",
+                    value.kind()
+                ),
+            ));
         }
     };
     retention.validate()?;
@@ -1553,48 +1357,59 @@ fn required_setting<'a>(
         config_error(format!("invalid runtime setting key '{key_name}': {error}"))
     })?;
     snapshot.effective_values.get(&key).ok_or_else(|| {
-        config_error(format!(
-            "resolved configuration snapshot is missing required setting '{key_name}'",
-        ))
+        TraceDecayError::reset_required(
+            "configuration",
+            format!("final snapshot is missing required setting '{key_name}'"),
+        )
     })
 }
 
 fn required_bool(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<bool> {
     match required_setting(snapshot, key_name)? {
         ConfigurationValueV1::Boolean(value) => Ok(*value),
-        value => Err(config_error(format!(
-            "resolved configuration setting '{key_name}' has wrong type: expected boolean, got {:?}",
-            value.kind()
-        ))),
+        value => Err(TraceDecayError::reset_required(
+            "configuration",
+            format!(
+                "final setting '{key_name}' has wrong type: expected boolean, got {:?}",
+                value.kind()
+            ),
+        )),
     }
 }
 
 fn required_unsigned(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<u64> {
     match required_setting(snapshot, key_name)? {
         ConfigurationValueV1::Unsigned(value) => Ok(*value),
-        value => Err(config_error(format!(
-            "resolved configuration setting '{key_name}' has wrong type: expected unsigned, got {:?}",
-            value.kind()
-        ))),
+        value => Err(TraceDecayError::reset_required(
+            "configuration",
+            format!(
+                "final setting '{key_name}' has wrong type: expected unsigned, got {:?}",
+                value.kind()
+            ),
+        )),
     }
 }
 
 fn required_usize(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<usize> {
     let value = required_unsigned(snapshot, key_name)?;
     usize::try_from(value).map_err(|_| {
-        config_error(format!(
-            "resolved configuration setting '{key_name}' does not fit this platform",
-        ))
+        TraceDecayError::reset_required(
+            "configuration",
+            format!("final setting '{key_name}' does not fit this platform"),
+        )
     })
 }
 
 fn required_string_list(snapshot: &ConfigurationSnapshotV1, key_name: &str) -> Result<Vec<String>> {
     match required_setting(snapshot, key_name)? {
         ConfigurationValueV1::StringList(value) => Ok(value.clone()),
-        value => Err(config_error(format!(
-            "resolved configuration setting '{key_name}' has wrong type: expected string list, got {:?}",
-            value.kind()
-        ))),
+        value => Err(TraceDecayError::reset_required(
+            "configuration",
+            format!(
+                "final setting '{key_name}' has wrong type: expected string list, got {:?}",
+                value.kind()
+            ),
+        )),
     }
 }
 
@@ -1605,7 +1420,7 @@ fn direct_mutation_for_runtime_config_diff(
 ) -> Result<Option<crate::application::configuration::DirectConfigurationMutation>> {
     if before.version != after.version || before.root_dir != after.root_dir {
         return Err(config_error(
-            "legacy configuration metadata cannot be mutated through the runtime control plane",
+            "configuration display metadata cannot be mutated through the runtime control plane",
         ));
     }
 
@@ -1746,20 +1561,6 @@ fn direct_mutation_for_runtime_config_diff(
     push_runtime_change(
         &mut mutations,
         project_id,
-        SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-        ConfigurationValueV1::Unsigned(before.sync.branch_gc_days),
-        ConfigurationValueV1::Unsigned(after.sync.branch_gc_days),
-    )?;
-    push_runtime_change(
-        &mut mutations,
-        project_id,
-        SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-        ConfigurationValueV1::Unsigned(before.sync.orphan_db_gc_days),
-        ConfigurationValueV1::Unsigned(after.sync.orphan_db_gc_days),
-    )?;
-    push_runtime_change(
-        &mut mutations,
-        project_id,
         SYNC_AUTO_INIT_SETTING_KEY,
         ConfigurationValueV1::Boolean(before.sync.auto_init),
         ConfigurationValueV1::Boolean(after.sync.auto_init),
@@ -1844,133 +1645,6 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 /// Reads the `TRACEDECAY_<suffix>` environment variable.
 pub fn brand_env(suffix: &str) -> Option<String> {
     std::env::var(format!("TRACEDECAY_{suffix}")).ok()
-}
-
-/// Returns the path to the configuration file (`config.json`) within the
-/// resolved data directory.
-pub fn get_config_path(project_root: &Path) -> PathBuf {
-    if let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) {
-        return layout.config_path;
-    }
-    get_tracedecay_dir(project_root).join(CONFIG_FILENAME)
-}
-
-pub async fn get_config_path_with_identity(project_root: &Path) -> PathBuf {
-    if let Ok(layout) =
-        crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root).await
-    {
-        return layout.config_path;
-    }
-    get_config_path(project_root)
-}
-
-/// Loads a legacy configuration input from disk.
-///
-/// This compatibility reader is for migration and read-only diagnostics only;
-/// runtime consumers must use a pinned resolved snapshot. If the file does
-/// not exist, it returns the legacy defaults with `root_dir` set to the given
-/// project root.
-pub fn load_config(project_root: &Path) -> Result<TraceDecayConfig> {
-    let config_path = get_config_path(project_root);
-    load_config_from_path(project_root, &config_path)
-}
-
-pub async fn load_config_with_identity(project_root: &Path) -> Result<TraceDecayConfig> {
-    let config_path = get_config_path_with_identity(project_root).await;
-    load_config_from_path(project_root, &config_path)
-}
-
-/// Loads configuration from an explicit config path while preserving the
-/// project root used for default config values.
-pub fn load_config_from_path(project_root: &Path, config_path: &Path) -> Result<TraceDecayConfig> {
-    if !config_path.exists() {
-        return Ok(TraceDecayConfig {
-            root_dir: project_root.to_string_lossy().to_string(),
-            ..TraceDecayConfig::default()
-        });
-    }
-
-    let contents = fs::read_to_string(config_path).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to read config file '{}': {}",
-            config_path.display(),
-            e
-        ),
-    })?;
-
-    let config: TraceDecayConfig =
-        serde_json::from_str(&contents).map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to parse config file '{}': {}",
-                config_path.display(),
-                e
-            ),
-        })?;
-
-    Ok(config)
-}
-
-/// Writes a legacy configuration fixture using an atomic write.
-///
-/// Production runtime code must use the daemon control plane instead of this
-/// compatibility helper. It remains for fixtures and legacy-input tests while
-/// callers complete their migration.
-pub fn save_config(project_root: &Path, config: &TraceDecayConfig) -> Result<()> {
-    let config_path = get_config_path(project_root);
-    save_config_to_path(&config_path, config)
-}
-
-pub async fn save_config_with_identity(
-    project_root: &Path,
-    config: &TraceDecayConfig,
-) -> Result<()> {
-    let config_path = get_config_path_with_identity(project_root).await;
-    save_config_to_path(&config_path, config)
-}
-
-pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Result<()> {
-    let data_dir = config_path
-        .parent()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: format!(
-                "configuration path '{}' has no parent directory",
-                config_path.display()
-            ),
-        })?;
-    crate::storage::PrivateStoreIo::create_dir_all(data_dir).map_err(|e| {
-        TraceDecayError::Config {
-            message: format!(
-                "failed to create tracedecay directory '{}': {}",
-                data_dir.display(),
-                e
-            ),
-        }
-    })?;
-
-    let tmp_path = config_path.with_extension("tmp");
-
-    let json = serde_json::to_string_pretty(config).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to serialize config: {e}"),
-    })?;
-
-    fs::write(&tmp_path, &json).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to write temporary config file '{}': {}",
-            tmp_path.display(),
-            e
-        ),
-    })?;
-
-    fs::rename(&tmp_path, config_path).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to rename temporary config file '{}' to '{}': {}",
-            tmp_path.display(),
-            config_path.display(),
-            e
-        ),
-    })?;
-
-    Ok(())
 }
 
 /// Returns `true` if the project marker dir (`.tracedecay`) is ignored by Git

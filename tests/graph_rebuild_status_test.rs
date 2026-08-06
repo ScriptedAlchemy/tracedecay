@@ -101,8 +101,9 @@ async fn graph_rebuild_is_nonblocking_resumable_and_honestly_reported() {
     let feature_seed = runtime
         .open_project_graph_for_test(&project, options.clone())
         .await
-        .expect("auto-track peer branch through retained runtime");
-    assert_eq!(feature_seed.serving_branch(), Some("feature"));
+        .expect("open peer branch selector through retained runtime");
+    assert_eq!(feature_seed.active_branch(), Some("feature"));
+    assert_eq!(feature_seed.db_path(), initialized.db_path());
     feature_seed.close();
     git(&project, &["checkout", "-q", "main"]);
 

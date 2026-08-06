@@ -32,23 +32,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn lcm_doctor_for_test(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-        mode: &str,
-        apply: bool,
-        clean_config: crate::sessions::lcm::LcmCleanConfig,
-        gc_config: crate::sessions::lcm::LcmGcConfig,
-    ) -> std::result::Result<serde_json::Value, crate::sessions::lcm::LcmError> {
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
-            .await
-    }
-
-    #[doc(hidden)]
     pub async fn lcm_expand_for_test(
         &self,
         request: crate::sessions::lcm::LcmExpandRequest,
@@ -177,29 +160,6 @@ impl HostAdmissionTestRuntimeV1 {
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
             .lcm_recent_sessions(provider, limit)
-            .await
-    }
-
-    #[doc(hidden)]
-    pub async fn lcm_run_payload_gc_apply_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        provider: &str,
-        session_id: Option<&str>,
-        config: &crate::sessions::lcm::LcmGcConfig,
-        now: i64,
-    ) -> std::result::Result<crate::sessions::lcm::LcmGcReport, crate::sessions::lcm::LcmError>
-    {
-        let database = self
-            .session_database_for_test(scope)
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let storage_root = database.db_path().parent().ok_or_else(|| {
-            crate::sessions::lcm::LcmError::Db(
-                "registered session database has no storage root".to_string(),
-            )
-        })?;
-        database
-            .lcm_run_payload_gc_apply(storage_root, provider, session_id, config, now)
             .await
     }
 

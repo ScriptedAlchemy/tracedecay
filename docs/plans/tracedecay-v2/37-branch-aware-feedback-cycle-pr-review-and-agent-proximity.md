@@ -474,13 +474,12 @@ actor-indexed expertise view, score, leaderboard, export, workflow authority,
 or employment signal. Focused tests prove revocation/purge removes eligible
 input and cannot change feedback ranking or any canonical task result.
 
-Task retrieval begins in shadow mode. Proximity rank influence, Plan 24's
-expertise operation, cross-project cohorts, and stack fanout activate only
-after their direct product behavior and rollback path work. Wrong-project
+Task retrieval and proximity are production application operations with direct
+behavioral evidence and an explicit disable/rollback control. Wrong-project
 results, attempted GitHub writes, dropped stack transitions, prohibited
-purpose, unexplained results, or semantic auto-resolution disable only the
-affected extension without disabling base PR13 feedback or canonical
-read-only evidence.
+purpose, unexplained results, or semantic auto-resolution fail the affected
+operation truthfully without disabling canonical read-only evidence. There is
+no shadow mode or dormant rank path.
 
 ## Safety constraints retained
 

@@ -40,7 +40,7 @@ fn enroll_project(project_root: &Path, project_id: &str) -> PathBuf {
     .unwrap();
     let layout = crate::storage::resolve_layout_for_current_profile(project_root).unwrap();
     std::fs::create_dir_all(&layout.data_root).unwrap();
-    crate::config::bootstrap_runtime_configuration(project_root, &layout)
+    crate::config::install_fresh_runtime_configuration_for_test(project_root, &layout)
         .expect("publish hook test runtime configuration");
     layout.data_root
 }

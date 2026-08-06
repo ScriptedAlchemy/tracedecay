@@ -1,153 +1,108 @@
-# Secret Detection, Redaction, and Private Data Safety
-
-## Status / Role
-
-- Cross-cutting V2 safety requirement; its PR5 capture foundation is complete.
-- Mandatory for every later ingestion, storage, indexing, retrieval, logging, and export path.
-- Delivered structural sanitization remains required product behavior.
-  Sensitive-value redaction of lossless LCM raw payloads is conditionally
-  delivered through the owner setting described below.
-
-Historical detector-corpus names, sink inventories, remediation packets, and
-intermediate gate layouts are evidence, not mechanisms that later work must
-recreate. Persisted safety markers and published safety states retain their
-compatibility and migration obligations; acceptance otherwise follows the
-direct prevention, remediation, disclosure, and regression behavior below.
+# Secret detection, redaction, and private-data safety
 
 ## Outcome
 
-TraceDecay does not persist or disclose known secrets and private values
-through sanitized observations and derived data. Structured content is parsed
-before scanning, safety state follows data through the system, and each
-covered durable or external sink enforces the same policy.
+TraceDecay does not persist or disclose known secrets or prohibited private
+values through observations, derived indexes, facts, sessions, logs,
+analytics, APIs, UI, exports, provider requests, or diagnostic bundles.
+Coverage and uncertainty remain explicit: heuristic detection never claims it
+can identify every secret.
 
-**Conditional LCM raw-payload guarantee (2026-07-26).** Sensitive-value
-redaction of new `lcm_raw_messages` input is enforced when
-`UserConfig::lcm_sensitive_redaction_enabled` is set. The profile default
-flows through `IngestProtectionDefaults::from_profile()` into `ingest_config`
-and `redact_sensitive_text`; a per-message metadata key can override that
-profile default in either direction. The default remains `false` because
-redaction is irreversible and the LCM contract is lossless by default.
-Enabling it protects newly ingested values; it does not rewrite transcripts
-already at rest. Structural payload externalization remains independent of
-this sensitive-value setting.
+Final V2 starts with fresh stores. This plan does not scan, migrate, rewrite,
+backfill, quarantine, or rebuild an older TraceDecay database. Historical data
+acquired from supported agent hosts enters through the same current capture
+firewall as new data.
 
-## Owns
+## Authority
 
-- Structured parsing and secret/private-data detection.
-- Redaction, taint metadata, and verified-safe markers.
-- Sink firewalls for storage, indexes, facts, sanitized session projections,
-  analytics, logs, APIs, UI, and exports. LCM raw sensitive-value protection
-  is conditional on the named owner setting above.
-- Safe audit records and incident evidence.
-- Existing-data scanning, quarantine, remediation, and derivative rebuilds.
-- Doctor diagnostics and healing guidance.
-- Operator UI for safety state, incidents, and remediation progress.
-
-## Does not own
-
-- Credential storage or configuration resolution; Plan 20 supplies opaque credential references.
-- Provider-specific business logic unrelated to identifying sensitive values.
-- A speculative threat-model registry, compliance framework, or policy-document bureaucracy.
-- Generated inventories, plan parsers, trackers, executors, or workflow JavaScript.
-- A claim that heuristic detection can identify every possible secret.
+- Structured parsing and bounded secret/private-data detection run before a
+  value reaches a durable or external sink.
+- Safety state includes detector/policy revision, scanned coverage, source
+  class, transformation, privacy domain, and safe/tainted/redacted status.
+- Owning content authorities retain exact redaction and authorization state.
+  Grafeo stores only authorized typed identifiers/relations/vectors and never
+  becomes a raw-content bypass.
+- Configuration supplies opaque credential references and explicit privacy
+  policy. No client, log, metric, or graph property receives secret bytes.
+- Doctor is read-only and reports coverage, stale policy, disabled protection,
+  or unavailable evidence. It never repairs or rewrites data.
 
 ## Required behavior
 
-1. Parse before scan
-   - JSON, YAML, TOML, dotenv, URLs, headers, and known transcript/event envelopes are parsed first.
-   - Detectors inspect field meaning and decoded values as well as bounded raw text.
-   - Malformed structured input is treated as untrusted raw input, never implicitly safe.
+1. **Parse before scan.** JSON, YAML, TOML, dotenv, URLs, headers, and known
+   event/transcript envelopes are parsed before inspection. Malformed content
+   is untrusted bounded text, never implicitly safe.
+2. **Propagate safety state.** Concatenation, formatting, summarization,
+   extraction, embedding, projection, and export preserve taint unless a
+   canonical transformation produces a revisioned safe representation.
+3. **Fail closed at sinks.** Durable/external sinks accept only an allowed
+   representation with current policy evidence. Missing, incomplete, stale,
+   oversized, cancelled, or incompatible scanning returns a typed problem.
+4. **Protect ephemeral source.** Unsaved documents and provider-local frames
+   may reach only an explicitly authorized analyzer/provider for the admitted
+   operation. They are not persisted, logged, embedded, exported, or captured
+   as ordinary TraceDecay observations.
+5. **Detect realistically.** Exact credential formats, structured sensitive
+   fields, configured private patterns, known-value fingerprints, entropy, and
+   context signals are combined without recording matched secret bytes.
+6. **Audit safely.** Receipts record policy/detector revision, source class,
+   action, coverage, timestamps, and opaque identities. Logs, errors, metrics,
+   traces, and UI payloads contain redacted evidence only.
+7. **Respect lossless LCM.** Exact authorized source content remains
+   recoverable, but visibility is mediated by the owning redaction/content
+   authority. Sensitive-value transformation is explicit policy and cannot be
+   silently enabled or disabled per message.
+8. **Preserve deletion and denial.** Current tombstones, deletion, quarantine,
+   retention, authorization, and policy state are applied before restored
+   final-V2 content or rebuilt derivatives can serve.
 
-2. Propagate safety state
-   - Untrusted values enter as tainted.
-   - Unsaved LSP documents are tainted ephemeral session data. They may be
-     disclosed only to explicitly authorized analyzers; their content is never
-     persisted, logged, embedded, exported, or captured as a TraceDecay
-     observation.
-   - Remote analyzers are denied by default and require an explicit policy
-     capability and privacy disclosure, as specified by
-     [Plan 35](35-daemon-lsp-gateway-and-universal-diagnostics.md).
-   - Redaction creates a safe representation without erasing the source's tainted provenance.
-   - A verified-safe marker identifies the policy version and transformation that produced it.
-   - Concatenation, formatting, summarization, and extraction preserve taint unless re-sanitized.
+## Product journeys
 
-3. Enforce sink firewalls
-   - Every covered durable or externally visible sink accepts only
-     verified-safe payloads; LCM raw sensitive-value protection is conditional
-     on the owner setting above.
-   - Diagnostic messages and provenance pass the same sink firewall without
-     retaining raw analyzer stderr, environment values, command lines, or source.
-   - Missing, stale, or incompatible safety metadata fails closed with a structured error.
-   - Derived indexes and caches cannot retain unsafe source text after remediation.
+- Capture rejects or redacts prohibited values before committing the source
+  occurrence and before graph/vector publication.
+- Retrieval authorizes candidates before ranking and again before hydration;
+  denied candidates expose no identity, count, timing, cursor, vector, or
+  alternate source.
+- Session/LCM source pagination hydrates through each message's owning
+  redaction/content authority, including cross-project selection.
+- Memory writes store only an allowed project-wide fact representation and
+  provenance; Grafeo fact relations/vector references contain no raw secret.
+- Diagnostics and provider execution pass bounded safe views rather than raw
+  environment, command, prompt, or analyzer payloads.
+- Dashboard/CLI/MCP/HTTP/SDK render the same typed redacted finding and coverage
+  without a private bypass.
 
-4. Detect realistically
-   - Combine exact credential formats, entropy and context signals, configured private patterns,
-     structured sensitive keys, and known-value fingerprints.
-   - Bound scanning cost and payload size without silently accepting an unscanned remainder.
-   - Findings include detector origin/revision, location, remediation class,
-     evidence anchors, scanned coverage, and an optional typed assessment:
-     `ordinal_rank`, `heuristic_score`, `calibrated_probability`, or
-     `calibrated_interval`. Rank names its comparison set and deterministic
-     components; a heuristic names its versioned scale and never renders as a
-     probability. Probability or interval output requires a valid held-out
-     calibration profile naming detector cohort, horizon, support, error, and
-     drift validity. No finding or assessment contains the secret value.
+## Verification
 
-5. Audit safely
-   - Record policy version, source class, detector, action, timestamps, and opaque record identifiers.
-   - Logs, metrics, traces, errors, and diagnostic bundles contain redacted evidence only.
+- Representative structured, encoded, malformed, oversized, split-field, and
+  contextual inputs prove parse-before-scan and bounded failure behavior.
+- Every sink rejects raw, tainted, unmarked, stale-policy, and
+  incomplete-coverage payloads.
+- End-to-end tests prove secrets do not appear in SQLite, Grafeo
+  properties/vectors, facts, sanitized session projections, logs, analytics,
+  API/UI responses, exports, or diagnostics.
+- LSP tests prove unsaved content is ephemeral and remote analyzer access is
+  denied without explicit capability and disclosure.
+- LCM tests page summary sources and prove authorized redaction/content
+  hydration without leaking ranked metadata.
+- Revocation between candidate selection and hydration returns no payload and
+  invalidates cached/cursor state.
+- Backup/restore and rebuild tests apply current deletion/quarantine/privacy
+  state before activation.
+- Detector evaluation reports precision, recall, false positives/negatives,
+  and coverage per declared cohort. Probability output requires a valid
+  held-out calibration profile; otherwise output is a named heuristic or
+  abstention.
+- Read-only Doctor completes without a writer lane and exposes no sensitive
+  evidence.
 
-6. Remediate existing data
-   - Scan legacy records and their derivatives.
-   - Quarantine unsafe records before they can be served.
-   - Redact, delete, or replace sources according to policy, then rebuild affected derivatives.
-   - Maintain a deletion/quarantine/correction overlay whose lineage is applied
-     before migrated, restored, cached, indexed, or derived data can serve.
-     Restore and archive recovery replay every newer disposition and rebuild
-     affected derivatives; provenance never overrides erasure.
-   - Preserve opaque source and derivative identity, transformation/privacy
-     revisions, receipts, corrections, tombstones, quarantine, and derivative
-     ownership. Do not retain raw sensitive payload merely to make a migration
-     reversible.
-   - Resume safely after interruption by consuming
-     [Plan 12](12-root-compatibility-migration.md)'s
-     destination-committed checkpoints bound to the privacy revision, and
-     report bounded progress. A missing or incompatible overlay/checkpoint
-     fails closed.
+## Rejected designs
 
-7. Expose operational state
-   - Doctor detects disabled protection, stale policy markers, unsafe legacy rows, failed remediation,
-     and derivatives that need rebuilding.
-   - Safe automatic repairs run through normal daemon operations; destructive choices stay explicit.
-   - UI shows coverage, findings by class, quarantine state, remediation progress, and failures.
-
-## Acceptance
-
-- PR5 established shared parsing, detection, redaction, receipt, and safe-marker primitives.
-- Representative structured and malformed inputs prove parse-before-scan behavior.
-- Every covered sink rejects raw, tainted, unmarked, and stale-policy payloads;
-  LCM raw sensitive values follow the conditional guarantee above.
-- End-to-end tests prove secrets do not appear in covered databases, indexes,
-  facts, sanitized session projections, logs, analytics, API responses, UI
-  payloads, exports, or diagnostic bundles. LCM raw tests prove the profile
-  setting enables redaction without message metadata, message metadata
-  overrides the profile in both directions, the default remains off, and
-  enablement affects new ingestion without claiming an at-rest rewrite.
-- LSP tests prove unsaved document content remains session-ephemeral, reaches
-  only authorized analyzers, and cannot reach remote analyzers without the
-  required capability and disclosure.
-- Remediation tests quarantine unsafe legacy data and rebuild clean derivatives after repair.
-- Migration, backup, and restore fixtures prove newer deletion, quarantine,
-  correction, and policy state is replayed before serving and that raw
-  sensitive payload is not retained for reversibility.
-- Direct detector-contract tests reject findings with a numeric assessment but
-  no origin, score kind, scale/calibration revision, evidence anchors, or
-  scanned coverage. Checked-in positive/negative evaluation corpora report
-  precision, recall, false-positive/false-negative counts, and coverage by
-  detector/source cohort; held-out calibration tests report probability and
-  interval error/support and force stale, shifted, or under-supported
-  calibration to heuristic output or abstention without weakening the sink
-  firewall.
-- Doctor and UI expose actionable state without reproducing sensitive values.
-- Performance limits fail visibly and safely instead of skipping protection.
+- raw-value logging, metrics, graph properties, receipts, or errors;
+- ambient environment/PATH/credential authority;
+- direct client access to a store or redaction key;
+- old-database scanners, migrations, overlays, compatibility readers, or
+  reversible secret retention;
+- Doctor repair/apply modes;
+- silent partial scanning, fabricated safe state, or fixed test-count/source
+  inventories as acceptance.

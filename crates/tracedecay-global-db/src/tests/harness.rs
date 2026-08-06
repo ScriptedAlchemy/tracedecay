@@ -763,7 +763,7 @@ async fn open_registered_test_database(
             },
         )?;
     Ok(Arc::new(
-        RegisteredGlobalDb::migrate_and_attach(
+        RegisteredGlobalDb::install_and_attach(
             runtime,
             expected_binding,
             expected_locator,

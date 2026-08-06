@@ -59,7 +59,6 @@ pub enum DoctorRemediationDispatchCommandV1 {
 pub enum DoctorRemediationTargetV1 {
     StorageRetentionCollect,
     StorageCollectOrphanStore,
-    StorageBranchGc,
     StorageQuarantineAndCollectDebris,
     ConfigurationProtectedPreview(ConfigurationProtectedPreviewSurfaceRequest),
     ConfigurationProtectedApply(ConfigurationProtectedApplySurfaceRequest),
@@ -78,7 +77,6 @@ impl DoctorRemediationTargetV1 {
         match operation.as_str() {
             operations::STORAGE_RETENTION_COLLECT => Some(Self::StorageRetentionCollect),
             operations::STORAGE_COLLECT_ORPHAN_STORE => Some(Self::StorageCollectOrphanStore),
-            operations::STORAGE_BRANCH_GC => Some(Self::StorageBranchGc),
             operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS => {
                 Some(Self::StorageQuarantineAndCollectDebris)
             }
@@ -95,7 +93,6 @@ impl DoctorRemediationTargetV1 {
         match self {
             Self::StorageRetentionCollect => operations::STORAGE_RETENTION_COLLECT,
             Self::StorageCollectOrphanStore => operations::STORAGE_COLLECT_ORPHAN_STORE,
-            Self::StorageBranchGc => operations::STORAGE_BRANCH_GC,
             Self::StorageQuarantineAndCollectDebris => {
                 operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS
             }

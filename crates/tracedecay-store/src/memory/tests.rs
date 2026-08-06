@@ -3,12 +3,12 @@ use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorProvenanceRelationV2,
     AnchorSourceGenerationV2, CapabilityId, ComponentVersion, CoverageReportV1, EntityId,
     EntityKind, EntityRef, EvidenceClass, FactAssertionKindV1, FactCategoryV1, FactEvidenceRefV1,
-    FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1, ObservationScopeV1,
-    PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId,
-    ProvenanceId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2Parts,
-    RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1,
-    VectorWatermark,
+    FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1, FeedbackResultId,
+    ObservationScopeV1, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
+    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
+    SensitivityV1, VectorWatermark,
 };
 
 use super::*;
@@ -552,32 +552,41 @@ fn proposal_record_projects_typed_automation_run_id() {
 }
 
 #[test]
-fn repair_stats_preserve_the_atomic_feedback_batch_outcome() {
-    let stats = CompatibilityMemoryRepairStatsV1::new(3, 2).with_feedback_history_repair(
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
-            processed: 512,
-            remaining: Some(9),
-        },
-    );
+fn repair_stats_preserve_measured_counts_and_saturation() {
+    let stats = CompatibilityMemoryRepairStatsV1::new(3, 2);
 
     assert_eq!(stats.missing_vectors_repaired(), 3);
     assert_eq!(stats.banks_rebuilt(), 2);
-    assert_eq!(
-        stats.feedback_history_repair(),
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
-            processed: 512,
-            remaining: Some(9),
-        }
-    );
-    assert_eq!(
-        CompatibilityMemoryRepairStatsV1::default().feedback_history_repair(),
-        CompatibilityFeedbackRepairProgressV1::Unknown
-    );
-    // Saturation defaults off and round-trips through the builder without
-    // disturbing the feedback-history outcome.
     assert!(!stats.saturated());
     assert!(!CompatibilityMemoryRepairStatsV1::default().saturated());
     assert!(stats.with_saturated(true).saturated());
+}
+
+#[test]
+fn feedback_history_uses_feedback_result_identity_for_entries_and_resume() {
+    let owner = FactOwnerV1::Profile;
+    let fact_id = fact_id(owner.clone(), "operation.feedback-history");
+    let result_id = id::<FeedbackResultId>("feedback.result.fixture.1");
+    let entry = FactFeedbackHistoryEntry::new(
+        result_id.clone(),
+        UtcMicros(7),
+        CompatibilityFactFeedbackActionV1::Helpful,
+        Confidence::new(0.5).unwrap(),
+        Confidence::new(0.55).unwrap(),
+        Some("test".to_owned()),
+        Some("useful".to_owned()),
+        FactFeedbackDetailsAvailability::Available,
+    )
+    .unwrap();
+
+    let query =
+        FactFeedbackHistoryQuery::new(owner.clone(), fact_id, Some(result_id.clone()), 10).unwrap();
+    let page =
+        FactFeedbackHistoryPage::new(owner, vec![entry.clone()], Some(result_id.clone())).unwrap();
+
+    assert_eq!(query.after(), Some(&result_id));
+    assert_eq!(entry.result_id(), &result_id);
+    assert_eq!(page.next_after(), Some(&result_id));
 }
 
 #[test]

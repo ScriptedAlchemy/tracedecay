@@ -15,10 +15,10 @@ use tracedecay_domain::{FactId, FactLineageEventV1, FactOwnerV1, RetrievalAnchor
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
     FactContradictionStateV1 as StoreFactContradictionStateV1, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactProposalPromotionStateV1, FactProposalStore,
-    FactProposalStoreError, FactQueryCoverageV1, FactStore, FactStoreError, FactWriteBatch,
-    LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery,
-    StoredFactV1,
+    FactCurrentResponseV1, FactFeedbackHistoryPage, FactFeedbackHistoryQuery, FactLineageQuery,
+    FactProposalPromotionStateV1, FactProposalStore, FactProposalStoreError, FactQueryCoverageV1,
+    FactStore, FactStoreError, FactWriteBatch, LegacyFactQuery, PromoteFactProposal,
+    PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use super::{MemoryApplication, MemoryApplicationError};
@@ -232,6 +232,25 @@ impl<A: FactStore> MemoryApplication<A> {
             .await
             .map_err(store_error)?;
         Ok(result.into_payload())
+    }
+
+    pub async fn query_fact_feedback_history(
+        &self,
+        query: FactFeedbackHistoryQuery,
+    ) -> Result<FactFeedbackHistoryPage, MemoryApplicationError> {
+        self.ensure_owner(query.owner())?;
+        let limit = query.limit();
+        let page = self
+            .authority
+            .query_fact_feedback_history(query)
+            .await
+            .map_err(MemoryApplicationError::Store)?;
+        if page.owner() != &self.owner || page.events().len() > limit {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "fact feedback history owner and bounds",
+            });
+        }
+        Ok(page)
     }
 
     pub async fn resolve_legacy_fact(

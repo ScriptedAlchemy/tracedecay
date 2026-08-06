@@ -42,7 +42,6 @@ use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicCloc
 mod artifact_store;
 pub mod embedding_parallelism;
 mod fastembed_adapter;
-pub mod legacy_migration;
 mod manifest;
 mod model_catalog;
 mod model_lifecycle;
@@ -564,6 +563,32 @@ impl DaemonSemanticRuntimeHandleV1 {
         self.scheduling.status()
     }
 
+    pub fn mark_queued(
+        &self,
+        target_generation: CodeGenerationId,
+        total_units: u64,
+        total_batches: u64,
+    ) -> bool {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.scheduling
+            .mark_queued(target_generation, total_units, total_batches)
+    }
+
+    pub fn fail_queued(
+        &self,
+        target_generation: &CodeGenerationId,
+        reason: SemanticRuntimeScheduleFailureV1,
+    ) {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.scheduling.fail_queued(target_generation, reason);
+    }
+
     pub fn schedule(&self, work: SemanticRuntimeWorkV1) -> bool {
         if work.total_units() > self.bounds.max_projection_units {
             return false;
@@ -592,12 +617,23 @@ impl DaemonSemanticRuntimeHandleV1 {
 
         let target_generation = request.target_generation.clone();
         let projection_key = request.projection_request.target_projection_key.clone();
+        let total_batches = u64::try_from(
+            request
+                .projection_request
+                .changes
+                .added_or_changed
+                .len()
+                .div_ceil(request.max_embeds_per_batch.max(1))
+                .max(1),
+        )
+        .unwrap_or(u64::MAX);
         let pool_config = self.pool_config.clone();
         let runtime = Arc::clone(&self.runtime);
         let query_in_flight = Arc::clone(&self.query_in_flight);
-        let work = SemanticRuntimeWorkV1::new(
+        let work = SemanticRuntimeWorkV1::new_batched(
             request.target_generation,
             total_units,
+            total_batches,
             move |progress| async move {
                 let authority = tokio::task::spawn_blocking(request.load_artifact)
                     .await
@@ -628,6 +664,9 @@ impl DaemonSemanticRuntimeHandleV1 {
                 // durable batch count is exactly how far a prior run got.
                 let committed_batches =
                     usize::try_from((request.resume_projection)().await?).unwrap_or(usize::MAX);
+                progress.set_completed_batches(
+                    u64::try_from(committed_batches.min(batches.len())).unwrap_or(u64::MAX),
+                );
                 let mut commit_batch = request.commit_batch;
                 let mut embedded_units = batches
                     .iter()
@@ -635,7 +674,8 @@ impl DaemonSemanticRuntimeHandleV1 {
                     .map(|batch| batch.request.changes.added_or_changed.len() as u64)
                     .sum::<u64>();
                 progress.set_completed_units(embedded_units.min(total_units));
-                for batch in batches.into_iter().skip(committed_batches) {
+                for (batch_index, batch) in batches.into_iter().skip(committed_batches).enumerate()
+                {
                     let encoder = RuntimeChunkVectorEncoderV1::new(
                         Arc::clone(&candidate),
                         Arc::clone(&progress),
@@ -655,6 +695,14 @@ impl DaemonSemanticRuntimeHandleV1 {
                     commit_batch(prepared).await?;
                     embedded_units = embedded_units.saturating_add(batch_units);
                     progress.set_completed_units(embedded_units.min(total_units));
+                    progress.set_completed_batches(
+                        u64::try_from(
+                            committed_batches
+                                .saturating_add(batch_index)
+                                .saturating_add(1),
+                        )
+                        .unwrap_or(u64::MAX),
+                    );
                 }
                 if progress.cancelled() {
                     return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
@@ -838,9 +886,18 @@ impl DaemonSemanticRuntimeHandleV1 {
     pub fn status_projection(&self) -> SemanticRuntimeStatusProjectionV1 {
         let status = self.status();
         let (degraded_reason, prior_generation) = match &status {
-            SemanticRuntimeScheduleStatusV1::Indexing {
+            SemanticRuntimeScheduleStatusV1::Queued {
+                prior_generation, ..
+            }
+            | SemanticRuntimeScheduleStatusV1::Indexing {
                 prior_generation, ..
             } => (None, prior_generation.clone()),
+            SemanticRuntimeScheduleStatusV1::Stalled {
+                prior_generation, ..
+            } => (
+                Some(SemanticFallbackReasonV1::RuntimeFailure),
+                prior_generation.clone(),
+            ),
             SemanticRuntimeScheduleStatusV1::Failed {
                 reason,
                 prior_generation,

@@ -4,7 +4,7 @@
 //! signatures, or behavior changed. `use super::*` re-exposes every name the
 //! parent `daemon` module had in scope so the moved code resolves unchanged.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tracedecay_query::code_search;
@@ -268,6 +268,7 @@ pub(super) fn code_index_search_display_binding(
                         })
                         .ok_or(HydrationUnavailableV1::Invalid)?;
                     code_search::CodeIndexSearchDisplayV1 {
+                        node_id: None,
                         name: file
                             .logical_path
                             .rsplit('/')
@@ -303,9 +304,10 @@ pub(super) fn code_index_search_display_binding(
 }
 
 fn code_index_symbol_display(
-    symbol: &crate::code_index::lineage::LineageSymbolRecordV1,
+    symbol: &crate::code_index::lineage::LineageSymbolRecord,
 ) -> code_search::CodeIndexSearchDisplayV1 {
     code_search::CodeIndexSearchDisplayV1 {
+        node_id: Some(symbol.occurrence.as_str().to_owned()),
         name: symbol
             .qualified_name
             .rsplit("::")
@@ -321,6 +323,7 @@ fn code_index_search_display_bytes(
     display: &code_search::CodeIndexSearchDisplayV1,
 ) -> std::result::Result<u64, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1> {
     serde_json::to_vec(&(
+        display.node_id.as_deref(),
         display.name.as_str(),
         display.qualified_name.as_str(),
         display.kind.as_str(),
@@ -384,8 +387,7 @@ pub(super) fn code_index_search_executor(
                     );
                 }
             };
-            let current_authority = admission.search_authority();
-            let authority = match admission.authorize(&scope, Some(&current_authority)) {
+            let authority = match admission.authorize(&scope, request.authority.as_ref()) {
                 Ok(authority) => authority,
                 Err(error) => {
                     return code_index_search_unavailable(
@@ -461,6 +463,25 @@ pub(super) fn code_index_search_executor(
             if let Some(outcome) = search_terminated(&control, &admission_provider, None) {
                 return outcome;
             }
+            let requested_generation =
+                if let Some(source_revision) = request.source_revision.as_ref() {
+                    let Some(generation) = schedulers
+                        .generation_for_project_commit(
+                            &project_id,
+                            &scope.repository_id,
+                            source_revision,
+                        )
+                        .await
+                    else {
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                            "branch_generation_warming",
+                        );
+                    };
+                    Some(generation.generation().manifest().generation_id.clone())
+                } else {
+                    None
+                };
             let execution_permit = match execution_admission.try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
@@ -475,11 +496,14 @@ pub(super) fn code_index_search_executor(
                 let execution_project_root = project_root.clone();
                 let execution_scope = scope.clone();
                 let execution_control = Arc::clone(&control);
-                let execution_request =
+                let mut execution_request =
                     code_index_scheduler::query_runtime::QuerySearchExecutionRequestV1::new(
                         request.query,
                         policy,
                     );
+                if let Some(generation) = requested_generation {
+                    execution_request = execution_request.with_generation(generation);
+                }
                 let runtime = tokio::runtime::Handle::current();
                 let mut execution = tokio::task::spawn_blocking(move || {
                     let _execution_permit = execution_permit;
@@ -650,7 +674,7 @@ pub(super) fn code_index_search_executor(
                 ),
             };
             let Some(latest) = schedulers
-                .generation_for(&terminal_scope, &executed.query.generation)
+                .generation_for_project_generation(&project_id, &executed.query.generation)
                 .await
             else {
                 return code_index_search_unavailable_for_generation(
@@ -886,4 +910,341 @@ pub(super) fn code_index_search_executor(
             )
         })
     })
+}
+
+fn branch_diff_unavailable(
+    reason: code_search::CodeIndexSearchUnavailableReasonV1,
+    base_generation: Option<String>,
+    head_generation: Option<String>,
+) -> code_search::CodeIndexBranchDiffOutcomeV1 {
+    code_search::CodeIndexBranchDiffOutcomeV1::Unavailable(
+        code_search::CodeIndexBranchDiffUnavailableV1 {
+            base_generation,
+            head_generation,
+            reason,
+        },
+    )
+}
+
+fn generation_branch_symbols(
+    latest: &code_index_scheduler::LatestCompleteCodeIndex,
+    file_filter: Option<&str>,
+    kind_filter: Option<&str>,
+) -> Option<Vec<(String, code_search::CodeIndexBranchSymbolV1)>> {
+    let generation = latest.generation();
+    let mut file_by_symbol = HashMap::new();
+    for chunk in generation.chunks().chunks() {
+        let Some(symbol) = chunk.anchor.symbol_occurrence_id.as_ref() else {
+            continue;
+        };
+        match file_by_symbol.get(symbol) {
+            Some(existing) if existing != &chunk.anchor.file_occurrence_id => return None,
+            Some(_) => {}
+            None => {
+                file_by_symbol.insert(symbol.clone(), chunk.anchor.file_occurrence_id.clone());
+            }
+        }
+    }
+    let path_by_file = generation
+        .snapshot()
+        .files
+        .iter()
+        .map(|file| (file.file_occurrence_id.clone(), file.logical_path.as_str()))
+        .collect::<HashMap<_, _>>();
+
+    let mut symbols = Vec::with_capacity(generation.symbols().symbols.len());
+    for symbol in &generation.symbols().symbols {
+        let file = path_by_file.get(file_by_symbol.get(&symbol.occurrence)?)?;
+        if !tracedecay_domain::repository_path_matches_scope(file, file_filter)
+            || kind_filter.is_some_and(|filter| filter != symbol.kind)
+        {
+            continue;
+        }
+        let name = symbol
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(&symbol.qualified_name)
+            .to_owned();
+        symbols.push((
+            symbol.identity.as_str().to_owned(),
+            code_search::CodeIndexBranchSymbolV1 {
+                qualified_name: symbol.qualified_name.clone(),
+                name,
+                kind: symbol.kind.clone(),
+                file: (*file).to_owned(),
+                content_digest: symbol.content_digest.as_str().to_owned(),
+            },
+        ));
+    }
+    Some(symbols)
+}
+
+fn diff_branch_symbols(
+    base_generation: String,
+    head_generation: String,
+    base: Vec<(String, code_search::CodeIndexBranchSymbolV1)>,
+    head: Vec<(String, code_search::CodeIndexBranchSymbolV1)>,
+) -> code_search::CodeIndexBranchDiffCompletedV1 {
+    let base = base.into_iter().collect::<BTreeMap<_, _>>();
+    let head = head.into_iter().collect::<BTreeMap<_, _>>();
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    for (identity, symbol) in &head {
+        match base.get(identity) {
+            None => added.push(symbol.clone()),
+            Some(prior) if prior.content_digest != symbol.content_digest => {
+                changed.push(code_search::CodeIndexBranchChangedSymbolV1 {
+                    base: prior.clone(),
+                    head: symbol.clone(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for (identity, symbol) in &base {
+        if !head.contains_key(identity) {
+            removed.push(symbol.clone());
+        }
+    }
+    code_search::CodeIndexBranchDiffCompletedV1 {
+        base_generation,
+        head_generation,
+        added,
+        removed,
+        changed,
+    }
+}
+
+pub(super) fn code_index_branch_diff_executor(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    project_id: tracedecay_domain::ProjectId,
+    admission_provider: query_mcp_admission::QueryMcpReadAdmissionProviderV1,
+) -> code_search::CodeIndexBranchDiffExecutor {
+    Arc::new(move |request| {
+        let schedulers = schedulers.clone();
+        let project_id = project_id.clone();
+        let admission_provider = admission_provider.clone();
+        Box::pin(async move {
+            if let Some(reason) = mcp_search_request_termination(
+                request.deadline.as_ref(),
+                request.cancellation.as_ref(),
+                tracedecay_application::clock::now_micros().0,
+            ) {
+                return branch_diff_unavailable(reason, None, None);
+            }
+            let scope = match project_open_owners::resolved_scope_for_project(
+                &request.project_root,
+                &project_id,
+            ) {
+                Ok(scope) => scope,
+                Err(_) => {
+                    return branch_diff_unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        None,
+                        None,
+                    );
+                }
+            };
+            let admitted = match admission_provider.admit_current(&scope) {
+                Ok(admitted) => admitted,
+                Err(_) => {
+                    return branch_diff_unavailable(
+                        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        None,
+                        None,
+                    );
+                }
+            };
+            if admitted
+                .authorize(&scope, request.authority.as_ref())
+                .is_err()
+            {
+                return branch_diff_unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    None,
+                    None,
+                );
+            }
+
+            let (base, head) = tokio::join!(
+                schedulers.generation_for_project_commit(
+                    &project_id,
+                    &scope.repository_id,
+                    &request.base_revision,
+                ),
+                schedulers.generation_for_project_commit(
+                    &project_id,
+                    &scope.repository_id,
+                    &request.head_revision,
+                ),
+            );
+            let base_generation = base.as_ref().map(|latest| {
+                latest
+                    .generation()
+                    .manifest()
+                    .generation_id
+                    .as_str()
+                    .to_owned()
+            });
+            let head_generation = head.as_ref().map(|latest| {
+                latest
+                    .generation()
+                    .manifest()
+                    .generation_id
+                    .as_str()
+                    .to_owned()
+            });
+            let (Some(base), Some(head)) = (base, head) else {
+                return branch_diff_unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                    base_generation,
+                    head_generation,
+                );
+            };
+            if base.generation().snapshot().repository != scope.repository_id
+                || head.generation().snapshot().repository != scope.repository_id
+            {
+                return branch_diff_unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                    base_generation,
+                    head_generation,
+                );
+            }
+            if let Some(reason) = mcp_search_request_termination(
+                request.deadline.as_ref(),
+                request.cancellation.as_ref(),
+                tracedecay_application::clock::now_micros().0,
+            ) {
+                return branch_diff_unavailable(reason, base_generation, head_generation);
+            }
+            let Some(base_symbols) = generation_branch_symbols(
+                &base,
+                request.file_filter.as_deref(),
+                request.kind_filter.as_deref(),
+            ) else {
+                return branch_diff_unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    base_generation,
+                    head_generation,
+                );
+            };
+            let Some(head_symbols) = generation_branch_symbols(
+                &head,
+                request.file_filter.as_deref(),
+                request.kind_filter.as_deref(),
+            ) else {
+                return branch_diff_unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    base_generation,
+                    head_generation,
+                );
+            };
+            let (Some(base_generation), Some(head_generation)) = (base_generation, head_generation)
+            else {
+                return branch_diff_unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                    None,
+                    None,
+                );
+            };
+            code_search::CodeIndexBranchDiffOutcomeV1::Complete(diff_branch_symbols(
+                base_generation,
+                head_generation,
+                base_symbols,
+                head_symbols,
+            ))
+        })
+    })
+}
+
+#[cfg(test)]
+mod branch_diff_tests {
+    use super::*;
+
+    fn symbol(
+        file: &str,
+        qualified_name: &str,
+        digest: &str,
+    ) -> code_search::CodeIndexBranchSymbolV1 {
+        code_search::CodeIndexBranchSymbolV1 {
+            qualified_name: qualified_name.to_owned(),
+            name: qualified_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(qualified_name)
+                .to_owned(),
+            kind: "function".to_owned(),
+            file: file.to_owned(),
+            content_digest: digest.to_owned(),
+        }
+    }
+
+    #[test]
+    fn generation_diff_is_identity_bound_and_does_not_leak_unrelated_symbols() {
+        let completed = diff_branch_symbols(
+            "generation.base".to_owned(),
+            "generation.head".to_owned(),
+            vec![
+                (
+                    "identity.a".to_owned(),
+                    symbol("src/a.rs", "crate::a", "old"),
+                ),
+                (
+                    "identity.removed".to_owned(),
+                    symbol("src/c.rs", "crate::c", "same"),
+                ),
+            ],
+            vec![
+                (
+                    "identity.a".to_owned(),
+                    symbol("src/a.rs", "crate::a", "new"),
+                ),
+                (
+                    "identity.b".to_owned(),
+                    symbol("src/b.rs", "crate::b", "same"),
+                ),
+            ],
+        );
+
+        assert_eq!(completed.changed.len(), 1);
+        assert_eq!(completed.changed[0].head.qualified_name, "crate::a");
+        assert_eq!(
+            completed
+                .added
+                .iter()
+                .map(|symbol| symbol.qualified_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["crate::b"]
+        );
+        assert_eq!(
+            completed
+                .removed
+                .iter()
+                .map(|symbol| symbol.qualified_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["crate::c"]
+        );
+    }
+
+    #[test]
+    fn same_qualified_name_in_different_files_never_aliases() {
+        let completed = diff_branch_symbols(
+            "generation.base".to_owned(),
+            "generation.head".to_owned(),
+            vec![(
+                "identity.left".to_owned(),
+                symbol("src/left.rs", "crate::run", "left"),
+            )],
+            vec![(
+                "identity.right".to_owned(),
+                symbol("src/right.rs", "crate::run", "right"),
+            )],
+        );
+
+        assert!(completed.changed.is_empty());
+        assert_eq!(completed.added[0].file, "src/right.rs");
+        assert_eq!(completed.removed[0].file, "src/left.rs");
+    }
 }

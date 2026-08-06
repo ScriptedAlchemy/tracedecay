@@ -295,8 +295,10 @@ where
         binding: &SessionRequestBinding,
         query: SessionTemporalQuery,
     ) -> SessionRetrievalOutcome<TemporalKernelResult> {
-        if application_request_interruption(context, binding.cancellation()).is_some() {
-            return SessionRetrievalOutcome::Cancelled;
+        if let Some(interruption) =
+            application_request_interruption(context, binding.cancellation())
+        {
+            return interruption_outcome(interruption);
         }
         let Ok(authorization) = SessionScopeAuthorizationRequest::new(
             context.actor().clone(),
@@ -357,8 +359,10 @@ where
         {
             return SessionRetrievalOutcome::BudgetExhausted;
         }
-        if application_request_interruption(context, binding.cancellation()).is_some() {
-            return SessionRetrievalOutcome::Cancelled;
+        if let Some(interruption) =
+            application_request_interruption(context, binding.cancellation())
+        {
+            return interruption_outcome(interruption);
         }
 
         let root_digest = digest_root(grant.scope().authorized_root().identity());
@@ -422,7 +426,7 @@ where
             None => execution,
         };
         let expected_execution = execution.clone();
-        let Ok(result) = run_application_request_interruptible(
+        let result = run_application_request_interruptible(
             context,
             binding.cancellation(),
             self.execution.execute(execution, &self.estimator),
@@ -430,9 +434,10 @@ where
                 cancellation_control.cancel();
             },
         )
-        .await
-        else {
-            return SessionRetrievalOutcome::Cancelled;
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(interruption) => return interruption_outcome(interruption),
         };
         match result {
             Ok(report) if expected_execution.validates_report(&report) => {
@@ -440,6 +445,17 @@ where
             }
             Ok(_) => SessionRetrievalOutcome::Unavailable,
             Err(error) => map_execution_error(error),
+        }
+    }
+}
+
+const fn interruption_outcome<T>(
+    interruption: crate::context::RequestInterruption,
+) -> SessionRetrievalOutcome<T> {
+    match interruption {
+        crate::context::RequestInterruption::Cancelled => SessionRetrievalOutcome::Cancelled,
+        crate::context::RequestInterruption::DeadlineExceeded => {
+            SessionRetrievalOutcome::DeadlineExceeded
         }
     }
 }
@@ -633,6 +649,9 @@ fn map_execution_error(
         }
         SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
+        SessionTemporalExecutionError::DeadlineExceeded => {
+            SessionRetrievalOutcome::DeadlineExceeded
+        }
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
     }
 }
@@ -642,13 +661,11 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         TemporalKernelError::InvalidLimit | TemporalKernelError::BudgetExceeded => {
             SessionRetrievalOutcome::BudgetExhausted
         }
-        TemporalKernelError::Cancelled | TemporalKernelError::DeadlineExceeded => {
-            SessionRetrievalOutcome::Cancelled
-        }
+        TemporalKernelError::Cancelled => SessionRetrievalOutcome::Cancelled,
+        TemporalKernelError::DeadlineExceeded => SessionRetrievalOutcome::DeadlineExceeded,
         TemporalKernelError::Port(error) => match error {
-            TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded => {
-                SessionRetrievalOutcome::Cancelled
-            }
+            TemporalPortError::Cancelled => SessionRetrievalOutcome::Cancelled,
+            TemporalPortError::DeadlineExceeded => SessionRetrievalOutcome::DeadlineExceeded,
             TemporalPortError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
             TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
                 SessionRetrievalOutcome::CursorManifestLimitExceeded {
@@ -702,9 +719,12 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         },
         TemporalKernelError::Hydration(error) => match error {
             HydrationError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
-            HydrationError::Interrupted(
-                TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
-            ) => SessionRetrievalOutcome::Cancelled,
+            HydrationError::Interrupted(TemporalPortError::Cancelled) => {
+                SessionRetrievalOutcome::Cancelled
+            }
+            HydrationError::Interrupted(TemporalPortError::DeadlineExceeded) => {
+                SessionRetrievalOutcome::DeadlineExceeded
+            }
             HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 SessionRetrievalOutcome::BudgetExhausted
             }
@@ -714,9 +734,12 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
         },
         TemporalKernelError::Context(error) => match error {
             ContextError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
-            ContextError::Interrupted(
-                TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded,
-            ) => SessionRetrievalOutcome::Cancelled,
+            ContextError::Interrupted(TemporalPortError::Cancelled) => {
+                SessionRetrievalOutcome::Cancelled
+            }
+            ContextError::Interrupted(TemporalPortError::DeadlineExceeded) => {
+                SessionRetrievalOutcome::DeadlineExceeded
+            }
             ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 SessionRetrievalOutcome::BudgetExhausted
             }
@@ -1001,6 +1024,28 @@ mod tests {
                 observed: 65_537,
                 maximum: 65_536,
             }
+        );
+    }
+
+    #[test]
+    fn deadline_and_cancellation_remain_distinct_terminal_outcomes() {
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::DeadlineExceeded),
+            SessionRetrievalOutcome::DeadlineExceeded
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Cancelled),
+            SessionRetrievalOutcome::Cancelled
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(
+                TemporalPortError::DeadlineExceeded,
+            )),
+            SessionRetrievalOutcome::DeadlineExceeded
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(TemporalPortError::Cancelled)),
+            SessionRetrievalOutcome::Cancelled
         );
     }
 

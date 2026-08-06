@@ -17,38 +17,70 @@ impl WorkStoragePort for WorkSqliteStorage {
         authority: &WorkAuthority,
         task_id: &TaskId,
     ) -> Result<WorkProjection, WorkStorageError> {
-        load_registered_projection(&self.handle, authority, task_id)
+        load_registered_projection(&self.handle, &self.topology, authority, task_id)
     }
 
     fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
-        append_registered(&self.handle, request)
+        append_registered(&self.handle, &self.topology, request)
     }
 }
 
-/// Reads the published projection for one task. The snapshot row is what every
-/// append publishes with the fold; it is the ordinary read authority.
 pub(crate) fn load_registered_projection(
     handle: &ExactSqlHandle,
+    topology: &topology::WorkGraphTopologyStore,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<WorkProjection, WorkStorageError> {
+    match topology.projection(authority, task_id) {
+        Ok(projection) => Ok(projection),
+        Err(topology::WorkTopologyError::NotFound)
+            if has_pending_graph_publication(handle, authority, task_id)? =>
+        {
+            Err(WorkStorageError::Unavailable)
+        }
+        Err(topology::WorkTopologyError::NotFound) => {
+            Err(WorkStorageError::NotFoundOrNotAuthorized)
+        }
+        Err(_) => Err(WorkStorageError::Unavailable),
+    }
+}
+
+fn has_pending_graph_publication(
+    handle: &ExactSqlHandle,
+    authority: &WorkAuthority,
+    task_id: &TaskId,
+) -> Result<bool, WorkStorageError> {
     let rows = registered_work_query(
         handle,
-        "SELECT projection_payload FROM work_projection_snapshots_v1
+        "SELECT 1
+         FROM work_graph_publication_outbox_v1
          WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5 AND task_id = ?6",
+           AND actor_id = ?4 AND policy_digest = ?5 AND task_id = ?6 AND applied = 0
+         LIMIT 1",
         authority_params_owned(authority)
             .into_iter()
             .chain([ExactSqlValue::Text(task_id.as_str().to_owned())])
             .collect(),
     )
     .map_err(|_| WorkStorageError::Unavailable)?;
-    let payload = rows
-        .rows
-        .first()
-        .and_then(|row| exact_sql_text(&row.values, 0))
-        .ok_or(WorkStorageError::NotFoundOrNotAuthorized)?;
-    serde_json::from_str(payload).map_err(|_| WorkStorageError::Unavailable)
+    Ok(!rows.rows.is_empty())
+}
+
+pub(crate) fn has_any_pending_graph_publication(
+    handle: &ExactSqlHandle,
+    authority: &WorkAuthority,
+) -> Result<bool, WorkStorageError> {
+    let rows = registered_work_query(
+        handle,
+        "SELECT 1
+         FROM work_graph_publication_outbox_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5 AND applied = 0
+         LIMIT 1",
+        authority_params_owned(authority),
+    )
+    .map_err(|_| WorkStorageError::Unavailable)?;
+    Ok(!rows.rows.is_empty())
 }
 
 pub(crate) fn load_registered_history(
@@ -108,24 +140,25 @@ pub(crate) fn decode_registered_events(
 
 pub(crate) fn append_registered(
     handle: &ExactSqlHandle,
+    topology: &topology::WorkGraphTopologyStore,
     request: &WorkAppendRequest,
 ) -> Result<WorkAppendOutcome, WorkStorageError> {
+    reconcile_graph_publications(handle, topology, request.event.authority())?;
     let transaction = handle
         .begin_immediate()
         .map_err(|_| WorkStorageError::Unavailable)?;
     let authority = request.event.authority();
     let task_id = request.event.task_id();
-    let current = load_fold_state(&transaction, authority, task_id)?;
+    let current = load_projection_state(&transaction, authority, task_id)?;
 
-    if current
+    if let Some(state) = current
         .as_ref()
-        .is_some_and(|state| state.command_ids().contains(request.event.command_id()))
+        .filter(|state| state.command_ids().contains(request.event.command_id()))
     {
         let outcome = match replayed_input_digest(&transaction, authority, task_id, &request.event)?
         {
             Some(digest) if digest == request.event.input_digest().as_str() => {
-                let state = current.expect("replay is only reachable with fold state");
-                Ok(WorkAppendOutcome::Replayed(state.into_projection()))
+                Ok(WorkAppendOutcome::Replayed(state.projection().clone()))
             }
             Some(_) => Err(WorkStorageError::IdempotencyConflict),
             None => Err(WorkStorageError::Unavailable),
@@ -161,50 +194,25 @@ pub(crate) fn append_registered(
         None => WorkProjectionStateV1::rebuild(std::slice::from_ref(&request.event)),
     }
     .map_err(|_| WorkStorageError::Unavailable)?;
+    topology
+        .validate(next.projection())
+        .map_err(|_| WorkStorageError::Unavailable)?;
 
     let owner_sequence = advance_registered_owner_cursor(&transaction, authority)?;
     registered_insert_event(&transaction, &request.event)?;
-    registered_publish_projection(&transaction, next.projection(), owner_sequence)?;
-    registered_publish_fold_state(&transaction, &next)?;
+    registered_queue_graph_publication(&transaction, next.projection(), owner_sequence)?;
     transaction
         .commit()
         .map_err(|_| WorkStorageError::Unavailable)?;
+    reconcile_graph_publications(handle, topology, authority)?;
     Ok(WorkAppendOutcome::Appended(next.into_projection()))
 }
 
-/// Reads the published fold state, falling back to one full rebuild when a
-/// task has none yet — an unmigrated task, or one last written before the
-/// current state version. That task folds incrementally from then on.
-pub(crate) fn load_fold_state(
+pub(crate) fn load_projection_state(
     transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<Option<WorkProjectionStateV1>, WorkStorageError> {
-    let rows = registered_work_query(
-        transaction,
-        "SELECT state_payload FROM work_projection_fold_state_v1
-         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
-           AND actor_id = ?4 AND policy_digest = ?5 AND task_id = ?6
-           AND state_version = ?7",
-        authority_params_owned(authority)
-            .into_iter()
-            .chain([
-                ExactSqlValue::Text(task_id.as_str().to_owned()),
-                ExactSqlValue::Integer(i64::from(WORK_PROJECTION_STATE_VERSION_V1)),
-            ])
-            .collect(),
-    )
-    .map_err(|_| WorkStorageError::Unavailable)?;
-    if let Some(payload) = rows
-        .rows
-        .first()
-        .and_then(|row| exact_sql_text(&row.values, 0))
-    {
-        return serde_json::from_str(payload)
-            .map(Some)
-            .map_err(|_| WorkStorageError::Unavailable);
-    }
-
     let history = load_registered_history_in_transaction(transaction, authority, task_id).or_else(
         |error| match error {
             WorkStorageError::NotFoundOrNotAuthorized => Ok(Vec::new()),
@@ -280,50 +288,6 @@ pub(crate) fn advance_registered_owner_cursor(
         .ok_or(WorkStorageError::Unavailable)
 }
 
-pub(crate) fn registered_publish_fold_state(
-    transaction: &ExactSqlTransaction,
-    state: &WorkProjectionStateV1,
-) -> Result<(), WorkStorageError> {
-    let projection = state.projection();
-    let payload = serde_json::to_string(state).map_err(|_| WorkStorageError::Unavailable)?;
-    let version =
-        i64::try_from(projection.version().get()).map_err(|_| WorkStorageError::Unavailable)?;
-    transaction
-        .execute(
-            exact_sql_statement(
-                "INSERT INTO work_projection_fold_state_v1 (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, version, state_version, state_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest, task_id
-                 ) DO UPDATE SET
-                    version = excluded.version,
-                    state_version = excluded.state_version,
-                    state_payload = excluded.state_payload
-                 WHERE work_projection_fold_state_v1.version < excluded.version",
-                authority_params_owned(projection.authority())
-                    .into_iter()
-                    .chain([
-                        ExactSqlValue::Text(projection.task_id().as_str().to_owned()),
-                        ExactSqlValue::Integer(version),
-                        ExactSqlValue::Integer(i64::from(state.state_version())),
-                        ExactSqlValue::Text(payload),
-                    ])
-                    .collect(),
-            )
-            .map_err(|_| WorkStorageError::Unavailable)?,
-        )
-        .map_err(|_| WorkStorageError::Unavailable)
-        .and_then(|result| {
-            if result.changed_rows == 1 {
-                Ok(())
-            } else {
-                Err(WorkStorageError::VersionConflict)
-            }
-        })
-}
-
 pub(crate) fn registered_insert_event(
     transaction: &ExactSqlTransaction,
     event: &WorkEvent,
@@ -357,7 +321,7 @@ pub(crate) fn registered_insert_event(
     Ok(())
 }
 
-pub(crate) fn registered_publish_projection(
+pub(crate) fn registered_queue_graph_publication(
     transaction: &ExactSqlTransaction,
     projection: &WorkProjection,
     owner_sequence: u64,
@@ -366,62 +330,19 @@ pub(crate) fn registered_publish_projection(
     let version =
         i64::try_from(projection.version().get()).map_err(|_| WorkStorageError::Unavailable)?;
     let sequence = i64::try_from(owner_sequence).map_err(|_| WorkStorageError::Unavailable)?;
-    let changed = transaction
-        .execute(
-            exact_sql_statement(
-                "INSERT INTO work_projection_snapshots_v1 (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    task_id, version, owner_sequence, accepted_proposal_id,
-                    execution_admitted, task_accepted, projection_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                 ON CONFLICT (
-                    project_id, repository_id, worktree_id, actor_id, policy_digest, task_id
-                 ) DO UPDATE SET
-                    version = excluded.version, owner_sequence = excluded.owner_sequence,
-                    accepted_proposal_id = excluded.accepted_proposal_id,
-                    execution_admitted = excluded.execution_admitted,
-                    task_accepted = excluded.task_accepted,
-                    projection_payload = excluded.projection_payload
-                 WHERE work_projection_snapshots_v1.version + 1 = excluded.version",
-                authority_params_owned(projection.authority())
-                    .into_iter()
-                    .chain([
-                        ExactSqlValue::Text(projection.task_id().as_str().to_owned()),
-                        ExactSqlValue::Integer(version),
-                        ExactSqlValue::Integer(sequence),
-                        projection
-                            .accepted_proposal()
-                            .map(|proposal| ExactSqlValue::Text(proposal.as_str().to_owned()))
-                            .unwrap_or(ExactSqlValue::Null),
-                        ExactSqlValue::Integer(if projection.is_execution_admitted() {
-                            1
-                        } else {
-                            0
-                        }),
-                        ExactSqlValue::Integer(if projection.is_task_accepted() { 1 } else { 0 }),
-                        ExactSqlValue::Text(payload.clone()),
-                    ])
-                    .collect(),
-            )
-            .map_err(|_| WorkStorageError::Unavailable)?,
-        )
-        .map_err(|_| WorkStorageError::Unavailable)?;
-    if changed.changed_rows != 1 {
-        return Err(WorkStorageError::VersionConflict);
-    }
     transaction
         .execute(
             exact_sql_statement(
-                "INSERT INTO work_projection_deltas_v1 (
+                "INSERT INTO work_graph_publication_outbox_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
-                    owner_sequence, task_id, version, projection_payload
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    task_id, version, owner_sequence, projection_payload, applied
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
                 authority_params_owned(projection.authority())
                     .into_iter()
                     .chain([
-                        ExactSqlValue::Integer(sequence),
                         ExactSqlValue::Text(projection.task_id().as_str().to_owned()),
                         ExactSqlValue::Integer(version),
+                        ExactSqlValue::Integer(sequence),
                         ExactSqlValue::Text(payload),
                     ])
                     .collect(),
@@ -430,4 +351,80 @@ pub(crate) fn registered_publish_projection(
         )
         .map_err(|_| WorkStorageError::Unavailable)?;
     Ok(())
+}
+
+pub(crate) fn reconcile_graph_publications(
+    handle: &ExactSqlHandle,
+    topology: &topology::WorkGraphTopologyStore,
+    authority: &WorkAuthority,
+) -> Result<(), WorkStorageError> {
+    loop {
+        let transaction = handle
+            .begin_immediate()
+            .map_err(|_| WorkStorageError::Unavailable)?;
+        let outcome = (|| {
+            let rows = registered_work_query(
+                &transaction,
+                "SELECT projection_payload, owner_sequence
+                 FROM work_graph_publication_outbox_v1
+                 WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+                   AND actor_id = ?4 AND policy_digest = ?5 AND applied = 0
+                 ORDER BY owner_sequence
+                 LIMIT 1000",
+                authority_params_owned(authority),
+            )
+            .map_err(|_| WorkStorageError::Unavailable)?;
+            if rows.rows.is_empty() {
+                return Ok(false);
+            }
+            let mut latest = BTreeMap::new();
+            let mut through_sequence = 0_i64;
+            for row in rows.rows {
+                let payload =
+                    exact_sql_text(&row.values, 0).ok_or(WorkStorageError::Unavailable)?;
+                let projection: WorkProjection =
+                    serde_json::from_str(payload).map_err(|_| WorkStorageError::Unavailable)?;
+                through_sequence = through_sequence
+                    .max(exact_sql_integer(&row.values, 1).ok_or(WorkStorageError::Unavailable)?);
+                latest.insert(projection.task_id().clone(), projection);
+            }
+            topology
+                .publish_batch(&latest.into_values().collect::<Vec<_>>())
+                .map_err(|_| WorkStorageError::Unavailable)?;
+            transaction
+                .execute(
+                    exact_sql_statement(
+                        "UPDATE work_graph_publication_outbox_v1
+                     SET applied = 1
+                     WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+                       AND actor_id = ?4 AND policy_digest = ?5
+                       AND owner_sequence <= ?6 AND applied = 0",
+                        authority_params_owned(authority)
+                            .into_iter()
+                            .chain([ExactSqlValue::Integer(through_sequence)])
+                            .collect(),
+                    )
+                    .map_err(|_| WorkStorageError::Unavailable)?,
+                )
+                .map_err(|_| WorkStorageError::Unavailable)?;
+            Ok(true)
+        })();
+        match outcome {
+            Ok(true) => {
+                transaction
+                    .commit()
+                    .map_err(|_| WorkStorageError::Unavailable)?;
+            }
+            Ok(false) => {
+                transaction
+                    .rollback()
+                    .map_err(|_| WorkStorageError::Unavailable)?;
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = transaction.rollback();
+                return Err(error);
+            }
+        }
+    }
 }

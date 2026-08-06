@@ -164,20 +164,8 @@ fn state_round_trips_and_defaults_when_absent() {
 
 #[tokio::test]
 async fn reconcile_untracks_closed_pr_and_cleans_store() {
-    use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
-
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap(); // not a git repo; git ops no-op
-
-    // Seed a tracked PR branch store entry + its DB file.
-    let mut meta = BranchMeta::new("main");
-    meta.add_branch("pr/5", "branches/pr_5.db", "main");
-    std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
-    drop(
-        rusqlite::Connection::open(data_root.path().join("branches/pr_5.db"))
-            .expect("empty branch database"),
-    );
-    save_branch_meta(data_root.path(), &meta).unwrap();
 
     // Seed autotrack state marking pr/5 as managed.
     let mut state = PrAutotrackState::default();
@@ -216,9 +204,6 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     assert_eq!(report.untracked, vec!["pr/5".to_string()]);
     assert!(report.tracked.is_empty());
     assert!(load_state(data_root.path()).managed.is_empty());
-    let reloaded = load_branch_meta(data_root.path()).unwrap();
-    assert!(!reloaded.is_tracked("pr/5"));
-    assert!(!data_root.path().join("branches/pr_5.db").exists());
 }
 
 #[tokio::test]
@@ -270,17 +255,8 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
 
 #[tokio::test]
 async fn partial_discovery_suppresses_removals() {
-    use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
-
     let data_root = tempfile::tempdir().unwrap();
     let repo_root = tempfile::tempdir().unwrap();
-
-    // Seed a managed PR branch store + entry, exactly as the untrack test does.
-    let mut meta = BranchMeta::new("main");
-    meta.add_branch("pr/5", "branches/pr_5.db", "main");
-    std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
-    std::fs::write(data_root.path().join("branches/pr_5.db"), b"db").unwrap();
-    save_branch_meta(data_root.path(), &meta).unwrap();
 
     let mut state = PrAutotrackState::default();
     state.managed.insert(
@@ -320,10 +296,4 @@ async fn partial_discovery_suppresses_removals() {
         load_state(data_root.path()).managed.contains_key("pr/5"),
         "managed entry survives a partial discovery"
     );
-    assert!(
-        load_branch_meta(data_root.path())
-            .unwrap()
-            .is_tracked("pr/5")
-    );
-    assert!(data_root.path().join("branches/pr_5.db").exists());
 }

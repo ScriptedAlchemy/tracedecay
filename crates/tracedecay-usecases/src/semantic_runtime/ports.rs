@@ -9,6 +9,7 @@ use tracedecay_domain::{
     FusionProfileId, ManifestDigest, RetrievalAnchorId, UtcMicros, VectorGenerationIdV1,
     canonical_sha256,
 };
+use tracedecay_semantic::{SemanticModelLifecycleStatusV1, SemanticRuntimeScheduleStatusV1};
 
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditEventV1, RetrievalProfileAuditOperationV1,
@@ -611,6 +612,8 @@ pub enum SemanticRuntimeRouteV1 {
 pub struct SemanticRuntimeStatusV1 {
     pub configuration: Option<SemanticConfigurationPinV1>,
     pub state: SemanticRuntimeStateV1,
+    pub convergence: SemanticRuntimeScheduleStatusV1,
+    pub model: Option<SemanticModelLifecycleStatusV1>,
 }
 
 impl SemanticRuntimeStatusV1 {
@@ -621,7 +624,19 @@ impl SemanticRuntimeStatusV1 {
         Self {
             configuration,
             state,
+            convergence: SemanticRuntimeScheduleStatusV1::Unavailable,
+            model: None,
         }
+    }
+
+    pub fn with_runtime_evidence(
+        mut self,
+        convergence: SemanticRuntimeScheduleStatusV1,
+        model: Option<SemanticModelLifecycleStatusV1>,
+    ) -> Self {
+        self.convergence = convergence;
+        self.model = model;
+        self
     }
 
     pub fn validate(&self) -> Result<(), SemanticRuntimeContractErrorV1> {

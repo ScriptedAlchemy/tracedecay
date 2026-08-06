@@ -118,13 +118,13 @@ pub(super) async fn expand(
             )
             .await?;
             let total_sources = summary.source_refs.len();
-            let source_pagination =
+            let (source_offset, source_limit, source_pagination) =
                 source_pagination(total_sources, request.source_offset, request.source_limit);
             let page_refs = summary
                 .source_refs
                 .iter()
-                .skip(source_pagination.source_offset)
-                .take(source_pagination.source_limit)
+                .skip(source_offset)
+                .take(source_limit)
                 .cloned()
                 .collect::<Vec<_>>();
             let summary_sources =
@@ -167,6 +167,36 @@ pub(super) async fn expand(
     };
 
     Ok(apply_canonical_content(expansion, slice, canonical_content))
+}
+
+pub(super) async fn source_offset_after(
+    snapshot: &ReadSnapshot,
+    provider: &str,
+    session_id: &str,
+    node_id: &str,
+    boundary: &LcmSourceRef,
+) -> Result<usize, LcmError> {
+    let summary = load_summary_node(snapshot, provider, session_id, node_id).await?;
+    unique_source_offset_after(&summary.source_refs, boundary)
+}
+
+fn unique_source_offset_after(
+    sources: &[LcmSourceRef],
+    boundary: &LcmSourceRef,
+) -> Result<usize, LcmError> {
+    let mut matches = sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| *source == boundary);
+    let (index, _) = matches
+        .next()
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+    if matches.next().is_some() {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    }
+    index
+        .checked_add(1)
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)
 }
 
 struct DescribeCounts {
@@ -812,25 +842,26 @@ fn source_pagination(
     total_sources: usize,
     source_offset: usize,
     source_limit: Option<usize>,
-) -> LcmExpandSourcePagination {
+) -> (usize, usize, LcmExpandSourcePagination) {
     let source_offset = source_offset.min(total_sources);
     let remaining = total_sources - source_offset;
     let source_limit = source_limit.map_or(remaining, |limit| limit.min(remaining));
     let consumed = source_offset.saturating_add(source_limit);
     let has_more = consumed < total_sources;
-    LcmExpandSourcePagination {
+    (
         source_offset,
         source_limit,
-        returned_sources: source_limit,
-        total_sources,
-        next_source_offset: has_more.then_some(consumed),
-        has_more,
-        remaining_sources: if has_more {
-            total_sources - consumed
-        } else {
-            0
+        LcmExpandSourcePagination {
+            returned_sources: source_limit,
+            total_sources,
+            has_more,
+            remaining_sources: if has_more {
+                total_sources - consumed
+            } else {
+                0
+            },
         },
-    }
+    )
 }
 
 fn empty_content_range(slice: LcmContentSlice) -> LcmContentRange {
@@ -854,6 +885,30 @@ fn source_ref(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmErr
         _ => Err(LcmError::Db(format!(
             "invalid summary source_kind: {source_kind}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod cursor_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_boundary_must_identify_exactly_one_summary_source() {
+        let first = LcmSourceRef::RawMessage { store_id: 1 };
+        let boundary = LcmSourceRef::RawMessage { store_id: 2 };
+
+        assert_eq!(
+            unique_source_offset_after(&[first.clone(), boundary.clone()], &boundary),
+            Ok(2)
+        );
+        assert!(matches!(
+            unique_source_offset_after(&[boundary.clone(), first, boundary.clone()], &boundary),
+            Err(LcmError::SummarySourceNotOwnedBySession)
+        ));
+        assert!(matches!(
+            unique_source_offset_after(&[], &boundary),
+            Err(LcmError::SummarySourceNotOwnedBySession)
+        ));
     }
 }
 

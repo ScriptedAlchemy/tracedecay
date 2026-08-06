@@ -170,7 +170,20 @@ impl HostAdmissionTestRuntimeV1 {
     pub fn project_workflow_storage_for_test(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority> {
-        self.project_database_for_test()?.workflow_storage()
+        let graph = tracedecay_graph_db::GraphDb::open(tracedecay_graph_db::GraphDbOpenOptions {
+            location: tracedecay_graph_db::GraphDbLocation::Memory,
+            expected_format: tracedecay_graph_db::GraphFormatVersion::new(2).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("workflow test graph format is invalid: {error}"),
+                }
+            })?,
+            durability: tracedecay_graph_db::GraphDurability::Memory,
+            cancellation: Arc::new(tracedecay_graph_db::NeverCancelled),
+        })
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("workflow test graph is unavailable: {error}"),
+        })?;
+        self.project_database_for_test()?.workflow_storage(graph)
     }
 
     #[doc(hidden)]

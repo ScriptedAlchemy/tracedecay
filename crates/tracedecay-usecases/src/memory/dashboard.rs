@@ -8,12 +8,12 @@ use tracedecay_store::{
     CompatibilityDashboardVectorPointV1, CompatibilityDashboardVectorPointsQueryV1,
     CompatibilityFactAddAliasV1, CompatibilityFactCurationBatchV1,
     CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
     CompatibilityFactLinkV1, CompatibilityFactMergeCommandV1, CompatibilityFactMergeEntitiesV1,
     CompatibilityFactMergeOutcomeV1, CompatibilityFactNormalizeTagsV1,
     CompatibilityFactRepairVectorV1, CompatibilityLegacyEntityTargetV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, FactCompatibilityStore,
+    CompatibilityMemoryStatusV1, FactCompatibilityStore, FactFeedbackHistoryPage,
+    FactFeedbackHistoryQuery,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
@@ -102,23 +102,32 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         Ok(detail)
     }
 
-    /// Numeric dashboard trust-history route retaining typed repair progress.
-    /// Callers that need an honest incomplete state must use this rather than
-    /// the legacy lossy `fact_trust_history_v1` vector projection.
-    pub async fn dashboard_feedback_history_v1(
+    pub async fn dashboard_feedback_history(
         &self,
         fact_id: i64,
         limit: usize,
-    ) -> Result<CompatibilityFactFeedbackHistoryV1, MemoryApplicationError> {
-        self.get_compatibility_feedback_history(CompatibilityFactFeedbackHistoryQueryV1::new(
-            self.legacy_compatibility_target(fact_id)?,
+    ) -> Result<FactFeedbackHistoryPage, MemoryApplicationError> {
+        let target = self.legacy_compatibility_target(fact_id)?;
+        let canonical_fact_id = self
+            .resolve_legacy_fact(target.legacy_query().cloned().ok_or(
+                MemoryApplicationError::InvalidCompatibilityInput {
+                    invariant: "legacy numeric fact target",
+                },
+            )?)
+            .await?
+            .ok_or(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "feedback history fact identity",
+            })?;
+        self.query_fact_feedback_history(FactFeedbackHistoryQuery::new(
+            self.owner.clone(),
+            canonical_fact_id,
             None,
             limit,
         )?)
         .await
     }
 
-    /// Typed dashboard status including feedback-history repair progress.
+    /// Typed dashboard status.
     pub async fn dashboard_memory_status_v1(
         &self,
     ) -> Result<CompatibilityMemoryStatusV1, MemoryApplicationError> {
@@ -389,8 +398,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         .await
     }
 
-    /// One authority repair step only. Any incomplete feedback-history repair is
-    /// surfaced through `memory_status_v1`/feedback history while the daemon resumes it.
+    /// One authority repair step only.
     pub async fn dashboard_repair_v1(
         &self,
         context: MemoryOperationContext,

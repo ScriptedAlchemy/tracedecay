@@ -193,185 +193,6 @@ fn format_bytes_boundaries() {
     assert_eq!(format_bytes(1024 * 1024 * 1024 * 2), "2.0 GB");
 }
 
-#[tokio::test]
-async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
-    let base = ephemeral_safe_fixture_base();
-    let dir = tempfile::Builder::new()
-        .prefix("doctor-orphans-")
-        .tempdir_in(&base)
-        .unwrap();
-    let db_dir = tempfile::Builder::new()
-        .prefix("doctor-orphans-db-")
-        .tempdir()
-        .unwrap();
-    let profile_root = dir.path().join("profile");
-    let eligible_root = dir.path().join("eligible-repo");
-    let conflicting_root = dir.path().join("conflicting-repo");
-    let conflicting_registered_root = dir.path().join("registered-elsewhere");
-    let blocked_root = dir.path().join("blocked-repo");
-    std::fs::create_dir_all(&eligible_root).unwrap();
-    std::fs::create_dir_all(&conflicting_root).unwrap();
-    std::fs::create_dir_all(&conflicting_registered_root).unwrap();
-    std::fs::create_dir_all(&blocked_root).unwrap();
-    for root in [&eligible_root, &conflicting_root, &blocked_root] {
-        let status = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(root)
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
-    write_enrollment_marker(
-        &eligible_root,
-        &EnrollmentMarker {
-            project_id: "proj_eligible".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
-    write_repository_identity_marker(&eligible_root, "proj_eligible").unwrap();
-    write_enrollment_marker(
-        &conflicting_root,
-        &EnrollmentMarker {
-            project_id: "proj_conflict".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
-    write_repository_identity_marker(&conflicting_root, "proj_conflict").unwrap();
-    for (project_id, project_root) in [
-        ("proj_eligible", &eligible_root),
-        ("proj_conflict", &conflicting_root),
-        ("proj_blocked", &blocked_root),
-    ] {
-        let data_root = profile_root.join("projects").join(project_id);
-        std::fs::create_dir_all(&data_root).unwrap();
-        let manifest = StoreManifest {
-            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-            project_id: Some(project_id.to_string()),
-            store_kind: StoreKind::CodeProject,
-            storage_mode: StorageMode::ProfileSharded,
-            project_root: project_root.clone(),
-            data_root: data_root.clone(),
-            graph_db_relpath: "tracedecay.db".into(),
-            sessions_db_relpath: "sessions.db".into(),
-            branch_meta_relpath: "branch-meta.json".into(),
-        };
-        std::fs::write(
-            data_root.join(STORE_MANIFEST_FILENAME),
-            serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
-    }
-
-    let runtime = DoctorTestRuntime::open(
-        &db_dir.path().join("profile"),
-        "doctor orphan reporting test",
-    )
-    .await;
-    let db = runtime.database();
-    db.upsert_code_project(
-        "proj_conflict",
-        &conflicting_registered_root,
-        None,
-        None,
-        Some("main"),
-    )
-    .await
-    .unwrap();
-    let (count, warnings) = orphan_store_manifest_report(db, &profile_root).await;
-
-    assert_eq!(count, 1, "{warnings:?}");
-    assert!(
-        warnings
-            .iter()
-            .any(|warning| warning.contains("proj_conflict")),
-        "{warnings:?}"
-    );
-
-    let scan = crate::migrate::registry::scan_profile_store_manifests(&profile_root, 1_800_000_000);
-    let eligible = crate::migrate::registry::RegistryReconstructionReport {
-        plans: scan
-            .plans
-            .into_iter()
-            .filter(|plan| {
-                plan.status == crate::migrate::registry::RegistryReconstructionStatus::Eligible
-                    && plan.project.project_id == "proj_eligible"
-            })
-            .collect(),
-        issues: Vec::new(),
-    };
-    let mut batch_left = eligible.plans[0].clone();
-    batch_left.project.aliases = vec![dir.path().join("shared-alias")];
-    let mut batch_right = batch_left.clone();
-    batch_right.project.project_id = "proj_batch_other".to_string();
-    batch_right.project.project_root = conflicting_root.clone();
-    batch_right.store.project_id = batch_right.project.project_id.clone();
-    batch_right.store.store_id = "store:proj_batch_other:profile_sharded".to_string();
-    batch_right.store.store_relpath = "projects/proj_batch_other".to_string();
-    batch_right.store.manifest_relpath =
-        Some("projects/proj_batch_other/store_manifest.json".to_string());
-    batch_right.graph_scopes.clear();
-    batch_right.artifacts.clear();
-    batch_left.graph_scopes.clear();
-    batch_left.artifacts.clear();
-    let batch_diff = crate::migrate::registry::diff_registry_reconstruction_report(
-        db,
-        &crate::migrate::registry::RegistryReconstructionReport {
-            plans: vec![batch_left, batch_right],
-            issues: Vec::new(),
-        },
-    )
-    .await;
-    assert_eq!(batch_diff.missing_plans, 0);
-    assert!(
-        batch_diff
-            .issues
-            .iter()
-            .any(|issue| issue.contains("shared-alias")),
-        "{:?}",
-        batch_diff.issues
-    );
-    let applied = crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
-        .await
-        .unwrap();
-    assert_eq!(applied.projects, 1);
-    assert_eq!(
-        orphan_store_manifest_report(db, &profile_root).await.0,
-        0,
-        "a complete reconstruction registry is healthy without a legacy projects.path row"
-    );
-    assert_eq!(
-        crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
-            .await
-            .unwrap(),
-        crate::migrate::registry::RegistryReconstructionApplyReport::default()
-    );
-
-    db.writer_connection()
-        .unwrap()
-        .execute(
-            "DELETE FROM store_artifacts WHERE store_id=?1",
-            crate::db::engine::params![eligible.plans[0].store.store_id.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(orphan_store_manifest_report(db, &profile_root).await.0, 1);
-    crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
-        .await
-        .unwrap();
-
-    db.writer_connection()
-        .unwrap()
-        .execute(
-            "DELETE FROM store_instances WHERE store_id=?1",
-            crate::db::engine::params![eligible.plans[0].store.store_id.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(orphan_store_manifest_report(db, &profile_root).await.0, 1);
-}
-
 #[test]
 fn format_bytes_fractional_kb() {
     // 2048 bytes = 2.0 KB
@@ -1078,7 +899,6 @@ async fn registry_drift_findings_report_manifest_identity_mismatches()
     std::fs::create_dir_all(&shard_root)?;
     std::fs::write(shard_root.join("tracedecay.db"), b"graph")?;
     std::fs::write(shard_root.join("sessions.db"), b"sessions")?;
-    std::fs::write(shard_root.join("branch-meta.json"), b"{}")?;
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
         project_id: Some("proj_manifest".to_string()),
@@ -1088,7 +908,6 @@ async fn registry_drift_findings_report_manifest_identity_mismatches()
         data_root: shard_root.clone(),
         graph_db_relpath: "tracedecay.db".into(),
         sessions_db_relpath: "sessions.db".into(),
-        branch_meta_relpath: "branch-meta.json".into(),
     };
     std::fs::write(
         shard_root.join(STORE_MANIFEST_FILENAME),

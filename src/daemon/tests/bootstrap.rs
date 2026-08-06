@@ -1049,10 +1049,6 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     std::fs::create_dir_all(&project).expect("project dir");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let mut config = crate::config::load_config(&project).expect("load project config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&project, &config)
-        .expect("disable unrelated startup transcript ingestion");
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "portable-bootstrap-cache-test")
             .expect("daemon database scope");
@@ -1470,10 +1466,6 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
             .expect("daemon database scope");
-    let mut config = crate::config::load_config(&project).expect("load project config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&project, &config)
-        .expect("disable unrelated startup transcript ingestion");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -1614,10 +1606,6 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     let project = project.canonicalize().expect("canonical project");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let mut config = crate::config::load_config(&project).expect("load project config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&project, &config)
-        .expect("disable unrelated startup transcript ingestion");
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
             .expect("daemon database scope");

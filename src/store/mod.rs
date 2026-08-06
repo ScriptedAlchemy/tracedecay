@@ -39,13 +39,13 @@ pub mod vector_generation_test_support {
     };
 
     pub use super::vector_generations::{
-        DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
-        VectorGenerationBuildIdV1, VectorGenerationIdV1, VectorGenerationPlanV1,
-        VectorGenerationPublicationV1, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
+        DatabaseVectorGenerationStoreV1, PublishedVectorGenerationV1, VectorGenerationBuildIdV1,
+        VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationPublicationV1,
+        VectorGenerationState, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
     };
 
     /// Inject one failure immediately before the oracle's publication swap.
-    pub fn fail_before_publication_swap_once(store: &mut FakeVectorGenerationStoreV1) {
+    pub fn fail_before_publication_swap_once(store: &mut VectorGenerationState) {
         store.fail_before_publication_swap_once();
     }
 }

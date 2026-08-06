@@ -52,10 +52,8 @@ async fn observation_authority_audit(
         Some(registry) => {
             let audit = match registry.read_snapshot().await {
                 Ok(snapshot) => {
-                    crate::global_db::schema_stages::validate_observation_authority_connection(
-                        &snapshot,
-                    )
-                    .await
+                    crate::global_db::schema::validate_observation_authority_connection(&snapshot)
+                        .await
                 }
                 Err(error) => Err(TraceDecayError::Database {
                     operation: "begin observation authority audit".to_string(),

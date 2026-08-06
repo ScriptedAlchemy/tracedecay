@@ -106,7 +106,7 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         SessionStoreTable::SessionMessages,
         SessionStoreTable::SessionSchemaMigrations,
         SessionStoreTable::LcmRawMessages,
-        SessionStoreTable::SessionTemporalSchemaMigrations,
+        SessionStoreTable::SessionTemporalSchemaState,
         SessionStoreTable::SessionTemporalGenerations,
         SessionStoreTable::SessionTemporalObservationEffects,
         SessionStoreTable::SessionTemporalProjectionReceipts,
@@ -150,7 +150,7 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
             name: "migration".to_owned(),
         },
         SessionStoreCursor::LcmRawMessages { store_id: 1 },
-        SessionStoreCursor::SessionTemporalSchemaMigrations {
+        SessionStoreCursor::SessionTemporalSchemaState {
             name: "migration".to_owned(),
         },
         SessionStoreCursor::SessionTemporalGenerations {
@@ -424,7 +424,7 @@ fn session_rows() -> [SessionStoreRow; 27] {
             content_hash: "content".to_owned(),
             row_digest: "row".to_owned(),
         },
-        SessionStoreRow::SessionTemporalSchemaMigrations {
+        SessionStoreRow::SessionTemporalSchemaState {
             name: "migration".to_owned(),
             version: 1,
             row_digest: "row".to_owned(),

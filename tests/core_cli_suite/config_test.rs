@@ -43,20 +43,6 @@ fn default_config_excludes_generated_vendor_cache_trees_and_gitignore_on() {
 }
 
 #[test]
-fn legacy_config_fixture_load_does_not_rewrite_input() {
-    let dir = TempDir::new().unwrap();
-    let config = TraceDecayConfig::default();
-    let config_path = get_config_path(dir.path());
-    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    let source = serde_json::to_string_pretty(&config).unwrap();
-    std::fs::write(&config_path, &source).unwrap();
-    let loaded = load_config(dir.path()).unwrap();
-    assert_eq!(config.version, loaded.version);
-    assert_eq!(config.exclude, loaded.exclude);
-    assert_eq!(std::fs::read_to_string(config_path).unwrap(), source);
-}
-
-#[test]
 fn test_is_excluded() {
     let config = TraceDecayConfig::default();
     assert!(!is_excluded("src/main.rs", &config));
@@ -102,29 +88,6 @@ fn test_config_serde_roundtrip() {
     let deserialized: TraceDecayConfig = serde_json::from_str(&json).unwrap();
     assert_eq!(config.version, deserialized.version);
     assert_eq!(config.max_file_size, deserialized.max_file_size);
-}
-
-#[test]
-fn test_legacy_config_with_include_field_still_loads() {
-    let dir = TempDir::new().unwrap();
-    let tracedecay_dir = dir.path().join(".tracedecay");
-    std::fs::create_dir_all(&tracedecay_dir).unwrap();
-    // Simulate an old config that still has an "include" field
-    let legacy_json = r#"{
-        "version": 1,
-        "root_dir": ".",
-        "include": ["**/*.rs"],
-        "exclude": ["target/**", ".git/**", ".tracedecay/**"],
-        "max_file_size": 1048576,
-        "extract_docstrings": true,
-        "track_call_sites": true,
-        "enable_embeddings": false
-    }"#;
-    std::fs::write(tracedecay_dir.join("config.json"), legacy_json).unwrap();
-    let loaded = load_config(dir.path()).unwrap();
-    assert_eq!(loaded.version, 1);
-    assert!(loaded.exclude.contains(&"target/**".to_string()));
-    assert!(loaded.git_ignore);
 }
 
 // ── is_in_gitignore ─────────────────────────────────────────────────────────

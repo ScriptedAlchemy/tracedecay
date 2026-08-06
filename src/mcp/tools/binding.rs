@@ -20,10 +20,9 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use crate::mcp::server::McpToolLifecyclePolicy;
 use tracedecay_tool_catalog::{
-    BindingSurface, CancellationContract, CancellationPoint, EffectClass, McpDeadlineContractV1,
-    McpDispatchAvailability, McpDispatchCatalogV1, McpDispatchContractInputV1,
+    BindingSurface, CancellationContract, CancellationPoint, DeadlineBehavior, DeadlineContract,
+    EffectClass, McpDispatchAvailability, McpDispatchCatalogV1, McpDispatchContractInputV1,
     McpDispatchContractV1, McpDispatchUnavailableReason, McpIdempotencyContract,
     McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
@@ -118,7 +117,6 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_constructors", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_field_sites", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_diagnostics", group: Some(McpToolDispatchGroup::Analysis), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_admin_branch_add", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_affected", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_diff_context", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_changelog", group: Some(McpToolDispatchGroup::Git), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -210,7 +208,6 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_git_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_health_delta", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_health_read", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_compress", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_describe", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_doctor", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_expand", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -218,7 +215,6 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_lcm_grep", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_load_session", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_preflight", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_lcm_session_boundary", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_lcm_status", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_module_api", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_qualified_name", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -263,21 +259,37 @@ const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
     "tracedecay_admin_cli",
     "tracedecay_admin_project",
     "tracedecay_admin_sync",
-    "tracedecay_admin_branch_add",
 ];
 
-/// Exact admission policy for a root MCP binding.
+/// Exact deadline contribution for a directly handled MCP binding.
 ///
-/// An absent row is unavailable; callers must not invent a default policy for
-/// a name the canonical binding table does not own.
-pub(crate) fn lifecycle_policy_for_bound_tool(tool_name: &str) -> Option<McpToolLifecyclePolicy> {
-    binding(tool_name)?;
+/// Once composed into [`McpDispatchCatalogV1`], the catalog is the only
+/// lifecycle authority consumed by admission.
+fn direct_deadline_for_bound_tool(
+    tool_name: &str,
+    effect: EffectClass,
+) -> Result<DeadlineContract, super::dispatch::McpDispatchMetadataError> {
+    binding(tool_name).ok_or_else(|| {
+        super::dispatch::McpDispatchMetadataError::MissingContract(tool_name.to_owned())
+    })?;
     let ceiling = if LONG_RUNNING_DISPATCH_TOOLS.contains(&tool_name) {
         LONG_RUNNING_DISPATCH_CEILING
     } else {
         INTERACTIVE_DISPATCH_CEILING
     };
-    Some(McpToolLifecyclePolicy::new(ceiling, true))
+    let maximum_millis = u64::try_from(ceiling.as_millis()).map_err(|_| {
+        super::dispatch::McpDispatchMetadataError::Initialization(format!(
+            "MCP dispatch deadline for '{tool_name}' exceeds the catalog range"
+        ))
+    })?;
+    Ok(DeadlineContract::new(
+        maximum_millis,
+        if effect.is_read_only() {
+            DeadlineBehavior::ReturnOperationReceipt
+        } else {
+            DeadlineBehavior::ReturnEffectReceipt
+        },
+    )?)
 }
 
 /// The statically bound dispatch group, if this tool has one.
@@ -316,11 +328,12 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_memory_status"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests"
-        | "tracedecay_lcm_doctor"
-        | "tracedecay_lcm_compress"
-        | "tracedecay_lcm_session_boundary"
         | "tracedecay_session_start"
-        | "tracedecay_session_end" => EffectClass::Administrative,
+        | "tracedecay_session_end"
+        | "tracedecay_admin_cli"
+        | "tracedecay_admin_project"
+        | "tracedecay_admin_sync"
+        | "tracedecay_hook_runtime" => EffectClass::Administrative,
         _ => EffectClass::Read,
     }
 }
@@ -333,14 +346,25 @@ fn application_capability_for_tool(
 > {
     let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
     let catalog = crate::application_surface::application_surface_catalog_ref()?;
-    Ok(catalog.capabilities().find(|capability| {
+    let bound = catalog.capabilities().find(|capability| {
         capability.binding_ids().iter().any(|binding_id| {
             catalog.binding(binding_id).is_some_and(|binding| {
                 binding.surface() == BindingSurface::Mcp
                     && binding.operation().as_str() == operation
             })
         })
-    }))
+    });
+    if bound.is_some() {
+        return Ok(bound);
+    }
+
+    let feedback_operation = tracedecay_application::feedback_surface_operation(operation)
+        .map_err(|error| {
+            super::dispatch::McpDispatchMetadataError::Initialization(error.to_string())
+        })?;
+    Ok(feedback_operation
+        .as_ref()
+        .and_then(|operation| catalog.capability(operation.capability_id())))
 }
 
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
@@ -360,6 +384,23 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_session_start"
             | "tracedecay_session_end"
     )
+}
+
+fn dispatch_available(
+    tool_name: &str,
+    effect: EffectClass,
+    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+) -> bool {
+    if effect.is_effect() {
+        return verified_effect_journey(tool_name)
+            || super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name);
+    }
+    application_capability
+        .map(tracedecay_tool_catalog::CapabilityManifestV1::availability)
+        .map_or(
+            true,
+            tracedecay_tool_catalog::AvailabilityContract::is_callable,
+        )
 }
 
 fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract {
@@ -398,6 +439,21 @@ fn idempotency_for_tool(tool_name: &str) -> McpIdempotencyContract {
     }
 }
 
+fn idempotency_for_capability(
+    capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+    tool_name: &str,
+) -> McpIdempotencyContract {
+    match capability.map(tracedecay_tool_catalog::CapabilityManifestV1::idempotency) {
+        Some(tracedecay_tool_catalog::IdempotencyContract::Required) => {
+            McpIdempotencyContract::KeyRequired
+        }
+        Some(tracedecay_tool_catalog::IdempotencyContract::NotRequired) => {
+            McpIdempotencyContract::NotProvided
+        }
+        None => idempotency_for_tool(tool_name),
+    }
+}
+
 fn cancellation_for_tool(
     tool_name: &str,
     application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
@@ -424,21 +480,13 @@ fn cancellation_for_tool(
 fn build_mcp_dispatch_catalog()
 -> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     let mut contracts = Vec::new();
-    for binding in MCP_TOOL_BINDINGS
-        .iter()
-        .filter(|binding| !super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
-    {
+    for binding in MCP_TOOL_BINDINGS.iter() {
         let application_capability = application_capability_for_tool(binding.name)?;
-        let direct_effect = direct_effect(binding.name);
-        let effect = if direct_effect.is_effect() {
-            direct_effect
-        } else {
-            application_capability.map_or(
-                EffectClass::Read,
-                tracedecay_tool_catalog::CapabilityManifestV1::effect,
-            )
-        };
-        let available = effect.is_read_only() || verified_effect_journey(binding.name);
+        let effect = application_capability.map_or_else(
+            || direct_effect(binding.name),
+            tracedecay_tool_catalog::CapabilityManifestV1::effect,
+        );
+        let available = dispatch_available(binding.name, effect, application_capability);
         let cancellation = cancellation_for_tool(binding.name, application_capability)?;
         let mut terminal_states = vec![
             McpTerminalState::Completed,
@@ -450,16 +498,9 @@ fn build_mcp_dispatch_catalog()
         if matches!(cancellation, CancellationContract::Cooperative { .. }) {
             terminal_states.push(McpTerminalState::Cancelled);
         }
-        let maximum_millis = match application_capability {
-            Some(capability) => capability.deadline().maximum_millis(),
-            None => lifecycle_policy_for_bound_tool(binding.name)
-                .ok_or_else(|| {
-                    super::dispatch::McpDispatchMetadataError::MissingContract(
-                        binding.name.to_owned(),
-                    )
-                })?
-                .maximum_duration()
-                .as_millis() as u64,
+        let deadline = match application_capability {
+            Some(capability) => capability.deadline().clone(),
+            None => direct_deadline_for_bound_tool(binding.name, effect)?,
         };
         let streaming = application_capability
             .map(tracedecay_tool_catalog::CapabilityManifestV1::streaming)
@@ -471,13 +512,17 @@ fn build_mcp_dispatch_catalog()
                 McpDispatchAvailability::Available
             } else {
                 McpDispatchAvailability::Unavailable {
-                    reason: McpDispatchUnavailableReason::EffectJourneyUnverified,
+                    reason: if effect.is_effect() {
+                        McpDispatchUnavailableReason::EffectJourneyUnverified
+                    } else {
+                        McpDispatchUnavailableReason::SurfaceNotMounted
+                    },
                     retryable: false,
                 }
             },
             effect,
-            deadline: McpDeadlineContractV1::new(maximum_millis)?,
-            idempotency: idempotency_for_tool(binding.name),
+            deadline,
+            idempotency: idempotency_for_capability(application_capability, binding.name),
             inverse: inverse_for_tool(binding.name, effect),
             cancellation,
             terminal_states,
@@ -566,6 +611,9 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         let cataloged = catalog
             .contracts()
+            .filter(|contract| {
+                !super::super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&contract.tool_name())
+            })
             .map(tracedecay_tool_catalog::McpDispatchContractV1::tool_name)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(cataloged, advertised);
@@ -574,10 +622,9 @@ mod tests {
                 .unwrap()
                 .map_or_else(
                     || {
-                        lifecycle_policy_for_bound_tool(contract.tool_name())
+                        direct_deadline_for_bound_tool(contract.tool_name(), contract.effect())
                             .unwrap()
-                            .maximum_duration()
-                            .as_millis() as u64
+                            .maximum_millis()
                     },
                     |capability| capability.deadline().maximum_millis(),
                 );
@@ -585,30 +632,102 @@ mod tests {
                 contract.deadline().maximum_millis(),
                 expected_maximum_millis
             );
+            let capability = application_capability_for_tool(contract.tool_name()).unwrap();
+            let expected_available =
+                dispatch_available(contract.tool_name(), contract.effect(), capability);
+            assert_eq!(contract.availability().is_available(), expected_available);
+        }
+    }
+
+    #[test]
+    fn internal_bindings_use_the_same_catalog_lifecycle_authority() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        for tool_name in super::super::handlers::INTERNAL_DAEMON_TOOL_NAMES {
+            let contract = catalog
+                .contract(tool_name)
+                .unwrap_or_else(|| panic!("{tool_name} has no catalog lifecycle contract"));
+            let policy = super::super::dispatch::lifecycle_policy_for_tool(tool_name)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{tool_name} has no admission policy"));
             assert_eq!(
-                contract.availability().is_available(),
-                contract.effect().is_read_only() || verified_effect_journey(contract.tool_name())
+                policy.maximum_duration().as_millis() as u64,
+                contract.deadline().maximum_millis()
+            );
+            assert_eq!(
+                policy.externally_cancellable(),
+                matches!(
+                    contract.cancellation(),
+                    CancellationContract::Cooperative { .. }
+                )
             );
         }
     }
 
     #[test]
+    fn code_query_admission_uses_the_manifest_deadline() {
+        let contract = mcp_dispatch_catalog()
+            .unwrap()
+            .contract("tracedecay_code_exact_occurrence")
+            .unwrap();
+        let policy = super::super::dispatch::lifecycle_policy_for_tool(contract.tool_name())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(contract.deadline().maximum_millis(), 10_000);
+        assert_eq!(policy.maximum_duration(), Duration::from_secs(10));
+        assert_eq!(
+            contract.deadline().behavior(),
+            DeadlineBehavior::ReturnOperationReceipt
+        );
+    }
+
+    #[test]
     fn mixed_repair_tools_are_effects_without_fabricated_lifecycle_claims() {
         let catalog = mcp_dispatch_catalog().unwrap();
-        for tool_name in [
-            "tracedecay_lcm_doctor",
-            "tracedecay_memory_status",
-            "tracedecay_session_refresh",
-        ] {
+        let doctor = catalog.contract("tracedecay_lcm_doctor").unwrap();
+        assert_eq!(doctor.effect(), EffectClass::Read);
+        assert!(doctor.read_only());
+        assert!(doctor.availability().is_available());
+        assert_eq!(doctor.idempotency(), McpIdempotencyContract::NotProvided);
+        assert!(matches!(
+            doctor.inverse(),
+            McpInverseContract::NotApplicable
+        ));
+
+        for tool_name in ["tracedecay_memory_status", "tracedecay_session_refresh"] {
             let contract = catalog.contract(tool_name).unwrap();
             assert_eq!(contract.effect(), EffectClass::Administrative);
             assert!(!contract.read_only());
-            assert!(!contract.availability().is_available());
-            assert_eq!(contract.idempotency(), McpIdempotencyContract::NotProvided);
+            let capability = application_capability_for_tool(contract.tool_name()).unwrap();
+            let expected_available =
+                dispatch_available(contract.tool_name(), contract.effect(), capability);
+            assert_eq!(contract.availability().is_available(), expected_available);
+            assert_eq!(
+                contract.idempotency(),
+                idempotency_for_capability(capability, contract.tool_name())
+            );
             assert!(matches!(
                 contract.inverse(),
                 McpInverseContract::Unavailable { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn unmounted_feedback_handlers_are_not_advertised_as_available() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        for tool_name in [
+            "tracedecay_feedback_advisory_cycle",
+            "tracedecay_test_results",
+        ] {
+            let contract = catalog.contract(tool_name).unwrap();
+            assert!(!contract.availability().is_available(), "{tool_name}");
+            assert_eq!(contract.effect(), EffectClass::Read);
+            assert_eq!(contract.deadline().maximum_millis(), 15_000);
+            assert_eq!(
+                serde_json::to_value(contract).unwrap()["availability"]["reason"],
+                "surface_not_mounted"
+            );
         }
     }
 

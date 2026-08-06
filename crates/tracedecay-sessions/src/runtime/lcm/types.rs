@@ -40,8 +40,8 @@ pub struct LcmSummaryNodeDraft {
 }
 
 /// Explicit identity and predecessor edge for one immutable summary
-/// publication. `draft` is also materialized into the legacy LCM tables as a
-/// compatibility projection in the authoritative transaction.
+/// publication. Canonical summary content stays in the owning session store;
+/// relationship topology publishes through the project graph journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LcmImmutableSummaryPublication {
     pub summary_id: String,
@@ -435,16 +435,6 @@ pub struct LcmConfigStatus {
     pub compression_boundary_cooldown_seconds: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmCleanConfig {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ignore_session_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub stateless_session_patterns: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ignore_message_patterns: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmGcConfig {
     #[serde(
@@ -458,12 +448,6 @@ pub struct LcmGcConfig {
     pub reap_missing_enabled: bool,
     #[serde(default = "default_lcm_gc_max_batch_size")]
     pub max_batch_size: usize,
-    #[serde(default = "default_lcm_gc_backup_before_reap")]
-    pub backup_before_reap: bool,
-    #[serde(default = "default_lcm_gc_interval_seconds")]
-    pub interval_seconds: u64,
-    #[serde(default = "default_lcm_gc_enabled")]
-    pub gc_enabled: bool,
 }
 
 impl LcmGcConfig {
@@ -487,9 +471,6 @@ impl Default for LcmGcConfig {
             reap_missing_after: default_lcm_gc_reap_missing_after(),
             reap_missing_enabled: default_lcm_gc_reap_missing_enabled(),
             max_batch_size: default_lcm_gc_max_batch_size(),
-            backup_before_reap: default_lcm_gc_backup_before_reap(),
-            interval_seconds: default_lcm_gc_interval_seconds(),
-            gc_enabled: default_lcm_gc_enabled(),
         }
         .normalized()
     }
@@ -509,18 +490,6 @@ fn default_lcm_gc_reap_missing_enabled() -> bool {
 
 fn default_lcm_gc_max_batch_size() -> usize {
     500
-}
-
-fn default_lcm_gc_backup_before_reap() -> bool {
-    true
-}
-
-fn default_lcm_gc_interval_seconds() -> u64 {
-    21_600
-}
-
-fn default_lcm_gc_enabled() -> bool {
-    true
 }
 
 fn deserialize_lcm_gc_grace_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -777,14 +746,12 @@ mod tests {
 
     #[test]
     fn gc_config_clamps_grace_floor_from_serde() {
-        let config: LcmGcConfig = serde_json::from_str(
-            r#"{"grace_seconds":10,"reap_missing_after":0,"gc_enabled":false}"#,
-        )
-        .expect("gc config should deserialize");
+        let config: LcmGcConfig =
+            serde_json::from_str(r#"{"grace_seconds":10,"reap_missing_after":0}"#)
+                .expect("gc config should deserialize");
 
         assert_eq!(config.grace_seconds, 300);
         assert_eq!(config.reap_missing_after, 0);
-        assert!(!config.gc_enabled);
     }
 
     #[test]
@@ -795,9 +762,6 @@ mod tests {
         assert_eq!(config.reap_missing_after, 604_800);
         assert!(!config.reap_missing_enabled);
         assert_eq!(config.max_batch_size, 500);
-        assert!(config.backup_before_reap);
-        assert_eq!(config.interval_seconds, 21_600);
-        assert!(config.gc_enabled);
     }
 
     #[test]
@@ -810,9 +774,6 @@ mod tests {
         assert_eq!(value["reap_missing_after"], 604_800);
         assert_eq!(value["reap_missing_enabled"], false);
         assert_eq!(value["max_batch_size"], 500);
-        assert_eq!(value["backup_before_reap"], true);
-        assert_eq!(value["interval_seconds"], 21_600);
-        assert_eq!(value["gc_enabled"], true);
     }
 
     #[test]

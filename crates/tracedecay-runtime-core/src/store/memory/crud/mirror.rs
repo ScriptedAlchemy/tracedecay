@@ -8,11 +8,9 @@
 //! consumers may read this projection through that compatibility store; they
 //! do not make the mirror an independent write authority.
 //!
-//! The raw V1 rows remain durable compatibility data. Cutover backfills and
-//! verifies their V2 representation, but never bulk-reclaims them with the
-//! canonical fact-deletion primitive. Direct legacy-store mutation is limited
-//! to schema/data migration and tests; production fact mutations enter through
-//! `DatabaseFactStore`.
+//! The compatibility rows are written transactionally with the canonical fact
+//! authority. Production fact mutations enter through `DatabaseFactStore`;
+//! tests may seed the projection directly.
 
 use super::super::primitives::{
     COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey, QUERY_OPERATION,

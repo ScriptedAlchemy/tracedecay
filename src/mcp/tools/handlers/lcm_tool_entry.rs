@@ -106,10 +106,6 @@ pub(super) async fn dispatch_lcm_tool(
         RetainedSurfaceOperation::LcmPreflight => {
             session::handle_lcm_preflight(context, args).await
         }
-        RetainedSurfaceOperation::LcmCompress => session::handle_lcm_compress(context, args).await,
-        RetainedSurfaceOperation::LcmSessionBoundary => {
-            session::handle_lcm_session_boundary(context, args).await
-        }
         RetainedSurfaceOperation::FactStore
         | RetainedSurfaceOperation::FactFeedback
         | RetainedSurfaceOperation::MemoryStatus

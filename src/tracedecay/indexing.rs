@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 #[cfg(any(test, feature = "test-transport"))]
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -379,13 +379,13 @@ impl TraceDecay {
         let Some(encoded) = self.db.get_metadata(GRAPH_REBUILD_STATE_KEY).await? else {
             let generation_is_current = self
                 .db
-                .get_metadata(crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY)
+                .get_metadata(crate::db::schema::GRAPH_GENERATION_SCHEMA_KEY)
                 .await?
                 .and_then(|value| value.parse::<u32>().ok())
-                == Some(crate::db::migrations::SCHEMA_VERSION);
+                == Some(crate::db::schema::SCHEMA_VERSION);
             if !generation_is_current {
                 return Ok(GraphRebuildStatusV1::Indexing {
-                    schema_version: crate::db::migrations::SCHEMA_VERSION,
+                    schema_version: crate::db::schema::SCHEMA_VERSION,
                     completed_files: 0,
                     total_files: None,
                     availability: self.graph_rebuild_availability().await?,
@@ -398,14 +398,14 @@ impl TraceDecay {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
             return Ok(GraphRebuildStatusV1::Current {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_at,
             });
         };
         match serde_json::from_str(&encoded) {
             Ok(status) => Ok(status),
             Err(_) => Ok(GraphRebuildStatusV1::Failed {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 availability: self.graph_rebuild_availability().await?,
                 retryable: true,
                 reason: "stored graph rebuild state is unreadable".to_owned(),
@@ -436,7 +436,7 @@ impl TraceDecay {
         if !should_schedule_graph_rebuild(&status) {
             return Ok(());
         }
-        if let Err(error) = self.ensure_branch_writable("schedule graph rebuild") {
+        if let Err(error) = self.ensure_writable("schedule graph rebuild") {
             eprintln!("[tracedecay] graph rebuild remains pending on a read-only branch: {error}");
             return Ok(());
         }
@@ -469,7 +469,7 @@ impl TraceDecay {
         let total = u64::try_from(self.scan_files().len()).unwrap_or(u64::MAX);
         if let Err(error) = self
             .write_graph_rebuild_status(&GraphRebuildStatusV1::Indexing {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_files: 0,
                 total_files: Some(total),
                 availability,
@@ -504,7 +504,7 @@ impl TraceDecay {
             Err(error) => {
                 eprintln!("[tracedecay] background graph rebuild failed: {error}");
                 let status = GraphRebuildStatusV1::Failed {
-                    schema_version: crate::db::migrations::SCHEMA_VERSION,
+                    schema_version: crate::db::schema::SCHEMA_VERSION,
                     availability,
                     retryable: true,
                     reason: error.to_string(),
@@ -592,7 +592,7 @@ impl TraceDecay {
                 completed.insert(entry.file_path.clone(), entry);
             }
             self.write_graph_rebuild_status(&GraphRebuildStatusV1::Indexing {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_files: u64::try_from(completed.len()).unwrap_or(u64::MAX),
                 total_files: Some(u64::try_from(files.len()).unwrap_or(u64::MAX)),
                 availability,
@@ -661,7 +661,7 @@ impl TraceDecay {
                     continue;
                 }
             };
-            if batch.schema_version != crate::db::migrations::SCHEMA_VERSION {
+            if batch.schema_version != crate::db::schema::SCHEMA_VERSION {
                 continue;
             }
             sequence = sequence.max(
@@ -685,7 +685,7 @@ impl TraceDecay {
         entries: &[GraphRebuildCheckpointEntryV1],
     ) -> Result<()> {
         let batch = GraphRebuildCheckpointBatchV1 {
-            schema_version: crate::db::migrations::SCHEMA_VERSION,
+            schema_version: crate::db::schema::SCHEMA_VERSION,
             entries: entries.to_vec(),
         };
         let bytes = serde_json::to_vec(&batch).map_err(|error| TraceDecayError::Database {
@@ -718,10 +718,7 @@ impl TraceDecay {
             open_options: self.open_options.clone(),
             registry: tracedecay_code_extraction::LanguageRegistry::new(),
             active_branch: self.active_branch.clone(),
-            serving_branch: self.serving_branch.clone(),
-            fallback_warning: self.fallback_warning.clone(),
             read_only: self.read_only,
-            db_path_cache: OnceLock::new(),
             context_scout_owner: self.context_scout_owner.clone(),
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
@@ -777,10 +774,7 @@ impl TraceDecay {
             self.project_root.is_dir(),
             "project root is not a directory"
         );
-        // R4: one branch resolution for the whole full index — the write gate
-        // and the closing branch-meta stamp share it.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("full index", &live_branch)?;
+        self.ensure_writable("full index")?;
         let sync_lease = self.begin_active_sync()?;
         #[cfg(any(test, feature = "test-transport"))]
         if rebuild_availability.is_some() {
@@ -939,13 +933,13 @@ impl TraceDecay {
         self.db
             .set_metadata_unguarded(
                 &transaction,
-                crate::db::migrations::GRAPH_GENERATION_SCHEMA_KEY,
-                &crate::db::migrations::SCHEMA_VERSION.to_string(),
+                crate::db::schema::GRAPH_GENERATION_SCHEMA_KEY,
+                &crate::db::schema::SCHEMA_VERSION.to_string(),
             )
             .await?;
         if rebuild_availability.is_some() {
             let status = serde_json::to_string(&GraphRebuildStatusV1::Current {
-                schema_version: crate::db::migrations::SCHEMA_VERSION,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
                 completed_at: now,
             })
             .map_err(|error| TraceDecayError::Database {
@@ -960,7 +954,6 @@ impl TraceDecay {
         // Stamp HEAD after releasing the full-index transaction: this helper
         // acquires its own writer lane, as do the incremental-sync call sites.
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
 
         let result = IndexResult {
             file_count: files.len(),
@@ -1016,17 +1009,13 @@ impl TraceDecay {
             return Ok(false);
         }
 
-        // R4: one branch resolution for this whole sync — the entry gate, the
-        // inner `sync_single_files` gate, and the branch-meta stamp all read
-        // it instead of re-opening the repository three times.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("sync files", &live_branch)?;
+        self.ensure_writable("sync files")?;
 
         let Ok(sync_lease) = self.begin_active_sync() else {
             return Ok(true);
         };
 
-        let result = self.sync_single_files(&stale_files, &live_branch).await;
+        let result = self.sync_single_files(&stale_files).await;
 
         match result {
             Ok(()) => {
@@ -1057,10 +1046,7 @@ impl TraceDecay {
             return Ok(());
         }
 
-        // R4: one branch resolution threaded through the entry gate, the inner
-        // `sync_single_files` gate, and the branch-meta stamp.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("sync files", &live_branch)?;
+        self.ensure_writable("sync files")?;
 
         let sync_lease = if let Ok(sync_lease) = self.begin_active_sync() {
             sync_lease
@@ -1090,11 +1076,7 @@ impl TraceDecay {
             }
         };
 
-        if self
-            .sync_single_files(&stale_files, &live_branch)
-            .await
-            .is_ok()
-        {
+        if self.sync_single_files(&stale_files).await.is_ok() {
             sync_lease.commit()?;
         }
         Ok(())
@@ -1103,16 +1085,10 @@ impl TraceDecay {
     /// Index/reexamine the given file paths, updating their graph nodes and edges.
     /// This is a focused, single-shot operation used by `sync_if_stale`.
     ///
-    /// `live_branch` is the caller's per-request branch resolution; every
-    /// public entry that reaches here already made one.
-    async fn sync_single_files(
-        &self,
-        file_paths: &[String],
-        live_branch: &crate::branch::BranchMemo,
-    ) -> Result<()> {
+    async fn sync_single_files(&self, file_paths: &[String]) -> Result<()> {
         use crate::sync as sync_mod;
 
-        self.ensure_branch_writable_with("sync files", live_branch)?;
+        self.ensure_writable("sync files")?;
 
         let start = Instant::now();
         let project_root = &self.project_root;
@@ -1216,7 +1192,6 @@ impl TraceDecay {
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(live_branch);
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
@@ -1236,8 +1211,7 @@ impl TraceDecay {
     ) -> Result<Vec<String>> {
         // R4: one branch resolution for the entry gate and the inner
         // `sync_single_files` gate.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("lazy index ignored dependency files", &live_branch)?;
+        self.ensure_writable("lazy index ignored dependency files")?;
 
         let mut accepted = Vec::new();
         let mut seen = HashSet::new();
@@ -1264,7 +1238,7 @@ impl TraceDecay {
 
         if !accepted.is_empty() {
             let sync_lease = self.begin_active_sync()?;
-            self.sync_single_files(&accepted, &live_branch).await?;
+            self.sync_single_files(&accepted).await?;
             sync_lease.commit()?;
         }
         Ok(accepted)
@@ -1433,10 +1407,7 @@ impl TraceDecay {
             self.project_root.is_dir(),
             "sync: project root is not a directory"
         );
-        // R4: one branch resolution for the whole sync — the write gate and
-        // both branch-meta stamp points below share it.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("sync", &live_branch)?;
+        self.ensure_writable("sync")?;
         let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
@@ -1641,7 +1612,6 @@ impl TraceDecay {
                 .set_metadata("last_sync_at", &current_timestamp().to_string())
                 .await?;
             self.stamp_last_synced_commit().await;
-            self.touch_branch_meta_synced(&live_branch);
             self.db
                 .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
                 .await?;
@@ -1783,7 +1753,6 @@ impl TraceDecay {
             .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -1960,16 +1929,6 @@ impl TraceDecay {
     /// any gix error (not a repo, detached/unborn HEAD, unreadable object)
     /// this is a silent no-op — a missing/stale stamp only forces the watcher
     /// to fall back to a full tree walk, never a failed sync.
-    /// Best-effort branch-meta freshness stamp on every successful sync, so
-    /// `branch_list` reflects real sync recency rather than branch-add time
-    /// only. No-op when the active branch cannot be resolved (detached HEAD)
-    /// or the branch is untracked.
-    fn touch_branch_meta_synced(&self, live_branch: &crate::branch::BranchMemo) {
-        if let Some(branch) = live_branch.resolve_for(&self.project_root) {
-            crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
-        }
-    }
-
     async fn stamp_last_synced_commit(&self) {
         // Scope the gix values so they drop before the `.await`:
         // `gix::Repository`/`Commit` are `!Send`, and holding them across the

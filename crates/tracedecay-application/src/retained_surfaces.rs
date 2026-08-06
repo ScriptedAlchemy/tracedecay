@@ -43,14 +43,12 @@ pub enum RetainedSurfaceOperation {
     LcmExpand,
     LcmExpandQuery,
     LcmPreflight,
-    LcmCompress,
-    LcmSessionBoundary,
     SessionStart,
     SessionEnd,
 }
 
 impl RetainedSurfaceOperation {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 17] = [
         Self::FactStore,
         Self::FactFeedback,
         Self::MemoryStatus,
@@ -65,8 +63,6 @@ impl RetainedSurfaceOperation {
         Self::LcmExpand,
         Self::LcmExpandQuery,
         Self::LcmPreflight,
-        Self::LcmCompress,
-        Self::LcmSessionBoundary,
         Self::SessionStart,
         Self::SessionEnd,
         Self::Workflows,
@@ -89,8 +85,6 @@ impl RetainedSurfaceOperation {
             Self::LcmExpand => "lcm_expand",
             Self::LcmExpandQuery => "lcm_expand_query",
             Self::LcmPreflight => "lcm_preflight",
-            Self::LcmCompress => "lcm_compress",
-            Self::LcmSessionBoundary => "lcm_session_boundary",
             Self::SessionStart => "session_start",
             Self::SessionEnd => "session_end",
         }
@@ -278,6 +272,7 @@ fn capability(
                 TerminalState::Completed,
                 TerminalState::Cancelled,
                 TerminalState::TimedOut,
+                TerminalState::Unavailable,
                 TerminalState::Failed,
                 TerminalState::EffectUnknown,
                 TerminalState::Partial,
@@ -287,6 +282,7 @@ fn capability(
                 TerminalState::Completed,
                 TerminalState::Cancelled,
                 TerminalState::TimedOut,
+                TerminalState::Unavailable,
                 TerminalState::Failed,
                 TerminalState::Partial,
             ]

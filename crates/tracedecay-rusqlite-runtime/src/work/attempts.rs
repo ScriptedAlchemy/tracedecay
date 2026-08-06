@@ -53,14 +53,21 @@ impl WorkSqliteStorage {
         if expected.is_some_and(|expected| expected.identity() != attempt.identity()) {
             return Err(AttemptStoreError::InvalidRequest);
         }
-        append_registered_attempt(
+        let result = append_registered_attempt(
             &self.handle,
+            &self.topology,
             authority,
             command_id,
             input_digest,
             expected,
             attempt,
-        )
+        );
+        if result.is_ok()
+            && let Some(notifier) = &self.git_graph_evidence_notifier
+        {
+            notifier.notify();
+        }
+        result
     }
 }
 
@@ -213,6 +220,7 @@ pub(crate) fn registered_recovery_candidates(
 
 pub(crate) fn append_registered_attempt(
     handle: &ExactSqlHandle,
+    topology: &topology::WorkGraphTopologyStore,
     authority: &WorkAuthority,
     command_id: &WorkCommandId,
     input_digest: &ManifestDigest,
@@ -233,7 +241,7 @@ pub(crate) fn append_registered_attempt(
         let _ = transaction.rollback();
         return result;
     }
-    validate_registered_attempt_projection(&transaction, authority, attempt)?;
+    validate_registered_attempt_projection(&transaction, topology, authority, attempt)?;
     let identity = attempt.identity();
     let current = load_registered_attempt_snapshot(&transaction, authority, identity)?;
     let revision = match current.as_ref() {
@@ -277,6 +285,7 @@ pub(crate) fn append_registered_attempt(
     )?;
     persist_registered_attempt_artifacts(&transaction, authority, attempt, revision)?;
     persist_registered_terminal_evidence(&transaction, authority, attempt, revision)?;
+    git_evidence::stage(&transaction, authority, attempt)?;
     persist_registered_attempt_idempotency(
         &transaction,
         authority,
@@ -326,6 +335,7 @@ pub(crate) fn load_registered_attempt_idempotency(
 
 pub(crate) fn validate_registered_attempt_projection(
     source: &impl RegisteredWorkQuery,
+    topology: &topology::WorkGraphTopologyStore,
     authority: &WorkAuthority,
     attempt: &WorkAttemptV1,
 ) -> AttemptStoreResult<()> {
@@ -337,27 +347,21 @@ pub(crate) fn validate_registered_attempt_projection(
     }
     let rows = registered_work_query(
         source,
-        "SELECT owner_sequence, projection_payload
-         FROM work_projection_snapshots_v1
+        "SELECT sequence
+         FROM work_owner_cursors_v1
          WHERE project_id = ?1
            AND repository_id = ?2
            AND worktree_id = ?3
            AND actor_id = ?4
-           AND policy_digest = ?5
-           AND task_id = ?6",
-        authority_params_owned(authority)
-            .into_iter()
-            .chain([ExactSqlValue::Text(
-                attempt.identity().task_id().as_str().to_owned(),
-            )])
-            .collect(),
+           AND policy_digest = ?5",
+        authority_params_owned(authority),
     )
     .map_err(|_| AttemptStoreError::Unavailable)?;
     let row = rows.rows.first().ok_or(AttemptStoreError::Conflict)?;
     let owner_sequence = exact_sql_integer(&row.values, 0).ok_or(AttemptStoreError::Unavailable)?;
-    let payload = exact_sql_text(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
-    let projection: WorkProjection =
-        serde_json::from_str(payload).map_err(|_| AttemptStoreError::Unavailable)?;
+    let projection = topology
+        .projection(authority, attempt.identity().task_id())
+        .map_err(|_| AttemptStoreError::Conflict)?;
     if projection.authority() != authority {
         return Err(AttemptStoreError::InvalidRequest);
     }

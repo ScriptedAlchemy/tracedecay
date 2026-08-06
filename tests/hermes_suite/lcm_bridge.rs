@@ -480,8 +480,8 @@ plugin.register(ctx)
 # in-memory messages list (and the context-engine tool mirrors) are gated.
 assert "tracedecay_search" in ctx.tools
 assert "tracedecay_context" in ctx.tools
-assert "tracedecay_lcm_compress" not in ctx.tools
-assert "tracedecay_lcm_preflight" not in ctx.tools
+assert "tracedecay_lcm_compact" not in ctx.tools
+assert "tracedecay_lcm_session_boundary" not in ctx.tools
 assert "lcm_grep" not in ctx.tools
 assert len(ctx.context_engines) == 1
 engine = ctx.context_engines[0]
@@ -519,7 +519,9 @@ expected_native = {
 }
 assert expected_native.issubset(schema_names)
 assert "tracedecay_lcm_preflight" not in schema_names
-assert "tracedecay_lcm_compress" not in schema_names
+assert "lcm_compact" not in schema_names
+assert "lcm_compress" not in schema_names
+assert "lcm_session_boundary" not in schema_names
 assert all(name.startswith("lcm_") for name in schema_names)
 
 grep_params = schemas_by_name["lcm_grep"]["parameters"]
@@ -551,8 +553,8 @@ assert "node_id" in expand_params["properties"]
 assert "store_id" in expand_params["properties"]
 assert "externalized_ref" in expand_params["properties"]
 assert "session_id" in expand_params["properties"]
-assert "source_offset" in expand_params["properties"]
-assert "source_limit" in expand_params["properties"]
+assert "source_offset" not in expand_params["properties"]
+assert "source_limit" not in expand_params["properties"]
 assert "target" not in expand_params["properties"]
 assert expand_params.get("required") == []
 
@@ -611,10 +613,14 @@ describe_node_result = engine.handle_tool_call("lcm_describe", {"node_id": 7})
 describe_payload_result = engine.handle_tool_call("lcm_describe", {"externalized_ref": "payload_123.payload"})
 expand_result = engine.handle_tool_call(
     "lcm_expand",
-    {"store_id": 42, "session_id": "session-foreign", "max_tokens": 77, "source_offset": 3, "source_limit": 2},
+    {"store_id": 42, "session_id": "session-foreign", "max_tokens": 77},
 )
 direct_result = engine.handle_tool_call("tracedecay_lcm_grep", {"query": "direct", "session_scope": "all"})
 implicit_current_result = engine.handle_tool_call("lcm_grep", {"query": "implicit"})
+doctor_result = engine.handle_tool_call("lcm_doctor", {})
+status_result = engine.handle_tool_call("lcm_status", {})
+private_compact = engine.handle_tool_call("lcm_compact", {})
+private_boundary = engine.handle_tool_call("lcm_session_boundary", {})
 
 assert json.loads(native_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
 assert json.loads(load_result) == {"ok": True, "tool": "tracedecay_lcm_load_session"}
@@ -623,7 +629,12 @@ assert json.loads(describe_payload_result) == {"ok": True, "tool": "tracedecay_l
 assert json.loads(expand_result) == {"ok": True, "tool": "tracedecay_lcm_expand"}
 assert json.loads(direct_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
 assert json.loads(implicit_current_result) == {"ok": True, "tool": "tracedecay_lcm_grep"}
-assert calls[0][0] == "tracedecay_lcm_preflight"
+assert json.loads(doctor_result) == {"ok": True, "tool": "tracedecay_lcm_doctor"}
+assert json.loads(status_result) == {"ok": True, "tool": "tracedecay_lcm_status"}
+assert json.loads(private_compact)["error"] == "unknown LCM tool: lcm_compact"
+assert json.loads(private_boundary)["error"] == "unknown LCM tool: lcm_session_boundary"
+assert calls[0][0] == "tracedecay_hook_runtime"
+assert calls[0][1]["action"] == "lcm_preflight"
 assert calls[0][1]["messages"] == [{"role": "user", "content": "current turn"}]
 assert calls[0][1]["session_id"] == "session-1"
 assert "project_root" not in calls[0][1]
@@ -643,7 +654,8 @@ assert "messages" not in calls[1][1]
 assert "project_root" not in calls[1][1]
 assert calls[1][1]["session_id"] == "session-1"
 assert calls[1][2] == {"project_root": "/tmp/project"}
-assert calls[2][0] == "tracedecay_lcm_preflight"
+assert calls[2][0] == "tracedecay_hook_runtime"
+assert calls[2][1]["action"] == "lcm_preflight"
 assert calls[2][1]["messages"] == [{"role": "assistant", "content": "load turn"}]
 assert calls[3][0] == "tracedecay_lcm_load_session"
 assert calls[3][1]["content_limit"] == 123
@@ -682,6 +694,11 @@ assert "session_scope" not in calls[8][1]
 assert "project_root" not in calls[8][1]
 assert calls[8][2] == {"project_root": "/tmp/project"}
 assert calls[8][1]["session_id"] == "session-1"
+assert calls[9][0] == "tracedecay_lcm_doctor"
+assert "repair" not in calls[9][1]
+assert "gc_config" not in calls[9][1]
+assert calls[10][0] == "tracedecay_lcm_status"
+assert "gc_config" not in calls[10][1]
 "#,
         "generated context engine should expose Hermes-style native LCM surface",
     );
@@ -705,16 +722,16 @@ def envelope(payload):
 
 def fake_call_tracedecay_tool(name, args, **kwargs):
     calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_preflight":
+    if name == "tracedecay_hook_runtime" and args["action"] == "lcm_preflight":
         return envelope({"should_compress": True})
-    if name == "tracedecay_lcm_compress":
+    if name == "tracedecay_hook_runtime" and args["action"] == "lcm_compact":
         return envelope({
             "status": "compressed",
             "replay_messages": [{"role": "system", "content": "summary"}],
             "summary_node_count": 1,
             "raw_message_count": 2,
         })
-    if name == "tracedecay_lcm_session_boundary":
+    if name == "tracedecay_hook_runtime" and args["action"] == "lcm_session_boundary":
         return json.dumps({"ok": True})
     raise AssertionError(f"unexpected tool call: {name}")
 
@@ -756,7 +773,10 @@ assert engine.should_defer_preflight_to_real_usage(rough_tokens=2200) is True
 assert engine.last_real_prompt_tokens == 321
 
 engine.carry_over_new_session_context("old-session", "new-session")
-boundary_calls = [call for call in calls if call[0] == "tracedecay_lcm_session_boundary"]
+boundary_calls = [
+    call for call in calls
+    if call[0] == "tracedecay_hook_runtime" and call[1]["action"] == "lcm_session_boundary"
+]
 assert len(boundary_calls) == 1
 assert boundary_calls[0][1]["old_session_id"] == "old-session"
 assert boundary_calls[0][1]["session_id"] == "new-session"
@@ -826,7 +846,8 @@ engine.handle_tool_call(
     messages=[{"role": "user", "content": "profile current turn"}],
 )
 
-assert calls[0][0] == "tracedecay_lcm_preflight"
+assert calls[0][0] == "tracedecay_hook_runtime"
+assert calls[0][1]["action"] == "lcm_preflight"
 assert "project_root" not in calls[0][1]
 assert calls[0][1]["storage_scope"] == "user"
 assert calls[0][2] == {}
@@ -871,7 +892,10 @@ for _ in range(3):
     engine.handle_tool_call("lcm_status", {}, messages=same_messages)
 engine.handle_tool_call("lcm_status", {}, messages=changed_messages)
 
-preflight_calls = [call for call in calls if call[0] == "tracedecay_lcm_preflight"]
+preflight_calls = [
+    call for call in calls
+    if call[0] == "tracedecay_hook_runtime" and call[1]["action"] == "lcm_preflight"
+]
 status_calls = [call for call in calls if call[0] == "tracedecay_lcm_status"]
 
 assert len(status_calls) == 4
@@ -899,8 +923,8 @@ os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
 compress_calls = []
 
 def fake_call_tracedecay_json(name, args, **kwargs):
-    if name != "tracedecay_lcm_compress":
-        raise AssertionError(name)
+    assert name == "tracedecay_hook_runtime", name
+    assert args["action"] == "lcm_compact", args
     compress_calls.append((name, dict(args)))
     summarizer_mode = (args.get("summarizer") or {}).get("mode")
     if summarizer_mode == "hermes_auxiliary":
@@ -1300,7 +1324,8 @@ profile_engine = plugin.TraceDecayContextEngine()
 profile_engine.on_session_start(session_id="session-1", hermes_home="/tmp/hermes")
 profile_engine.should_compress_preflight(messages=[], current_tokens=123)
 name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
+assert name == "tracedecay_hook_runtime"
+assert args["action"] == "lcm_preflight"
 assert args["session_id"] == "session-1"
 assert "project_root" not in args
 assert args["storage_scope"] == "user"
@@ -1314,7 +1339,8 @@ project_engine.on_session_start(
 )
 project_engine.should_compress_preflight(messages=[], current_tokens=456)
 name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
+assert name == "tracedecay_hook_runtime"
+assert args["action"] == "lcm_preflight"
 assert args["session_id"] == "session-2"
 assert "project_root" not in args
 assert kwargs == {"project_root": "/tmp/project"}
@@ -1324,7 +1350,8 @@ project_engine.initialize(session_id="initial", project_root="/tmp/project")
 project_engine.on_session_start(session_id="next", project_root="/tmp/project")
 project_engine.should_compress_preflight(messages=[], current_tokens=789)
 name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
+assert name == "tracedecay_hook_runtime"
+assert args["action"] == "lcm_preflight"
 assert args["session_id"] == "next"
 assert "project_root" not in args
 assert kwargs == {"project_root": "/tmp/project"}
@@ -1334,7 +1361,8 @@ profile_engine.initialize(session_id="initial", hermes_home="/tmp/hermes")
 profile_engine.on_session_start(session_id="next")
 profile_engine.should_compress_preflight(messages=[], current_tokens=321)
 name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_preflight"
+assert name == "tracedecay_hook_runtime"
+assert args["action"] == "lcm_preflight"
 assert args["session_id"] == "next"
 assert "project_root" not in args
 assert args["storage_scope"] == "user"
@@ -1429,10 +1457,11 @@ assert result["messages"] == []
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_preflight", "--json"]
+assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_hook_runtime", "--json"]
 args_index = argv.index("--args")
 args = json.loads(argv[args_index + 1])
 assert args == {
+    "action": "lcm_preflight",
     "format": "json",
     "provider": "hermes",
     "fresh_tail_count": 64,
@@ -1448,7 +1477,7 @@ assert args == {
     "current_tokens": 987,
 }
 "#,
-        "generated context engine should call tracedecay_lcm_preflight through the JSON bridge",
+        "generated context engine should call the lcm_preflight hook-runtime action through the JSON bridge",
     );
 }
 
@@ -1515,9 +1544,10 @@ engine.on_session_start(
 assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
-assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_session_boundary", "--json"]
+assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_hook_runtime", "--json"]
 args = json.loads(argv[argv.index("--args") + 1])
 assert args == {
+    "action": "lcm_session_boundary",
     "format": "json",
     "provider": "hermes",
     "session_id": "session-b",
@@ -1533,7 +1563,7 @@ assert engine.active_session_id == "session-b"
 engine.on_session_start(session_id="session-d", old_session_id="session-b", boundary_reason="manual")
 assert len(calls) == 1
 "#,
-        "generated context engine should report compression boundaries through tracedecay_lcm_session_boundary",
+        "generated context engine should report compression boundaries through the hook-runtime action",
     );
 }
 
@@ -1615,7 +1645,7 @@ assert len(calls) == 1
 argv = calls[0]
 assert argv[0] == plugin.tools.TRACEDECAY_BIN
 assert argv[1:4] == ["tool", "--project", "/tmp/project"]
-tool_idx = argv.index("tracedecay_lcm_compress")
+tool_idx = argv.index("tracedecay_hook_runtime")
 assert argv[tool_idx + 1] == "--json"
 assert argv[tool_idx + 2] == "--args"
 args_ref = argv[argv.index("--args") + 1]
@@ -1626,6 +1656,7 @@ else:
     args = json.loads(args_ref)
 # expanduser matches the plugin's fallback byte-for-byte on Windows too.
 assert args == {
+    "action": "lcm_compact",
     "format": "json",
     "response_handle_project_root": "/tmp/project",
     "provider": "hermes",
@@ -1644,7 +1675,7 @@ assert args == {
     "summarizer": {"mode": "hermes_auxiliary"},
 }
 "#,
-        "generated context engine should call tracedecay_lcm_compress through the JSON bridge",
+        "generated context engine should call the lcm_compact hook-runtime action through the JSON bridge",
     );
 }
 
@@ -1723,6 +1754,10 @@ engine.compress(
 assert len(calls) == 2
 preflight_args = json.loads(calls[0][calls[0].index("--args") + 1])
 compress_args = json.loads(calls[1][calls[1].index("--args") + 1])
+assert calls[0][4] == "tracedecay_hook_runtime"
+assert calls[1][4] == "tracedecay_hook_runtime"
+assert preflight_args["action"] == "lcm_preflight"
+assert compress_args["action"] == "lcm_compact"
 
 for args in (preflight_args, compress_args):
     assert args["threshold_tokens"] == 777
@@ -1825,12 +1860,13 @@ assert profile_engine.should_compress_preflight([], current_tokens=100) is False
 profile_argv = calls.pop()
 profile_cwd = run_cwds.pop()
 assert profile_argv[0] == plugin.tools.TRACEDECAY_BIN
-assert profile_argv[1:3] == ["tool", "tracedecay_lcm_preflight"]
+assert profile_argv[1:3] == ["tool", "tracedecay_hook_runtime"]
 assert "--project" not in profile_argv
 assert profile_cwd == os.path.abspath(os.sep)
 profile_args = json.loads(profile_argv[profile_argv.index("--args") + 1])
 assert "project_root" not in profile_args
 assert profile_args["storage_scope"] == "user"
+assert profile_args["action"] == "lcm_preflight"
 
 explicit = plugin.tools.call_tracedecay_tool(
     "tracedecay_lcm_status",
@@ -2473,14 +2509,14 @@ def envelope(payload):
 
 def fake_call_tracedecay_tool(name, args, **kwargs):
     calls.append((name, dict(args), dict(kwargs)))
-    if name == "tracedecay_lcm_preflight":
+    if name == "tracedecay_hook_runtime" and args["action"] == "lcm_preflight":
         return envelope({
             "status": "ok",
             "should_compress": False,
             "reason": "replay_only",
             "replay_messages": replay,
         })
-    if name == "tracedecay_lcm_compress":
+    if name == "tracedecay_hook_runtime" and args["action"] == "lcm_compact":
         return envelope({"truncated": True, "handle": "compress-payload"})
     if name == "tracedecay_retrieve":
         assert args == {"handle": "compress-payload"}
@@ -2508,10 +2544,11 @@ assert engine.compression_count == 1
 assert engine.last_compress_result["status"] == "ok"
 assert engine.last_compress_result["reason"] == "compressed_backlog"
 assert [call[0] for call in calls] == [
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_compress",
+    "tracedecay_hook_runtime",
+    "tracedecay_hook_runtime",
     "tracedecay_retrieve",
 ]
+assert [calls[0][1]["action"], calls[1][1]["action"]] == ["lcm_preflight", "lcm_compact"]
 "#,
         "generated context engine should adopt decoded replay payloads as compression progress",
     );
@@ -2545,7 +2582,8 @@ compressed = engine.compress(
 
 assert compressed == [{"role": "user", "content": "compressed"}]
 name, args, kwargs = calls.pop()
-assert name == "tracedecay_lcm_compress"
+assert name == "tracedecay_hook_runtime"
+assert args["action"] == "lcm_compact"
 assert args["storage_scope"] == "user"
 assert "project_root" not in kwargs
 "#,
@@ -2613,7 +2651,8 @@ def envelope(payload):
     return json.dumps({"content": [{"type": "text", "text": json.dumps(payload)}]})
 
 def fake_call_tracedecay_tool(name, args, **kwargs):
-    assert name == "tracedecay_lcm_compress"
+    assert name == "tracedecay_hook_runtime"
+    assert args["action"] == "lcm_compact"
     return envelope({
         "status": "ok",
         "reason": "compressed_backlog",
@@ -2663,10 +2702,12 @@ assert provider.project_root == "/tmp/project"
 assert len(calls) == 8
 for index in range(0, len(calls), 2):
     user_call, project_call = calls[index:index + 2]
-    assert user_call[0] == "tracedecay_lcm_preflight"
+    assert user_call[0] == "tracedecay_hook_runtime"
+    assert user_call[1]["action"] == "lcm_preflight"
     assert user_call[1]["storage_scope"] == "user"
     assert user_call[2] == {}
-    assert project_call[0] == "tracedecay_lcm_preflight"
+    assert project_call[0] == "tracedecay_hook_runtime"
+    assert project_call[1]["action"] == "lcm_preflight"
     assert "storage_scope" not in project_call[1]
     assert project_call[2]["project_root"] == "/tmp/project"
     assert user_call[1]["messages"] == project_call[1]["messages"]
@@ -2821,9 +2862,8 @@ expand = schemas["lcm_expand"]
 assert expand["additionalProperties"] is False
 assert len(expand["oneOf"]) == 3
 assert expand["properties"]["node_id"]["type"] == "string"
-assert expand["properties"]["source_limit"]["minimum"] == 1
-assert expand["properties"]["source_limit"]["maximum"] == 100
-assert expand["properties"]["source_limit"]["default"] == 50
+assert "source_offset" not in expand["properties"]
+assert "source_limit" not in expand["properties"]
 assert expand["properties"]["cursor"]["type"] == "string"
 
 target, error = plugin._native_expand_target({"store_id": 7})
@@ -2837,15 +2877,11 @@ summary = plugin._translate_lcm_args(
     "lcm_expand",
     {
         "node_id": "summary-v1:abc",
-        "source_offset": 4,
-        "source_limit": 7,
         "content_offset": 3,
         "cursor": "opaque-summary-page",
     },
 )
 assert summary["target"] == {"kind": "summary_node", "node_id": "summary-v1:abc"}
-assert summary["source_offset"] == 4
-assert summary["source_limit"] == 7
 assert summary["content_offset"] == 3
 assert summary["cursor"] == "opaque-summary-page"
 
@@ -2853,17 +2889,19 @@ raw = plugin._translate_lcm_args(
     "lcm_expand",
     {
         "store_id": 7,
-        "source_offset": 4,
-        "source_limit": 7,
         "content_offset": 3,
         "cursor": "wrong-target-page",
     },
 )
 assert raw["target"] == {"kind": "raw_message", "store_id": 7}
 assert raw["content_offset"] == 3
-assert "source_offset" not in raw
-assert "source_limit" not in raw
 assert "cursor" not in raw
+
+legacy = plugin._translate_lcm_args(
+    "lcm_expand",
+    {"node_id": "summary-v1:abc", "source_offset": 4, "source_limit": 7},
+)
+assert "numeric source pagination is unsupported" in legacy["error"]
 "#,
         "generated Hermes schemas should close each compatibility target branch",
     );
@@ -4174,7 +4212,7 @@ calls = []
 
 def fake_call_tracedecay_tool(tool, args, **kwargs):
     calls.append((tool, dict(args)))
-    if tool == "tracedecay_lcm_preflight":
+    if tool == "tracedecay_hook_runtime" and args["action"] == "lcm_preflight":
         payload = {"status": "ok", "should_compress": True, "reason": "test", "replay_messages": []}
     else:
         payload = {"status": "ok", "reason": "test", "replay_messages": [], "summary_nodes": [], "frontier": {"provider": "cursor", "conversation_id": "session-1", "current_session_id": "session-1", "current_frontier_store_id": None, "last_finalized_session_id": None, "last_finalized_frontier_store_id": None, "maintenance_debt": []}}
@@ -4219,7 +4257,8 @@ assert args["threshold_tokens"] == 800000
 # compress must forward the same runtime window and threshold.
 engine.compress([{"role": "user", "content": "compress me"}], current_tokens=1)
 tool, args = calls.pop()
-assert tool == "tracedecay_lcm_compress"
+assert tool == "tracedecay_hook_runtime"
+assert args["action"] == "lcm_compact"
 assert args["context_length"] == 1000000
 assert args["threshold_tokens"] == 800000
 
@@ -4230,7 +4269,8 @@ assert calls == []
 # ...and defers to the preflight probe once tokens reach the threshold.
 assert engine.should_compress(prompt_tokens=800000) is True
 tool, _args = calls.pop()
-assert tool == "tracedecay_lcm_preflight"
+assert tool == "tracedecay_hook_runtime"
+assert _args["action"] == "lcm_preflight"
 "#,
         "generated plugin should propagate update_model/session_start context windows into preflight/compress",
     );
@@ -4297,7 +4337,8 @@ compressed = engine.compress(
 )
 
 tool, args, kwargs = calls.pop()
-assert tool == "tracedecay_lcm_compress"
+assert tool == "tracedecay_hook_runtime"
+assert args["action"] == "lcm_compact"
 assert args["max_assembly_tokens"] == 89999
 assert "force" not in kwargs
 assert compressed == [{"role": "user", "content": "compressed"}]
@@ -4541,7 +4582,7 @@ plugin.tools.call_tracedecay_tool = fake_call_tracedecay_tool
 
 def call_with_outer(outer):
     responses.append(json.dumps(outer))
-    return plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+    return plugin.call_tracedecay_hook_json("lcm_preflight", {})
 
 missing_content = call_with_outer({})
 assert missing_content["error"] == "tracedecay tool response missing text content"
@@ -4553,7 +4594,7 @@ non_text_content = call_with_outer({"content": [{"type": "text", "text": 123}]})
 assert non_text_content["error"] == "tracedecay tool response missing text content"
 
 responses.append(json.dumps({"content": [{"type": "text", "text": "{not json"}]}))
-invalid_nested_json = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+invalid_nested_json = plugin.call_tracedecay_hook_json("lcm_preflight", {})
 assert invalid_nested_json["error"] == "tracedecay tool returned invalid nested JSON"
 
 outer_error = {"error": "tool failed", "code": "boom", "content": []}
@@ -4566,7 +4607,7 @@ def envelope(payload):
 
 def fake_retrieve_call(name, args, **kwargs):
     calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_preflight":
+    if name == "tracedecay_hook_runtime" and args["action"] == "lcm_preflight":
         return envelope({"truncated": True, "handle": "payload-1"})
     if name == "tracedecay_retrieve":
         if args == {"handle": "payload-1"}:
@@ -4580,14 +4621,15 @@ def fake_retrieve_call(name, args, **kwargs):
     raise AssertionError(f"unexpected tool call: {name}")
 
 plugin.tools.call_tracedecay_tool = fake_retrieve_call
-retrieved = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {}, project_root="/tmp/project")
+retrieved = plugin.call_tracedecay_hook_json("lcm_preflight", {}, project_root="/tmp/project")
 assert retrieved == {"should_compress": True, "source": "retrieved"}
-assert [call[0] for call in calls] == ["tracedecay_lcm_preflight", "tracedecay_retrieve"]
+assert [call[0] for call in calls] == ["tracedecay_hook_runtime", "tracedecay_retrieve"]
+assert calls[0][1]["action"] == "lcm_preflight"
 
 retrieved_fact = plugin.call_tracedecay_json("tracedecay_fact_store", {})
 assert retrieved_fact == {"count": 1, "facts": [{"fact": {"content": "retrieved fact"}}]}
 assert [call[0] for call in calls] == [
-    "tracedecay_lcm_preflight",
+    "tracedecay_hook_runtime",
     "tracedecay_retrieve",
     "tracedecay_fact_store",
     "tracedecay_retrieve",
@@ -4601,19 +4643,19 @@ responses.append(json.dumps({
         {"type": "text", "text": split_payload[12:]},
     ]
 }))
-split_content = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+split_content = plugin.call_tracedecay_hook_json("lcm_preflight", {})
 assert split_content == {"status": "ok", "source": "split-content"}
 
 nested_payload = {"content": json.dumps({"status": "ok", "source": "nested-content"})}
 responses.append(envelope(nested_payload))
-nested_content = plugin.call_tracedecay_json("tracedecay_lcm_preflight", {})
+nested_content = plugin.call_tracedecay_hook_json("lcm_preflight", {})
 assert nested_content == {"status": "ok", "source": "nested-content"}
 
 response_handle_calls = []
 
 def fake_response_handle_call(name, args, **kwargs):
     response_handle_calls.append((name, args, kwargs))
-    if name == "tracedecay_lcm_compress":
+    if name == "tracedecay_hook_runtime" and args["action"] == "lcm_compact":
         return envelope({"truncated": True, "response_handle": "payload-2"})
     if name == "tracedecay_retrieve":
         assert args == {"handle": "payload-2"}
@@ -4628,12 +4670,13 @@ def fake_response_handle_call(name, args, **kwargs):
     raise AssertionError(f"unexpected tool call: {name}")
 
 plugin.tools.call_tracedecay_tool = fake_response_handle_call
-response_handle_payload = plugin.call_tracedecay_json("tracedecay_lcm_compress", {})
+response_handle_payload = plugin.call_tracedecay_hook_json("lcm_compact", {})
 assert response_handle_payload == {"status": "ok", "source": "response-handle"}
 assert [call[0] for call in response_handle_calls] == [
-    "tracedecay_lcm_compress",
+    "tracedecay_hook_runtime",
     "tracedecay_retrieve",
 ]
+assert response_handle_calls[0][1]["action"] == "lcm_compact"
 "#,
         "generated JSON bridge should normalize malformed envelopes and decode LCM payloads",
     );

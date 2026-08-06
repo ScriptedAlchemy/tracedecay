@@ -168,6 +168,7 @@ impl MaintenanceCoordinator {
         profile_root: PathBuf,
         profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
         administration: StoreAdministration,
+        graph_runtime: crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
         retention: crate::config::RetentionConfig,
     ) -> Self {
         let coordinator = Self::default();
@@ -182,6 +183,7 @@ impl MaintenanceCoordinator {
                     profile_root,
                     profile_database,
                     administration,
+                    graph_runtime,
                     retention,
                     interval,
                 )
@@ -209,6 +211,7 @@ impl MaintenanceCoordinator {
         profile_root: PathBuf,
         profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
         administration: StoreAdministration,
+        graph_runtime: crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
         retention: crate::config::RetentionConfig,
         interval: Duration,
     ) {
@@ -233,6 +236,7 @@ impl MaintenanceCoordinator {
                     &profile_root,
                     profile_database.as_ref(),
                     &administration,
+                    &graph_runtime,
                     &retention,
                 )
                 .await;
@@ -245,6 +249,7 @@ impl MaintenanceCoordinator {
         profile_root: &Path,
         profile_database: &crate::global_db::RegisteredGlobalDb,
         administration: &StoreAdministration,
+        graph_runtime: &crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
         retention: &crate::config::RetentionConfig,
     ) -> bool {
         let session_databases = administration.mounted_registered_session_databases().await;
@@ -253,7 +258,7 @@ impl MaintenanceCoordinator {
         // Build one stably-sorted work list across both store kinds so the
         // per-tick budget and round-robin cursor bound the total work, not each
         // loop independently. Keys are unique on-disk identities (session db
-        // path; project root + serving branch), prefixed by kind so the order
+        // path; project root + selected branch), prefixed by kind so the order
         // is deterministic regardless of the mounted maps' iteration order.
         let mut work: Vec<(String, MaintenanceStoreWork)> =
             Vec::with_capacity(session_databases.len() + project_graphs.len());
@@ -268,7 +273,7 @@ impl MaintenanceCoordinator {
                 format!(
                     "g:{}\u{1f}{}",
                     graph.project_root().display(),
-                    graph.serving_branch().unwrap_or_default()
+                    graph.active_branch().unwrap_or_default()
                 ),
                 MaintenanceStoreWork::Graph(Arc::clone(graph)),
             ));
@@ -298,9 +303,25 @@ impl MaintenanceCoordinator {
                             .await;
                         }
                         MaintenanceStoreWork::Graph(graph) => {
-                            succeeded &=
-                                super::store_maintenance::run_code_generation_retention(graph)
-                                    .await;
+                            let project_id = graph
+                                .configuration_runtime()
+                                .configuration_target()
+                                .project_id
+                                .clone();
+                            let embedded_graph = graph_runtime
+                                .mounted_project(&project_id, &graph.hook_store_layout().data_root)
+                                .ok()
+                                .flatten();
+                            succeeded &= match embedded_graph {
+                                Some(embedded_graph) => {
+                                    super::store_maintenance::run_code_generation_retention(
+                                        graph,
+                                        embedded_graph.as_ref(),
+                                    )
+                                    .await
+                                }
+                                None => false,
+                            };
                             // Generation retention only ever sees the one scope
                             // root derived from this graph's project root. Scope
                             // reconciliation is the sibling pass that reaches
@@ -315,10 +336,6 @@ impl MaintenanceCoordinator {
                                 succeeded &= super::store_maintenance::run_project_compaction(
                                     graph.db(),
                                     compaction,
-                                )
-                                .await;
-                                succeeded &= super::store_maintenance::run_branch_compaction(
-                                    graph, compaction,
                                 )
                                 .await;
                             }

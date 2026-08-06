@@ -464,7 +464,7 @@ async fn test_check_file_staleness_deleted_indexed_file() {
 }
 
 #[tokio::test]
-async fn open_auto_tracks_branch_and_sync_does_not_mutate_main_db() {
+async fn branch_selectors_share_project_store_and_keep_scopes_exact() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -490,23 +490,23 @@ async fn open_auto_tracks_branch_and_sync_does_not_mutate_main_db() {
 
     let feature_cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
-    assert_eq!(feature_cg.serving_branch(), Some("feature/sync-safety"));
-    assert!(!feature_cg.is_fallback());
+    assert_eq!(feature_cg.db_path(), cg.db_path());
     for attempt in 0..40 {
         match feature_cg.sync().await {
             Ok(_) => break,
             Err(TraceDecayError::SyncLock { .. }) if attempt < 39 => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            Err(err) => panic!("auto-tracked branch sync should write to the branch DB: {err}"),
+            Err(err) => panic!("feature snapshot sync should update the project store: {err}"),
         }
     }
 
     let main_cg = TraceDecay::open_branch(project, "main").await.unwrap();
+    assert_eq!(main_cg.db_path(), feature_cg.db_path());
     let main_files = main_cg.get_all_files().await.unwrap();
     assert!(
         !main_files.iter().any(|file| file.path == "src/feature.rs"),
-        "auto-tracked branch sync must not insert feature files into the main DB"
+        "feature snapshot files must not leak into the main selector"
     );
 }
 

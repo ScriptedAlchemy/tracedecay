@@ -28,7 +28,7 @@ use tracedecay_query::retrieval::semantic::{
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
-    NativeSemanticRecordV1, NativeSymbolRecordV1, PreparedQueryBindingsV1,
+    NativeSemanticRecordV1, NativeSymbolRecord, PreparedQueryBindingsV1,
     PreparedQueryRoutingBindingsV1, PreparedQueryV1, QUERY_RANKING_REVISION_V1, QueryAuthorityV1,
     authenticate_prepared_query_cursor_for_routing, route_authenticated_prepared_query_cursor,
 };
@@ -215,11 +215,11 @@ fn semantic_evidence() -> CodeSemanticEvidenceV1 {
         projection_key: projection.embedding_key().clone(),
         search_index_key: SemanticSearchIndexProfileV1::exact_flat_v1()
             .and_then(|profile| profile.index_key())
-            .expect("exact-flat semantic index"),
+            .expect("semantic vector index"),
         vector_generation: VectorGenerationIdV1::new(digest('6')),
         chunk_id: id("chunk.canonical-equivalence"),
         distance,
-        search_kind: SemanticSearchKindV1::ExactFlat,
+        search_kind: SemanticSearchKindV1::EmbeddedVectorIndex,
     }
 }
 
@@ -241,8 +241,8 @@ impl FixtureRecords {
         }
     }
 
-    fn symbol(symbol: &SymbolOccurrenceId) -> NativeSymbolRecordV1 {
-        NativeSymbolRecordV1 {
+    fn symbol(symbol: &SymbolOccurrenceId) -> NativeSymbolRecord {
+        NativeSymbolRecord {
             occurrence: symbol.clone(),
             name: "run_query".to_owned(),
             qualified_name: "query::canonical::run_query".to_owned(),
@@ -283,7 +283,7 @@ impl NativeRecordReadPortV1 for FixtureRecords {
         &self,
         symbol: &SymbolOccurrenceId,
         _: &FileOccurrenceId,
-    ) -> Result<NativeSymbolRecordV1, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
+    ) -> Result<NativeSymbolRecord, tracedecay_query::retrieval::QueryExecutionContractErrorV1>
     {
         Ok(Self::symbol(symbol))
     }

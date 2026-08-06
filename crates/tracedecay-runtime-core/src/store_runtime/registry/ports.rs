@@ -136,9 +136,9 @@ async fn publish_lifecycle_runtime(
     runtime: Arc<ShardRuntime>,
     attachment: LifecyclePhysicalAttachment,
 ) -> Result<PublishedShardRuntime, StoreRuntimeRegistryFailure> {
-    let migrated = if request.mode == StoreRuntimeOpenMode::Initialize {
-        match migrate_before_publication(&request, attachment.as_physical()).await {
-            Ok(migrated) => migrated,
+    let schema_installed = if request.mode == StoreRuntimeOpenMode::Initialize {
+        match install_schema_before_publication(&request, attachment.as_physical()).await {
+            Ok(installed) => installed,
             Err(error) => {
                 attachment.abort(request.locator.is_prospective());
                 return Err(error);
@@ -160,10 +160,10 @@ async fn publish_lifecycle_runtime(
             message: error,
         });
     }
-    Ok(PublishedShardRuntime::new_with_schema_migration(
+    Ok(PublishedShardRuntime::new_with_schema_installation(
         runtime,
         attachment.into_arc(),
-        migrated,
+        schema_installed,
     ))
 }
 
@@ -235,21 +235,21 @@ impl LifecyclePhysicalAttachment {
     }
 }
 
-struct InitializingMigrationAuthority {
+struct InitializingSchemaAuthority {
     authority: crate::db::DatabaseAuthority,
     canonical_path: PathBuf,
     opened_file_identity: u64,
 }
 
 impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
-    for InitializingMigrationAuthority
+    for InitializingSchemaAuthority
 {
     fn verify(
         &self,
         _intent: tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent,
     ) -> Result<(), tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> {
         self.authority
-            .require_active_write_scope("migrate initialized SQLite runtime")
+            .require_active_write_scope("install initialized SQLite schema")
             .map_err(|error| {
                 tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
                     error.to_string(),
@@ -272,37 +272,37 @@ impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
     }
 }
 
-async fn migrate_before_publication(
+async fn install_schema_before_publication(
     request: &ShardRuntimeBuildRequest,
     attachment: &dyn PhysicalRuntimeAttachment,
 ) -> Result<bool, StoreRuntimeRegistryFailure> {
     let authority = request.database_authority.clone().ok_or_else(|| {
         StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "migrate initialized SQLite runtime",
+            operation: "install initialized SQLite schema",
             message: "initialization requires originating database authority".to_owned(),
         }
     })?;
     authority
-        .require_active_write_scope("migrate initialized SQLite runtime")
+        .require_active_write_scope("install initialized SQLite schema")
         .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "migrate initialized SQLite runtime",
+            operation: "install initialized SQLite schema",
             message: error.to_string(),
         })?;
     if authority.canonical_database_path() != request.locator.path() {
         return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "migrate initialized SQLite runtime",
+            operation: "install initialized SQLite schema",
             message: "originating database authority does not match initialized locator".to_owned(),
         });
     }
     let opened_file_identity = attachment.opened_file_identity().map_err(|message| {
         StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "migrate initialized SQLite runtime",
+            operation: "install initialized SQLite schema",
             message,
         }
     })?;
     let handle = attachment.exact_sql_handle().map_err(|message| {
         StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "migrate initialized SQLite runtime",
+            operation: "install initialized SQLite schema",
             message,
         }
     })?;
@@ -310,12 +310,11 @@ async fn migrate_before_publication(
         || handle.verified_locator() != request.locator.verified()
     {
         return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "migrate initialized SQLite runtime",
-            message: "initialized migration handle identity does not match build request"
-                .to_owned(),
+            operation: "install initialized SQLite schema",
+            message: "initialized schema handle identity does not match build request".to_owned(),
         });
     }
-    let authority = InitializingMigrationAuthority {
+    let authority = InitializingSchemaAuthority {
         canonical_path: authority.canonical_database_path().to_path_buf(),
         authority,
         opened_file_identity,
@@ -323,7 +322,7 @@ async fn migrate_before_publication(
     let handle = handle
         .with_write_authority(Arc::new(authority))
         .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "authorize initialized SQLite migration",
+            operation: "authorize initialized SQLite schema",
             message: error.to_string(),
         })?;
     let connection = crate::db::engine::Connection::attach(handle);
@@ -331,7 +330,7 @@ async fn migrate_before_publication(
         StoreShardScopeV1::Code { .. }
         | StoreShardScopeV1::ProfileMemory
         | StoreShardScopeV1::Project { .. } => {
-            crate::db::migrations::create_schema_connection(&connection)
+            crate::db::schema::create_schema_connection(&connection)
                 .await
                 .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "create initialized graph schema",

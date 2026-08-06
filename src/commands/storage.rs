@@ -124,8 +124,7 @@ pub(crate) async fn handle_wipe(all: bool, assume_yes: bool) -> tracedecay::erro
     let _database_scope =
         tracedecay::db::enter_maintenance_database_scope(&lifecycle_lease, &profile_root, "wipe")?;
     let registry =
-        tracedecay::migrate::registry::MigrationRegistryRuntime::try_open_existing(&profile_root)
-            .await?;
+        tracedecay::daemon::ProfileRegistryMaintenance::try_open_existing(&profile_root).await?;
 
     // `--all` must enumerate the registry only after exclusive maintenance
     // ownership is active. A strict local query avoids both the daemon
@@ -304,12 +303,12 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
             0
         };
         let project_key =
-            tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(path);
+            tracedecay::daemon::ProfileRegistryMaintenance::canonical_project_key(path);
         let token_row = token_rows.iter().find(|row| {
             row.get("project")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|value| {
-                    tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
+                    tracedecay::daemon::ProfileRegistryMaintenance::canonical_project_key(
                         Path::new(value),
                     ) == project_key
                 })
@@ -335,10 +334,6 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
             size,
             tokens,
         });
-    }
-
-    if all {
-        append_orphan_manifest_rows(&mut rows, &project_paths, home_tracedecay.as_deref());
     }
 
     if rows.is_empty() {
@@ -422,49 +417,4 @@ struct ListRow {
     size: u64,
     /// `None` when this run could not read the project's saved-token total.
     tokens: Option<u64>,
-}
-
-fn append_orphan_manifest_rows(
-    rows: &mut Vec<ListRow>,
-    project_paths: &[std::path::PathBuf],
-    profile_root: Option<&Path>,
-) {
-    let Some(profile_root) = profile_root else {
-        return;
-    };
-    let registered: std::collections::HashSet<String> = project_paths
-        .iter()
-        .map(|path| {
-            tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(path)
-        })
-        .collect();
-    let report = tracedecay::migrate::registry::scan_profile_store_manifests(
-        profile_root,
-        tracedecay::tracedecay::current_timestamp(),
-    );
-    for plan in report.plans {
-        if plan.status != tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible {
-            continue;
-        }
-        let key = tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
-            &plan.project.project_root,
-        );
-        if registered.contains(&key) {
-            continue;
-        }
-        let data_root = profile_root.join(&plan.store.store_relpath);
-        let has_data = data_root.exists();
-        let size = if has_data {
-            global::tracedecay_dir_size(&data_root)
-        } else {
-            0
-        };
-        rows.push(ListRow {
-            path: plan.project.project_root,
-            status_label: "orphan manifest-reconstructable",
-            has_data,
-            size,
-            tokens: Some(0),
-        });
-    }
 }

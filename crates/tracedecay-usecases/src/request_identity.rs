@@ -61,7 +61,6 @@ impl GlobalRequestSurface {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlobalOpaqueIdentityKind {
-    DashboardPayloadGcPreview,
     ExplorerRun,
     GitIndexPreview,
     MemoryOperation,
@@ -70,7 +69,6 @@ pub enum GlobalOpaqueIdentityKind {
 impl GlobalOpaqueIdentityKind {
     const fn prefix(self) -> &'static str {
         match self {
-            Self::DashboardPayloadGcPreview => "payload-gc",
             Self::ExplorerRun => "explorer-run",
             Self::GitIndexPreview => "preview",
             Self::MemoryOperation => "generated",

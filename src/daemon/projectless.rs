@@ -158,6 +158,8 @@ pub(super) async fn projectless_tools_call_response(
         );
     }
     if tool_name == "tracedecay_hook_runtime" {
+        let temporal_refresh =
+            crate::mcp::tools::handlers::hook_runtime::temporal_refresh_after_success(&arguments);
         let global_db = match store_administration.registered_profile_database().await {
             Ok(global_db) => global_db,
             Err(error) => {
@@ -219,7 +221,15 @@ pub(super) async fn projectless_tools_call_response(
         .await
         {
             Ok(result) => {
-                refresh_wake.wake();
+                if let Some(refresh) = temporal_refresh {
+                    if refresh.wait_until_idle {
+                        let _ = refresh_wake
+                            .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
+                            .await;
+                    } else {
+                        refresh_wake.wake();
+                    }
+                }
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
@@ -250,7 +260,7 @@ pub(super) async fn projectless_tools_call_response(
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }
-    if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
+    if projectless_public_user_session_tool(tool_name) {
         return projectless_user_lcm_tools_call_response(
             id,
             tool_name,
@@ -318,12 +328,6 @@ async fn projectless_user_lcm_tools_call_response(
             "projectless LCM dispatch requires storage_scope=user".to_string(),
         );
     }
-    if let Err(error) =
-        await_user_profile_host_admission_replay_for_identity(store_administration, client_identity)
-            .await
-    {
-        return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
-    }
     let user_session_db = match store_administration
         .registered_profile_session_database()
         .await
@@ -341,19 +345,11 @@ async fn projectless_user_lcm_tools_call_response(
     };
     let refresh_wake = store_administration
         .session_temporal_refresh_schedulers()
-        .ensure_profile(
-            user_session_db.db_path().to_path_buf(),
-            Arc::clone(&user_session_db),
-        )
-        .await;
-    if tool_name == "tracedecay_message_search" {
-        // Joining retained temporal projection is part of reopening the mounted
-        // profile store. It does not ingest provider history or widen scope.
-        let _ = refresh_wake
-            .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-            .await;
-    }
-    let retrieval_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        .retained_profile_wake(user_session_db.db_path())
+        .await
+        .unwrap_or_else(
+            crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable,
+        );
     let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
         .and_then(|root| root.with_profile_runtime_shard(profile_identity))
         .and_then(|root| {
@@ -361,7 +357,6 @@ async fn projectless_user_lcm_tools_call_response(
                 Arc::clone(&user_session_db),
                 Arc::clone(&user_session_db),
                 root,
-                Arc::clone(&retrieval_calls),
                 Some(refresh_wake.clone()),
             )
         })
@@ -377,28 +372,15 @@ async fn projectless_user_lcm_tools_call_response(
     )
     .await;
     match result {
-        Ok(result) => {
-            if tool_name == "tracedecay_lcm_preflight"
-                && arguments
-                    .get("transcript_projection")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            {
-                let _ = refresh_wake
-                    .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-                    .await;
-            } else if matches!(
-                tool_name,
-                "tracedecay_lcm_preflight"
-                    | "tracedecay_lcm_compress"
-                    | "tracedecay_lcm_session_boundary"
-            ) {
-                refresh_wake.wake();
-            }
-            JsonRpcResponse::success(id, result.value)
-        }
+        Ok(result) => JsonRpcResponse::success(id, result.value),
         Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
     }
+}
+
+fn projectless_public_user_session_tool(tool_name: &str) -> bool {
+    tool_name == "tracedecay_message_search"
+        || (tool_name.starts_with("tracedecay_lcm_")
+            && tracedecay_application::RetainedSurfaceOperation::from_name(tool_name).is_some())
 }
 
 pub(super) fn projectless_tool_call(
@@ -427,9 +409,47 @@ pub(super) fn projectless_user_session_request(request_line: &str) -> bool {
     let Ok((tool_name, arguments)) = projectless_tool_call(request.params.as_ref()) else {
         return false;
     };
-    (tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search")
+    projectless_public_user_session_tool(tool_name)
         && arguments
             .get("storage_scope")
             .and_then(serde_json::Value::as_str)
             == Some("user")
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    fn user_tool_request(tool_name: &str) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": {
+                    "storage_scope": "user",
+                    "provider": "codex",
+                    "session_id": "session-1",
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn projectless_public_session_route_excludes_internal_lifecycle_mutations() {
+        assert!(projectless_user_session_request(&user_tool_request(
+            "tracedecay_lcm_preflight"
+        )));
+        assert!(projectless_user_session_request(&user_tool_request(
+            "tracedecay_message_search"
+        )));
+        assert!(!projectless_user_session_request(&user_tool_request(
+            "tracedecay_lcm_compress"
+        )));
+        assert!(!projectless_user_session_request(&user_tool_request(
+            "tracedecay_lcm_session_boundary"
+        )));
+    }
 }

@@ -16,8 +16,7 @@ use super::super::projection::{
 };
 use super::{
     CompatibilityMirrorInsertV1, compatibility_active_fact_count_tx, compatibility_commit_batch_tx,
-    compatibility_initial_batch, compatibility_last_insert_rowid_tx,
-    compatibility_legacy_mapping_for_new_fact, compatibility_mark_owner_banks_dirty_tx,
+    compatibility_initial_batch, compatibility_legacy_mapping_for_new_fact,
     compatibility_mirror_delete_tx, compatibility_mirror_insert_tx, compatibility_mirror_update_tx,
     compatibility_payload_metadata, compatibility_sanitize_payload, load_current_fact_tx,
     load_current_projection,
@@ -52,67 +51,6 @@ pub(super) fn compatibility_feedback_delta(action: CompatibilityFactFeedbackActi
         CompatibilityFactFeedbackActionV1::Helpful => 0.05,
         CompatibilityFactFeedbackActionV1::Unhelpful => -0.10,
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn compatibility_mirror_feedback_tx(
-    transaction: &Transaction<'_>,
-    legacy_fact_id: i64,
-    action: CompatibilityFactFeedbackActionV1,
-    old_trust: Confidence,
-    new_trust: Confidence,
-    timestamp: i64,
-    source: &str,
-    note: Option<&str>,
-) -> FactStoreResult<i64> {
-    let changed = transaction
-        .execute(
-            "UPDATE memory_facts SET
-                trust_score = ?1,
-                helpful_count = helpful_count + ?2,
-                unhelpful_count = unhelpful_count + ?3,
-                last_feedback_at = ?4,
-                updated_at = ?4
-             WHERE fact_id = ?5",
-            params![
-                new_trust.as_f64(),
-                i64::from(matches!(action, CompatibilityFactFeedbackActionV1::Helpful)),
-                i64::from(matches!(
-                    action,
-                    CompatibilityFactFeedbackActionV1::Unhelpful
-                )),
-                timestamp,
-                legacy_fact_id,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-    if changed != 1 {
-        return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility feedback target is missing from the legacy mirror",
-        ));
-    }
-    transaction
-        .execute(
-            "INSERT INTO memory_feedback_events (
-                fact_id, action, trust_delta, old_trust, new_trust,
-                created_at, source, note
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                legacy_fact_id,
-                compatibility_feedback_action_label(action),
-                new_trust.as_f64() - old_trust.as_f64(),
-                old_trust.as_f64(),
-                new_trust.as_f64(),
-                timestamp,
-                source,
-                note,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-    compatibility_last_insert_rowid_tx(transaction).await
 }
 
 pub(super) async fn compatibility_update_feedback_projection_tx(
@@ -760,64 +698,32 @@ pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
                     "compatibility remove target has no lineage CAS identity",
                 )
             })?;
-        let canonical_event_id = if mapping.history_coverage() == LegacyHistoryCoverageV1::Unknown {
-            let purge = db
-                .purge_memory_v2_legacy_fact_payload_in_transaction(
-                    transaction,
-                    request.target().owner(),
-                    mapping.source_store_id(),
-                    &fact_id,
-                    &expected_last_event_id,
-                    request.actor(),
-                    now,
-                )
-                .await
-                .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-            if !purge.payload_purged() {
-                return Err(storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    "migrated compatibility fact was not purged",
-                )
-                .into());
-            }
-            compatibility_mark_owner_banks_dirty_tx(
-                db,
-                transaction,
-                request.target().owner(),
-                category,
-                now,
+        if mapping.history_coverage() == LegacyHistoryCoverageV1::Unknown {
+            return Err(storage_message(
+                COMPATIBILITY_WRITE_OPERATION,
+                "fact mapping is not a final-V2 complete-history mapping; reset the store",
             )
-            .await?;
-            load_current_projection(transaction, &owner_key, &fact_id)
-                .await?
-                .and_then(|projection| projection.last_event_id)
-                .ok_or_else(|| {
-                    storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "migrated compatibility purge produced no lineage event",
-                    )
-                })?
-        } else {
-            let batch = compatibility_removal_batch(
-                request.target().owner(),
-                &fact_id,
-                current.access,
-                Some(expected_last_event_id),
-                request.actor().cloned(),
-                now,
-            )?;
-            let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-            compatibility_mirror_delete_tx(
-                db,
-                transaction,
-                request.target().owner(),
-                mapping.legacy_fact_id(),
-                category,
-                now,
-            )
-            .await?;
-            canonical_receipt.last_event_id().clone()
-        };
+            .into());
+        }
+        let batch = compatibility_removal_batch(
+            request.target().owner(),
+            &fact_id,
+            current.access,
+            Some(expected_last_event_id),
+            request.actor().cloned(),
+            now,
+        )?;
+        let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+        compatibility_mirror_delete_tx(
+            db,
+            transaction,
+            request.target().owner(),
+            mapping.legacy_fact_id(),
+            category,
+            now,
+        )
+        .await?;
+        let canonical_event_id = canonical_receipt.last_event_id().clone();
         tombstone_fact_derivatives_tx(
             transaction,
             request.target().owner(),

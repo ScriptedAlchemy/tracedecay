@@ -24,10 +24,10 @@ use super::{
     ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest, ContextScoutClaimSurfaceRequest,
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
-    HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
-    application_negotiated_features, application_surface_dispatch_input_with_controls,
-    current_micros, execute_application_surface, http_operation_event_router,
-    normalize_application_tool_args, parse_application_surface_request, plan26_sse_stream_event,
+    HttpDisconnectCancellation, HttpOperationEventState, application_negotiated_features,
+    application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
+    http_default_deadline_micros, http_operation_event_router, normalize_application_tool_args,
+    parse_application_surface_request, plan26_sse_stream_event,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
     surface_rejection_metadata,
 };
@@ -84,6 +84,14 @@ async fn response_text(response: axum::response::Response) -> String {
             .to_vec(),
     )
     .expect("UTF-8 response")
+}
+
+#[test]
+fn callable_code_http_default_uses_the_catalog_deadline() {
+    assert_eq!(
+        http_default_deadline_micros("/code/code_exact_occurrence").expect("catalog deadline"),
+        10_000_000
+    );
 }
 
 #[test]
@@ -542,7 +550,7 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
         }
     }
 
-    assert_eq!(resolved_bindings, 58);
+    assert_eq!(resolved_bindings, 56);
     assert_eq!(
         compatibility_operations,
         [
@@ -553,7 +561,6 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
             "fact_store",
             "insert_at",
             "insert_at_symbol",
-            "lcm_compress",
             "lcm_describe",
             "lcm_doctor",
             "lcm_expand",
@@ -561,7 +568,6 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
             "lcm_grep",
             "lcm_load_session",
             "lcm_preflight",
-            "lcm_session_boundary",
             "lcm_status",
             "memory_status",
             "message_search",
@@ -799,7 +805,7 @@ fn callable_code_operations_parse_distinct_application_requests() {
 }
 
 #[test]
-fn callable_symbol_graph_operations_reuse_primitive_requests() {
+fn callable_symbol_graph_operations_bind_the_generation_query_service() {
     let symbol_search = parse_application_surface_request(
         ApplicationSurfaceOperation::CodeSymbolSearch,
         callable_symbol_graph_request_body(serde_json::json!({
@@ -810,27 +816,27 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     .expect("symbol search request");
     assert!(matches!(
         &symbol_search,
-        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(request))
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::SymbolSearch(request))
             if request.query == "ApplicationSurfaceOperation"
     ));
-    let ApplicationSurfaceRequest::PrimitiveCode(symbol_search) = symbol_search else {
-        unreachable!("parsed symbol search uses the primitive-code adapter");
+    let ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::SymbolSearch(
+        symbol_search,
+    )) = symbol_search
+    else {
+        unreachable!("parsed symbol search uses the generation-bound callable adapter");
     };
     let sanitizer_revision =
         SanitizerRevision::new("sanitizer.daemon-owned-test.v1").expect("sanitizer revision");
     let normalization_revision =
         QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
             .expect("normalization revision");
-    let Pr12PrimitiveRequest::SymbolSearch(symbol_search) = symbol_search
-        .into_primitive(
+    let symbol_search = symbol_search
+        .into_application_request(
             sanitizer_revision.clone(),
             normalization_revision.clone(),
             PageRequest::first(25).expect("page"),
         )
-        .expect("daemon revisions create the primitive request")
-    else {
-        unreachable!("symbol search preserves its primitive kind");
-    };
+        .expect("daemon revisions create the callable request");
     assert_eq!(
         symbol_search.query.sanitizer_revision(),
         &sanitizer_revision
@@ -838,6 +844,10 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     assert_eq!(
         symbol_search.query.normalization_revision(),
         &normalization_revision
+    );
+    assert_eq!(
+        symbol_search.scope.generation.as_str(),
+        tracedecay_application::UNPINNED_LATEST_GENERATION_SENTINEL
     );
 
     let signature_search = parse_application_surface_request(
@@ -851,7 +861,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     .expect("signature search request");
     assert!(matches!(
         signature_search,
-        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::SignatureSearch(request))
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::SignatureSearch(request))
             if request.returns.as_deref() == Some("ApplicationResult")
     ));
 
@@ -864,7 +874,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     .expect("implementations request");
     assert!(matches!(
         implementations,
-        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::Implementations(_))
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Implementations(_))
     ));
 
     let type_hierarchy = parse_application_surface_request(
@@ -877,7 +887,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     .expect("type hierarchy request");
     assert!(matches!(
         type_hierarchy,
-        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::TypeHierarchy(request))
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::TypeHierarchy(request))
             if request.node_id == "node.application-surface"
     ));
 
@@ -892,7 +902,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     .expect("callers request");
     assert!(matches!(
         callers,
-        ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::Callers(request))
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Callers(request))
             if request.resolve_trait_dispatch
     ));
 }

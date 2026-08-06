@@ -352,7 +352,7 @@ mod tests {
                 project_id: "proj_test".to_string(),
                 store_id: "store:test".to_string(),
                 branch_name: "main".to_string(),
-                db_relpath: "projects/proj_test/branches/main.db".to_string(),
+                db_relpath: "projects/proj_test/tracedecay.db".to_string(),
                 parent_scope_id: None,
                 last_synced_at: Some(230),
                 writable: true,
@@ -360,7 +360,7 @@ mod tests {
             artifacts: vec![StoreArtifactRecord {
                 store_id: "store:test".to_string(),
                 artifact_kind: "graph_db".to_string(),
-                relpath: "projects/proj_test/branches/main.db".to_string(),
+                relpath: "projects/proj_test/tracedecay.db".to_string(),
                 size_bytes: Some(4096),
                 schema_version: None,
                 updated_at: Some(240),
@@ -391,8 +391,7 @@ mod tests {
         let base = registry_context();
         let mut changed = registry_context();
         changed.stores[0].store.last_write_at = Some(999);
-        changed.stores[0].graph_scopes[0].db_relpath =
-            "projects/proj_test/branches/feature.db".to_string();
+        changed.stores[0].graph_scopes[0].last_synced_at = Some(999);
         changed.stores[0].artifacts[0].updated_at = Some(1000);
 
         assert_ne!(base, changed);

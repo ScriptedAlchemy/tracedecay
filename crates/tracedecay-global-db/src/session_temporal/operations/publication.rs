@@ -1,7 +1,10 @@
 use std::future::Future;
+use std::sync::Mutex;
 
 use serde_json::{Value, json};
-use tracedecay_domain::{EntityKind, RetrievalAnchorRecord, RetrievalAnchorTargetV2};
+use tracedecay_domain::{
+    EntityKind, RetrievalAnchorId, RetrievalAnchorRecord, RetrievalAnchorTargetV2,
+};
 use tracedecay_runtime_core::db::engine::{Executor, params};
 
 use tracedecay_sessions::compatibility::projected_content_hash;
@@ -18,14 +21,22 @@ use super::{
     compatibility, generation, load_manifest, logical_identity_digest, receipt_id, sources,
     unixepoch,
 };
+use crate::session_temporal::relation_publication::stage_projection;
+use crate::session_temporal::relations::{
+    SessionRelationProjection, SummaryRelationNode, SummarySourceRef,
+};
 
 pub struct GlobalDbLcmSummaryPublication<'a, E> {
     conn: &'a E,
+    relation_projection: Mutex<SessionRelationProjection>,
 }
 
 impl<'a, E> GlobalDbLcmSummaryPublication<'a, E> {
-    pub const fn new(conn: &'a E) -> Self {
-        Self { conn }
+    pub fn for_project(conn: &'a E, relation_projection: SessionRelationProjection) -> Self {
+        Self {
+            conn,
+            relation_projection: Mutex::new(relation_projection),
+        }
     }
 }
 
@@ -37,30 +48,149 @@ where
         &self,
         publication: LcmImmutableSummaryPublication,
     ) -> impl Future<Output = Result<LcmSummaryPublicationReceipt, LcmError>> {
-        publish_immutable_summary(self.conn, publication)
+        async move {
+            let relation_projection = self
+                .relation_projection
+                .lock()
+                .map_err(|_| {
+                    LcmError::Db("session relation publication lock is poisoned".to_owned())
+                })
+                .map(|projection| projection.clone())?;
+            let receipt = publish_immutable_summary_with_activation(
+                self.conn,
+                publication.clone(),
+                &relation_projection,
+            )
+            .await?;
+            if receipt.disposition == LcmSummaryPublicationDisposition::ExactReplay {
+                let (manifest, _) = load_manifest(self.conn, &publication.summary_id)
+                    .await?
+                    .ok_or(LcmError::SummaryNodeNotFound)?;
+                verify_projection_summary(&relation_projection, &publication, &manifest)?;
+                return Ok(receipt);
+            }
+            let mut projection = relation_projection;
+            stage_summary_relation(
+                self.conn,
+                &mut projection,
+                &publication,
+                receipt.generation,
+                receipt.published_at,
+            )
+            .await?;
+            let mut retained = self.relation_projection.lock().map_err(|_| {
+                LcmError::Db("session relation publication lock is poisoned".to_owned())
+            })?;
+            *retained = projection;
+            Ok(receipt)
+        }
     }
 }
 
-enum PublicationRule<'a> {
-    Initial,
-    Successor { predecessor: &'a str },
+fn verify_projection_summary(
+    projection: &SessionRelationProjection,
+    publication: &LcmImmutableSummaryPublication,
+    manifest: &CanonicalPublicationManifest,
+) -> Result<(), LcmError> {
+    let expected_sources = manifest
+        .canonical_sources
+        .iter()
+        .map(|source| match source.kind.as_str() {
+            "summary" => Ok(SummarySourceRef::Summary {
+                summary_id: source.id.clone(),
+            }),
+            "anchor" => RetrievalAnchorId::new(source.id.clone())
+                .map(|anchor_id| SummarySourceRef::Anchor { anchor_id })
+                .map_err(|error| LcmError::Db(error.to_string())),
+            _ => Err(LcmError::ImmutableSummaryConflict {
+                summary_id: publication.summary_id.clone(),
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let matches = projection.summaries.iter().any(|summary| {
+        summary.summary_id == publication.summary_id
+            && summary.sources == expected_sources
+            && summary.predecessor_summary_id == publication.predecessor_summary_id
+    });
+    if matches {
+        Ok(())
+    } else {
+        Err(LcmError::ImmutableSummaryConflict {
+            summary_id: publication.summary_id.clone(),
+        })
+    }
 }
 
-pub async fn publish_immutable_summary(
+async fn stage_summary_relation(
+    conn: &impl Executor,
+    projection: &mut SessionRelationProjection,
+    publication: &LcmImmutableSummaryPublication,
+    generation: i64,
+    now: i64,
+) -> Result<(), LcmError> {
+    if projection.session_id.as_str() != publication.draft.session_id {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    }
+    let expected_active_generation =
+        generation::active_generation(conn, publication.draft.session_id.as_str())
+            .await?
+            .map(|generation| {
+                u64::try_from(generation)
+                    .map_err(|error| LcmError::Db(format!("invalid active generation: {error}")))
+            })
+            .transpose()?;
+    projection.generation = u64::try_from(generation)
+        .map_err(|error| LcmError::Db(format!("invalid relation generation: {error}")))?;
+    let (manifest, _) = load_manifest(conn, &publication.summary_id)
+        .await?
+        .ok_or(LcmError::SummaryNodeNotFound)?;
+    let sources = manifest
+        .canonical_sources
+        .into_iter()
+        .map(|source| match source.kind.as_str() {
+            "summary" => Ok(SummarySourceRef::Summary {
+                summary_id: source.id,
+            }),
+            "anchor" => RetrievalAnchorId::new(source.id)
+                .map(|anchor_id| SummarySourceRef::Anchor { anchor_id })
+                .map_err(|error| LcmError::Db(error.to_string())),
+            _ => Err(LcmError::Db(
+                "summary publication has an invalid canonical source kind".to_owned(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    projection.summaries.push(SummaryRelationNode {
+        summary_id: publication.summary_id.clone(),
+        sources,
+        predecessor_summary_id: publication.predecessor_summary_id.clone(),
+    });
+    stage_projection(conn, projection, expected_active_generation, now)
+        .await
+        .map_err(|error| LcmError::Db(format!("{error:?}")))
+}
+
+async fn publish_immutable_summary_with_activation(
     conn: &impl Executor,
     publication: LcmImmutableSummaryPublication,
+    relation_projection: &SessionRelationProjection,
 ) -> Result<LcmSummaryPublicationReceipt, LcmError> {
-    let rule = validate_publication_shape(&publication)?;
+    validate_publication_shape(&publication)?;
     if let Some((manifest, created_at)) = load_manifest(conn, &publication.summary_id).await? {
         return exact_replay_receipt(conn, &publication, manifest, created_at).await;
     }
 
     // Cycle checks must precede source materialization: a self-source is not a
     // missing node, and loading first would misreport SummaryNodeNotFound.
-    generation::validate_lineage_graph(conn, &publication).await?;
+    generation::validate_lineage_projection(relation_projection, &publication)?;
     let sources = sources::prepare_sources(conn, &publication).await?;
     let logical_identity = logical_identity_digest(&publication.draft)?;
-    generation::validate_current_predecessor(conn, &publication, &logical_identity).await?;
+    generation::validate_current_predecessor_projection(
+        conn,
+        relation_projection,
+        &publication,
+        &logical_identity,
+    )
+    .await?;
 
     let summary_id = publication.summary_id.as_str();
     let draft = &publication.draft;
@@ -117,17 +247,6 @@ pub async fn publish_immutable_summary(
         created_at,
     )
     .await?;
-    insert_canonical_sources(conn, summary_id, &manifest).await?;
-    if let PublicationRule::Successor { predecessor } = rule {
-        conn.execute(
-            "INSERT INTO session_summary_successors (
-                predecessor_summary_id, successor_summary_id, created_at
-             ) VALUES (?1, ?2, ?3)",
-            params![predecessor, summary_id, created_at],
-        )
-        .await?;
-    }
-
     let generation = generation::publish_candidate_generation(
         conn,
         &draft.session_id,
@@ -135,6 +254,7 @@ pub async fn publish_immutable_summary(
         publication.predecessor_summary_id.as_deref(),
         &source_horizon,
         created_at,
+        relation_projection,
     )
     .await?;
     let frozen_watermarks_json =
@@ -166,7 +286,7 @@ pub async fn publish_immutable_summary(
 
 fn validate_publication_shape(
     publication: &LcmImmutableSummaryPublication,
-) -> Result<PublicationRule<'_>, LcmError> {
+) -> Result<(), LcmError> {
     let draft = &publication.draft;
     if publication.summary_id.trim().is_empty()
         || draft.provider.trim().is_empty()
@@ -185,8 +305,7 @@ fn validate_publication_shape(
         Some(predecessor) if predecessor == publication.summary_id => Err(LcmError::SummaryCycle {
             summary_id: publication.summary_id.clone(),
         }),
-        Some(predecessor) => Ok(PublicationRule::Successor { predecessor }),
-        None => Ok(PublicationRule::Initial),
+        Some(_) | None => Ok(()),
     }
 }
 
@@ -220,38 +339,6 @@ async fn insert_canonical_node(
     Ok(())
 }
 
-async fn insert_canonical_sources(
-    conn: &impl Executor,
-    summary_id: &str,
-    manifest: &CanonicalPublicationManifest,
-) -> Result<(), LcmError> {
-    for (ordinal, source) in manifest.canonical_sources.iter().enumerate() {
-        let (anchor_id, source_summary_id) = match source.kind.as_str() {
-            "anchor" => (Some(source.id.as_str()), None),
-            "summary" => (None, Some(source.id.as_str())),
-            _ => {
-                return Err(LcmError::ImmutableSummaryConflict {
-                    summary_id: summary_id.to_string(),
-                });
-            }
-        };
-        conn.execute(
-            "INSERT INTO session_summary_sources (
-                summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                summary_id,
-                ordinal as i64,
-                source.kind.as_str(),
-                anchor_id,
-                source_summary_id,
-            ],
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 async fn exact_replay_receipt(
     conn: &impl Executor,
     publication: &LcmImmutableSummaryPublication,
@@ -272,8 +359,6 @@ async fn exact_replay_receipt(
         return Err(conflict(summary_id));
     }
     verify_canonical_node(conn, summary_id, &manifest, created_at).await?;
-    verify_canonical_sources(conn, summary_id, &manifest).await?;
-    verify_predecessor(conn, summary_id, manifest.predecessor_summary_id.as_deref()).await?;
     verify_summary_anchor(conn, summary_id, &manifest, created_at).await?;
     let receipt = load_and_verify_receipt(conn, summary_id, &manifest, created_at).await?;
     sources::verify_payload_manifests(conn, summary_id, &manifest, created_at).await?;
@@ -313,57 +398,6 @@ async fn verify_canonical_node(
         || row.get::<String>(5)? != expected_json
         || row.get::<i64>(6)? != created_at
     {
-        return Err(conflict(summary_id));
-    }
-    Ok(())
-}
-
-async fn verify_canonical_sources(
-    conn: &impl Executor,
-    summary_id: &str,
-    manifest: &CanonicalPublicationManifest,
-) -> Result<(), LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT source_kind, COALESCE(source_anchor_id, source_summary_id), source_ordinal
-             FROM session_summary_sources
-             WHERE summary_id = ?1 ORDER BY source_ordinal",
-            params![summary_id],
-        )
-        .await?;
-    let mut ordinal = 0usize;
-    while let Some(row) = rows.next().await? {
-        let Some(expected) = manifest.canonical_sources.get(ordinal) else {
-            return Err(conflict(summary_id));
-        };
-        if row.get::<String>(0)? != expected.kind
-            || row.get::<String>(1)? != expected.id
-            || row.get::<i64>(2)? != ordinal as i64
-        {
-            return Err(conflict(summary_id));
-        }
-        ordinal += 1;
-    }
-    if ordinal != manifest.canonical_sources.len() {
-        return Err(conflict(summary_id));
-    }
-    Ok(())
-}
-
-async fn verify_predecessor(
-    conn: &impl Executor,
-    summary_id: &str,
-    expected: Option<&str>,
-) -> Result<(), LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT predecessor_summary_id FROM session_summary_successors
-             WHERE successor_summary_id = ?1 ORDER BY predecessor_summary_id",
-            params![summary_id],
-        )
-        .await?;
-    let actual: Option<String> = rows.next().await?.map(|row| row.get(0)).transpose()?;
-    if rows.next().await?.is_some() || actual.as_deref() != expected {
         return Err(conflict(summary_id));
     }
     Ok(())

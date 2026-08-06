@@ -213,6 +213,11 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
 /// below.
 const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
+/// Feedback operations with production request construction and daemon routing
+/// on the declared host surfaces. A registered application handler validates
+/// the contract but does not, by itself, mount that end-to-end journey.
+const MOUNTED_FEEDBACK_SURFACE_SPECS: [usize; 6] = [0, 1, 2, 3, 4, 5];
+
 pub fn feedback_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let handlers = feedback_surface_handler_descriptors()?;
@@ -226,13 +231,10 @@ fn feedback_surface_catalog_contribution_for_handlers(
     let mut bindings =
         Vec::with_capacity(FEEDBACK_SPECS.iter().map(|spec| spec.surfaces.len()).sum());
 
-    for spec in &FEEDBACK_SPECS {
+    for (index, spec) in FEEDBACK_SPECS.iter().enumerate() {
         let capability_id = CapabilityId::new(spec.capability)?;
-        // Handler registration is the executable-owner proof. Keep this
-        // symmetric with `feedback_surface_handler_descriptors`: narrowing a
-        // registered handler here leaves root composition with a handler for
-        // an unavailable capability and breaks the catalog/handler bijection.
-        let callable = handlers.contains(&handler_descriptor(spec)?);
+        let callable = handlers.contains(&handler_descriptor(spec)?)
+            && MOUNTED_FEEDBACK_SURFACE_SPECS.contains(&index);
         let mut binding_ids = Vec::new();
         if callable {
             let (spec_bindings, spec_binding_ids) = current_bindings(
@@ -339,6 +341,7 @@ fn capability(
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::Partial,
         ])?,
@@ -407,8 +410,9 @@ mod tests {
             .collect();
         names.sort();
         names.dedup();
-        let mut expected = FEEDBACK_SPECS
+        let mut expected = MOUNTED_FEEDBACK_SURFACE_SPECS
             .iter()
+            .filter_map(|index| FEEDBACK_SPECS.get(*index))
             .filter(|spec| !spec.surfaces.is_empty())
             .map(|spec| spec.operation.to_owned())
             .collect::<Vec<_>>();
@@ -420,7 +424,7 @@ mod tests {
     fn internal_feedback_handlers_do_not_imply_transport_availability() {
         let unavailable =
             feedback_surface_catalog_contribution_for_handlers(&[]).expect("unavailable catalog");
-        for spec in &FEEDBACK_SPECS {
+        for (index, spec) in FEEDBACK_SPECS.iter().enumerate() {
             let capability = unavailable
                 .capabilities()
                 .iter()
@@ -437,8 +441,12 @@ mod tests {
                 .iter()
                 .find(|capability| capability.capability_id().as_str() == spec.capability)
                 .expect("registered feedback capability");
-            assert!(capability.availability().is_callable());
-            assert_eq!(capability.binding_ids().len(), spec.surfaces.len());
+            let mounted = MOUNTED_FEEDBACK_SURFACE_SPECS.contains(&index);
+            assert_eq!(capability.availability().is_callable(), mounted);
+            assert_eq!(
+                capability.binding_ids().len(),
+                if mounted { spec.surfaces.len() } else { 0 }
+            );
         }
     }
 }

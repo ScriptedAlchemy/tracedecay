@@ -291,6 +291,11 @@ pub(super) fn lcm_typed_outcome(
             "lcm_retrieval_cancelled",
             "session retrieval was cancelled",
         ),
+        SessionRetrievalServiceOutcome::DeadlineExceeded => (
+            "timed_out",
+            "lcm_retrieval_deadline_exceeded",
+            "session retrieval exceeded its deadline",
+        ),
         _ => (
             "unavailable",
             "lcm_retrieval_invalid_outcome",

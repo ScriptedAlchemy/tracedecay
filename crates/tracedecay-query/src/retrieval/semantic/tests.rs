@@ -76,7 +76,7 @@ fn search_index_key() -> &'static SemanticSearchIndexKeyV1 {
     KEY.get_or_init(|| {
         SemanticSearchIndexProfileV1::exact_flat_v1()
             .and_then(|profile| profile.index_key())
-            .expect("exact-flat search index key")
+            .expect("semantic vector search index key")
     })
 }
 
@@ -167,49 +167,71 @@ fn record(
     request: &SemanticRetrievalRequestV1<'_>,
     name: &str,
     values: Vec<f32>,
-) -> SemanticVectorRecordV1 {
+) -> TestVectorRecord {
     let source_occurrence_id = id::<SourceOccurrenceId>(&format!("occurrence.{name}"));
     let anchor_id = RetrievalAnchorId::new(format!("anchor.{name}")).expect("valid anchor");
     let chunk_id = id::<CodeSearchChunkId>(&format!("chunk.{name}"));
-    SemanticVectorRecordV1 {
-        vector_generation: request.vector_generation.clone(),
-        projection_key: request.projection.projection_key().clone(),
-        source_generation: request.code_generation.clone(),
-        chunk_id: chunk_id.clone(),
-        candidate: CompactCandidate {
-            anchor_id: anchor_id.clone(),
-            logical_evidence_id: id::<LogicalEvidenceId>(&format!("logical.{name}")),
-            source_occurrence_id: source_occurrence_id.clone(),
-            file_occurrence_id: Some(id(&format!("file.{name}"))),
-            source_namespace: id::<SourceNamespace>("namespace.code"),
-            repository_id: Some(id("repository.fixture")),
-            session_or_thread_id: None,
-            logical_copy_cluster_id: None,
-            logical_copy_evidence_anchor: None,
-            evidence_role: EvidenceRole::Primary,
-            retriever: RetrieverKind::Semantic,
-            retriever_revision: id::<ComponentRevision>("retriever.semantic-flat.v1"),
-            score_domain: id::<ScoreDomainId>("score.semantic-distance.v1"),
-            raw_score: tracedecay_domain::FixedPointScore::ZERO,
-            ordinal_rank: 0,
-            exact_admission_proof: None,
-            retriever_evidence_anchor: RetrievalAnchorId::new(format!("evidence.{name}"))
-                .expect("valid evidence anchor"),
-            freshness: freshness(),
-        },
-        binding: CodeCandidateBindingV1 {
-            candidate_anchor: anchor_id,
-            occurrence: CodeOccurrenceRefV1 {
-                generation: request.code_generation.clone(),
-                file: id(&format!("file.{name}")),
-                symbol: None,
-                chunk: Some(chunk_id),
+    TestVectorRecord {
+        record: SemanticVectorRecordV1 {
+            vector_generation: request.vector_generation.clone(),
+            projection_key: request.projection.projection_key().clone(),
+            source_generation: request.code_generation.clone(),
+            chunk_id: chunk_id.clone(),
+            candidate: CompactCandidate {
+                anchor_id: anchor_id.clone(),
+                logical_evidence_id: id::<LogicalEvidenceId>(&format!("logical.{name}")),
+                source_occurrence_id: source_occurrence_id.clone(),
+                file_occurrence_id: Some(id(&format!("file.{name}"))),
+                source_namespace: id::<SourceNamespace>("namespace.code"),
+                repository_id: Some(id("repository.fixture")),
+                session_or_thread_id: None,
+                logical_copy_cluster_id: None,
+                logical_copy_evidence_anchor: None,
+                evidence_role: EvidenceRole::Primary,
+                retriever: RetrieverKind::Semantic,
+                retriever_revision: id::<ComponentRevision>("retriever.semantic-flat.v1"),
+                score_domain: id::<ScoreDomainId>("score.semantic-distance.v1"),
+                raw_score: tracedecay_domain::FixedPointScore::ZERO,
+                ordinal_rank: 0,
+                exact_admission_proof: None,
+                retriever_evidence_anchor: RetrievalAnchorId::new(format!("evidence.{name}"))
+                    .expect("valid evidence anchor"),
+                freshness: freshness(),
             },
-            language_descriptor_revision: id("language.rust.v1"),
-            matched_term_kinds: Vec::new(),
-            source_occurrence: source_occurrence_id,
+            binding: CodeCandidateBindingV1 {
+                candidate_anchor: anchor_id,
+                occurrence: CodeOccurrenceRefV1 {
+                    generation: request.code_generation.clone(),
+                    file: id(&format!("file.{name}")),
+                    symbol: None,
+                    chunk: Some(chunk_id),
+                },
+                language_descriptor_revision: id("language.rust.v1"),
+                matched_term_kinds: Vec::new(),
+                source_occurrence: source_occurrence_id,
+            },
         },
         values,
+    }
+}
+
+#[derive(Clone)]
+struct TestVectorRecord {
+    record: SemanticVectorRecordV1,
+    values: Vec<f32>,
+}
+
+impl std::ops::Deref for TestVectorRecord {
+    type Target = SemanticVectorRecordV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
+}
+
+impl std::ops::DerefMut for TestVectorRecord {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.record
     }
 }
 
@@ -235,7 +257,7 @@ impl SemanticQueryEmbeddingPort for FakeQueryEmbedder {
 }
 
 struct FakeVectorReadPort {
-    rows: Vec<SemanticVectorRecordV1>,
+    rows: Vec<TestVectorRecord>,
     scans: Cell<u32>,
     summary: Option<SemanticVectorScanSummaryV1>,
     after_scan_cancel: Option<Rc<Cell<bool>>>,
@@ -245,10 +267,11 @@ struct FakeVectorReadPort {
     search_index_key: SemanticSearchIndexKeyV1,
     source_generation: CodeGenerationId,
     capability_manifest_digest: ManifestDigest,
+    metric: EmbeddingMetricV1,
 }
 
 impl FakeVectorReadPort {
-    fn new(request: &SemanticRetrievalRequestV1<'_>, rows: Vec<SemanticVectorRecordV1>) -> Self {
+    fn new(request: &SemanticRetrievalRequestV1<'_>, rows: Vec<TestVectorRecord>) -> Self {
         Self {
             rows,
             scans: Cell::new(0),
@@ -260,41 +283,62 @@ impl FakeVectorReadPort {
             search_index_key: request.search_index_key.clone(),
             source_generation: request.code_generation.clone(),
             capability_manifest_digest: request.capability_manifest_digest.clone(),
+            metric: request.projection.embedding_key().metric,
         }
     }
 }
 
 impl SemanticVectorReadPort for FakeVectorReadPort {
-    fn scan_exact_flat(
+    fn search_bounded(
         &self,
-        request: SemanticVectorReadRequestV1<'_>,
-        visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
-    ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
+        request: SemanticVectorSearchRequestV1<'_>,
+    ) -> Result<SemanticVectorSearchPageV1, RetrievalPortError> {
         self.scans.set(self.scans.get() + 1);
-        assert_eq!(request.vector_generation, &self.vector_generation);
-        assert_eq!(request.projection_key, &self.projection_key);
-        assert_eq!(request.search_index_key, &self.search_index_key);
-        assert_eq!(request.source_generation, &self.source_generation);
+        assert_eq!(request.identity.vector_generation, &self.vector_generation);
+        assert_eq!(request.identity.projection_key, &self.projection_key);
+        assert_eq!(request.identity.search_index_key, &self.search_index_key);
+        assert_eq!(request.identity.source_generation, &self.source_generation);
         assert_eq!(
-            request.capability_manifest_digest,
+            request.identity.capability_manifest_digest,
             &self.capability_manifest_digest
         );
-        assert_eq!(request.search_kind, SemanticSearchKindV1::ExactFlat);
-        for row in &self.rows {
-            visit(row)?;
-        }
+        assert_eq!(
+            request.identity.search_kind,
+            SemanticSearchKindV1::EmbeddedVectorIndex
+        );
+        let mut matches = self
+            .rows
+            .iter()
+            .map(|row| {
+                let distance = canonical_distance(self.metric, request.query, &row.values)?;
+                Ok(SemanticVectorMatchV1 {
+                    record: row.record.clone(),
+                    distance: distance.micros() as f64 / SEMANTIC_DISTANCE_SCALE,
+                })
+            })
+            .collect::<Result<Vec<_>, RetrievalPortError>>()?;
+        matches.sort_by(|left, right| {
+            left.distance.total_cmp(&right.distance).then_with(|| {
+                left.record
+                    .candidate
+                    .source_occurrence_id
+                    .cmp(&right.record.candidate.source_occurrence_id)
+            })
+        });
+        matches.truncate(request.limit);
         if let Some(cancelled) = &self.after_scan_cancel {
             cancelled.set(true);
         }
         if let Some((elapsed, value)) = &self.after_scan_elapsed {
             elapsed.set(*value);
         }
-        Ok(self.summary.unwrap_or(SemanticVectorScanSummaryV1 {
+        let summary = self.summary.unwrap_or(SemanticVectorScanSummaryV1 {
             examined: self.rows.len() as u64,
             eligible: self.rows.len() as u64,
             excluded: 0,
             unknown: 0,
-        }))
+        });
+        Ok(SemanticVectorSearchPageV1 { matches, summary })
     }
 }
 
@@ -386,7 +430,7 @@ impl LateHydrationSource<String> for DenyingHydrationSource {
 }
 
 #[test]
-fn exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence() {
+fn bounded_vector_search_is_deterministic_and_emits_generic_semantic_evidence() {
     let query_view = query_view();
     let projection = projection();
     let request = request(&query_view, &projection, 2);
@@ -441,20 +485,17 @@ fn exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence() {
         .evidence_by_occurrence
         .get(&id("occurrence.identical"))
         .expect("occurrence-keyed semantic evidence");
-    assert_eq!(evidence.search_kind, SemanticSearchKindV1::ExactFlat);
+    assert_eq!(
+        evidence.search_kind,
+        SemanticSearchKindV1::EmbeddedVectorIndex
+    );
     assert_eq!(evidence.distance.micros(), 0);
     assert_eq!(evidence.vector_generation, request.vector_generation);
     assert_eq!(evidence.projection_key, *request.projection.embedding_key());
 }
 
 #[test]
-fn bounded_scan_retains_the_cap_smallest_rows_by_tie_break_order() {
-    // Equivalence guard for the bounded ExactFlat scan (finding 15). Every row
-    // shares an identical distance, so the retained set is decided purely by the
-    // secondary tie-break key (`source_occurrence_id`). Rows are emitted in
-    // reverse tie-break order to prove the max-heap evicts the worst retained
-    // row regardless of emission order, exactly as a full sort followed by
-    // truncation to the cap would.
+fn bounded_vector_search_retains_the_cap_smallest_rows_by_tie_break_order() {
     let query_view = query_view();
     let projection = projection();
     let request = request(&query_view, &projection, 2);

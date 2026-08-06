@@ -1245,6 +1245,10 @@ mod tests {
                 "session_evidence_cancelled",
             ),
             (
+                SessionRetrievalOutcome::DeadlineExceeded,
+                "session_evidence_timed_out",
+            ),
+            (
                 SessionRetrievalOutcome::CompleteZero {
                     freshness: crate::application::session::SessionDataFreshness::Stored {
                         generation_lag: 2,

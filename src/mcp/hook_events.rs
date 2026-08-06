@@ -1,7 +1,7 @@
-//! Normalizes daemon hook notifications into typed sync plans.
+//! Normalizes daemon hook notifications into typed convergence hints.
 //!
-//! This module owns wire-level hook semantics. The MCP server owns graph side
-//! effects such as branch tracking, sync execution, and token-map refreshes.
+//! This module owns wire-level hook semantics. The retained scheduler owns all
+//! code convergence; hook handling only admits bounded hints and wakes it.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -142,16 +142,6 @@ fn push_admission_identity_part(buffer: &mut Vec<u8>, label: &str, value: &[u8])
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HookEventPlan {
     SyncFiles(Vec<String>),
-    AddBranch(String),
-    AddBranchAt {
-        root: PathBuf,
-        branch: String,
-        agent: HookAgent,
-    },
-    SyncCurrentBranch {
-        branch: String,
-        agent: HookAgent,
-    },
     DebouncedIncrementalSync(HookAgent),
     RecordTerminalReceipt {
         route: Option<crate::daemon::HookRouteMetadata>,
@@ -173,18 +163,6 @@ enum DurableHookEventPlan {
     SyncFiles {
         rel_paths: Vec<String>,
     },
-    AddBranch {
-        branch: String,
-    },
-    AddBranchAt {
-        root: PathBuf,
-        branch: String,
-        agent: String,
-    },
-    SyncCurrentBranch {
-        branch: String,
-        agent: String,
-    },
     DebouncedIncrementalSync {
         agent: String,
     },
@@ -202,9 +180,8 @@ enum DurableHookEventPlan {
     Noop,
 }
 
-/// Durable spool envelope version. Bump when the plan inventory or field policy
-/// changes in a non-compatible way; keep decode arms for prior versions when
-/// retained spool records must still replay.
+/// Durable spool envelope version. Cursor-native events extend the plan
+/// inventory, so new records use V2 while V1 records remain replayable.
 const DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 2;
 const LEGACY_DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
 
@@ -214,7 +191,6 @@ const LEGACY_DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
 /// values become stable digests while public ids remain byte-for-byte.
 /// Equality-only thread/tool/turn identifiers are hashed before persistence.
 const DURABLE_MAX_IDENTIFIER_BYTES: usize = 256;
-const DURABLE_MAX_BRANCH_BYTES: usize = 256;
 const DURABLE_MAX_STATUS_BYTES: usize = 64;
 const DURABLE_MAX_PATH_BYTES: usize = 1024;
 const DURABLE_MAX_REL_PATH_BYTES: usize = 512;
@@ -349,12 +325,6 @@ fn sanitize_durable_receipt(
     Ok(sanitized)
 }
 
-/// Normalize an effect root for durable storage. Canonicalization and live
-/// project reauthorization happen at replay via [`authorize_add_branch_at_root`].
-fn normalize_durable_effect_root(root: &Path) -> Result<PathBuf, ()> {
-    bound_absolute_add_branch_at_root(root).map_err(|_| ())
-}
-
 fn sanitize_durable_rel_paths(rel_paths: &[String]) -> Result<Vec<String>, ()> {
     let sanitized = safe_hook_rel_paths(rel_paths);
     if sanitized.len() != rel_paths.len() || sanitized.len() > DURABLE_MAX_REL_PATHS {
@@ -369,29 +339,34 @@ fn sanitize_durable_rel_paths(rel_paths: &[String]) -> Result<Vec<String>, ()> {
     Ok(sanitized)
 }
 
+pub(crate) fn authorize_observation_worktree_root(
+    candidate: &Path,
+    active_project_root: &Path,
+) -> Option<PathBuf> {
+    if !candidate.is_absolute() || !active_project_root.is_absolute() {
+        return None;
+    }
+    let candidate = candidate.canonicalize().ok()?;
+    let active_project_root = active_project_root.canonicalize().ok()?;
+    let candidate_worktree = crate::worktree::git_worktree_root(&candidate)?;
+    let candidate_worktree = candidate_worktree.canonicalize().ok()?;
+    if candidate_worktree != candidate {
+        return None;
+    }
+    let candidate_common = crate::worktree::git_common_dir(&candidate_worktree)?
+        .canonicalize()
+        .ok()?;
+    let active_common = crate::worktree::git_common_dir(&active_project_root)?
+        .canonicalize()
+        .ok()?;
+    (candidate_common == active_common).then_some(candidate_worktree)
+}
+
 fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPlan, ()> {
     Ok(match plan {
         HookEventPlan::SyncFiles(rel_paths) => DurableHookEventPlan::SyncFiles {
             rel_paths: sanitize_durable_rel_paths(rel_paths)?,
         },
-        HookEventPlan::AddBranch(branch) => DurableHookEventPlan::AddBranch {
-            branch: durable_bound_required_str(branch, DURABLE_MAX_BRANCH_BYTES)?,
-        },
-        HookEventPlan::AddBranchAt {
-            root,
-            branch,
-            agent,
-        } => DurableHookEventPlan::AddBranchAt {
-            root: normalize_durable_effect_root(root)?,
-            branch: durable_bound_required_str(branch, DURABLE_MAX_BRANCH_BYTES)?,
-            agent: agent.as_wire().to_string(),
-        },
-        HookEventPlan::SyncCurrentBranch { branch, agent } => {
-            DurableHookEventPlan::SyncCurrentBranch {
-                branch: durable_bound_required_str(branch, DURABLE_MAX_BRANCH_BYTES)?,
-                agent: agent.as_wire().to_string(),
-            }
-        }
         HookEventPlan::DebouncedIncrementalSync(agent) => {
             DurableHookEventPlan::DebouncedIncrementalSync {
                 agent: agent.as_wire().to_string(),
@@ -433,29 +408,6 @@ fn runtime_plan_from_durable(
             sanitize_durable_rel_paths(&rel_paths)
                 .map_err(|()| DurableHookEventDecodeError::Malformed)?,
         )),
-        DurableHookEventPlan::AddBranch { branch } => Ok(HookEventPlan::AddBranch(
-            durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
-                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-        )),
-        DurableHookEventPlan::AddBranchAt {
-            root,
-            branch,
-            agent,
-        } => Ok(HookEventPlan::AddBranchAt {
-            root: normalize_durable_effect_root(&root)
-                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-            branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
-                .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-            agent: HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
-        }),
-        DurableHookEventPlan::SyncCurrentBranch { branch, agent } => {
-            Ok(HookEventPlan::SyncCurrentBranch {
-                branch: durable_bound_required_str(&branch, DURABLE_MAX_BRANCH_BYTES)
-                    .map_err(|()| DurableHookEventDecodeError::Malformed)?,
-                agent: HookAgent::from_wire(&agent)
-                    .ok_or(DurableHookEventDecodeError::Malformed)?,
-            })
-        }
         DurableHookEventPlan::DebouncedIncrementalSync { agent } => {
             Ok(HookEventPlan::DebouncedIncrementalSync(
                 HookAgent::from_wire(&agent).ok_or(DurableHookEventDecodeError::Malformed)?,
@@ -549,8 +501,8 @@ pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
 
 pub(crate) fn plan_hook_event(
     event: &HookEvent,
-    project_root: &Path,
-    current_branch: Option<&str>,
+    _project_root: &Path,
+    _current_branch: Option<&str>,
 ) -> HookEventPlan {
     match event.kind {
         HookEventKind::FileEdit => {
@@ -563,15 +515,8 @@ pub(crate) fn plan_hook_event(
         // Shell observations cannot mint branch/worktree/sync authority.
         // Native Git reconciliation and typed host records own those effects.
         HookEventKind::Shell => HookEventPlan::Noop,
-        HookEventKind::WorkspaceOpen => current_branch
-            .filter(|branch| !branch.is_empty())
-            .map(|branch| HookEventPlan::SyncCurrentBranch {
-                branch: branch.to_string(),
-                agent: event.agent,
-            })
-            .unwrap_or(HookEventPlan::DebouncedIncrementalSync(event.agent)),
-        HookEventKind::SessionStart => {
-            plan_session_start_hook_event(event, project_root, current_branch)
+        HookEventKind::WorkspaceOpen | HookEventKind::SessionStart => {
+            HookEventPlan::DebouncedIncrementalSync(event.agent)
         }
         HookEventKind::IncrementalSync if !event.rel_paths.is_empty() => {
             HookEventPlan::SyncFiles(event.rel_paths.clone())
@@ -599,18 +544,6 @@ pub(crate) fn plan_hook_event(
     }
 }
 
-pub(crate) fn sync_marker_path(data_root: &Path, agent: HookAgent) -> PathBuf {
-    data_root.join(agent.sync_marker_file())
-}
-
-pub(crate) fn should_run_sync(marker: &Path, now_secs: i64, debounce_secs: i64) -> bool {
-    crate::hooks::cursor_should_run_sync(now_secs, read_marker_secs(marker), debounce_secs)
-}
-
-pub(crate) fn write_sync_marker(marker: &Path, now_secs: i64) {
-    let _ = std::fs::write(marker, now_secs.to_string());
-}
-
 fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
     paths
         .iter()
@@ -629,218 +562,16 @@ fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Plans the sync for a `sessionStart` hook.
-///
-/// In the main checkout this mirrors `WorkspaceOpen`: sync the current branch,
-/// or fall back to a debounced incremental sync when the branch is unknown.
-///
-/// When the event `cwd` is a *linked* git worktree (a harness-created
-/// `.claude/worktrees/*` session tree whose `.git` is a gitdir pointer rather
-/// than a real directory), we additionally plan `AddBranchAt` against the
-/// resolved worktree root so the session gets its own writable branch store
-/// instead of the read-only fallback-ancestor DB. The downstream
-/// `add_hook_branch_tracking` returns `AlreadyTracked` cheaply and
-/// idempotently, so re-planning `AddBranchAt` for an already-tracked worktree
-/// branch is a no-op — we do not need branch-meta visibility here.
-fn plan_session_start_hook_event(
-    event: &HookEvent,
-    project_root: &Path,
-    current_branch: Option<&str>,
-) -> HookEventPlan {
-    let cwd = event.cwd.as_deref().unwrap_or(project_root);
-    if let Some(plan) = plan_linked_worktree_branch_add(event, cwd, project_root) {
-        return plan;
-    }
-    current_branch
-        .filter(|branch| !branch.is_empty())
-        .map(|branch| HookEventPlan::SyncCurrentBranch {
-            branch: branch.to_string(),
-            agent: event.agent,
-        })
-        .unwrap_or(HookEventPlan::DebouncedIncrementalSync(event.agent))
-}
-
-/// When `cwd` resolves to a linked git worktree that belongs to `project_root`,
-/// returns an `AddBranchAt` plan for the worktree root and its current branch.
-/// Returns `None` for the main checkout, a non-git cwd, or an unrelated repo.
-fn plan_linked_worktree_branch_add(
-    event: &HookEvent,
-    cwd: &Path,
-    project_root: &Path,
-) -> Option<HookEventPlan> {
-    let worktree_root = crate::worktree::git_worktree_root(cwd)?;
-    // A linked worktree's git common dir lives outside its own working tree
-    // (it points back at the main checkout's `.git`). In the main checkout the
-    // common dir is `<root>/.git`, so the two paths match and we bail out.
-    let common_dir = crate::worktree::git_common_dir(&worktree_root)?;
-    if path_is_inside(&common_dir, &worktree_root) {
-        return None;
-    }
-    if !git_roots_share_common_dir(&worktree_root, project_root) {
-        return None;
-    }
-    let branch = crate::branch::current_branch(&worktree_root)?;
-    if branch.is_empty() {
-        return None;
-    }
-    Some(HookEventPlan::AddBranchAt {
-        root: worktree_root,
-        branch,
-        agent: event.agent,
-    })
-}
-
-/// Effect-time authorization failure for durable branch-write plans
-/// ([`HookEventPlan::AddBranch`], [`HookEventPlan::AddBranchAt`],
-/// [`HookEventPlan::SyncCurrentBranch`]).
-///
-/// Queued plans keep their encoded root/branch; this error means the effect
-/// must not run until a later replay reauthorizes against live git state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AddBranchAtRootAuthError {
-    Empty,
-    NotAbsolute,
-    Unbounded,
-    Unresolvable,
-    Unauthorized,
-}
-
-impl AddBranchAtRootAuthError {
-    pub(crate) const fn reason_code(self) -> &'static str {
-        match self {
-            Self::Empty
-            | Self::NotAbsolute
-            | Self::Unbounded
-            | Self::Unresolvable
-            | Self::Unauthorized => "stale_branch_authorization",
-        }
-    }
-}
-
-const MAX_ADD_BRANCH_AT_ROOT_BYTES: usize = DURABLE_MAX_PATH_BYTES;
-const MAX_ADD_BRANCH_AT_ROOT_COMPONENTS: usize = 64;
-
-/// Normalize and bound a durable effect root, then freshly reauthorize it
-/// against the live project root via canonical path + git common-dir identity.
-///
-/// Admit-time membership is never reused: removal, replacement, symlink/path
-/// swap, or common-dir drift fail closed instead of applying a stale write.
-pub(crate) fn authorize_add_branch_at_root(
-    planned_root: &Path,
-    project_root: &Path,
-) -> Result<PathBuf, AddBranchAtRootAuthError> {
-    let bounded = bound_absolute_add_branch_at_root(planned_root)?;
-    let canonical = bounded
-        .canonicalize()
-        .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
-    let live_worktree_root = crate::worktree::git_worktree_root(&canonical)
-        .and_then(|root| root.canonicalize().ok())
-        .ok_or(AddBranchAtRootAuthError::Unauthorized)?;
-    if live_worktree_root != canonical {
-        return Err(AddBranchAtRootAuthError::Unauthorized);
-    }
-    let project_canonical = project_root
-        .canonicalize()
-        .map_err(|_| AddBranchAtRootAuthError::Unresolvable)?;
-    if !root_belongs_to_project(&canonical, &project_canonical) {
-        return Err(AddBranchAtRootAuthError::Unauthorized);
-    }
-    Ok(canonical)
-}
-
-/// Revalidate live root identity and current branch immediately before a
-/// durable branch-write effect. Admit-time root/branch are never reused.
-pub(crate) fn authorize_planned_branch_effect(
-    planned_root: &Path,
-    project_root: &Path,
-    planned_branch: &str,
-) -> Result<PathBuf, AddBranchAtRootAuthError> {
-    let root = authorize_add_branch_at_root(planned_root, project_root)?;
-    if crate::branch::current_branch(&root).as_deref() != Some(planned_branch) {
-        return Err(AddBranchAtRootAuthError::Unauthorized);
-    }
-    Ok(root)
-}
-
-fn bound_absolute_add_branch_at_root(path: &Path) -> Result<PathBuf, AddBranchAtRootAuthError> {
-    let raw = path.as_os_str().as_encoded_bytes();
-    if raw.is_empty() {
-        return Err(AddBranchAtRootAuthError::Empty);
-    }
-    if !path.is_absolute() {
-        return Err(AddBranchAtRootAuthError::NotAbsolute);
-    }
-    if raw.len() > MAX_ADD_BRANCH_AT_ROOT_BYTES || raw.contains(&0) {
-        return Err(AddBranchAtRootAuthError::Unbounded);
-    }
-
-    let mut components = 0usize;
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err(AddBranchAtRootAuthError::Unbounded);
-            }
-            Component::Normal(part) => {
-                components = components.saturating_add(1);
-                if components > MAX_ADD_BRANCH_AT_ROOT_COMPONENTS {
-                    return Err(AddBranchAtRootAuthError::Unbounded);
-                }
-                normalized.push(part);
-            }
-        }
-    }
-    Ok(normalized)
-}
-
-fn root_belongs_to_project(root: &Path, project_root: &Path) -> bool {
-    paths_same(root, project_root) || git_roots_share_common_dir(root, project_root)
-}
-
-fn path_is_inside(path: &Path, root: &Path) -> bool {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    path.starts_with(root)
-}
-
-fn git_roots_share_common_dir(a: &Path, b: &Path) -> bool {
-    let a_common = crate::worktree::git_common_dir(a);
-    let b_common = crate::worktree::git_common_dir(b);
-    a_common
-        .as_ref()
-        .zip(b_common.as_ref())
-        .is_some_and(|(a_common, b_common)| paths_same(a_common, b_common))
-}
-
-fn paths_same(a: &Path, b: &Path) -> bool {
-    let a = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
-    let b = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
-    a == b
-}
-
-fn read_marker_secs(path: &Path) -> Option<i64> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse::<i64>()
-        .ok()
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     use serde_json::json;
 
     use super::{
-        AddBranchAtRootAuthError, DurableHookEventDecodeError, HookAgent, HookEvent, HookEventKind,
-        HookEventPlan, authorize_add_branch_at_root, decode_durable_hook_event_plan,
-        encode_durable_hook_event_plan, parse_hook_event, plan_hook_event,
+        DurableHookEventDecodeError, HookAgent, HookEvent, HookEventKind, HookEventPlan,
+        decode_durable_hook_event_plan, encode_durable_hook_event_plan, parse_hook_event,
+        plan_hook_event,
     };
 
     fn parse_or_panic(params: &serde_json::Value) -> HookEvent {
@@ -848,131 +579,6 @@ mod tests {
             Some(event) => event,
             None => panic!("hook event should parse"),
         }
-    }
-
-    /// Resolves the `git` executable to an absolute path exactly once per
-    /// process. Under heavy parallel test load (nextest spawns one process per
-    /// test, each spawning several `git` subprocesses), a bare
-    /// `Command::new("git")` PATH lookup can transiently fail the spawn with
-    /// `ENOENT` ("No such file or directory") even though git is installed.
-    /// Resolving to an absolute path up front, plus a `GIT` env override,
-    /// removes the per-spawn PATH walk and makes the lookup deterministic.
-    fn git_program() -> std::ffi::OsString {
-        use std::sync::OnceLock;
-        static GIT: OnceLock<std::ffi::OsString> = OnceLock::new();
-        GIT.get_or_init(|| {
-            if let Some(explicit) = std::env::var_os("GIT") {
-                return explicit;
-            }
-            let exe_name = if cfg!(windows) { "git.exe" } else { "git" };
-            if let Some(paths) = std::env::var_os("PATH") {
-                for dir in std::env::split_paths(&paths) {
-                    let candidate = dir.join(exe_name);
-                    if candidate.is_file() {
-                        return candidate.into_os_string();
-                    }
-                }
-            }
-            // Fall back to a bare name and let the OS resolve it.
-            std::ffi::OsString::from("git")
-        })
-        .clone()
-    }
-
-    fn run_git(cwd: &Path, args: &[&str]) {
-        // A cwd that does not yet exist makes the spawn itself fail with
-        // ENOENT, which is indistinguishable from git-not-found; guard it so
-        // any real failure is attributable.
-        assert!(
-            cwd.is_dir(),
-            "git cwd {cwd:?} should exist before running git {args:?}"
-        );
-        let git = git_program();
-        // Retry a transient spawn ENOENT a few times: under load the initial
-        // fork/exec can spuriously fail even with a valid absolute program.
-        let mut last_err: Option<std::io::Error> = None;
-        let mut output = None;
-        for attempt in 0..5 {
-            match Command::new(&git).args(args).current_dir(cwd).output() {
-                Ok(out) => {
-                    output = Some(out);
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt < 4 => {
-                    last_err = Some(e);
-                    std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
-                }
-                Err(e) => {
-                    panic!("git {args:?} should run (program {git:?}): {e}");
-                }
-            }
-        }
-        let output = output.unwrap_or_else(|| {
-            panic!("git {args:?} should run (program {git:?}) after retries: {last_err:?}")
-        });
-        assert!(
-            output.status.success(),
-            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
-            args,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[cfg(windows)]
-    fn git_test_root(path: &Path) -> std::path::PathBuf {
-        path.to_path_buf()
-    }
-
-    #[cfg(not(windows))]
-    fn git_test_root(path: &Path) -> std::path::PathBuf {
-        path.canonicalize()
-            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"))
-    }
-
-    fn setup_linked_session_worktree() -> (tempfile::TempDir, PathBuf, PathBuf) {
-        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
-        let base_root = git_test_root(base.path());
-        let project_root = base_root.join("project");
-        let worktree_root = base_root.join("session-worktree");
-        std::fs::create_dir_all(project_root.join("src"))
-            .unwrap_or_else(|e| panic!("project dirs should create: {e}"));
-        std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n")
-            .unwrap_or_else(|e| panic!("source should write: {e}"));
-        run_git(&project_root, &["init", "-b", "main"]);
-        run_git(&project_root, &["config", "user.email", "test@test.com"]);
-        run_git(&project_root, &["config", "user.name", "Test"]);
-        run_git(&project_root, &["add", "."]);
-        run_git(&project_root, &["commit", "-m", "initial"]);
-        let worktree_arg = worktree_root.to_string_lossy();
-        run_git(
-            &project_root,
-            &[
-                "worktree",
-                "add",
-                worktree_arg.as_ref(),
-                "-b",
-                "feature/session",
-            ],
-        );
-        (base, project_root, worktree_root)
-    }
-
-    fn assert_add_branch_at(plan: HookEventPlan, expected_root: &Path, expected_branch: &str) {
-        let HookEventPlan::AddBranchAt {
-            root,
-            branch,
-            agent,
-        } = plan
-        else {
-            panic!("expected AddBranchAt plan, got {plan:?}");
-        };
-        assert!(
-            super::paths_same(&root, expected_root),
-            "planned root {root:?} should match expected root {expected_root:?}"
-        );
-        assert_eq!(branch, expected_branch);
-        assert_eq!(agent, HookAgent::Codex);
     }
 
     #[test]
@@ -1210,43 +816,32 @@ mod tests {
     }
 
     #[test]
-    fn plans_session_start_from_main_checkout_as_current_branch_sync() {
-        let (_base, project_root, _worktree_root) = setup_linked_session_worktree();
-
+    fn plans_session_start_as_debounced_convergence() {
         let params = json!({
             "agent": "claude",
             "event": "sessionStart",
-            "cwd": project_root,
+            "cwd": "/tmp/project",
         });
         let event = parse_or_panic(&params);
 
         assert_eq!(
-            plan_hook_event(&event, &project_root, Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Claude,
-            }
+            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
+            HookEventPlan::DebouncedIncrementalSync(HookAgent::Claude)
         );
     }
 
     #[test]
-    fn plans_session_start_from_linked_worktree_as_branch_add() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-
+    fn session_start_does_not_mint_branch_or_worktree_authority() {
         let params = json!({
             "agent": "codex",
             "event": "sessionStart",
-            "cwd": worktree_root,
+            "cwd": "/tmp/linked-worktree",
         });
         let event = parse_or_panic(&params);
 
-        // The session cwd is the linked worktree, so even though the main
-        // checkout reports `main`, the plan tracks the worktree's own branch
-        // at the worktree root.
-        assert_add_branch_at(
-            plan_hook_event(&event, &project_root, Some("main")),
-            &worktree_root,
-            "feature/session",
+        assert_eq!(
+            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
+            HookEventPlan::DebouncedIncrementalSync(HookAgent::Codex)
         );
     }
 
@@ -1266,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn plans_cursor_session_start_as_current_branch_sync() {
+    fn plans_cursor_session_start_as_debounced_convergence() {
         let params = serde_json::to_value(crate::daemon::DaemonHookEvent::session_start(
             HookAgent::Cursor,
             PathBuf::from("/tmp/project"),
@@ -1276,15 +871,12 @@ mod tests {
 
         assert_eq!(
             plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Cursor,
-            }
+            HookEventPlan::DebouncedIncrementalSync(HookAgent::Cursor)
         );
     }
 
     #[test]
-    fn plans_workspace_open_as_current_branch_sync() {
+    fn plans_workspace_open_as_debounced_convergence() {
         let params = json!({
             "agent": "kiro",
             "event": "workspaceOpen"
@@ -1293,16 +885,12 @@ mod tests {
 
         assert_eq!(
             plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Kiro,
-            }
+            HookEventPlan::DebouncedIncrementalSync(HookAgent::Kiro)
         );
     }
 
     #[test]
     fn durable_plan_round_trip_preserves_supported_variants() {
-        let worktree_root = std::env::temp_dir().join("worktree");
         let route = Some(crate::daemon::HookRouteMetadata {
             session_id: Some("session-1".to_string()),
             thread_id: None,
@@ -1319,16 +907,6 @@ mod tests {
         };
         for plan in [
             HookEventPlan::SyncFiles(vec!["src/lib.rs".to_string()]),
-            HookEventPlan::AddBranch("feature/test".to_string()),
-            HookEventPlan::AddBranchAt {
-                root: worktree_root,
-                branch: "feature/test".to_string(),
-                agent: HookAgent::Codex,
-            },
-            HookEventPlan::SyncCurrentBranch {
-                branch: "main".to_string(),
-                agent: HookAgent::Claude,
-            },
             HookEventPlan::DebouncedIncrementalSync(HookAgent::Cursor),
             HookEventPlan::RecordTerminalReceipt {
                 route: route.clone(),
@@ -1469,14 +1047,6 @@ mod tests {
             })
             .is_err()
         );
-        assert!(
-            encode_durable_hook_event_plan(&HookEventPlan::AddBranchAt {
-                root: PathBuf::from("/tmp/worktree/../escape"),
-                branch: "feature".to_string(),
-                agent: HookAgent::Codex,
-            })
-            .is_err()
-        );
     }
 
     #[test]
@@ -1577,152 +1147,6 @@ mod tests {
         assert_ne!(
             fallback.admission_source(),
             other_fallback.admission_source()
-        );
-    }
-
-    #[test]
-    fn add_branch_at_effect_auth_accepts_linked_worktree_canonical_root() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-        let authorized = authorize_add_branch_at_root(&worktree_root, &project_root)
-            .expect("linked worktree should authorize");
-        assert_eq!(
-            authorized,
-            worktree_root
-                .canonicalize()
-                .expect("worktree should canonicalize")
-        );
-    }
-
-    #[test]
-    fn add_branch_at_effect_auth_rejects_relative_and_parent_escape() {
-        let (_base, project_root, _worktree_root) = setup_linked_session_worktree();
-        assert_eq!(
-            authorize_add_branch_at_root(Path::new("relative-root"), &project_root),
-            Err(AddBranchAtRootAuthError::NotAbsolute)
-        );
-        let escaped = project_root.join("..").join("outside");
-        assert_eq!(
-            authorize_add_branch_at_root(&escaped, &project_root),
-            Err(AddBranchAtRootAuthError::Unbounded)
-        );
-        assert_eq!(
-            authorize_add_branch_at_root(&project_root.join("src"), &project_root),
-            Err(AddBranchAtRootAuthError::Unauthorized)
-        );
-    }
-
-    #[test]
-    fn add_branch_at_effect_auth_rejects_removed_or_replaced_root() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-        let planned = worktree_root.clone();
-        authorize_add_branch_at_root(&planned, &project_root).expect("precondition");
-
-        std::fs::remove_dir_all(&worktree_root).expect("remove worktree");
-        assert_eq!(
-            authorize_add_branch_at_root(&planned, &project_root),
-            Err(AddBranchAtRootAuthError::Unresolvable)
-        );
-
-        // Replacement at the same path with an unrelated repository must not
-        // inherit the queued plan's prior admission.
-        std::fs::create_dir_all(worktree_root.join("src")).expect("recreate");
-        std::fs::write(worktree_root.join("src/lib.rs"), "pub fn other() {}\n").expect("write");
-        run_git(&worktree_root, &["init", "-b", "main"]);
-        run_git(&worktree_root, &["config", "user.email", "test@test.com"]);
-        run_git(&worktree_root, &["config", "user.name", "Test"]);
-        run_git(&worktree_root, &["add", "."]);
-        run_git(&worktree_root, &["commit", "-m", "replacement"]);
-        assert_eq!(
-            authorize_add_branch_at_root(&planned, &project_root),
-            Err(AddBranchAtRootAuthError::Unauthorized)
-        );
-    }
-
-    #[test]
-    fn add_branch_at_effect_auth_rejects_common_dir_drift() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-        let planned = worktree_root.clone();
-        authorize_add_branch_at_root(&planned, &project_root).expect("precondition");
-
-        let stranger = project_root.parent().expect("base").join("unrelated-repo");
-        std::fs::create_dir_all(stranger.join("src")).expect("stranger dirs");
-        std::fs::write(stranger.join("src/lib.rs"), "pub fn stranger() {}\n").expect("write");
-        run_git(&stranger, &["init", "-b", "main"]);
-        run_git(&stranger, &["config", "user.email", "test@test.com"]);
-        run_git(&stranger, &["config", "user.name", "Test"]);
-        run_git(&stranger, &["add", "."]);
-        run_git(&stranger, &["commit", "-m", "stranger"]);
-        let stranger_git = stranger
-            .join(".git")
-            .canonicalize()
-            .expect("stranger gitdir");
-
-        // Linked worktrees store a gitdir pointer; rewriting it changes the
-        // common-dir identity without changing the planned path string.
-        let git_pointer = worktree_root.join(".git");
-        assert!(git_pointer.is_file(), "linked worktree uses gitfile");
-        std::fs::write(
-            &git_pointer,
-            format!("gitdir: {}\n", stranger_git.display()),
-        )
-        .expect("rewrite gitdir pointer");
-
-        assert_eq!(
-            authorize_add_branch_at_root(&planned, &project_root),
-            Err(AddBranchAtRootAuthError::Unauthorized)
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn add_branch_at_effect_auth_rejects_symlink_path_swap() {
-        let base = tempfile::tempdir().expect("tempdir");
-        let base_root = git_test_root(base.path());
-        let project_root = base_root.join("project");
-        let worktree_root = base_root.join("session-worktree");
-        let alias = base_root.join("alias-root");
-        std::fs::create_dir_all(project_root.join("src")).expect("project");
-        std::fs::write(project_root.join("src/lib.rs"), "pub fn marker() {}\n").expect("write");
-        run_git(&project_root, &["init", "-b", "main"]);
-        run_git(&project_root, &["config", "user.email", "test@test.com"]);
-        run_git(&project_root, &["config", "user.name", "Test"]);
-        run_git(&project_root, &["add", "."]);
-        run_git(&project_root, &["commit", "-m", "initial"]);
-        let worktree_arg = worktree_root.to_string_lossy();
-        run_git(
-            &project_root,
-            &[
-                "worktree",
-                "add",
-                worktree_arg.as_ref(),
-                "-b",
-                "feature/session",
-            ],
-        );
-        std::os::unix::fs::symlink(&worktree_root, &alias).expect("alias symlink");
-
-        let authorized = authorize_add_branch_at_root(&alias, &project_root)
-            .expect("alias into linked worktree should authorize");
-        assert_eq!(
-            authorized,
-            worktree_root.canonicalize().expect("canonicalize worktree")
-        );
-
-        let stranger = base_root.join("stranger");
-        std::fs::create_dir_all(stranger.join("src")).expect("stranger");
-        std::fs::write(stranger.join("src/lib.rs"), "pub fn stranger() {}\n").expect("write");
-        run_git(&stranger, &["init", "-b", "main"]);
-        run_git(&stranger, &["config", "user.email", "test@test.com"]);
-        run_git(&stranger, &["config", "user.name", "Test"]);
-        run_git(&stranger, &["add", "."]);
-        run_git(&stranger, &["commit", "-m", "stranger"]);
-
-        std::fs::remove_file(&alias).expect("remove alias");
-        std::os::unix::fs::symlink(&stranger, &alias).expect("swap alias");
-
-        assert_eq!(
-            authorize_add_branch_at_root(&alias, &project_root),
-            Err(AddBranchAtRootAuthError::Unauthorized)
         );
     }
 }

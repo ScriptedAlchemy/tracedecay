@@ -2,30 +2,24 @@
 
 ## Status / Role
 
-Status: active product plan and quality authority. PR9 and PR10 remain
-unfinished until their callable behavior, direct regressions, Linux developer
-evaluation, and normal CI pass; this document does not mark either complete.
-
-PR9 ships the typed federated-retrieval contract, independent exact and lexical
-retrievers, adapters for authorities available at that dependency point, deterministic
-fusion, source-aware dedupe and diversity, compact-candidate ranking, and the developer
-evaluation harness. PR10 ships source-local semantic projections, native semantic
-retrieval, and optional bounded reranking. The application service consumes the
-accepted ports, the dashboard exposes their controls and state, and the
-task/work journey adds the Plan 24 task/session retriever after canonical task
-identity exists. Semantic implementation is required in PR10; activation
-remains evidence-gated and lexical-only operation remains fully supported.
+Status: final-V2 product and quality authority. The typed federated-retrieval
+contract, independent exact/lexical/semantic/graph/temporal/task-session/
+diagnostic lanes, deterministic fusion, source-aware dedupe/diversity,
+rank-before-hydrate pipeline, bounded reranking, application operation,
+dashboard state, and every supported public surface are delivered together.
+Semantic activation remains evidence-backed; an unavailable semantic lane does
+not reduce exact, lexical, or graph functionality.
 
 This plan is the quality and composition authority. It does not replace the canonical
 stores, the Plan 23 temporal query kernel, the Plan 24 task/work graph, the Plan 25 code
 graph, Plan 13 diagnostic anchors, or their authorization rules.
 
 Plan 15 owns retrieval quality, composition, evaluation, and profile-selection
-semantics. Plan 25 is the current PR9 delivery owner and Plan 31 the later PR10
-semantic delivery owner. The application, dashboard, task/work, and public
-surface plans are later consumers. They depend on tested callable behavior
-and evaluation results, not exact historical module, type, fixture, benchmark, command,
-or suite-spine names.
+semantics. Plan 25 owns canonical code retrieval inputs and Plan 31 owns native
+semantic projection/search. Application, dashboard, task/work, SDK, host, and
+transport surfaces are production consumers of the same operation now. They
+depend on tested callable behavior and evaluation results, not historical
+module, fixture, benchmark, command, or suite-spine names.
 
 ## Outcome
 
@@ -70,10 +64,11 @@ The implementation ranks compact authorized candidates before hydrating payloads
   indexing, stale, failed, cancelled, and incompatible generations have zero influence
   on rank, caps, pages, cursors, explanations, caches, and visible timing class. Strict
   semantic alone may return typed unavailable.
-- TraceDecay will not create one monolithic embeddings table or a cross-authority vector
-  store. Vectors are derived, source-local projections keyed by stable anchor, privacy
-  domain, source generation, projection digest, model revision, dimensions,
-  normalization, chunking version, and schema version. Federation occurs at query time.
+- TraceDecay uses the one canonical project Grafeo authority for derived vector
+  projections. Projection namespace, stable anchor, privacy domain, source
+  generation, projection digest, model revision, dimensions, normalization,
+  chunking revision, and schema identity prevent cross-source or cross-domain
+  aliasing. Federation occurs at query time; there is no second vector store.
 - TraceDecay will not adopt a conventional fixed RRF constant such as `k = 60`, fixed
   fusion weights, similarity cutoffs, abstention margins, graph-hop cutoffs, freshness
   penalties, MMR parameters, diversity quotas, or reranker thresholds without a direct
@@ -95,10 +90,9 @@ behavior.
   `SourceFreshness`, `CandidateContribution`, `FusionProfile`, `DiversityPolicy`,
   `RerankPolicy`, `FusedCandidate`, `RankedCandidate`, `RetrievalResult`,
   `AuthorizedRerankView`, `HydrationReceipt`, and evaluation decision IDs.
-- `src/application/retrieval/{mod.rs,ports.rs,pipeline.rs,types.rs}` owns orchestration,
-  budgets, cancellation, query-snapshot pinning, partial-outcome policy, and the
-  rank-before-hydrate boundary when PR11 delivers the application layer. It depends on
-  PR9/PR10 ports, not storage implementations.
+- The application retrieval owner coordinates budgets, cancellation,
+  query-snapshot pinning, partial-outcome policy, and the rank-before-hydrate
+  boundary. It depends on typed ports, not storage implementations.
 - `src/query/retrieval/{exact.rs,lexical.rs,semantic.rs,graph.rs,temporal.rs,task_session.rs,diagnostic.rs}`
   owns independent adapters; `src/query/retrieval/ports.rs` owns the single
   generic `Retriever<R, E>` port. `fusion.rs`, `dedupe.rs`, `diversity.rs`, `rerank.rs`, and
@@ -118,18 +112,17 @@ behavior.
 - Plan 13 and the diagnostic owning stores retain GitHub, CI, compiler, lint, and runtime
   diagnostic evidence. `diagnostic.rs` resolves their stable anchors and never treats
   LSP projection as canonical storage.
-- `src/global_db/retrieval/lexical.rs` owns only global-store lexical projection rows.
-  Project graph and other stores expose equivalent projection ports in their owning
-  crates. `src/global_db/retrieval/semantic.rs` stores vectors only for global-store
-  source namespaces; other authorities keep source-local semantic projections.
+- Owning relational/content stores expose authorized lexical candidates and
+  hydration ports. The canonical project Grafeo store is the sole durable
+  semantic vector authority; projection namespaces and privacy domains isolate
+  source families without creating source-local vector databases.
 - Existing store authorization and privacy-domain resolution are authoritative. Each
   owning source applies authorization, scope, and temporal eligibility before emitting a
   candidate. The application pipeline and every owning-store hydrator recheck eligibility
   as defense in depth.
-- `src/config/retrieval.rs` owns versioned activation profiles and the atomic active and
-  rollback profile pointers under the configuration-control-plane mutation capability.
-  PR14's `src/dashboard/` work renders profile, freshness, fallback, and report state; it
-  does not decide profile activation.
+- The configuration owner stores versioned activation profiles and atomic
+  active/rollback pointers. The dashboard renders profile, freshness, fallback,
+  and report state through the daemon API; it does not decide activation.
 - The hermetic developer evaluation and direct contract regressions remain
   evaluation infrastructure. Their current owners do not create a service,
   evaluation database, acceptance packet, or separate evidence authority.
@@ -138,9 +131,9 @@ behavior.
 
 ## Typed retrieval contract
 
-PR9 must provide an equivalent typed contract with the behavior and information
-below. The Rust sketch is explanatory, not an artifact-name or source-layout
-requirement; field/type names may change when direct contract tests preserve
+Final V2 provides an equivalent typed contract with the behavior and
+information below. The Rust sketch is explanatory, not an artifact-name or
+source-layout requirement; names may change when direct contract tests preserve
 the semantics.
 
 ```rust
@@ -258,10 +251,10 @@ pub struct FusionProfile {
     pub retrieval_budget: RetrievalBudget,
 }
 
-pub struct Pr9FallbackSubpayload {
+pub struct BaselineFallbackSubpayload {
     pub profile_id: FusionProfileId,
     pub ordered_candidates: Vec<RankedCandidate>,
-    pub public_pr9_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    pub baseline_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub freshness: Vec<SourceFreshness>,
     pub cursor: Option<RetrievalCursor>,
     pub digest: FallbackSubpayloadDigest,
@@ -284,7 +277,7 @@ pub struct SemanticRerankOutcome {
 pub struct RetrievalResult {
     pub snapshot: RetrievalSnapshot,
     pub profile_id: FusionProfileId,
-    pub pr9_fallback: Pr9FallbackSubpayload,
+    pub baseline_fallback: BaselineFallbackSubpayload,
     pub ordered_candidates: Vec<RankedCandidate>,
     pub internal_lane_outcomes: BTreeMap<RetrieverKind, RetrieverOutcome<()>>,
     pub public_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
@@ -304,14 +297,14 @@ statuses, and checkpoint IDs for admitted authorized lanes only. Sealed denial o
 never affect cursor or cache-key bytes. Resume uses the bound candidate set or rejects
 the cursor; it never recomputes a differently completed set.
 
-`Pr9FallbackSubpayload` is canonical-encoded and hashed independently with the
-schema/domain separator `tracedecay.pr9-fallback.v1`; the digest field itself
+`BaselineFallbackSubpayload` is canonical-encoded and hashed independently with the
+durable domain separator `tracedecay.retrieval-baseline`; the digest field itself
 is excluded from those hashed bytes. Its
-ranked candidates contain the PR9 contributions/decisions/explanations; its
+ranked candidates contain exact, lexical, and graph contributions, decisions, and explanations; its
 maps contain only `ExactLiteral`, `Lexical`, and `Graph`. Semantic/rerank
 execution may change the enclosing final candidates and
 `semantic_rerank_outcome`, but cannot change the subpayload, its digest, or
-cursor identity. "Byte-identical fallback" means this typed PR9 subpayload is
+cursor identity. "Byte-identical fallback" means this typed baseline subpayload is
 identical; it does not forbid the enclosing response from truthfully reporting
 semantic unavailability.
 
@@ -419,7 +412,7 @@ candidate budget during comparison.
 
 ## Semantic projection and reranking constraints
 
-PR10 implements native in-process FastEmbed search with no Python, WASM, llama.cpp,
+The final product implements native in-process FastEmbed search with no Python, WASM, llama.cpp,
 external inference process, or separate model service. Models load once and reuse
 sessions. Document embeddings batch during indexing; unchanged source occurrences reuse
 vectors only when every compatibility key matches.
@@ -439,14 +432,14 @@ promote a model.
 
 Rerank bounds are fields of `RerankPolicy`: admitted candidate count, input bytes,
 input tokens, work units, model invocations, deadline, and cancellation checkpoints.
-PR10 selects their values from the measured Linux recall/latency/resource comparison and
+The enabled profile selects their values from the measured Linux recall/latency/resource comparison and
 records them in the enabled profile. Model absence, corruption, incompatibility, refusal,
 timeout, cancellation, or budget exhaustion produces the byte-identical pre-rerank
 order and a typed reason. No unmeasured substitute model is permitted.
 
 ## Developer evaluation and fixtures
 
-PR9 and PR10 use a small checked-in sanitized corpus and direct production
+The retrieval system uses a small checked-in sanitized corpus and direct production
 adapters. The corpus covers exact errors, symbols, flags, paths, IDs,
 false-exact hard negatives, paraphrases, typos, graph questions, temporal
 queries, stale/superseded evidence, wrong-scope cases, authorization canaries,
@@ -502,7 +495,7 @@ causality, and no public benchmark rank selects a production profile.
 The evaluated workload, revisions, seed, budgets, and pass conditions are
 reviewable before a candidate result is used. Zero authorization influence,
 exact-tier precedence, temporal eligibility, source-scope correctness, and a
-byte-identical PR9 fallback subpayload are hard product invariants. Candidate
+byte-identical baseline fallback subpayload are hard product invariants. Candidate
 quality or resource improvements use practical thresholds justified by the
 baseline and product behavior; this plan does not invent universal cutoffs.
 
@@ -521,11 +514,10 @@ application pipeline. An unavailable authority remains capability-reported
 rather than simulated. The dashboard renders the enabled profile, freshness,
 fallback, and evaluation state without gaining activation authority.
 
-Task/session retrieval joins Plan 24 task roots to Plan 23 session evidence only
-after the canonical task identity and typed application join ship. Until then
-that lane is explicitly unavailable and never simulated or copied. Adding it
-requires the same lane-disabled comparison and direct tests as every
-other retriever.
+Task/session retrieval joins Plan 24 task roots to Plan 23 session evidence
+through the canonical task identity and typed application join. It ships as a
+real retriever in the final profile and is typed unavailable only when its
+runtime authority is genuinely unavailable; it is never simulated or copied.
 
 Evaluation fixtures and fallback bytes use explicit immutable revisions. A
 later change creates a new fixture/profile revision and reruns the direct tests
@@ -534,7 +526,7 @@ redefine the lexical fallback.
 
 ## Behavioral tests and evaluation
 
-PR9/PR10 must keep direct domain/store retrieval contracts, every lane's
+The final retrieval implementation must keep direct domain/store retrieval contracts, every lane's
 regressions, the hermetic quality suite, profile activation/rollback
 regressions, normal all-feature CI, and the Linux developer evaluation green.
 Historical binary names, command lines, test-target names, packet schemas, and
@@ -549,7 +541,7 @@ recovery, copies and echoes, contradictions, stale and superseded evidence, wron
 project/worktree/branch/time, authorization canaries, deterministic pagination,
 contribution explanations, exact-admission hard negatives, deterministic committed
 prefixes under execution-order and timing jitter, partial outcomes, cancellation, no-result behavior,
-rank-before-hydrate, and hydration authorization recheck. PR10 additionally covers model
+rank-before-hydrate, and hydration authorization recheck. Semantic coverage additionally includes model
 installation and offline reuse, batching, incremental vector reuse, incompatibility and
 rebuild, privacy isolation, bounded reranking, model corruption/refusal/timeout,
 configuration pinning, byte-identical fallback, search while semantic indexing is
@@ -564,20 +556,22 @@ evidence-file path grants no authority. The transaction verifies artifact digest
 approvals, revisions, current-profile precondition, source/projection compatibility, and
 that the rollback profile remains executable under the target schema. It then
 compare-and-swaps active and rollback pointers and records the authenticated actor.
-Rollout proceeds through lexical default, optional-channel shadow, a configured
-staged cohort, and default eligibility. There is no universal rollout count.
+The final V2 profile is installed directly after its behavioral and quality
+evidence passes. There is no shadow-only product path, staged cohort, or
+milestone gate. Configuration activation remains an ordinary authenticated
+product operation for changing between fully executable evaluated profiles.
 Running queries and cursors stay pinned to their starting profile and freshness vector.
 Runtime safety ceilings may equal or exceed the enabled profile budgets but may not bind
 below them; otherwise activation fails because the evaluated profile cannot execute.
 
 Projection workers never enter the request dependency chain. During indexing, status may
-report bounded progress, but normal search routes immediately through the frozen PR9
+report bounded progress, but normal search routes immediately through the activated
 exact/lexical/graph fallback. Atomic activation is the first point at which a compatible
 semantic lane may appear; any failure before that point preserves the prior route and
 rank bytes.
 
 Authorization leakage, exact-tier demotion, temporal-invariant failure, or scope leakage
-prevents activation and immediately disables the candidate profile. A frozen operational
+prevents activation and immediately disables the candidate profile. An operational
 budget breach triggers the report's rollback rule. Optional retriever failure produces a
 visible partial result using the accepted lexical order; exact/lexical authority failure
 returns unavailable rather than silently substituting semantic evidence. Reranker failure
@@ -595,7 +589,7 @@ Rollback writes an audit event containing the failed profile, restored profile, 
 freshness vector, and evaluated profile revision. It does not delete vectors, rewrite fixtures, or
 alter canonical evidence. Re-enablement requires a new passing evaluation and a
 separate authorized configuration mutation.
-Integration fixtures inject each staged stop and automatic trigger: authorization
+Integration fixtures inject each failure trigger: authorization
 influence, exact-tier demotion, temporal error, scope leakage, and operational-budget
 breach. Each test asserts atomic disablement or rollback, unchanged pinned in-flight
 queries, complete authenticated audit data, and rejection of a runtime ceiling below the
@@ -614,14 +608,15 @@ evaluated profile budget.
   freshness, coverage, cap and dedupe decisions, and typed fallback reasons.
 - Exact errors, symbols, flags, paths, IDs, diagnostic codes, config keys, tool names,
   and quoted literals cannot be demoted by approximate fusion or reranking.
-- The checked-in fixture and run schemas reproduce the baseline, PR9, PR10, channel
+- The checked-in fixture and run schemas reproduce the production baseline, semantic profile, channel
   ablations, exact-scan/ANN comparison, and reranker comparison with immutable evidence.
 - Temporal correctness, authorization leakage, context precision/recall, p50/p95/p99
   latency, RSS, tokens, cost, and task completion are measured with the declared methods
   and protected strata. No aggregate score hides a failed invariant or worst stratum.
-- Semantic vectors are source-local derived projections; no monolithic embeddings table,
-  second corpus database, or cross-privacy-domain vector authority exists.
-- Search during semantic indexing returns the frozen exact/lexical/graph behavior without
+- Semantic vectors are projection-isolated derived indexes in the canonical
+  project Grafeo store. No SQLite embeddings table, source-local vector
+  database, flat scan, or cross-privacy-domain query exists.
+- Search during semantic indexing returns the activated exact/lexical/graph behavior without
   waiting. Partial, indexing, stale, failed, cancelled, and incompatible generations never
   affect rank, and semantic candidates appear only after atomic activation of a complete
   compatible generation.

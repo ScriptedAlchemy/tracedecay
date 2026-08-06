@@ -10,7 +10,7 @@ use std::time::Duration;
 #[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
@@ -26,22 +26,35 @@ use tracedecay_domain::CanonicalMessageRoleV1;
 use tracedecay_domain::PayloadAccessState;
 
 #[test]
-fn lcm_compress_public_schema_excludes_test_summarizer_modes() {
+fn lcm_lifecycle_mutations_are_not_agent_visible() {
     let tools = get_tool_definitions();
-    let compress = tools
-        .iter()
-        .find(|tool| tool.name == "tracedecay_lcm_compress")
-        .expect("tracedecay_lcm_compress definition");
-    let modes = compress.input_schema["properties"]["summarizer"]["properties"]["mode"]["enum"]
-        .as_array()
-        .expect("summarizer mode enum");
+    for removed_tool in ["tracedecay_lcm_compress", "tracedecay_lcm_session_boundary"] {
+        assert!(
+            !tools.iter().any(|tool| tool.name == removed_tool),
+            "{removed_tool} is a daemon hook-runtime lifecycle effect, not a public LCM tool"
+        );
+    }
+}
 
-    assert!(modes.iter().any(|mode| mode == "provided"));
-    assert!(modes.iter().any(|mode| mode == "hermes_auxiliary"));
-    assert!(
-        modes.iter().all(|mode| mode != "noop" && mode != "fake"),
-        "public MCP schema should not advertise test/control summarizers: {modes:?}"
-    );
+#[cfg(feature = "test-transport")]
+async fn call_lcm_hook_runtime(
+    cg: &tracedecay::tracedecay::TraceDecay,
+    action: &str,
+    mut args: Value,
+) -> tracedecay::errors::Result<tracedecay::mcp::ToolResult> {
+    args.as_object_mut()
+        .expect("hook runtime arguments must be an object")
+        .insert("action".to_string(), json!(action));
+    let runtime = open_active_project_session_db(cg).await;
+    handle_tool_call_with_runtime(
+        cg,
+        runtime.as_ref(),
+        "tracedecay_hook_runtime",
+        args,
+        None,
+        None,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -105,322 +118,34 @@ async fn lcm_project_path_selector_is_rejected_before_dispatch() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_doctor_clean_dry_run_reports_noise_and_filtered_sessions_without_mutating() {
+async fn public_lcm_preflight_does_not_persist_live_messages() {
     let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "cron-20260414",
-        "cron-20260414-message",
-        "scheduled report body that must not leak",
-        1,
-    )
-    .await;
-    seed_lcm_session_message(
-        &cg,
-        "scratch-shell-a",
-        "scratch-shell-message",
-        "scratch one-shot body that must not leak",
-        2,
-    )
-    .await;
-    seed_lcm_session_message(
-        &cg,
-        "normal-session",
-        "normal-heartbeat",
-        "Still working...",
-        3,
-    )
-    .await;
-    seed_lcm_session_message(
-        &cg,
-        "normal-session",
-        "normal-valuable",
-        "valuable payload to preserve",
-        4,
-    )
-    .await;
+    let session_id = "public-readonly-preflight";
+    assert_eq!(lcm_raw_message_count(&cg, session_id).await, 0);
 
     let result = handle_tool_call(
         &cg,
-        "tracedecay_lcm_doctor",
+        "tracedecay_lcm_preflight",
         json!({
             "provider": "cursor",
-            "mode": "clean",
-            "apply": false,
-            "ignore_session_patterns": ["cron-*"],
-            "stateless_session_patterns": ["scratch-shell-*"],
-            "ignore_message_patterns": ["Cronjob Response:*"]
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let payload: Value = serde_json::from_str(text).unwrap();
-
-    assert_eq!(payload["mode"], "clean");
-    assert_eq!(payload["dry_run"], true);
-    assert_eq!(payload["diagnostics"]["cleanup"]["read_only"], true);
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["ignored_session_candidates"],
-        1
-    );
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["stateless_session_candidates"],
-        1
-    );
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
-        0
-    );
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
-        1
-    );
-    assert_eq!(payload["diagnostics"]["cleanup"]["candidate_count"], 2);
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["heartbeat_message_candidates"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        payload["repairs"]["planned_actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|action| action["kind"] == "clean_lcm_noise")
-    );
-    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
-    assert_eq!(lcm_raw_message_count(&cg, "scratch-shell-a").await, 1);
-    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
-    assert!(!text.contains("scheduled report body that must not leak"));
-    assert!(!text.contains("scratch one-shot body that must not leak"));
-    assert!(!text.contains("Still working"));
-    assert!(!text.contains("valuable payload to preserve"));
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_doctor_clean_apply_is_denied_by_default() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "cron-20260414",
-        "cron-20260414-message",
-        "scheduled report body that must remain without explicit opt-in",
-        1,
-    )
-    .await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_doctor",
-        json!({
-            "provider": "cursor",
-            "mode": "clean",
-            "apply": true,
-            "ignore_session_patterns": ["cron-*"]
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let payload: Value = serde_json::from_str(text).unwrap();
-
-    assert_eq!(payload["status"], "denied");
-    assert_eq!(
-        payload["error"],
-        "destructive cleanup is disabled by default"
-    );
-    assert_eq!(payload["mode"], "clean");
-    assert_eq!(payload["apply"], true);
-    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 1);
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let _apply_enabled = TestEnvVarGuard::set("LCM_DOCTOR_CLEAN_APPLY_ENABLED", "true");
-    seed_lcm_session_message(
-        &cg,
-        "cron-20260414",
-        "cron-20260414-message",
-        "scheduled report body that must be deleted only after backup",
-        1,
-    )
-    .await;
-    let db = open_active_project_session_db(&cg).await;
-    let cron_store_id = rusqlite::Connection::open(project_session_db_path(&cg))
-        .unwrap()
-        .query_row(
-            "SELECT store_id FROM lcm_raw_messages
-             WHERE provider = 'cursor' AND message_id = 'cron-20260414-message'",
-            (),
-            |row| row.get(0),
-        )
-        .unwrap();
-    db.lcm_insert_summary_node_for_test(
-        HostAdmissionScope::Project,
-        LcmSummaryNodeDraft {
-            provider: "cursor".to_string(),
-            conversation_id: "cron-20260414".to_string(),
-            session_id: "cron-20260414".to_string(),
-            depth: 0,
-            summary_text: "scheduled report summary".to_string(),
-            source_refs: vec![LcmSourceRef::RawMessage {
-                store_id: cron_store_id,
+            "session_id": session_id,
+            "messages": [{
+                "id": "public-readonly-message",
+                "role": "user",
+                "content": "must not become durable transcript state"
             }],
-            source_token_count: 12,
-            summary_token_count: 3,
-            source_time_start: Some(1),
-            source_time_end: Some(2),
-            expand_hint: Some("test clean candidate".to_string()),
-            metadata_json: None,
-        },
+            "current_tokens": 50
+        }),
+        None,
+        None,
     )
     .await
     .unwrap();
-    seed_lcm_session_message(
-        &cg,
-        "normal-session",
-        "normal-heartbeat",
-        "Still working...",
-        2,
-    )
-    .await;
-    seed_lcm_session_message(
-        &cg,
-        "normal-session",
-        "normal-valuable",
-        "valuable payload to preserve",
-        3,
-    )
-    .await;
+    let payload = extract_json(&result.value);
 
-    let server = real_mcp_server(cg).await;
-    let result = handle_real_server_tool_call(
-        &server,
-        "tracedecay_lcm_doctor",
-        json!({
-            "provider": "cursor",
-            "mode": "clean",
-            "apply": true,
-            "ignore_session_patterns": ["cron-*"]
-        }),
-    )
-    .await;
-    let text = extract_real_server_text(&result);
-    let payload: Value = serde_json::from_str(text).unwrap();
-    let backup_path = payload["repairs"]["backup"]["path"]
-        .as_str()
-        .expect("clean apply should report backup path");
-
-    assert_eq!(payload["status"], "repaired");
-    assert_eq!(payload["dry_run"], false);
-    assert_eq!(payload["repairs"]["backup"]["ok"], true);
-    assert!(Path::new(backup_path).is_file());
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["heartbeat_noise_message_candidates"],
-        1
-    );
-    assert_eq!(
-        lcm_raw_message_count_at_path(Path::new(backup_path), "cron-20260414").await,
-        1
-    );
-    assert_eq!(
-        db.lcm_raw_message_count_for_test(HostAdmissionScope::Project, "cron-20260414")
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.lcm_summary_node_count_for_test(HostAdmissionScope::Project, "cron-20260414")
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        db.lcm_raw_message_count_for_test(HostAdmissionScope::Project, "normal-session")
-            .await
-            .unwrap(),
-        2
-    );
-    assert!(!text.contains("scheduled report body that must be deleted only after backup"));
-    assert!(!text.contains("Still working"));
-    assert!(!text.contains("valuable payload to preserve"));
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_samples() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let _apply_enabled = TestEnvVarGuard::set("LCM_DOCTOR_CLEAN_APPLY_ENABLED", "true");
-    let db = open_active_project_session_db(&cg).await;
-    for idx in 0..21 {
-        seed_lcm_session_message_in_db(
-            &db,
-            cg.project_root(),
-            "normal-session",
-            &format!("cron-noise-{idx}"),
-            format!("Cronjob Response: noisy heartbeat {idx}"),
-            idx + 1,
-        )
-        .await;
-    }
-    seed_lcm_session_message_in_db(
-        &db,
-        cg.project_root(),
-        "normal-session",
-        "normal-valuable",
-        "valuable payload to preserve",
-        30,
-    )
-    .await;
-
-    let server = real_mcp_server(cg).await;
-    let result = handle_real_server_tool_call(
-        &server,
-        "tracedecay_lcm_doctor",
-        json!({
-            "provider": "cursor",
-            "mode": "clean",
-            "apply": true,
-            "ignore_message_patterns": ["^Cronjob Response:"]
-        }),
-    )
-    .await;
-    let text = extract_real_server_text(&result);
-    let payload: Value = serde_json::from_str(text).unwrap();
-
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["noise_message_candidates"],
-        21
-    );
-    assert_eq!(
-        payload["diagnostics"]["cleanup"]["message_candidates"]
-            .as_array()
-            .unwrap()
-            .len(),
-        20
-    );
-    assert_eq!(
-        payload["repairs"]["applied_actions"][0]["deleted"]["raw_messages"],
-        21
-    );
-    assert_eq!(
-        db.lcm_raw_message_count_for_test(HostAdmissionScope::Project, "normal-session")
-            .await
-            .unwrap(),
-        1
-    );
-    assert!(!text.contains("Cronjob Response: noisy heartbeat"));
-    assert!(!text.contains("valuable payload to preserve"));
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["session_id"], session_id);
+    assert_eq!(lcm_raw_message_count(&cg, session_id).await, 0);
 }
 
 #[cfg(feature = "test-transport")]
@@ -474,7 +199,7 @@ async fn lcm_doctor_reports_missing_and_orphan_payloads_without_payload_bodies()
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodies() {
+async fn lcm_doctor_reports_placeholder_recovery_candidates_without_bodies() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let missing_ref = "payload_missing_placeholder_test.payload";
     let placeholder = format!(
@@ -542,92 +267,6 @@ async fn lcm_doctor_reports_placeholder_recovery_and_gc_candidates_without_bodie
     );
     let text = extract_text(&result.value);
     assert!(!text.contains("gc candidate body that must not be returned"));
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let _apply_enabled = TestEnvVarGuard::set("LCM_GC_APPLY_ENABLED", "true");
-    seed_lcm_session_message(
-        &cg,
-        "gc-preview-session",
-        "gc-preview-message",
-        "seed message for gc preview",
-        1,
-    )
-    .await;
-    let payload_dir = lcm_payload_dir(&cg);
-    fs::create_dir_all(&payload_dir).unwrap();
-    let payload_ref =
-        "payload_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.payload";
-    let payload_path = payload_dir.join(payload_ref);
-    fs::write(&payload_path, "gc mode secret body that must not leak").unwrap();
-    fs::OpenOptions::new()
-        .write(true)
-        .open(&payload_path)
-        .unwrap()
-        .set_times(
-            fs::FileTimes::new().set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
-        )
-        .unwrap();
-
-    let server = real_mcp_server(cg).await;
-    let preview = handle_real_server_tool_call(
-        &server,
-        "tracedecay_lcm_doctor",
-        json!({"provider": "cursor", "mode": "gc", "apply": false}),
-    )
-    .await;
-    let preview_text = extract_real_server_text(&preview);
-    let preview_payload: Value = serde_json::from_str(preview_text).unwrap();
-    assert_eq!(preview_payload["mode"], "gc");
-    assert_eq!(preview_payload["dry_run"], true);
-    assert_eq!(
-        preview_payload["repairs"]["gc_report"]["orphans"]["count"],
-        1
-    );
-    assert!(payload_path.is_file());
-    assert!(!preview_text.contains("gc mode secret body that must not leak"));
-
-    let apply = handle_real_server_tool_call(
-        &server,
-        "tracedecay_lcm_doctor",
-        json!({
-            "provider": "cursor",
-            "mode": "gc",
-            "apply": true
-        }),
-    )
-    .await;
-    let apply_text = extract_real_server_text(&apply);
-    let apply_payload: Value = serde_json::from_str(apply_text).unwrap();
-    assert_eq!(apply_payload["mode"], "gc");
-    assert_eq!(apply_payload["dry_run"], false);
-    assert_eq!(apply_payload["repairs"]["gc_report"]["orphans"]["count"], 1);
-    assert!(!payload_path.exists());
-    assert!(!apply_text.contains("gc mode secret body that must not leak"));
-}
-
-#[tokio::test]
-async fn lcm_doctor_gc_apply_is_denied_by_default() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_doctor",
-        json!({"provider": "cursor", "mode": "gc", "apply": true}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "denied");
-    assert_eq!(payload["mode"], "gc");
-    assert_eq!(
-        payload["repairs"]["unsafe_actions_skipped"][0]["reason"],
-        "lcm_gc_apply_disabled"
-    );
 }
 
 #[cfg(feature = "test-transport")]
@@ -939,149 +578,6 @@ async fn lcm_doctor_diagnose_does_not_create_missing_project_session_db() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-doctor-read-only-existing",
-        "lcm-doctor-read-only-existing-message",
-        "read only existing database text",
-        1,
-    )
-    .await;
-    let db = project_lcm_conn(&cg).await;
-    let server = real_mcp_server(cg).await;
-    db.clear_lcm_schema_migration_for_test(HostAdmissionScope::Project)
-        .await
-        .unwrap();
-    assert_eq!(
-        db.lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
-            .await
-            .unwrap(),
-        None
-    );
-
-    let result = handle_real_server_tool_call(
-        &server,
-        "tracedecay_lcm_doctor",
-        json!({"provider": "cursor", "mode": "repair", "apply": false}),
-    )
-    .await;
-    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
-
-    assert_eq!(payload["mode"], "repair");
-    assert_eq!(payload["dry_run"], true);
-    assert_eq!(payload["diagnostics"]["schema"]["migration_present"], false);
-    assert_eq!(
-        payload["diagnostics"]["ast_grep"]["rewrite_available"].as_bool(),
-        Some(tracedecay::mcp::tools::ast_grep_available())
-    );
-    assert_eq!(
-        payload["diagnostics"]["ast_grep"]["outline_available"].as_bool(),
-        Some(tracedecay::mcp::tools::ast_grep_outline_available())
-    );
-    assert!(
-        payload["diagnostics"]["ast_grep"]["message"].is_string(),
-        "doctor should include ast-grep install/update guidance"
-    );
-    assert_eq!(
-        db.lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
-            .await
-            .unwrap(),
-        None
-    );
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_doctor_repair_dry_run_reports_fts_rebuild_without_mutating() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-doctor-dry-run",
-        "lcm-doctor-dry-run-message",
-        "dry run searchable needle",
-        1,
-    )
-    .await;
-    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
-    wipe_lcm_raw_fts(&cg).await;
-    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_lcm_doctor",
-        json!({"provider": "cursor", "mode": "repair", "apply": false}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-
-    assert_eq!(payload["mode"], "repair");
-    assert_eq!(payload["dry_run"], true);
-    assert_eq!(payload["diagnostics"]["fts"]["rebuild_needed"], true);
-    assert!(
-        payload["repairs"]["planned_actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|action| action["kind"] == "rebuild_raw_fts")
-    );
-    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
-    close_test_graph(cg).await;
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    seed_lcm_session_message(
-        &cg,
-        "lcm-doctor-apply",
-        "lcm-doctor-apply-message",
-        "apply repair searchable needle",
-        1,
-    )
-    .await;
-    wipe_lcm_raw_fts(&cg).await;
-    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
-    let db = project_lcm_conn(&cg).await;
-
-    let server = real_mcp_server(cg).await;
-    let result = handle_real_server_tool_call(
-        &server,
-        "tracedecay_lcm_doctor",
-        json!({"provider": "cursor", "mode": "repair", "apply": true}),
-    )
-    .await;
-    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
-
-    assert_eq!(payload["status"], "repaired");
-    assert_eq!(payload["dry_run"], false);
-    let backup_path = payload["repairs"]["backup"]["path"]
-        .as_str()
-        .expect("repair apply should report backup path");
-    assert_eq!(payload["repairs"]["backup"]["ok"], true);
-    assert!(Path::new(backup_path).is_file());
-    assert!(
-        payload["repairs"]["applied_actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|action| action["kind"] == "rebuild_raw_fts")
-    );
-    assert_eq!(
-        db.lcm_raw_message_fts_count_for_test("needle")
-            .await
-            .unwrap(),
-        1
-    );
-}
-
-#[cfg(feature = "test-transport")]
-#[tokio::test]
 async fn lcm_doctor_retention_reports_candidates_without_deleting() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
@@ -1152,11 +648,13 @@ async fn lcm_tools_reject_invalid_storage_routing_arguments() {
 }
 
 #[tokio::test]
-async fn user_scoped_lcm_preflight_ingests_without_a_project() {
+async fn user_scoped_lcm_preflight_rejects_live_projection() {
     let profile = TempDir::new().unwrap();
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
-        .await
-        .unwrap();
+    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        profile.path(),
+    )
+    .await
+    .unwrap();
     let result = runtime
         .call_user_lcm_tool_for_test(
             "tracedecay_lcm_preflight",
@@ -1175,64 +673,56 @@ async fn user_scoped_lcm_preflight_ingests_without_a_project() {
             profile.path(),
         )
         .await
-        .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "ok");
-
+        .unwrap_err();
     assert!(
-        runtime
-            .lcm_load_raw_message_for_test("hermes", "untethered-message-1")
-            .await
-            .is_some()
+        result.to_string().contains(
+            "transcript_projection is only accepted by daemon hook_runtime lcm_preflight"
+        ),
+        "{result}"
     );
-    let session = runtime
-        .session_for_test(HostAdmissionScope::Profile, "hermes", "untethered-session")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(session.project_key, "user");
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn user_scoped_lcm_projection_preserves_associated_project_roots() {
-    let profile = TempDir::new().unwrap();
-    let roots = json!(["/work/alpha", "/work/beta"]);
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
-        .await
-        .unwrap();
-    runtime
-        .call_user_lcm_tool_for_test(
-            "tracedecay_lcm_preflight",
-            json!({
-            "storage_scope": "user",
-            "provider": "hermes",
-            "session_id": "multi-project-session",
+async fn hook_runtime_lcm_preflight_persists_live_projection() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let roots = json!([cg.project_root().to_string_lossy().to_string()]);
+
+    let result = call_lcm_hook_runtime(
+        &cg,
+        "lcm_preflight",
+        json!({
+            "provider": "cursor",
+            "session_id": "live-projection-session",
             "messages": [{
-                "id": "multi-project-message-1",
+                "id": "live-projection-message",
                 "role": "user",
-                "content": "Update both repositories",
+                "content": "Persist this through the internal lifecycle route",
                 "associated_project_roots": roots
             }],
-            "transcript_projection": true,
-            "format": "json"
-            }),
-            profile.path(),
-        )
-        .await
-        .unwrap();
+            "transcript_projection": true
+        }),
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
 
-    let message = runtime
-        .session_message_for_test(
-            HostAdmissionScope::Profile,
-            "hermes",
-            "multi-project-message-1",
-        )
+    assert_eq!(payload["action"], "lcm_preflight");
+    assert_eq!(payload["status"], "ok");
+    let db = open_active_project_session_db(&cg).await;
+    let message = db
+        .lcm_load_raw_message_for_test("cursor", "live-projection-message")
         .await
-        .unwrap()
-        .unwrap();
-    let metadata: Value = serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
+        .expect("hook-runtime preflight should persist the live projection");
+    let metadata: Value = serde_json::from_str(
+        message
+            .metadata_json
+            .as_deref()
+            .expect("live projection metadata"),
+    )
+    .unwrap();
     assert_eq!(metadata["associated_project_roots"], roots);
-    assert_eq!(metadata["storage_scope"], "user");
+    assert_eq!(metadata["storage_scope"], "project");
 }
 
 #[cfg(feature = "test-transport")]
@@ -1555,21 +1045,20 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     assert_eq!(preflight_payload["status"], "ok");
     assert_eq!(preflight_payload["should_compress"], false);
 
-    let compress = handle_tool_call(
+    let compress = call_lcm_hook_runtime(
         &cg,
-        "tracedecay_lcm_compress",
+        "lcm_compact",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
             "messages": [{"id": "active-compress", "role": "user", "content": "hello again"}],
             "summarizer": {"mode": "noop"}
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
     let compress_payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
+    assert_eq!(compress_payload["action"], "lcm_compact");
     assert_eq!(compress_payload["status"], "ok");
     assert_eq!(compress_payload["summary_nodes_created"], 0);
     assert_eq!(compress_payload["compression_attempts"], 0);
@@ -1580,9 +1069,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     );
     assert_eq!(compress_payload["retry_status"], Value::Null);
 
-    let unsafe_noop_compress = handle_tool_call(
+    let unsafe_noop_compress = call_lcm_hook_runtime(
         &cg,
-        "tracedecay_lcm_compress",
+        "lcm_compact",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
@@ -1593,8 +1082,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "leaf_chunk_tokens": 1,
             "summarizer": {"mode": "noop"}
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -1615,9 +1102,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         "hermes_auxiliary"
     );
 
-    let reserve_cap_noop_compress = handle_tool_call(
+    let reserve_cap_noop_compress = call_lcm_hook_runtime(
         &cg,
-        "tracedecay_lcm_compress",
+        "lcm_compact",
         json!({
             "provider": "cursor",
             "session_id": "lcm-session",
@@ -1629,8 +1116,6 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "leaf_chunk_tokens": 1,
             "summarizer": {"mode": "noop"}
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -1666,9 +1151,9 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         .await;
     }
 
-    let critical_compress = handle_tool_call(
+    let critical_compress = call_lcm_hook_runtime(
         &cg,
-        "tracedecay_lcm_compress",
+        "lcm_compact",
         json!({
             "provider": "cursor",
             "session_id": "lcm-critical-session",
@@ -1679,13 +1164,12 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "max_source_messages": 3,
             "summarizer": {"mode": "fake", "summary_text": "catchup summary"}
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
     let critical_payload: Value =
         serde_json::from_str(extract_text(&critical_compress.value)).unwrap();
+    assert_eq!(critical_payload["action"], "lcm_compact");
     assert_eq!(critical_payload["status"], "ok");
     assert_eq!(critical_payload["reason"], "forced_overflow_recovery");
     assert_eq!(critical_payload["summary_nodes_created"], 4);
@@ -1699,7 +1183,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
+async fn hook_runtime_lcm_compact_without_summarizer_requests_auxiliary_summary() {
     let (cg, _env, _dir) = setup_empty_project().await;
     for (index, content) in [
         "historical planning context alpha beta gamma",
@@ -1719,9 +1203,9 @@ async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
         .await;
     }
 
-    let compress = handle_tool_call(
+    let compress = call_lcm_hook_runtime(
         &cg,
-        "tracedecay_lcm_compress",
+        "lcm_compact",
         json!({
             "provider": "cursor",
             "session_id": "lcm-default-summarizer-session",
@@ -1732,13 +1216,12 @@ async fn lcm_compress_without_summarizer_requests_auxiliary_summary() {
             "leaf_chunk_tokens": 1,
             "max_assembly_tokens": 20
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&compress.value)).unwrap();
 
+    assert_eq!(payload["action"], "lcm_compact");
     assert_eq!(payload["status"], "needs_summary");
     assert_eq!(payload["reason"], "hermes_auxiliary_not_available");
     assert_eq!(payload["summary_nodes_created"], 0);
@@ -1866,7 +1349,7 @@ async fn lcm_preflight_structured_replay_content_is_bounded_for_mcp() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() {
+async fn hook_runtime_lcm_session_boundary_records_cooldown_for_skipped_carry_over() {
     let (cg, _env, _dir) = setup_empty_project().await;
     for (index, content) in ["old-1 token", "old-2 token", "fresh-1", "fresh-2"]
         .iter()
@@ -1882,9 +1365,9 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
         .await;
     }
 
-    let boundary = handle_tool_call(
+    let boundary = call_lcm_hook_runtime(
         &cg,
-        "tracedecay_lcm_session_boundary",
+        "lcm_session_boundary",
         json!({
             "provider": "cursor",
             "session_id": "lcm-boundary-session",
@@ -1892,12 +1375,11 @@ async fn lcm_session_boundary_handler_records_cooldown_for_skipped_carry_over() 
             "boundary_reason": "compression",
             "bound_session_id": "lcm-bound-session"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
     let boundary_payload: Value = serde_json::from_str(extract_text(&boundary.value)).unwrap();
+    assert_eq!(boundary_payload["action"], "lcm_session_boundary");
     assert_eq!(boundary_payload["status"], "ok");
     assert_eq!(boundary_payload["recorded"], true);
     assert_eq!(
@@ -2812,7 +2294,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
     let mut projections = Vec::new();
-    for index in 1..=4 {
+    for index in 1..=51 {
         let message_id = format!("page-msg-{index}");
         projections.push(
             seed_temporal_lcm_session_message(
@@ -2843,10 +2325,10 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
                         store_id: *store_id,
                     })
                     .collect(),
-                source_token_count: 16,
+                source_token_count: 204,
                 summary_token_count: 2,
                 source_time_start: Some(1),
-                source_time_end: Some(4),
+                source_time_end: Some(51),
                 expand_hint: Some("pagination test".to_string()),
                 metadata_json: None,
             },
@@ -2871,9 +2353,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
         json!({
             "provider": "cursor",
             "session_id": "lcm-page-session",
-            "target": {"kind": "summary_node", "node_id": summary_id},
-            "source_offset": 1,
-            "source_limit": 2
+            "target": {"kind": "summary_node", "node_id": summary_id}
         }),
     )
     .await;
@@ -2881,23 +2361,18 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
 
     assert_eq!(payload["status"], "ok", "{payload}");
     let sources = payload["expansion"]["summary_sources"].as_array().unwrap();
-    assert_eq!(sources.len(), 2);
-    assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[1]));
-    assert_eq!(sources[1]["raw_message"]["store_id"], json!(store_ids[2]));
-    for (source, expected_body) in sources
-        .iter()
-        .zip(["paged source body 2", "paged source body 3"])
-    {
-        assert_eq!(source["state"], "available", "{source}");
-        assert_eq!(source["content"], expected_body, "{source}");
-        assert_eq!(source["raw_message"]["content"], expected_body, "{source}");
-    }
+    assert_eq!(sources.len(), 50);
+    assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[0]));
+    assert_eq!(sources[49]["raw_message"]["store_id"], json!(store_ids[49]));
+    assert_eq!(sources[0]["state"], "available");
+    assert_eq!(sources[0]["content"], "paged source body 1");
+    assert_eq!(sources[49]["content"], "paged source body 50");
     let pagination = &payload["expansion"]["source_pagination"];
-    assert_eq!(pagination["source_offset"], 1);
-    assert_eq!(pagination["source_limit"], 2);
-    assert_eq!(pagination["returned_sources"], 2);
-    assert_eq!(pagination["total_sources"], 4);
-    assert_eq!(pagination["next_source_offset"], 3);
+    assert!(pagination.get("source_offset").is_none());
+    assert!(pagination.get("source_limit").is_none());
+    assert!(pagination.get("next_source_offset").is_none());
+    assert_eq!(pagination["returned_sources"], 50);
+    assert_eq!(pagination["total_sources"], 51);
     assert_eq!(pagination["has_more"], true);
     assert_eq!(pagination["remaining_sources"], 1);
     assert_eq!(payload["grain"], "summary");
@@ -2916,7 +2391,6 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": summary_id},
-            "source_limit": 2,
             "cursor": format!("{cursor}00")
         }),
     )
@@ -2931,7 +2405,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": summary_id},
-            "source_limit": 1,
+            "content_limit": 1,
             "cursor": cursor
         }),
     )
@@ -2946,7 +2420,6 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": "summary.missing"},
-            "source_limit": 2,
             "cursor": cursor
         }),
     )
@@ -2965,7 +2438,6 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": summary_id},
-            "source_limit": 2,
             "cursor": cursor
         }),
     )
@@ -2973,7 +2445,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     let continued: Value = serde_json::from_str(extract_real_server_text(&continued)).unwrap();
     assert_eq!(
         continued["expansion"]["summary_sources"][0]["raw_message"]["store_id"],
-        json!(store_ids[3])
+        json!(store_ids[50])
     );
     assert_eq!(
         continued["expansion"]["summary_sources"][0]["state"],
@@ -2981,15 +2453,20 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     );
     assert_eq!(
         continued["expansion"]["summary_sources"][0]["content"],
-        "paged source body 4"
+        "paged source body 51"
     );
     assert_eq!(
         continued["expansion"]["summary_sources"][0]["raw_message"]["content"],
-        "paged source body 4"
+        "paged source body 51"
     );
     assert_eq!(
-        continued["expansion"]["source_pagination"]["source_offset"],
-        3
+        continued["expansion"]["source_pagination"]["returned_sources"],
+        1
+    );
+    assert!(
+        continued["expansion"]["source_pagination"]
+            .get("source_offset")
+            .is_none()
     );
     assert!(continued["next_cursor"].is_null());
 
@@ -3454,7 +2931,7 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn lcm_compress_handler_honors_incremental_max_depth_override() {
+async fn hook_runtime_lcm_compact_honors_incremental_max_depth_override() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let mut store_ids = Vec::new();
     for index in 1..=6 {
@@ -3511,9 +2988,9 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
     .await
     .expect("lifecycle state should update");
 
-    let result = handle_tool_call(
+    let result = call_lcm_hook_runtime(
         &cg,
-        "tracedecay_lcm_compress",
+        "lcm_compact",
         json!({
             "provider": "cursor",
             "session_id": "lcm-depth-session",
@@ -3522,13 +2999,12 @@ async fn lcm_compress_handler_honors_incremental_max_depth_override() {
             "incremental_max_depth": 2,
             "summarizer": {"mode": "fake", "summary_text": "depth-two condensation"}
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
 
+    assert_eq!(payload["action"], "lcm_compact");
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["reason"], "condensed_summary_nodes");
     assert_eq!(payload["summary_nodes_created"], 1);

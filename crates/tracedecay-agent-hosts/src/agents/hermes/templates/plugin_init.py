@@ -266,18 +266,6 @@ LCM_NATIVE_SCHEMAS = [
                     "description": "Optional session id override (for example, expand a cross-session grep hit in its owning session).",
                 },
                 "max_tokens": {"type": "integer", "description": "Token budget for returned content.", "default": 4000},
-                "source_offset": {
-                    "type": "integer",
-                    "description": "Source pagination offset for node_id mode.",
-                    "default": 0,
-                },
-                "source_limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "default": 50,
-                    "description": "Maximum immediate sources to return from source_offset. If a returned source marks content_truncated=true, continue from its own store_id + content_offset.",
-                },
                 "content_offset": {
                     "type": "integer",
                     "description": "Character offset used to continue oversized content.",
@@ -351,7 +339,7 @@ LCM_NATIVE_SCHEMAS = [
     },
     {
         "name": "lcm_doctor",
-        "description": "Run diagnostics on the LCM database/configuration, including payload GC preview/apply via gc mode.",
+        "description": "Run read-only diagnostics on the LCM database/configuration.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
@@ -360,21 +348,15 @@ LCM_NATIVE_SCHEMAS = [
 # in-memory ``messages`` list to plugin tool handlers (their schemas carry a
 # ``messages`` parameter used for lossless LCM ingest). Everything else in
 # TOOL_SCHEMAS works without that capability.
-MESSAGE_DEPENDENT_TOOLS = frozenset((
-    "tracedecay_lcm_compress",
-    "tracedecay_lcm_preflight",
-))
+MESSAGE_DEPENDENT_TOOLS = frozenset()
 
 STANDARD_HERMES_LCM_PROVIDER = "hermes"
 
 LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
-    "tracedecay_lcm_compress",
     "tracedecay_lcm_describe",
     "tracedecay_lcm_doctor",
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_session_boundary",
 ))
 
 # Direct duplicates of the memory provider's own tool surface
@@ -828,6 +810,11 @@ def call_tracedecay_json(name: str, args: dict, **kwargs) -> dict:
             "raw_preview": _bridge_preview(raw),
         }
     return payload
+
+def call_tracedecay_hook_json(action: str, args: dict, **kwargs) -> dict:
+    routed = dict(args or {})
+    routed["action"] = action
+    return call_tracedecay_json("tracedecay_hook_runtime", routed, **kwargs)
 
 def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -> dict:
     for schema in schemas.TOOL_SCHEMAS:
@@ -1743,25 +1730,6 @@ def _lcm_config_args(config, hermes_home=None, runtime_context_length=None) -> d
     return {key: value for key, value in args.items() if value is not None}
 
 
-def _lcm_gc_config_args(config):
-    gc_config = {}
-    for env_key, name, default in (
-        ("LCM_PAYLOAD_GC_GRACE_SECONDS", "grace_seconds", None),
-        ("LCM_PAYLOAD_REAP_MISSING_METADATA_AFTER_SECONDS", "reap_missing_after", None),
-        ("LCM_PAYLOAD_REAP_MISSING_METADATA_ENABLED", "reap_missing_enabled", None),
-        ("LCM_PAYLOAD_GC_MAX_BATCH_SIZE", "max_batch_size", None),
-        ("LCM_PAYLOAD_GC_BACKUP_BEFORE_REAP", "backup_before_reap", None),
-        ("LCM_PAYLOAD_GC_INTERVAL_SECONDS", "interval_seconds", None),
-        ("LCM_PAYLOAD_GC_ENABLED", "gc_enabled", None),
-    ):
-        if name.endswith("enabled") or name == "backup_before_reap":
-            value = _lcm_bool_setting(config, env_key, name, default=default)
-        else:
-            value = _lcm_int_setting(config, env_key, name, default=default)
-        if value is not None:
-            gc_config[name] = value
-    return {"gc_config": gc_config} if gc_config else {}
-
 def _lcm_expansion_model(config):
     value = _lcm_str_setting(config, "LCM_EXPANSION_MODEL", "expansion_model", default="")
     return str(value or "").strip()
@@ -2611,6 +2579,13 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
         translated.pop("externalized_ref", None)
         return translated
     if native_name == "lcm_expand":
+        if "source_offset" in translated or "source_limit" in translated:
+            return {
+                "error": (
+                    "lcm_expand numeric source pagination is unsupported; "
+                    "continue with the authenticated opaque cursor"
+                )
+            }
         if "target" not in translated:
             target, error = _native_expand_target(translated)
             if error is not None:
@@ -2620,8 +2595,6 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
         for public_key in ("node_id", "store_id", "externalized_ref"):
             translated.pop(public_key, None)
         if translated["target"]["kind"] != "summary_node":
-            translated.pop("source_offset", None)
-            translated.pop("source_limit", None)
             translated.pop("cursor", None)
         content_limit = _tokens_from_native_max(translated.pop("max_tokens", None))
         if content_limit is not None and "content_limit" not in translated:
@@ -2985,8 +2958,8 @@ class TraceDecayContextEngine(ContextEngine):
         if bound_session_id:
             args["bound_session_id"] = bound_session_id
         try:
-            tools.call_tracedecay_tool(
-                "tracedecay_lcm_session_boundary",
+            call_tracedecay_hook_json(
+                "lcm_session_boundary",
                 args,
                 **_project_call_kwargs(self.project_root),
             )
@@ -3046,8 +3019,8 @@ class TraceDecayContextEngine(ContextEngine):
             "ignore_message_patterns",
         ))
         args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
-        return call_tracedecay_json(
-            "tracedecay_lcm_preflight",
+        return call_tracedecay_hook_json(
+            "lcm_preflight",
             args,
             **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
         )
@@ -3120,7 +3093,6 @@ class TraceDecayContextEngine(ContextEngine):
 
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
-        args.update(_lcm_gc_config_args(self.config))
         args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         return call_tracedecay_json(
             "tracedecay_lcm_status",
@@ -3216,8 +3188,8 @@ class TraceDecayContextEngine(ContextEngine):
         ))
         args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         try:
-            tools.call_tracedecay_tool(
-                "tracedecay_lcm_preflight",
+            call_tracedecay_hook_json(
+                "lcm_preflight",
                 args,
                 **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
             )
@@ -3245,10 +3217,6 @@ class TraceDecayContextEngine(ContextEngine):
             return json.dumps({"error": tool_args["error"]})
         if tracedecay_name in LCM_PROVIDER_LOCAL_TOOL_NAMES:
             tool_args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
-        if tracedecay_name == "tracedecay_lcm_compress" and self.project_root:
-            tool_args.setdefault("response_handle_project_root", self.project_root)
-        if native_name in ("lcm_status", "lcm_doctor"):
-            tool_args.update(_lcm_gc_config_args(self.config))
         if self.active_session_id:
             tool_args.setdefault("session_id", self.active_session_id)
         tool_args = _lcm_store_args(
@@ -3784,8 +3752,8 @@ class TraceDecayContextEngine(ContextEngine):
         attempt_args = dict(args)
 
         while attempts < max_auxiliary_attempts:
-            first = call_tracedecay_json(
-                "tracedecay_lcm_compress", attempt_args, **tool_kwargs
+            first = call_tracedecay_hook_json(
+                "lcm_compact", attempt_args, **tool_kwargs
             )
             if _compression_replay_is_compacted(first):
                 return _with_auxiliary_metadata(
@@ -3859,8 +3827,8 @@ class TraceDecayContextEngine(ContextEngine):
                 "summary_text": summary["text"],
                 "route": provided_route,
             }
-            result = call_tracedecay_json(
-                "tracedecay_lcm_compress", provided_args, **tool_kwargs
+            result = call_tracedecay_hook_json(
+                "lcm_compact", provided_args, **tool_kwargs
             )
             if _compression_replay_is_compacted(result):
                 result = _compacted_lcm_result_error(result)
@@ -4058,8 +4026,8 @@ class TracedecayMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None):
         """Persist the completed turn into the LCM raw store.
 
-        Uses tracedecay_lcm_preflight's lossless active-message ingest (the
-        same content-cursored path the context engine uses), so the raw
+        Uses the daemon lcm_preflight hook's lossless active-message ingest
+        (the same content-cursored path the context engine uses), so the raw
         store grows every turn instead of only when compression fires.
         """
         project_roots = _turn_project_roots(messages, self.hermes_home)
@@ -4101,8 +4069,8 @@ class TracedecayMemoryProvider(MemoryProvider):
                 "transcript_projection": True,
             }, project_root)
             try:
-                result = call_tracedecay_json(
-                    "tracedecay_lcm_preflight",
+                result = call_tracedecay_hook_json(
+                    "lcm_preflight",
                     args,
                     **_project_call_kwargs(project_root),
                 )

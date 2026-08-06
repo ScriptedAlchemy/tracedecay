@@ -1,21 +1,17 @@
-//! Migration, credential, revision, and audit persistence tests.
+//! Credential, revision, and audit persistence tests.
 
-use super::super::migration_store::commit_initial_migration_transaction;
 use super::super::mutation::{commit_configuration_transaction, validate_commit_bindings};
 use super::super::{
     AuthorizedActor, ConfigurationControlStore, ConfigurationError, ConfigurationStoreError,
     CredentialWritePort, params,
 };
 use super::{
-    ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationRevisionId,
-    ConfigurationSqlStore, ConfigurationValueV1, GlobalDbConfigurationControlStore,
-    HostAdmissionScope, TestConnection, TransactionBehavior, UtcMicros,
-    WriteOnlyCredentialMutation, control_authority, count, direct_project_layer, global_setup, id,
-    migration_fixture, protected_commit, root_revision, seed_revision, setup,
+    ConfigurationAuditEventKindV1, ConfigurationSqlStore, ConfigurationValueV1,
+    GlobalDbConfigurationControlStore, HostAdmissionScope, TestConnection, TransactionBehavior,
+    UtcMicros, WriteOnlyCredentialMutation, control_authority, count, direct_project_layer,
+    global_setup, id, protected_commit, root_revision, seed_revision, setup,
 };
 use crate::configuration::contracts::DirectConfigurationMutation;
-use crate::configuration::migration::ConfigurationMigrationStore;
-use std::collections::BTreeSet;
 use tracedecay_domain::configuration::{
     ConfigurationMutationOperationV1, CredentialKindV1, SettingKey,
 };
@@ -144,144 +140,6 @@ async fn credential_references_are_opaque_and_activation_failure_preserves_last_
         state.activation_error_code.as_deref(),
         Some("gateway_activation_failed")
     );
-}
-
-#[tokio::test]
-async fn production_migration_store_commits_revision_quarantine_receipt_and_audit_atomically() {
-    let (_directory, connection) = setup().await;
-    let store = ConfigurationSqlStore::new(&connection);
-    let (receipt, resolution, quarantine) = migration_fixture();
-
-    store
-        .commit_initial_migration(&receipt, &resolution, &quarantine)
-        .await
-        .unwrap();
-
-    assert_eq!(count(&connection, "configuration_revisions").await, 1);
-    let expected_entry_count = resolution
-        .snapshot
-        .effective_values
-        .keys()
-        .chain(resolution.snapshot.provenance.keys())
-        .collect::<BTreeSet<_>>()
-        .len();
-    assert_eq!(
-        count(&connection, "configuration_entries").await,
-        i64::try_from(expected_entry_count).unwrap()
-    );
-    assert_eq!(
-        count(&connection, "configuration_migration_quarantine").await,
-        1
-    );
-    assert_eq!(
-        count(&connection, "configuration_migration_receipts").await,
-        1
-    );
-    assert_eq!(count(&connection, "configuration_audit_events").await, 1);
-    assert_eq!(
-        count(&connection, "configuration_topology_policies").await,
-        1
-    );
-    assert!(count(&connection, "configuration_topology_protected_refs").await > 0);
-    assert_eq!(
-        store.current_revision().await.unwrap().snapshot,
-        resolution.snapshot
-    );
-    assert!(matches!(
-        store.audit(None, 1).await.unwrap().as_slice(),
-        [ConfigurationAuditEvent {
-            event_kind: ConfigurationAuditEventKindV1::Recovered,
-            ..
-        }]
-    ));
-}
-
-#[tokio::test]
-async fn production_migration_store_replays_exact_receipt_idempotently() {
-    let (_directory, connection) = setup().await;
-    let store = ConfigurationSqlStore::new(&connection);
-    let (receipt, resolution, quarantine) = migration_fixture();
-
-    store
-        .commit_initial_migration(&receipt, &resolution, &quarantine)
-        .await
-        .unwrap();
-    store
-        .commit_initial_migration(&receipt, &resolution, &quarantine)
-        .await
-        .unwrap();
-
-    assert_eq!(count(&connection, "configuration_revisions").await, 1);
-    assert_eq!(
-        count(&connection, "configuration_migration_receipts").await,
-        1
-    );
-    assert_eq!(count(&connection, "configuration_audit_events").await, 1);
-}
-
-#[tokio::test]
-async fn production_migration_store_rejects_conflicting_replay() {
-    let (_directory, connection) = setup().await;
-    let store = ConfigurationSqlStore::new(&connection);
-    let (receipt, resolution, quarantine) = migration_fixture();
-    store
-        .commit_initial_migration(&receipt, &resolution, &quarantine)
-        .await
-        .unwrap();
-
-    let mut conflicting = receipt;
-    conflicting.initial_revision_id =
-        ConfigurationRevisionId::new("configuration.revision.conflict").unwrap();
-    assert!(
-        store
-            .commit_initial_migration(&conflicting, &resolution, &quarantine)
-            .await
-            .is_err()
-    );
-    assert_eq!(count(&connection, "configuration_revisions").await, 1);
-    assert_eq!(count(&connection, "configuration_audit_events").await, 1);
-}
-
-#[tokio::test]
-async fn injected_crash_rolls_back_every_migration_table() {
-    let (directory, connection) = setup().await;
-    let (receipt, resolution, quarantine) = migration_fixture();
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .await
-        .unwrap();
-
-    assert!(
-        commit_initial_migration_transaction(
-            &transaction,
-            &receipt,
-            &resolution,
-            &quarantine,
-            true,
-        )
-        .await
-        .is_err()
-    );
-    drop(transaction);
-    drop(connection);
-
-    let connection = TestConnection::open(&directory.path().join("configuration.db"));
-    connection
-        .execute_batch("PRAGMA foreign_keys = ON;")
-        .await
-        .unwrap();
-
-    assert_eq!(count(&connection, "configuration_revisions").await, 0);
-    assert_eq!(count(&connection, "configuration_entries").await, 0);
-    assert_eq!(
-        count(&connection, "configuration_migration_quarantine").await,
-        0
-    );
-    assert_eq!(
-        count(&connection, "configuration_migration_receipts").await,
-        0
-    );
-    assert_eq!(count(&connection, "configuration_audit_events").await, 0);
 }
 
 #[tokio::test]

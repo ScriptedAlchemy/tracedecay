@@ -12,6 +12,8 @@ mod refresh;
 /// LCM compatibility rendering over one frozen registered-store snapshot. The
 /// DB-free shaping it applies is owned by [`self::render`].
 mod registered_lcm_render;
+pub(crate) mod relation_publication;
+pub mod relations;
 pub mod render;
 mod retrieval;
 mod schema;
@@ -61,7 +63,7 @@ pub use doctor_health::{
 };
 pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};
-pub use schema::{ensure_session_temporal_schema, repair_session_temporal_state};
+pub use schema::ensure_session_temporal_schema;
 pub use store::GlobalDbSessionTemporalStore;
 
 impl RegisteredGlobalDb {
@@ -260,6 +262,9 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
                 Err(SessionTemporalExecutionError::Cancelled) => {
                     return Err(SessionTemporalExecutionError::Cancelled);
                 }
+                Err(SessionTemporalExecutionError::DeadlineExceeded) => {
+                    return Err(SessionTemporalExecutionError::DeadlineExceeded);
+                }
                 Err(_) => {
                     resolutions.push(Err(HydrationStateV1::RetainedButUnavailable));
                 }
@@ -329,7 +334,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         &self,
         snapshot: &TemporalExecutionSnapshot,
         binding: &str,
-        next_source_offset: usize,
+        boundary: &LcmSourceRef,
     ) -> Result<String, SessionTemporalExecutionError> {
         let read = self
             .db
@@ -339,12 +344,8 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         let authenticator = GlobalDbCursorKeyProvider::from_registered_snapshot(&read, snapshot)
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        encode_cursor(
-            snapshot,
-            &lcm_source_cursor_sort_key(binding, next_source_offset),
-            &authenticator,
-        )
-        .map_err(map_lcm_cursor_error)
+        let sort_key = lcm_source_cursor_sort_key(binding, boundary)?;
+        encode_cursor(snapshot, &sort_key, &authenticator).map_err(map_lcm_cursor_error)
     }
 
     pub async fn decode_lcm_source_cursor(
@@ -352,7 +353,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         snapshot: &TemporalExecutionSnapshot,
         binding: &str,
         encoded: &str,
-    ) -> Result<usize, SessionTemporalExecutionError> {
+    ) -> Result<LcmSourceRef, SessionTemporalExecutionError> {
         let read = self
             .db
             .read_snapshot()
@@ -363,7 +364,30 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         let sort_key =
             verify_cursor(encoded, snapshot, &authenticator).map_err(map_lcm_cursor_error)?;
-        parse_lcm_source_cursor_offset(binding, &sort_key)
+        parse_lcm_source_cursor_boundary(binding, &sort_key)
+    }
+
+    pub async fn lcm_source_offset_after(
+        &self,
+        provider: &str,
+        session_id: &SessionId,
+        node_id: &str,
+        boundary: &LcmSourceRef,
+    ) -> Result<usize, SessionTemporalExecutionError> {
+        let snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        registered_lcm_render::source_offset_after(
+            &snapshot,
+            provider,
+            session_id.as_str(),
+            node_id,
+            boundary,
+        )
+        .await
+        .map_err(map_lcm_error)
     }
 
     async fn freeze(
@@ -736,9 +760,11 @@ fn map_control_error(
     error: tracedecay_temporal_query::ports::TemporalPortError,
 ) -> SessionTemporalExecutionError {
     match error {
-        tracedecay_temporal_query::ports::TemporalPortError::Cancelled
-        | tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
+        tracedecay_temporal_query::ports::TemporalPortError::Cancelled => {
             SessionTemporalExecutionError::Cancelled
+        }
+        tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
+            SessionTemporalExecutionError::DeadlineExceeded
         }
         tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
             SessionTemporalExecutionError::BudgetExhausted
@@ -772,29 +798,32 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
     }
 }
 
-fn lcm_source_cursor_sort_key(binding: &str, next_source_offset: usize) -> StableSortKey {
-    StableSortKey {
+fn lcm_source_cursor_sort_key(
+    binding: &str,
+    boundary: &LcmSourceRef,
+) -> Result<StableSortKey, SessionTemporalExecutionError> {
+    let boundary =
+        serde_json::to_string(boundary).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    Ok(StableSortKey {
         normalized_score_micros: 0,
         knowledge_at_micros: 0,
-        stable_id: format!("lcm-source:{binding}:{next_source_offset}"),
-    }
+        stable_id: format!("lcm-source:{binding}:{boundary}"),
+    })
 }
 
-fn parse_lcm_source_cursor_offset(
+fn parse_lcm_source_cursor_boundary(
     binding: &str,
     sort_key: &StableSortKey,
-) -> Result<usize, SessionTemporalExecutionError> {
+) -> Result<LcmSourceRef, SessionTemporalExecutionError> {
     if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
         return Err(SessionTemporalExecutionError::Denied);
     }
     let prefix = format!("lcm-source:{binding}:");
-    let offset = sort_key
+    let boundary = sort_key
         .stable_id
         .strip_prefix(&prefix)
         .ok_or(SessionTemporalExecutionError::Denied)?;
-    offset
-        .parse()
-        .map_err(|_| SessionTemporalExecutionError::Denied)
+    serde_json::from_str(boundary).map_err(|_| SessionTemporalExecutionError::Denied)
 }
 
 fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
@@ -926,6 +955,35 @@ mod participant_access_tests {
             None
         );
         assert_eq!(participant_source_access(Some("{"), 100), None);
+    }
+}
+
+#[cfg(test)]
+mod lcm_cursor_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_boundary_is_a_stable_source_identity_not_an_offset() {
+        let binding = "sha256:binding";
+        let boundary = LcmSourceRef::SummaryNode {
+            node_id: "summary:child".to_string(),
+        };
+        let sort_key = lcm_source_cursor_sort_key(binding, &boundary).unwrap();
+
+        assert_eq!(
+            parse_lcm_source_cursor_boundary(binding, &sort_key).unwrap(),
+            boundary
+        );
+
+        let old_offset_key = StableSortKey {
+            normalized_score_micros: 0,
+            knowledge_at_micros: 0,
+            stable_id: format!("lcm-source:{binding}:7"),
+        };
+        assert!(matches!(
+            parse_lcm_source_cursor_boundary(binding, &old_offset_key),
+            Err(SessionTemporalExecutionError::Denied)
+        ));
     }
 }
 

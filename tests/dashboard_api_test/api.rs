@@ -271,10 +271,8 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         );
         assert_eq!(status, 200);
         assert!(
-            memory_status["feedback_history_repair"]["state"].is_string()
-                && memory_status["feedback_history_repair"]["processed"].is_number()
-                && memory_status["feedback_history_repair"]["remaining"].is_number(),
-            "status must expose authoritative feedback-history repair progress: {memory_status}"
+            memory_status.get("feedback_history_repair").is_none(),
+            "final-V2 status must not expose a legacy feedback-history repair state: {memory_status}"
         );
 
         let (status, projection) = get_json(
@@ -534,6 +532,12 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
             .as_array()
             .unwrap_or_else(|| panic!("expected trust_history array: {history}"));
         assert_eq!(trail.len(), 2);
+        assert!(
+            trail.iter().all(|event| event["result_id"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("fact-event.v1."))),
+            "feedback history must expose typed result identities: {history}"
+        );
         assert!(trail[0]["timestamp"].is_number());
         assert_eq!(trail[0]["action"], "helpful");
         assert_eq!(trail[0]["old_trust"], 0.71);
@@ -552,6 +556,10 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
         assert_eq!(trail[1]["old_trust"], 0.76);
         assert_eq!(trail[1]["new_trust"], 0.66);
         assert!(trail[1]["note"].is_null());
+        assert!(
+            history.get("repair").is_none(),
+            "current feedback history must not expose a removed legacy repair state: {history}"
+        );
 
         let (status, empty_history) = get_json(
             &agent,

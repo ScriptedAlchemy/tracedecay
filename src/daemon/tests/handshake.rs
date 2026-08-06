@@ -155,8 +155,6 @@ fn missing_index_classifier_covers_every_auto_init_store_miss() {
     let missing_messages = [
         "no TraceDecay index found at '/repo'",
         "no TraceDecay database found at '/repo/store.db'",
-        "parent DB not found at '/repo/branches/main.db'",
-        "parent branch 'main' has no DB",
     ];
     for message in missing_messages {
         let error = crate::errors::TraceDecayError::Config {

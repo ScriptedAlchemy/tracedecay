@@ -61,7 +61,7 @@ pub(crate) struct StateCache {
     entities_by_node: HashMap<NodeId, StableKey>,
     relations_by_edge: HashMap<EdgeId, StableKey>,
     relations_by_entity: HashMap<StableKey, BTreeSet<StableKey>>,
-    watermarks: BTreeMap<StableKey, (u64, GraphWatermark)>,
+    commits: BTreeMap<StableKey, GraphCommit>,
     publications: BTreeMap<StableKey, StoredPublication>,
 }
 
@@ -170,14 +170,14 @@ impl StateCache {
 
         let commits: Vec<StoredCommit> =
             load_labeled_payloads(database, COMMIT_LABEL, "commit payload")?;
-        let mut watermarks = BTreeMap::new();
+        let mut commits_by_projection = BTreeMap::new();
         for stored in commits {
             let key = stable_key(&stored.namespace, stored.projection.as_str());
-            let replace = watermarks
+            let replace = commits_by_projection
                 .get(&key)
-                .is_none_or(|(sequence, _)| *sequence < stored.commit.sequence);
+                .is_none_or(|current: &GraphCommit| current.sequence < stored.commit.sequence);
             if replace {
-                watermarks.insert(key, (stored.commit.sequence, stored.commit.watermark));
+                commits_by_projection.insert(key, stored.commit);
             }
         }
         let stored_publications: Vec<StoredPublication> =
@@ -199,7 +199,7 @@ impl StateCache {
             entities_by_node,
             relations_by_edge,
             relations_by_entity,
-            watermarks,
+            commits: commits_by_projection,
             publications,
         })
     }
@@ -282,9 +282,18 @@ impl StateCache {
         namespace: &GraphNamespace,
         projection: &GraphProjectionId,
     ) -> Option<&GraphWatermark> {
-        self.watermarks
+        self.commits
             .get(&stable_key(namespace, projection.as_str()))
-            .map(|(_, watermark)| watermark)
+            .map(|commit| &commit.watermark)
+    }
+
+    pub(crate) fn latest_commit(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+    ) -> Option<&GraphCommit> {
+        self.commits
+            .get(&stable_key(namespace, projection.as_str()))
     }
 
     pub(crate) fn publication(
@@ -297,9 +306,9 @@ impl StateCache {
 
     pub(crate) fn record_commit(&mut self, stored: StoredCommit) {
         self.sequence = stored.commit.sequence;
-        self.watermarks.insert(
+        self.commits.insert(
             stable_key(&stored.namespace, stored.projection.as_str()),
-            (stored.commit.sequence, stored.commit.watermark.clone()),
+            stored.commit,
         );
     }
 

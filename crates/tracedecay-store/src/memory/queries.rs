@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactLineageEventV1, FactOwnerV1,
-    LocatorDigest, RetrievalAnchorId, SourceStoreId, UtcMicros,
+    FeedbackResultId, LocatorDigest, RetrievalAnchorId, SourceStoreId, UtcMicros,
 };
 
 use super::{
@@ -629,30 +629,39 @@ impl CompatibilityFactHistoryQueryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackHistoryQueryV1 {
-    target: CompatibilityFactTargetV1,
-    after: Option<FactLineageCursor>,
+pub struct FactFeedbackHistoryQuery {
+    owner: FactOwnerV1,
+    fact_id: FactId,
+    after: Option<FeedbackResultId>,
     limit: usize,
 }
 
-impl CompatibilityFactFeedbackHistoryQueryV1 {
+impl FactFeedbackHistoryQuery {
     pub fn new(
-        target: CompatibilityFactTargetV1,
-        after: Option<FactLineageCursor>,
+        owner: FactOwnerV1,
+        fact_id: FactId,
+        after: Option<FeedbackResultId>,
         limit: usize,
     ) -> FactStoreResult<Self> {
+        owner.validate()?;
+        fact_id.validate()?;
+        validate_owned_fact_id(&fact_id, &owner)?;
         validate_limit(limit, MAX_LINEAGE_LIMIT)?;
         Ok(Self {
-            target,
+            owner,
+            fact_id,
             after,
             limit,
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
-        &self.target
+    pub fn owner(&self) -> &FactOwnerV1 {
+        &self.owner
     }
-    pub fn after(&self) -> Option<&FactLineageCursor> {
+    pub fn fact_id(&self) -> &FactId {
+        &self.fact_id
+    }
+    pub fn after(&self) -> Option<&FeedbackResultId> {
         self.after.as_ref()
     }
     pub fn limit(&self) -> usize {

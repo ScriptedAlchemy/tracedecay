@@ -76,7 +76,7 @@ fn subprocess_reports_closed_session_store_counts_schema_and_keyset_pages() {
         "session_messages",
         "session_schema_migrations",
         "lcm_raw_messages",
-        "session_temporal_schema_migrations",
+        "session_temporal_schema_state",
         "session_temporal_generations",
         "session_temporal_observation_effects",
         "session_temporal_projection_receipts",

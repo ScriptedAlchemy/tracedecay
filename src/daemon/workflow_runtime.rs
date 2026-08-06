@@ -52,18 +52,19 @@ enum PreparedChild {
 
 pub(crate) async fn execute_canonical_workflow(
     database: &Arc<RegisteredGlobalDb>,
+    graph: &Arc<tracedecay_graph_db::GraphDb>,
     runtime: &Arc<DaemonWorkRuntimeV1<WorkStorage>>,
     context: &RequestContext,
     project_root: &Path,
     request: WorkflowFanOutRequestV1,
 ) -> Result<WorkflowExecutionTruthV1, WorkflowFanOutRuntimeError> {
-    validate_active_definition(database, context, &request)?;
+    validate_active_definition(database, graph, context, &request)?;
     let plan = prepare_workflow_fan_out(&request)?;
     if plan.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION_V1 {
         return Err(WorkflowFanOutRuntimeError::InvalidPlan);
     }
     let authority = database
-        .workflow_storage()
+        .workflow_storage(graph.as_ref().clone())
         .map_err(|_| authority_unavailable())?;
     let admission = authority
         .begin(&plan.identity, &request.fence, &plan.plan_digest)
@@ -131,7 +132,7 @@ pub(crate) async fn execute_canonical_workflow(
                 )
                 .await?;
             }
-            attach_terminal_evidence(database, context, &request, child, &attempt)?;
+            attach_terminal_evidence(database, graph, context, &request, child, &attempt)?;
             let record = child_record(child);
             records.insert(record.task_id.clone(), record);
         }
@@ -161,6 +162,7 @@ pub(crate) async fn execute_canonical_workflow(
             };
             match admit_child(
                 database,
+                graph,
                 runtime,
                 context,
                 project_root,
@@ -192,7 +194,7 @@ pub(crate) async fn execute_canonical_workflow(
                     active.push(running);
                 }
                 PreparedChild::Terminal { child, attempt } => {
-                    attach_terminal_evidence(database, context, &request, &child, &attempt)?;
+                    attach_terminal_evidence(database, graph, context, &request, &child, &attempt)?;
                     let record = child_record(&child);
                     records.insert(record.task_id.clone(), record);
                     terminal_attempts.push(*attempt);
@@ -221,7 +223,7 @@ pub(crate) async fn execute_canonical_workflow(
             let attempt = if fail_fast {
                 cancel_child(runtime, &running).await?
             } else {
-                settle_child(database, runtime, context, &request, running).await?
+                settle_child(database, graph, runtime, context, &request, running).await?
             };
             fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicyV1::FailFast)
                 && !matches!(
@@ -258,6 +260,7 @@ pub(crate) async fn execute_canonical_workflow(
 
 fn validate_active_definition(
     database: &Arc<RegisteredGlobalDb>,
+    graph: &Arc<tracedecay_graph_db::GraphDb>,
     context: &RequestContext,
     request: &WorkflowFanOutRequestV1,
 ) -> Result<(), WorkflowFanOutRuntimeError> {
@@ -268,7 +271,7 @@ fn validate_active_definition(
         return Err(WorkflowFanOutRuntimeError::InvalidPlan);
     }
     let authority = database
-        .workflow_storage()
+        .workflow_storage(graph.as_ref().clone())
         .map_err(|_| authority_unavailable())?;
     let active = tracedecay_application::WorkflowDefinitionAuthorityPort::active_version(
         &authority,
@@ -292,6 +295,7 @@ fn validate_active_definition(
 
 async fn admit_child(
     database: &Arc<RegisteredGlobalDb>,
+    graph: &Arc<tracedecay_graph_db::GraphDb>,
     runtime: &Arc<DaemonWorkRuntimeV1<WorkStorage>>,
     context: &RequestContext,
     project_root: &Path,
@@ -374,7 +378,7 @@ async fn admit_child(
         ));
     }
     let services = database
-        .work_application_services()
+        .work_application_services(graph.as_ref().clone())
         .map_err(|_| child_unavailable("canonical Work services are unavailable"))?;
     let work = services.commands();
     let created = work
@@ -480,6 +484,7 @@ async fn admit_child(
 
 async fn settle_child(
     database: &Arc<RegisteredGlobalDb>,
+    graph: &Arc<tracedecay_graph_db::GraphDb>,
     runtime: &Arc<DaemonWorkRuntimeV1<WorkStorage>>,
     context: &RequestContext,
     request: &WorkflowFanOutRequestV1,
@@ -489,7 +494,7 @@ async fn settle_child(
         .finish(&running.identity, &running.lease, now())
         .await
         .map_err(work_error)?;
-    attach_terminal_evidence(database, context, request, &running.child, &attempt)?;
+    attach_terminal_evidence(database, graph, context, request, &running.child, &attempt)?;
     Ok(attempt)
 }
 
@@ -516,6 +521,7 @@ async fn cancel_child(
 
 fn attach_terminal_evidence(
     database: &Arc<RegisteredGlobalDb>,
+    graph: &Arc<tracedecay_graph_db::GraphDb>,
     context: &RequestContext,
     request: &WorkflowFanOutRequestV1,
     child: &WorkflowPlannedChildV1,
@@ -528,7 +534,7 @@ fn attach_terminal_evidence(
         .runtime_evidence_ref(request.run_id.clone())
         .map_err(|_| child_unavailable("Work terminal evidence reference is invalid"))?;
     let services = database
-        .work_application_services()
+        .work_application_services(graph.as_ref().clone())
         .map_err(|_| child_unavailable("canonical Work services are unavailable"))?;
     let projection = services
         .commands()

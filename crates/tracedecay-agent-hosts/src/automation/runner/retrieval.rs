@@ -517,6 +517,9 @@ pub(super) fn accept_automation_temporal_outcome(
         SessionRetrievalOutcome::Cancelled => {
             AutomationTemporalRetrieval::Rejected("session_evidence_cancelled")
         }
+        SessionRetrievalOutcome::DeadlineExceeded => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_timed_out")
+        }
     }
 }
 

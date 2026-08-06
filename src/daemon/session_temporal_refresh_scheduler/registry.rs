@@ -23,6 +23,7 @@ pub(super) struct SessionTemporalRefreshPassReport {
     pub(super) begun: usize,
     pub(super) joined: usize,
     pub(super) projected_batches: usize,
+    pub(super) relation_publications: usize,
     pub(super) completed: usize,
     pub(super) failed: usize,
     pub(super) cancelled: usize,
@@ -259,6 +260,17 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let wake = entry.wake.clone();
         profile.insert(database_path, entry);
         wake
+    }
+
+    pub(in crate::daemon) async fn retained_profile_wake(
+        &self,
+        database_path: &std::path::Path,
+    ) -> Option<SessionTemporalRefreshWake> {
+        self.profile
+            .lock()
+            .await
+            .get(database_path)
+            .map(|entry| entry.wake.clone())
     }
 
     pub(in crate::daemon) async fn rekey_project(

@@ -1,4 +1,4 @@
-//! Compatibility feedback-history repair, missing-vector repair, and dirty-bank rebuilds.
+//! Compatibility missing-vector repair and dirty-bank rebuilds.
 
 use crate::db::Database;
 use crate::memory::encoding::HolographicEncoder;
@@ -9,9 +9,8 @@ use serde_json::json;
 
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    CompatibilityFactRepairVectorV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1, FactCompatibilityResult,
-    FactStoreError, FactStoreResult,
+    CompatibilityFactRepairVectorV1, CompatibilityMemoryRepairCommandV1,
+    CompatibilityMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 
 use super::crud::{
@@ -25,9 +24,8 @@ use super::envelope::{
     compatibility_record_operation_receipt_tx,
 };
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
-    compatibility_legacy_timestamp, compatibility_now, compatibility_source_store_id,
-    nonnegative_u64, row_i64, row_string, storage_error, storage_message,
+    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp, compatibility_now,
+    compatibility_source_store_id, row_i64, row_string, storage_error, storage_message,
 };
 use super::projection::compatibility_required_mapping_tx;
 
@@ -289,9 +287,8 @@ fn compatibility_average_vectors(vectors: &[Vec<f64>]) -> Vec<f64> {
 }
 
 /// Marks every populated bank dirty when the owner has eligible facts but no
-/// materialized bank projections at all — the state a store lands in when its
-/// legacy cutover predates dirty-marking (or a bank table was lost). Repair
-/// then rebuilds them in the same pass; stores with any banks are untouched.
+/// materialized bank projections at all. Repair then rebuilds them in the same
+/// pass; stores with any banks are untouched.
 async fn compatibility_mark_absent_banks_dirty_tx(
     db: &Database,
     transaction: &Transaction<'_>,
@@ -581,58 +578,4 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
         }
     }
     Ok(rebuilt)
-}
-
-pub(super) async fn compatibility_feedback_history_repair_progress_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-) -> FactCompatibilityResult<CompatibilityFeedbackRepairProgressV1> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let mut rows = transaction
-        .query(
-            "SELECT owner_json, feedback_frontier, feedback_cursor, phase
-             FROM memory_v2_feedback_history_repair_progress
-             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
-            params![key.kind, key.project_id.as_str(), source_store_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
-    else {
-        return Ok(CompatibilityFeedbackRepairProgressV1::NotRequired);
-    };
-    if row_string(&row, 0, COMPATIBILITY_READ_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch.into());
-    }
-    let frontier = nonnegative_u64(
-        row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?,
-        "feedback repair frontier",
-    )?;
-    let cursor = nonnegative_u64(
-        row_i64(&row, 2, COMPATIBILITY_READ_OPERATION)?,
-        "feedback repair cursor",
-    )?;
-    if cursor > frontier {
-        return Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
-            "feedback repair cursor exceeds captured frontier",
-        )
-        .into());
-    }
-    match row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?.as_str() {
-        "pending" => Ok(CompatibilityFeedbackRepairProgressV1::Incomplete {
-            processed: 0,
-            remaining: Some(frontier.saturating_sub(cursor)),
-        }),
-        "complete" => Ok(CompatibilityFeedbackRepairProgressV1::Complete { processed: 0 }),
-        _ => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
-            "feedback repair progress has an unsupported phase",
-        )
-        .into()),
-    }
 }

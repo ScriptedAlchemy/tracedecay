@@ -17,9 +17,10 @@ Codex.
 - **Lifecycle hooks** (`hooks/hooks.json`, referenced from the manifest's
   `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse`, and `PostCompact` handlers that inject index status and
-  tool-routing steering, keep the graph/session store warm, and replace
-  encrypted Codex compaction placeholders with auxiliary app-server summaries
-  backed by the visible source messages in TraceDecay's LCM DAG.
+  tool-routing steering and submit bounded lifecycle events to the daemon.
+  The daemon records Codex compaction boundaries and, when Codex does not expose
+  summary content, requests an auxiliary summary asynchronously from the
+  configured context engine while preserving exact visible LCM source lineage.
 
 The source `hooks/hooks-codex.json` is an empty seed for repo-local bundles.
 Global Codex installs populate `hooks/hooks.json` from the managed hook table
@@ -49,11 +50,10 @@ diagnostics: paste captured output into `tracedecay_diagnose`, or run
 symbols and callers. The bundled `fixing-build-and-type-errors` skill covers
 this workflow.
 
-The `PostCompact` hook starts `codex app-server` as a short-lived child process
-and sets `TRACEDECAY_CODEX_SUMMARY_CHILD=1` to prevent recursive summary hooks.
-Set `TRACEDECAY_CODEX_BIN` to use a different Codex binary,
-`TRACEDECAY_CODEX_SUMMARY_MODEL` to pin a model, or
-`TRACEDECAY_CODEX_SUMMARY_TIMEOUT_SECS` to adjust the child timeout.
+The `PostCompact` hook never starts `codex app-server`, invokes a model, opens a
+database, or waits for summarization. It reports the boundary through
+`tracedecay_hook_runtime`; daemon work is bounded, asynchronous, restart-safe,
+and visible through session/LCM status.
 
 When Codex starts a thread from compacted context (`SessionStart` source
 `compact`), the plugin injects a short recovery hint through

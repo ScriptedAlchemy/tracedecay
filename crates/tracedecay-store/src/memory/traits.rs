@@ -12,12 +12,10 @@ use super::{
     CompatibilityFactContentDigestQueryV1, CompatibilityFactContradictionPageV1,
     CompatibilityFactContradictionQueryV1, CompatibilityFactCurationBatchV1,
     CompatibilityFactCurationReceiptV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
     CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
     CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
     CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
@@ -27,9 +25,9 @@ use super::{
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCurrentQuery, FactCurrentResponseV1,
-    FactLineageQuery, FactLineageResponseV1, FactProposalStoreError, FactStoreResult,
-    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
-    RetrievalAnchorQuery, StoredFactV1,
+    FactFeedbackHistoryPage, FactFeedbackHistoryQuery, FactLineageQuery, FactLineageResponseV1,
+    FactProposalStoreError, FactStoreResult, FactWriteBatch, LegacyFactQuery, PromoteFactProposal,
+    PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Authoritative persistence boundary for append-only facts and evidence.
@@ -78,6 +76,11 @@ pub trait FactStore: Send + Sync {
         &self,
         query: FactLineageQuery,
     ) -> impl Future<Output = FactStoreResult<FactLineageResponseV1>> + Send;
+
+    fn query_fact_feedback_history(
+        &self,
+        query: FactFeedbackHistoryQuery,
+    ) -> impl Future<Output = FactStoreResult<FactFeedbackHistoryPage>> + Send;
 
     fn resolve_legacy_fact(
         &self,
@@ -140,8 +143,7 @@ pub trait FactCompatibilityStore: FactProposalStore {
         query: CompatibilityFactHistoryQueryV1,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactHistoryV1>> + Send;
 
-    /// Pure snapshot read. Implementations must report repair state without
-    /// advancing a repair batch or acquiring the writer lane.
+    /// Pure snapshot read that never acquires the writer lane.
     fn compatibility_memory_status(
         &self,
         owner: FactOwnerV1,
@@ -172,13 +174,6 @@ pub trait FactCompatibilityStore: FactProposalStore {
         request: CompatibilityFactFeedbackCommandV1,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1>> + Send;
 
-    /// Pure snapshot read. Implementations must report repair state without
-    /// advancing a repair batch or acquiring the writer lane.
-    fn compatibility_fact_feedback_history(
-        &self,
-        query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1>> + Send;
-
     /// Owner-scoped exact lookup for deduplication. `content_digest` is opaque and
     /// must be derived by the application boundary; implementations never accept
     /// raw content for this read.
@@ -199,9 +194,8 @@ pub trait FactCompatibilityStore: FactProposalStore {
         request: CompatibilityFactMergeCommandV1,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactMergeOutcomeV1>> + Send;
 
-    /// Repairs the finite V1 compatibility projection and returns measured
-    /// results plus the exact feedback-history batch outcome from that same
-    /// atomic command.
+    /// Repairs finite derived compatibility projections and returns measured
+    /// results from that atomic command.
     fn repair_compatibility_memory(
         &self,
         request: CompatibilityMemoryRepairCommandV1,
@@ -274,11 +268,6 @@ pub trait FactCompatibilityStore: FactProposalStore {
         reviewer: ActorId,
         reason: String,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalRecordV1>> + Send;
-
-    fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>> + Send;
 
     fn promote_compatibility_fact_proposal(
         &self,

@@ -75,7 +75,7 @@ async fn describe_maps_summary_target_to_typed_service_and_adds_temporal_metadat
 }
 
 #[tokio::test]
-async fn expand_maps_raw_alias_and_preserves_bounded_legacy_expansion() {
+async fn expand_maps_raw_target_and_preserves_bounded_canonical_content() {
     let service = RecordingService::new(complete("unused", "assistant", None));
     service.set_expand_outcome(LcmExpandServiceOutcome::Complete {
         expansion: LcmExpandResponse {
@@ -125,8 +125,7 @@ async fn expand_maps_raw_alias_and_preserves_bounded_legacy_expansion() {
     assert_eq!(command.grain(), RetrievalGrainV1::Occurrence);
     assert_eq!(command.content_slice().offset, 1);
     assert_eq!(command.content_slice().limit, 2);
-    assert_eq!(command.source_offset(), 0);
-    assert_eq!(command.source_limit(), None);
+    assert_eq!(command.source_page_size(), 50);
     assert_eq!(command.cursor(), None);
     assert!(matches!(
         command.target(),
@@ -138,6 +137,33 @@ async fn expand_maps_raw_alias_and_preserves_bounded_legacy_expansion() {
     assert_eq!(response["state"], "available");
     assert_eq!(response["next_cursor"], "opaque-next");
     assert_eq!(response["source_coverage"][0]["source_id"], "claude");
+}
+
+#[tokio::test]
+async fn expand_rejects_numeric_source_pagination_before_retrieval() {
+    for (field, value) in [("source_offset", json!(1)), ("source_limit", json!(2))] {
+        let service = RecordingService::new(complete("unused", "assistant", None));
+        let mut args = json!({
+            "provider": "claude",
+            "session_id": "session-exact",
+            "target": {"kind": "summary_node", "node_id": "summary-1"},
+            "format": "json"
+        });
+        args[field] = value;
+
+        let error = handle_lcm_expand(
+            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            args,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("authenticated cursor"),
+            "{error}"
+        );
+        assert_eq!(service.expand_calls(), 0);
+    }
 }
 
 #[tokio::test]

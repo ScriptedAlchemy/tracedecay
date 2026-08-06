@@ -9,7 +9,6 @@ use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::storage::resolve_response_handle_root;
@@ -504,86 +503,6 @@ pub(crate) async fn tool_call_via_transport(
 /// transport and returns the full response text for the given id.
 pub(crate) async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> Value {
     tool_call_via_transport(server, id, "tracedecay_search", json!({ "query": query })).await
-}
-
-/// Builds the mid-session branch-switch fixture inside an isolated home.
-///
-/// The fixture writes branch metadata and a seeded branch DB straight into the
-/// profile store, so it must own that profile: run against the developer's or
-/// runner's real `~/.tracedecay` it would both mutate live state and read back
-/// branch rows another project put there. [`crate::common::IsolatedEnv`] also
-/// serializes these tests within one binary, which is why no separate
-/// fixture-local lock is needed.
-pub(crate) async fn setup_branch_drift_fixture()
--> (crate::common::IsolatedEnv, PathBuf, Arc<McpServer>) {
-    let (env, project) = crate::common::IsolatedEnv::acquire().await;
-
-    // main: one committed source file, indexed into the default DB.
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn main_only() -> u32 { 1 }\n",
-    )
-    .unwrap();
-    fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
-    git(&project, &["init"]);
-    git(&project, &["config", "user.email", "test@test.com"]);
-    git(&project, &["config", "user.name", "Test"]);
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-m", "initial"]);
-    git(&project, &["branch", "-M", "main"]);
-
-    // Take the layout from the graph that just created the store. Resolving
-    // the profile layout independently can name a different shard than the one
-    // this project was indexed into (identity resolution and the fallback
-    // directory derivation do not always agree), and the branch seeding below
-    // would then write metadata and a feature DB into a store no reader opens.
-    let layout = {
-        let cg = TraceDecay::init(&project).await.unwrap();
-        cg.index_all().await.unwrap();
-        cg.checkpoint().await.unwrap();
-        cg.store_layout().clone()
-    };
-
-    // Track main + feature, seeding feature's DB from main's.
-    let mut meta = BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
-    save_branch_meta(&layout.data_root, &meta).unwrap();
-    fs::create_dir_all(layout.data_root.join("branches")).unwrap();
-    fs::copy(
-        &layout.graph_db_path,
-        layout.data_root.join("branches/feature.db"),
-    )
-    .unwrap();
-
-    // feature: add a feature-only symbol and index it into feature's DB.
-    git(&project, &["checkout", "-b", "feature"]);
-    fs::write(
-        project.join("src/feat.rs"),
-        "pub fn feature_only() -> u32 { 2 }\n",
-    )
-    .unwrap();
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-m", "feature work"]);
-    {
-        let cg = TraceDecay::open(&project).await.unwrap();
-        assert_eq!(cg.serving_branch(), Some("feature"));
-        cg.sync().await.unwrap();
-        cg.checkpoint().await.unwrap();
-    }
-
-    // Back on main: start the server pinned to main's DB. Startup catch-up is
-    // unrelated to branch drift and may scan the host's default transcript
-    // profile, so keep this fixture isolated from that background work.
-    git(&project, &["checkout", "main"]);
-    let mut config = tracedecay::config::load_config(&project).expect("load test config");
-    config.sync.session_start_sync = false;
-    tracedecay::config::save_config(&project, &config).expect("disable unrelated catch-up");
-    let cg = TraceDecay::open(&project).await.unwrap();
-    assert_eq!(cg.serving_branch(), Some("main"));
-    let server = McpServer::new(cg, None).await;
-
-    (env, project, server)
 }
 
 // ---------------------------------------------------------------------------

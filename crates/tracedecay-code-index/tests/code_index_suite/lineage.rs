@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 
 use tracedecay_code_index::lineage::{
-    ABSTAIN_CANDIDATE_COUNT_MISMATCH, GenerationSymbolIndexV1, LineageSymbolRecordV1,
+    ABSTAIN_CANDIDATE_COUNT_MISMATCH, GenerationSymbolIndexV1, LineageSymbolRecord,
     SymbolLineageResolver,
 };
 use tracedecay_domain::{
@@ -35,8 +35,8 @@ fn symbol(
     qualified_name: &str,
     file_identity: char,
     content: char,
-) -> LineageSymbolRecordV1 {
-    LineageSymbolRecordV1 {
+) -> LineageSymbolRecord {
+    LineageSymbolRecord {
         occurrence: id::<SymbolOccurrenceId>(occurrence),
         identity: digest::<SymbolIdentityDigest>(identity),
         qualified_name: qualified_name.to_owned(),
@@ -46,7 +46,7 @@ fn symbol(
     }
 }
 
-fn index(sequence: u64, symbols: Vec<LineageSymbolRecordV1>) -> GenerationSymbolIndexV1 {
+fn index(sequence: u64, symbols: Vec<LineageSymbolRecord>) -> GenerationSymbolIndexV1 {
     GenerationSymbolIndexV1::new(generation(sequence), symbols).expect("canonical symbol index")
 }
 

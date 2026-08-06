@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "id": "memory-feedback-trust",
-  "title": "helpful fact_feedback raises trust and records an audit event",
-  "description": "Proves the fact_feedback tool is wired end-to-end: a `helpful` action on a seeded fact must raise its trust_score above the seeded value and append a matching row to the memory_feedback_events audit table. Guards against a regression where feedback is silently dropped or stops moving trust.",
+  "title": "helpful fact_feedback raises trust and records canonical history",
+  "description": "Proves the fact_feedback tool is wired end-to-end: a `helpful` action on a seeded fact must raise its trust_score above the seeded value and append a typed result to the canonical memory_v2_feedback_history table. Guards against a regression where feedback is silently dropped or stops moving trust.",
   "contract": "stable",
-  "contract_notes": "Deterministic write-path check with no LLM. helpful applies +0.05 to trust_score (store.rs apply_feedback) and inserts a memory_feedback_events row with action='helpful'. The single seeded fact is fact_id=1 in the fresh fixture.",
+  "contract_notes": "Deterministic write-path check with no LLM. Helpful feedback raises trust and records one available canonical history row with a typed result identity. The single seeded fact is fact_id=1 in the fresh fixture.",
   "setup": {
     "facts": [
       {
@@ -47,8 +47,8 @@
     },
     {
       "kind": "sql",
-      "name": "helpful_feedback_event_recorded",
-      "sql": "SELECT COUNT(*) FROM memory_feedback_events WHERE fact_id = 1 AND action = 'helpful'",
+      "name": "helpful_feedback_result_recorded",
+      "sql": "SELECT COUNT(*) FROM memory_v2_feedback_history WHERE action = 'helpful' AND details_availability = 'available' AND length(result_id) > 0",
       "op": "eq",
       "value": 1
     }

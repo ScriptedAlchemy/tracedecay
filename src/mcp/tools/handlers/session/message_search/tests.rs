@@ -3,8 +3,8 @@ use std::sync::Mutex;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    RetrievalAnchorId, SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
-    SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
+    RetrievalAnchorId, RetrievalGrainV1, SessionSourceCoverageV1, SessionSourceFrontierV1,
+    SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
 use super::{
@@ -121,6 +121,8 @@ async fn existing_filters_translate_to_one_root_wide_temporal_query() {
         "branch": "feature/message-search",
         "workflow_run": "wf_123",
         "workflow_agent": "researcher",
+        "temporal_mode": "forensic",
+        "grain": "occurrence",
         "limit": 7,
         "format": "json"
     });
@@ -138,6 +140,8 @@ async fn existing_filters_translate_to_one_root_wide_temporal_query() {
     assert_eq!(command.query().query(), "database backup");
     assert_eq!(command.query().provider(), Some("claude"));
     assert_eq!(command.query().limit(), 7);
+    assert_eq!(command.query().temporal_mode(), TemporalModeV1::Forensic);
+    assert_eq!(command.query().grain(), RetrievalGrainV1::Occurrence);
     assert_eq!(
         command.query().retrieval_scope(),
         &SessionRetrievalScope::AllSessionsInAuthorizedRoot
@@ -314,6 +318,8 @@ async fn malformed_optional_arguments_are_rejected_without_broadening() {
         ("catch_up", json!(1)),
         ("limit", json!("ten")),
         ("project_scope", json!(true)),
+        ("temporal_mode", json!(7)),
+        ("grain", json!(false)),
     ] {
         let service = RecordingService::default();
         let mut args = json_args();
@@ -578,7 +584,7 @@ async fn fresh_partial_outcome_uses_cursor_without_requesting_refresh() {
 }
 
 #[tokio::test]
-async fn all_registered_defers_without_invoking_retrieval() {
+async fn all_registered_is_typed_unavailable_without_invoking_retrieval() {
     let service = RecordingService::default();
     let result = handle_message_search_with_service(
         Some(Path::new("/repo")),
@@ -595,14 +601,18 @@ async fn all_registered_defers_without_invoking_retrieval() {
     let payload = response_payload(&result);
 
     assert_eq!(service.calls(), 0);
-    assert_eq!(payload["status"], "deferred");
-    assert_eq!(payload["outcome"], "deferred");
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["outcome"], "unavailable");
     assert_eq!(payload["project_scope"], "all_registered");
     assert_eq!(
         payload["error"]["code"],
-        "session_retrieval_multi_root_deferred"
+        "session_retrieval_service_unavailable"
     );
-    assert_eq!(payload["error"]["retryable"], false);
+    assert_eq!(
+        payload["error"]["reason"],
+        "multi_root_authority_unavailable"
+    );
+    assert_eq!(payload["error"]["retryable"], true);
 }
 
 #[tokio::test]
@@ -751,6 +761,11 @@ async fn complete_zero_and_terminal_error_outcomes_are_typed() {
             SessionRetrievalServiceOutcome::Cancelled,
             "cancelled",
             "session_retrieval_cancelled",
+        ),
+        (
+            SessionRetrievalServiceOutcome::DeadlineExceeded,
+            "timed_out",
+            "session_retrieval_deadline_exceeded",
         ),
     ];
     for (outcome, status, code) in terminal {

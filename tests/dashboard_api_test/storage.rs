@@ -85,7 +85,6 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
             [
                 "over_budget_store",
                 "orphan_store",
-                "stale_branch_dbs",
                 "incident_debris_present",
                 "retention_backlog",
                 "table_growth",
@@ -113,7 +112,6 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
 
         for kind in [
             "orphan_store",
-            "stale_branch_dbs",
             "incident_debris_present",
             "retention_backlog",
             "table_growth",

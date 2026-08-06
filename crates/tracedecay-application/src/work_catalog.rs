@@ -338,6 +338,7 @@ fn terminal_states(read_only: bool) -> Vec<TerminalState> {
         TerminalState::Completed,
         TerminalState::Cancelled,
         TerminalState::TimedOut,
+        TerminalState::Unavailable,
         TerminalState::Failed,
         TerminalState::Partial,
     ];

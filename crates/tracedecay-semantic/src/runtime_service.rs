@@ -12,8 +12,9 @@ use std::pin::Pin;
 use std::sync::RwLockWriteGuard;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
 
 use super::fastembed_adapter::FastEmbedEmbeddingRuntime;
@@ -91,7 +92,7 @@ pub struct SemanticGenerationPointerV1 {
     pub projection_key: ProjectionKeyV1,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticRuntimeScheduleFailureV1 {
     Artifact,
@@ -101,15 +102,37 @@ pub enum SemanticRuntimeScheduleFailureV1 {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum SemanticRuntimeScheduleStatusV1 {
     Unavailable,
+    Queued {
+        target_generation: CodeGenerationId,
+        total_units: u64,
+        total_batches: u64,
+        prior_generation: Option<VectorGenerationIdV1>,
+        queued_at_unix_ms: Option<u64>,
+    },
     Indexing {
         target_generation: CodeGenerationId,
         completed_units: u64,
         total_units: u64,
+        completed_batches: u64,
+        total_batches: u64,
         prior_generation: Option<VectorGenerationIdV1>,
+        last_progress_at_unix_ms: Option<u64>,
+        throughput_milliunits_per_second: Option<u64>,
+        eta_seconds: Option<u64>,
+    },
+    Stalled {
+        target_generation: CodeGenerationId,
+        completed_units: u64,
+        total_units: u64,
+        completed_batches: u64,
+        total_batches: u64,
+        prior_generation: Option<VectorGenerationIdV1>,
+        last_progress_at_unix_ms: Option<u64>,
+        stalled_for_seconds: u64,
     },
     Current {
         generation: VectorGenerationIdV1,
@@ -124,15 +147,60 @@ pub enum SemanticRuntimeScheduleStatusV1 {
 pub struct SemanticRuntimeScheduleCancellationV1 {
     cancelled: AtomicBool,
     completed_units: AtomicU64,
+    completed_batches: AtomicU64,
     total_units: u64,
+    total_batches: u64,
+    progress: Mutex<SemanticRuntimeProgressEvidenceV1>,
+}
+
+#[derive(Debug)]
+struct SemanticRuntimeProgressSampleV1 {
+    completed_units: u64,
+    observed_at: Instant,
+}
+
+#[derive(Debug)]
+struct SemanticRuntimeProgressEvidenceV1 {
+    first: SemanticRuntimeProgressSampleV1,
+    last: SemanticRuntimeProgressSampleV1,
+    last_progress_at_unix_ms: Option<u64>,
+}
+
+const SEMANTIC_STALL_THRESHOLD: Duration = Duration::from_secs(60);
+const SEMANTIC_THROUGHPUT_MINIMUM_WINDOW: Duration = Duration::from_secs(1);
+
+fn unix_millis_now() -> Option<u64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    u64::try_from(millis).ok()
 }
 
 impl SemanticRuntimeScheduleCancellationV1 {
     pub fn new(total_units: u64) -> Self {
+        Self::new_batched(total_units, 1)
+    }
+
+    pub fn new_batched(total_units: u64, total_batches: u64) -> Self {
+        let observed_at = Instant::now();
         Self {
             cancelled: AtomicBool::new(false),
             completed_units: AtomicU64::new(0),
+            completed_batches: AtomicU64::new(0),
             total_units,
+            total_batches: total_batches.max(1),
+            progress: Mutex::new(SemanticRuntimeProgressEvidenceV1 {
+                first: SemanticRuntimeProgressSampleV1 {
+                    completed_units: 0,
+                    observed_at,
+                },
+                last: SemanticRuntimeProgressSampleV1 {
+                    completed_units: 0,
+                    observed_at,
+                },
+                last_progress_at_unix_ms: None,
+            }),
         }
     }
 
@@ -141,17 +209,83 @@ impl SemanticRuntimeScheduleCancellationV1 {
     }
 
     pub fn set_completed_units(&self, completed_units: u64) {
-        self.completed_units
-            .fetch_max(completed_units.min(self.total_units), Ordering::AcqRel);
+        let completed_units = completed_units.min(self.total_units);
+        let prior = self
+            .completed_units
+            .fetch_max(completed_units, Ordering::AcqRel);
+        if completed_units > prior {
+            let mut progress = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+            progress.last = SemanticRuntimeProgressSampleV1 {
+                completed_units,
+                observed_at: Instant::now(),
+            };
+            progress.last_progress_at_unix_ms = unix_millis_now();
+        }
+    }
+
+    pub fn set_completed_batches(&self, completed_batches: u64) {
+        self.completed_batches
+            .fetch_max(completed_batches.min(self.total_batches), Ordering::AcqRel);
     }
 
     fn completed_units(&self) -> u64 {
         self.completed_units.load(Ordering::Acquire)
     }
 
+    fn completed_batches(&self) -> u64 {
+        self.completed_batches.load(Ordering::Acquire)
+    }
+
+    fn progress_projection(&self) -> SemanticRuntimeProgressProjectionV1 {
+        let progress = self.progress.lock().unwrap_or_else(PoisonError::into_inner);
+        let elapsed = progress
+            .last
+            .observed_at
+            .saturating_duration_since(progress.first.observed_at);
+        let advanced = progress
+            .last
+            .completed_units
+            .saturating_sub(progress.first.completed_units);
+        let throughput_milliunits_per_second = (advanced > 0
+            && elapsed >= SEMANTIC_THROUGHPUT_MINIMUM_WINDOW)
+            .then(|| {
+                let elapsed_millis = elapsed.as_millis();
+                (elapsed_millis > 0)
+                    .then(|| {
+                        u64::try_from(
+                            u128::from(advanced)
+                                .saturating_mul(1_000_000)
+                                .checked_div(elapsed_millis)?,
+                        )
+                        .ok()
+                    })
+                    .flatten()
+            })
+            .flatten();
+        let eta_seconds = throughput_milliunits_per_second.and_then(|throughput| {
+            let remaining = self.total_units.saturating_sub(self.completed_units());
+            (throughput > 0).then(|| remaining.saturating_mul(1_000).div_ceil(throughput))
+        });
+        SemanticRuntimeProgressProjectionV1 {
+            last_progress_at_unix_ms: progress.last_progress_at_unix_ms,
+            throughput_milliunits_per_second,
+            eta_seconds,
+            stalled_for: (self.completed_units() < self.total_units)
+                .then(|| progress.last.observed_at.elapsed())
+                .filter(|elapsed| *elapsed >= SEMANTIC_STALL_THRESHOLD),
+        }
+    }
+
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
+}
+
+struct SemanticRuntimeProgressProjectionV1 {
+    last_progress_at_unix_ms: Option<u64>,
+    throughput_milliunits_per_second: Option<u64>,
+    eta_seconds: Option<u64>,
+    stalled_for: Option<Duration>,
 }
 
 impl CancellationSignal for SemanticRuntimeScheduleCancellationV1 {
@@ -198,6 +332,7 @@ impl PreparedSemanticRuntimeCommitV1 {
 pub struct SemanticRuntimeWorkV1 {
     target_generation: CodeGenerationId,
     total_units: u64,
+    total_batches: u64,
     prepare: Box<
         dyn FnOnce(Arc<SemanticRuntimeScheduleCancellationV1>) -> SemanticRuntimePrepareFutureV1
             + Send
@@ -219,15 +354,37 @@ impl SemanticRuntimeWorkV1 {
             > + Send
             + 'static,
     {
+        Self::new_batched(target_generation, total_units, 1, prepare)
+    }
+
+    pub fn new_batched<Prepare, PrepareFuture>(
+        target_generation: CodeGenerationId,
+        total_units: u64,
+        total_batches: u64,
+        prepare: Prepare,
+    ) -> Self
+    where
+        Prepare:
+            FnOnce(Arc<SemanticRuntimeScheduleCancellationV1>) -> PrepareFuture + Send + 'static,
+        PrepareFuture: Future<
+                Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
+            > + Send
+            + 'static,
+    {
         Self {
             target_generation,
             total_units: total_units.max(1),
+            total_batches: total_batches.max(1),
             prepare: Box::new(move |cancellation| Box::pin(prepare(cancellation))),
         }
     }
 
     pub fn total_units(&self) -> u64 {
         self.total_units
+    }
+
+    pub fn total_batches(&self) -> u64 {
+        self.total_batches
     }
 }
 
@@ -277,16 +434,23 @@ impl SemanticRuntimeSchedulingHandleV1 {
             }
             state.sequence = state.sequence.wrapping_add(1);
             let sequence = state.sequence;
-            let cancellation =
-                Arc::new(SemanticRuntimeScheduleCancellationV1::new(work.total_units));
+            let cancellation = Arc::new(SemanticRuntimeScheduleCancellationV1::new_batched(
+                work.total_units,
+                work.total_batches,
+            ));
             state.status = SemanticRuntimeScheduleStatusV1::Indexing {
                 target_generation: work.target_generation.clone(),
                 completed_units: 0,
                 total_units: work.total_units,
+                completed_batches: 0,
+                total_batches: work.total_batches,
                 prior_generation: state
                     .current
                     .as_ref()
                     .map(|pointer| pointer.generation.clone()),
+                last_progress_at_unix_ms: None,
+                throughput_milliunits_per_second: None,
+                eta_seconds: None,
             };
             state.cancellation = Some(Arc::clone(&cancellation));
             (sequence, cancellation)
@@ -356,14 +520,89 @@ impl SemanticRuntimeSchedulingHandleV1 {
         let mut status = state.status.clone();
         if let (
             SemanticRuntimeScheduleStatusV1::Indexing {
-                completed_units, ..
+                target_generation,
+                completed_units,
+                total_units,
+                completed_batches,
+                total_batches,
+                prior_generation,
+                last_progress_at_unix_ms,
+                throughput_milliunits_per_second,
+                eta_seconds,
             },
             Some(cancellation),
         ) = (&mut status, state.cancellation.as_ref())
         {
             *completed_units = cancellation.completed_units();
+            *completed_batches = cancellation.completed_batches();
+            let progress = cancellation.progress_projection();
+            *last_progress_at_unix_ms = progress.last_progress_at_unix_ms;
+            *throughput_milliunits_per_second = progress.throughput_milliunits_per_second;
+            *eta_seconds = progress.eta_seconds;
+            if let Some(stalled_for) = progress.stalled_for {
+                status = SemanticRuntimeScheduleStatusV1::Stalled {
+                    target_generation: target_generation.clone(),
+                    completed_units: *completed_units,
+                    total_units: *total_units,
+                    completed_batches: *completed_batches,
+                    total_batches: *total_batches,
+                    prior_generation: prior_generation.clone(),
+                    last_progress_at_unix_ms: *last_progress_at_unix_ms,
+                    stalled_for_seconds: stalled_for.as_secs(),
+                };
+            }
         }
         status
+    }
+
+    pub fn mark_queued(
+        &self,
+        target_generation: CodeGenerationId,
+        total_units: u64,
+        total_batches: u64,
+    ) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.committing {
+            return false;
+        }
+        if let Some(cancellation) = state.cancellation.take() {
+            cancellation.cancel();
+        }
+        state.sequence = state.sequence.wrapping_add(1);
+        state.status = SemanticRuntimeScheduleStatusV1::Queued {
+            target_generation,
+            total_units: total_units.max(1),
+            total_batches: total_batches.max(1),
+            prior_generation: state
+                .current
+                .as_ref()
+                .map(|pointer| pointer.generation.clone()),
+            queued_at_unix_ms: unix_millis_now(),
+        };
+        true
+    }
+
+    pub fn fail_queued(
+        &self,
+        target_generation: &CodeGenerationId,
+        reason: SemanticRuntimeScheduleFailureV1,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(
+            &state.status,
+            SemanticRuntimeScheduleStatusV1::Queued {
+                target_generation: queued,
+                ..
+            } if queued == target_generation
+        ) {
+            state.status = SemanticRuntimeScheduleStatusV1::Failed {
+                reason,
+                prior_generation: state
+                    .current
+                    .as_ref()
+                    .map(|pointer| pointer.generation.clone()),
+            };
+        }
     }
 
     pub fn current(&self) -> Option<SemanticGenerationPointerV1> {
@@ -668,6 +907,54 @@ mod tests {
         })
         .await
         .expect("scheduler reached expected state");
+    }
+
+    #[test]
+    fn queued_status_preserves_exact_work_identity_and_batch_counts() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let target =
+            CodeGenerationId::new("code-generation.queued".to_owned()).expect("generation");
+
+        assert!(handle.mark_queued(target.clone(), 9, 3));
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Queued {
+                target_generation,
+                total_units: 9,
+                total_batches: 3,
+                queued_at_unix_ms: Some(_),
+                ..
+            } if target_generation == target
+        ));
+    }
+
+    #[test]
+    fn progress_metrics_require_time_evidence_and_stall_is_monotonic() {
+        let progress = SemanticRuntimeScheduleCancellationV1::new_batched(10, 2);
+        progress.set_completed_units(4);
+        progress.set_completed_batches(1);
+        assert_eq!(progress.completed_batches(), 1);
+        let insufficient = progress.progress_projection();
+        assert_eq!(insufficient.throughput_milliunits_per_second, None);
+        assert_eq!(insufficient.eta_seconds, None);
+        assert_eq!(insufficient.stalled_for, None);
+
+        {
+            let mut evidence = progress
+                .progress
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            evidence.first.observed_at = Instant::now() - Duration::from_secs(63);
+            evidence.last.observed_at = Instant::now() - Duration::from_secs(61);
+        }
+        let projection = progress.progress_projection();
+        assert!(projection.throughput_milliunits_per_second.is_some());
+        assert!(projection.eta_seconds.is_some());
+        assert!(
+            projection
+                .stalled_for
+                .is_some_and(|elapsed| elapsed >= SEMANTIC_STALL_THRESHOLD)
+        );
     }
 
     #[test]

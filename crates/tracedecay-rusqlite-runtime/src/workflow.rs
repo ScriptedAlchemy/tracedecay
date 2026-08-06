@@ -24,12 +24,23 @@ use crate::exact_sql::{
 };
 use crate::work::WorkSqliteStorage;
 
+pub mod topology;
+pub use topology::{WorkflowGraphTopologyStore, WorkflowTopologyError};
+
 const WORKFLOW_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS workflow_definitions_v1 (
     definition_id TEXT NOT NULL,
     definition_version INTEGER NOT NULL CHECK (definition_version > 0),
     payload TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
+    PRIMARY KEY (definition_id, definition_version)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS workflow_graph_publication_outbox_v1 (
+    definition_id TEXT NOT NULL,
+    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
+    payload TEXT NOT NULL,
+    applied INTEGER NOT NULL DEFAULT 0 CHECK (applied IN (0, 1)),
     PRIMARY KEY (definition_id, definition_version)
 ) STRICT;
 
@@ -65,6 +76,7 @@ CREATE TABLE IF NOT EXISTS workflow_executions_v1 (
 #[derive(Clone)]
 pub struct WorkflowSqliteAuthority {
     handle: ExactSqlHandle,
+    topology: WorkflowGraphTopologyStore,
 }
 
 impl WorkflowSqliteAuthority {
@@ -74,9 +86,14 @@ impl WorkflowSqliteAuthority {
     ) -> Result<Self, WorkflowSqliteAuthorityBuildError> {
         let authority = Self {
             handle: storage.handle.clone(),
+            topology: WorkflowGraphTopologyStore::new(storage.topology.database()),
         };
         authority.install_schema()?;
         Ok(authority)
+    }
+
+    pub fn reconcile_graph_publications(&self) -> Result<(), WorkflowDefinitionAuthorityError> {
+        reconcile_workflow_topology(&self.handle, &self.topology)
     }
 
     fn install_schema(&self) -> Result<(), WorkflowSqliteAuthorityBuildError> {
@@ -206,6 +223,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         &self,
         definition: &WorkflowDefinitionV1,
     ) -> Result<(), WorkflowDefinitionAuthorityError> {
+        reconcile_workflow_topology(&self.handle, &self.topology)?;
         let version = version_i64(definition.definition_version())
             .map_err(|_| definition_codec_unavailable())?;
         let payload = encode_definition(definition)?;
@@ -255,10 +273,20 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             ],
         )
         .map_err(definition_unavailable)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(definition_unavailable)
+        execute_tx(
+            &transaction,
+            "INSERT INTO workflow_graph_publication_outbox_v1 (
+                 definition_id, definition_version, payload, applied
+             ) VALUES (?1, ?2, ?3, 0)",
+            vec![
+                ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
+                ExactSqlValue::Integer(version),
+                ExactSqlValue::Text(encode_definition(definition)?),
+            ],
+        )
+        .map_err(definition_unavailable)?;
+        transaction.commit().map_err(definition_unavailable)?;
+        reconcile_workflow_topology(&self.handle, &self.topology)
     }
 
     fn load(
@@ -355,6 +383,70 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .commit()
             .map(|_| ())
             .map_err(definition_unavailable)
+    }
+}
+
+fn reconcile_workflow_topology(
+    handle: &ExactSqlHandle,
+    topology: &WorkflowGraphTopologyStore,
+) -> Result<(), WorkflowDefinitionAuthorityError> {
+    loop {
+        let transaction = handle.begin_immediate().map_err(definition_unavailable)?;
+        let outcome = (|| {
+            let rows = query_tx(
+                &transaction,
+                "SELECT definition_id, definition_version, payload
+                 FROM workflow_graph_publication_outbox_v1
+                 WHERE applied = 0
+                 ORDER BY definition_id, definition_version
+                 LIMIT 100",
+                Vec::new(),
+            )
+            .map_err(definition_unavailable)?;
+            if rows.rows.is_empty() {
+                return Ok(false);
+            }
+            for row in rows.rows {
+                let definition_id = exact_sql_text(&row.values, 0)
+                    .ok_or_else(definition_codec_unavailable)?
+                    .to_owned();
+                let definition_version =
+                    exact_sql_integer(&row.values, 1).ok_or_else(definition_codec_unavailable)?;
+                let payload =
+                    exact_sql_text(&row.values, 2).ok_or_else(definition_codec_unavailable)?;
+                let definition = decode_definition(payload)?;
+                topology.publish_definition(&definition).map_err(|error| {
+                    WorkflowDefinitionAuthorityError::Unavailable(format!(
+                        "workflow topology publication is unavailable: {error}"
+                    ))
+                })?;
+                execute_tx(
+                    &transaction,
+                    "UPDATE workflow_graph_publication_outbox_v1
+                     SET applied = 1
+                     WHERE definition_id = ?1 AND definition_version = ?2 AND applied = 0",
+                    vec![
+                        ExactSqlValue::Text(definition_id),
+                        ExactSqlValue::Integer(definition_version),
+                    ],
+                )
+                .map_err(definition_unavailable)?;
+            }
+            Ok(true)
+        })();
+        match outcome {
+            Ok(true) => {
+                transaction.commit().map_err(definition_unavailable)?;
+            }
+            Ok(false) => {
+                transaction.rollback().map_err(definition_unavailable)?;
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = transaction.rollback();
+                return Err(error);
+            }
+        }
     }
 }
 

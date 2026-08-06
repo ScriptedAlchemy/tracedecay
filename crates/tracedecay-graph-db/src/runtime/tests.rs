@@ -28,6 +28,7 @@ fn queued_reader_rechecks_postcommit_poison_after_database_lock() {
             namespace: GraphNamespace::new("workspace").unwrap(),
             start: GraphEntityId::new("missing").unwrap(),
             relation_kinds: BTreeSet::new(),
+            direction: crate::GraphTraversalDirection::Outgoing,
             max_depth: 1,
             max_visits: 1,
             max_results: 1,

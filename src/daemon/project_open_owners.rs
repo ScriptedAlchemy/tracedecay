@@ -7,12 +7,12 @@
 //! closed and placeholder owners are never installed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+use gix::bstr::ByteSlice;
 use sha2::{Digest, Sha256};
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
@@ -39,8 +39,15 @@ use tracedecay_lsp::{
     ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
     GatewayCapabilities, LspRuntimeFailure, LspRuntimeFuture, TRACEDECAY_CONTEXT_REVISION,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken as RuntimeCancellationToken;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+#[cfg(test)]
+use super::advisory_post_open::ProjectOpenAdvisoryPostOpenStatusV1;
+use super::advisory_post_open::{
+    CachedGitHubProviderResolutionV1, GitHubProviderDiscoveryCacheKeyV1,
+    ProjectOpenAdvisoryPostOpenRegistryV1, ProjectOpenAdvisoryWorkKeyV1,
+};
 use super::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrationError,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
@@ -875,6 +882,12 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
     let graph = server.cg().await;
+    invocation
+        .enqueue_git_convergence(&project_id, &graph.store_layout().data_root, project_root)
+        .await?;
+    let embedded_graph = invocation
+        .resolve_project_graph(&project_id, &graph.store_layout().data_root)
+        .await?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -890,6 +903,13 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require the daemon-owned project session database"
                 .to_owned(),
         })?;
+    invocation.bind_session_git_evidence(
+        &project_id,
+        &graph.store_layout().data_root,
+        project_root,
+        Arc::clone(&session_db),
+        Arc::clone(&embedded_graph),
+    )?;
     let scope = resolved_scope_for_project(project_root, &project_id).map_err(|error| {
         TraceDecayError::Config {
             message: format!("project-open resolved scope denied: {error}"),
@@ -1024,9 +1044,12 @@ pub(super) async fn register_project_open_production_owners(
     })?;
     invocation
         .work_runtime_registrar()
-        .register(
+        .register_with_git_evidence(
             project_root.to_path_buf(),
+            graph.store_layout().data_root.clone(),
+            invocation.embedded_graph_runtime.clone(),
             Arc::clone(&session_db),
+            embedded_graph,
             work_authority.clone(),
             requester.clone(),
             work_grant.clone(),
@@ -1253,59 +1276,59 @@ pub(super) async fn register_project_open_dependent_owners(
     );
 
     if let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle {
-        // P3: the advisory owner (Context Scout config install, GitHub provider
-        // resolution — potentially network — CI stores, and code-index-coupled
-        // anchors) is NOT required for the project to be servable: when the
-        // feedback cycle above resolves to `None`, advisory is skipped entirely
-        // and the project still fully publishes and answers queries. Awaiting it
-        // on the open critical path coupled open to the starved reconcile lane
-        // and to network stalls (observed 924 s). Register it as a background
-        // upgrade so open returns as soon as the graph is mounted; the advisory
-        // registrars are idempotent (AlreadyRegistered) and self-contained.
+        // Advisory provider discovery and mount are optional post-open work.
+        // Publish a typed warming owner and return; the daemon-generation
+        // registry coalesces the exact admitted identity, cancels replacements,
+        // and joins every retained task before dependent authorities shut down.
+        let advisory_key = ProjectOpenAdvisoryWorkKeyV1 {
+            repository_id: feedback_scope.repository_id.clone(),
+            worktree_id: feedback_scope.worktree_id.clone(),
+            head_commit_id: feedback_scope.head_commit_id.clone(),
+            configuration_digest: access.configuration_digest.clone(),
+        };
         let advisory_invocation = invocation.clone();
         let advisory_project_root = project_root.to_path_buf();
         let advisory_session_db = Arc::clone(&session_db);
         let advisory_graph = Arc::clone(&graph);
         let advisory_scope = scope.clone();
         let advisory_scout_configuration = scout_configuration.clone();
-        tokio::spawn(async move {
-            let outcome = register_production_advisory_owner(
-                &advisory_invocation,
-                &advisory_project_root,
-                database,
-                advisory_session_db,
-                advisory_graph,
-                advisory_scope,
-                access,
-                feedback_scope,
-                feedback_cycle,
-                feedback_lsp_input,
-                lsp_session_factory,
-                scout_registry,
-                advisory_scout_configuration,
-                admitted_root_uri,
-                indexed_files,
-            )
-            .await;
-            match outcome {
-                Ok(_) => tracing::info!(
+        let status = invocation.advisory_post_open_owners.enqueue(
+            advisory_project_root.clone(),
+            advisory_key,
+            move |cancellation| async move {
+                register_production_advisory_owner(
+                    &advisory_invocation,
+                    &advisory_project_root,
+                    database,
+                    advisory_session_db,
+                    advisory_graph,
+                    advisory_scope,
+                    access,
+                    feedback_scope,
+                    feedback_cycle,
+                    feedback_lsp_input,
+                    lsp_session_factory,
+                    scout_registry,
+                    advisory_scout_configuration,
+                    admitted_root_uri,
+                    indexed_files,
+                    cancellation,
+                )
+                .await?;
+                tracing::info!(
                     event = "project_open_owner_phase",
                     project = %advisory_project_root.display(),
                     phase = "advisory_owner_registered",
                     deferred = true,
-                ),
-                Err(error) => tracing::warn!(
-                    event = "project_open_owner_phase",
-                    project = %advisory_project_root.display(),
-                    phase = "advisory_owner_deferred_failed",
-                    error = %error,
-                ),
-            }
-        });
+                );
+                Ok(())
+            },
+        );
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
             phase = "advisory_owner_scheduled",
+            status = ?status,
         );
     }
 
@@ -1664,7 +1687,9 @@ async fn register_production_advisory_owner(
     scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
     root_uri: String,
     indexed_files: Vec<String>,
+    cancellation: RuntimeCancellationToken,
 ) -> Result<Option<()>> {
+    advisory_post_open_cancellation_checkpoint(&cancellation)?;
     let scout_configuration = ContextScoutConfigurationPinV1::from_current(&scout_configuration)
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
@@ -1691,16 +1716,21 @@ async fn register_production_advisory_owner(
         &graph.store_layout().dashboard_root,
     )
     .await?;
+    advisory_post_open_cancellation_checkpoint(&cancellation)?;
     let remote = resolve_production_github_provider_config(
         invocation,
+        &invocation.advisory_post_open_owners,
+        Arc::clone(graph.profile_database()),
         project_root,
         database.clone(),
         Arc::clone(&project_runtime_db),
         resolved_scope.clone(),
         &source_access,
         feedback_scope.clone(),
+        cancellation.clone(),
     )
-    .await;
+    .await?;
+    advisory_post_open_cancellation_checkpoint(&cancellation)?;
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
         (remote.github, Some(remote.github_source_access), remote.ci)
     });
@@ -1796,6 +1826,7 @@ async fn register_production_advisory_owner(
         hook_v2,
         legacy_hook,
     };
+    advisory_post_open_cancellation_checkpoint(&cancellation)?;
     let registration = match invocation
         .advisory_runtime_registrar()
         .register_production(
@@ -1807,13 +1838,20 @@ async fn register_production_advisory_owner(
         .await
     {
         Ok(registration) => registration,
-        Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered) => return Ok(Some(())),
+        Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered) => {
+            return Err(TraceDecayError::Config {
+                message: "project-open advisory runtime already exists for a different or \
+                          incomplete exact advisory identity"
+                    .to_owned(),
+            });
+        }
         Err(error) => {
             return Err(TraceDecayError::Config {
                 message: format!("project-open advisory runtime registration failed: {error}"),
             });
         }
     };
+    advisory_post_open_cancellation_checkpoint(&cancellation)?;
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         registration: Arc::clone(&registration),
         lsp_input: Arc::clone(&feedback_lsp_input),
@@ -1828,6 +1866,7 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory LSP cycle registration failed: {error}"),
         })?;
+    advisory_post_open_cancellation_checkpoint(&cancellation)?;
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();
     let work = move |request: Pr13HookOrchestrationRequestV1| {
@@ -1878,7 +1917,20 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open PR13 Hook orchestration failed: {error}"),
         })?;
+    advisory_post_open_cancellation_checkpoint(&cancellation)?;
     Ok(Some(()))
+}
+
+fn advisory_post_open_cancellation_checkpoint(
+    cancellation: &RuntimeCancellationToken,
+) -> Result<()> {
+    if cancellation.is_cancelled() {
+        Err(TraceDecayError::Config {
+            message: "project-open advisory owner was cancelled".to_owned(),
+        })
+    } else {
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2262,15 +2314,35 @@ struct ProductionGitHubProviderConfigV1 {
 
 async fn resolve_production_github_provider_config(
     invocation: &DaemonInvocationState,
+    post_open_owners: &ProjectOpenAdvisoryPostOpenRegistryV1,
+    profile_database: Arc<crate::global_db::RegisteredGlobalDb>,
     project_root: &Path,
     database: crate::db::Database,
     project_runtime_db: Arc<crate::global_db::RegisteredGlobalDb>,
     resolved_scope: ResolvedScope,
     project_source_access: &ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
-) -> Option<ProductionGitHubProviderConfigV1> {
-    let (owner, repository) =
-        github_repository_from_remote(&crate::tracedecay::git_remote_url(project_root)?)?;
+    cancellation: RuntimeCancellationToken,
+) -> Result<Option<ProductionGitHubProviderConfigV1>> {
+    if cancellation.is_cancelled() {
+        return Err(TraceDecayError::Config {
+            message: "project-open GitHub provider discovery was cancelled".to_owned(),
+        });
+    }
+    let Some(remote) = production_github_remote_identity(project_root) else {
+        return Ok(None);
+    };
+    let Some((owner, repository)) = github_repository_from_remote(&remote.remote_identity) else {
+        return Ok(None);
+    };
+    publish_validated_github_remote_identity(profile_database.as_ref(), &feedback_scope, &remote)
+        .await?;
+    let cache_key = GitHubProviderDiscoveryCacheKeyV1 {
+        repository_id: feedback_scope.repository_id.clone(),
+        canonical_common_dir: remote.canonical_common_dir,
+        head_commit_id: feedback_scope.head_commit_id.clone(),
+        remote_identity: remote.remote_identity,
+    };
     let profile_id = &project_runtime_db.binding().shard_id.profile_id;
     let credential = match invocation.mount_github_read_only_credential_authority_for_project(
         profile_id,
@@ -2281,7 +2353,7 @@ async fn resolve_production_github_provider_config(
             GitHubReadOnlyCredentialV1::anonymous()
         }
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
-        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => return None,
+        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => return Ok(None),
         ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
             match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
                 crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Verified(
@@ -2289,7 +2361,7 @@ async fn resolve_production_github_provider_config(
                 ) => credential,
                 crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Missing
                 | crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Rejected => {
-                    return None;
+                    return Ok(None);
                 }
             }
         }
@@ -2297,12 +2369,15 @@ async fn resolve_production_github_provider_config(
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         project_runtime_db,
     );
-    let configured_source_access = Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
+    let Some(configured_source_access) = ConfiguredGitHubSourceAccessAuthorityV1::new(
         configuration,
         resolved_scope.clone(),
         &owner,
         &repository,
-    )?);
+    ) else {
+        return Ok(None);
+    };
+    let configured_source_access = Arc::new(configured_source_access);
     let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = configured_source_access.clone();
     let ci_source_access: Arc<dyn CiSourceAccessAuthorityV1> = configured_source_access;
     let ci = (credential.permits(GitHubReadPermissionV1::Actions)
@@ -2326,11 +2401,19 @@ async fn resolve_production_github_provider_config(
     let http = GitHubHttpReadConfigV1::default();
     let discovery_http = http.clone();
     let discovery_credential = credential.clone();
-    let discovery = match review_discovery_authority.as_ref() {
-        Some((authorization_context, discovery_request)) => {
+    let discovery_cancellation = cancellation.clone();
+    let cached = post_open_owners.cached_provider(&cache_key);
+    let discovery = match (cached.as_ref(), review_discovery_authority.as_ref()) {
+        (Some(cached), Some(_)) => Some(GitHubExactCommitDiscoveryOutcomeV1::Found(
+            cached.pull.clone(),
+        )),
+        (None, Some((authorization_context, discovery_request))) => {
             discover_github_pull_request_after_authorization(
                 || source_access.authorize(authorization_context, discovery_request),
                 move || {
+                    if discovery_cancellation.is_cancelled() {
+                        return GitHubExactCommitDiscoveryOutcomeV1::Unavailable;
+                    }
                     discover_exact_commit_pull_request_v1(
                         &owner,
                         &repository,
@@ -2342,7 +2425,7 @@ async fn resolve_production_github_provider_config(
             )
             .await
         }
-        None => None,
+        (_, None) => None,
     };
     let github = match (discovery, review_discovery_authority.as_ref()) {
         (
@@ -2362,8 +2445,27 @@ async fn resolve_production_github_provider_config(
             {
                 None
             } else {
-                resolve_production_github_identity(project_root, &feedback_scope, &target, pull)
-                    .map(|identity| GitHubReviewRuntimeOwnerConfigV1 {
+                let identity = cached
+                    .filter(|cached| cached.pull == pull)
+                    .map(|cached| cached.identity)
+                    .or_else(|| {
+                        resolve_production_github_identity(
+                            project_root,
+                            &feedback_scope,
+                            &target,
+                            pull.clone(),
+                            cancellation.clone(),
+                        )
+                    });
+                identity.map(|identity| {
+                    post_open_owners.cache_provider(
+                        cache_key,
+                        CachedGitHubProviderResolutionV1 {
+                            pull,
+                            identity: identity.clone(),
+                        },
+                    );
+                    GitHubReviewRuntimeOwnerConfigV1 {
                         database,
                         resolved_scope,
                         feedback_scope,
@@ -2371,16 +2473,17 @@ async fn resolve_production_github_provider_config(
                         credential,
                         http,
                         identity,
-                    })
+                    }
+                })
             }
         }
         _ => None,
     };
-    Some(ProductionGitHubProviderConfigV1 {
+    Ok(Some(ProductionGitHubProviderConfigV1 {
         github,
         github_source_access: source_access,
         ci,
-    })
+    }))
 }
 
 async fn discover_github_pull_request_after_authorization<A, AF, F>(
@@ -2526,11 +2629,80 @@ fn github_repository_from_remote(remote: &str) -> Option<(String, String)> {
         .then_some((target.owner, target.repository))
 }
 
+struct ProductionGitRemoteIdentityV1 {
+    canonical_common_dir: PathBuf,
+    remote_identity: String,
+}
+
+async fn publish_validated_github_remote_identity(
+    profile_database: &crate::global_db::RegisteredGlobalDb,
+    feedback_scope: &FeedbackScopeV1,
+    remote: &ProductionGitRemoteIdentityV1,
+) -> Result<()> {
+    let project_id = feedback_scope.project_id.as_str();
+    let existing = profile_database
+        .get_code_project(project_id)
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "project-open remote publication requires the admitted project authority \
+                 '{project_id}'"
+            ),
+        })?;
+    if existing.git_remote_url.as_deref() == Some(remote.remote_identity.as_str()) {
+        return Ok(());
+    }
+    let canonical_root = PathBuf::from(&existing.canonical_root);
+    let git_common_dir = existing.git_common_dir.as_deref().map(Path::new);
+    let published = profile_database
+        .upsert_code_project(
+            project_id,
+            &canonical_root,
+            git_common_dir,
+            Some(&remote.remote_identity),
+            existing.default_branch.as_deref(),
+        )
+        .await
+        .filter(|published| published.project_id == project_id)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "project-open remote publication did not retain exact project authority \
+                 '{project_id}'"
+            ),
+        })?;
+    if published.git_remote_url.as_deref() != Some(remote.remote_identity.as_str()) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "project-open remote publication did not persist the validated identity for \
+                 exact project authority '{project_id}'"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn production_github_remote_identity(project_root: &Path) -> Option<ProductionGitRemoteIdentityV1> {
+    // Exact-root native open is deliberate: provider discovery must never
+    // inherit a parent repository or fall through to ambient Git CLI config.
+    let repository = gix::open(project_root).ok()?;
+    let canonical_common_dir = repository.common_dir().canonicalize().ok()?;
+    let remote = repository.config_snapshot().string("remote.origin.url")?;
+    let remote_identity = remote.to_str().ok()?.trim().to_owned();
+    if remote_identity.is_empty() {
+        return None;
+    }
+    Some(ProductionGitRemoteIdentityV1 {
+        canonical_common_dir,
+        remote_identity,
+    })
+}
+
 fn resolve_production_github_identity(
     project_root: &Path,
     feedback_scope: &FeedbackScopeV1,
     target: &GitHubRepositoryTargetV1,
     pull: crate::application::advisory::github_runtime::GitHubExactCommitPullRequestV1,
+    cancellation: RuntimeCancellationToken,
 ) -> Option<GitHubReviewProviderIdentityV1> {
     let base = pull.base_commit_id;
     let head = pull.head_commit_id;
@@ -2538,22 +2710,24 @@ fn resolve_production_github_identity(
         // Keep the advisory target bound to the admitted feedback head.
         return None;
     }
-    let merge_base = Command::new(crate::git::git_program())
-        .args([
-            "-C",
-            &project_root.to_string_lossy(),
-            "merge-base",
-            base.as_str(),
-            head.as_str(),
-        ])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| {
-            matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })?;
+    let bounds = tracedecay_runtime_core::git::GitCommandBounds {
+        deadline: Instant::now() + Duration::from_secs(2),
+        cancel: Some(cancellation),
+        max_stdout_bytes: 256,
+        max_stderr_bytes: 8 * 1024,
+    };
+    let merge_base = tracedecay_runtime_core::git::bounded_git_output(
+        project_root,
+        &["merge-base", base.as_str(), head.as_str()],
+        &bounds,
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .map(|value| value.trim().to_owned())
+    .filter(|value| {
+        matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })?;
     let identity = GitHubReviewProviderIdentityV1 {
         provider: ProviderId::new("provider.github").ok()?,
         repository_owner: target.owner.clone(),
@@ -3277,6 +3451,346 @@ mod tests {
             assert!(discovery.is_none());
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
+    }
+
+    fn advisory_work_key(suffix: &str) -> ProjectOpenAdvisoryWorkKeyV1 {
+        ProjectOpenAdvisoryWorkKeyV1 {
+            repository_id: RepositoryId::new(format!("repository.advisory.{suffix}"))
+                .expect("repository"),
+            worktree_id: tracedecay_domain::WorktreeId::new(format!("worktree.advisory.{suffix}"))
+                .expect("worktree"),
+            head_commit_id: CommitId::new(if suffix == "first" {
+                "a".repeat(40)
+            } else {
+                "b".repeat(40)
+            })
+            .expect("head commit"),
+            configuration_digest: tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{}",
+                "c".repeat(64)
+            ))
+            .expect("configuration digest"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_open_advisory_admission_stays_bounded_and_coalesces_blocked_work() {
+        let registry = ProjectOpenAdvisoryPostOpenRegistryV1::default();
+        let project_root = PathBuf::from("/project/advisory-bounded");
+        let key = advisory_work_key("first");
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mounted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let release_work = Arc::clone(&release);
+        let mounted_work = Arc::clone(&mounted);
+        let initial_admission_started = Instant::now();
+        assert_eq!(
+            registry.enqueue(project_root.clone(), key.clone(), move |_| async move {
+                release_work.notified().await;
+                mounted_work.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            }),
+            ProjectOpenAdvisoryPostOpenStatusV1::Warming
+        );
+
+        let mut admission_latencies = vec![initial_admission_started.elapsed()];
+        for _ in 0..20 {
+            let started = Instant::now();
+            assert_eq!(
+                registry.enqueue(project_root.clone(), key.clone(), |_| async move {
+                    panic!("coalesced work must not start")
+                }),
+                ProjectOpenAdvisoryPostOpenStatusV1::Warming
+            );
+            admission_latencies.push(started.elapsed());
+        }
+        admission_latencies.sort_unstable();
+        let p95_index = admission_latencies.len().saturating_mul(95).div_ceil(100) - 1;
+        assert!(
+            admission_latencies[p95_index] <= Duration::from_millis(50),
+            "post-open owner admission p95 exceeded 50 ms: {:?}",
+            admission_latencies[p95_index]
+        );
+        assert_eq!(
+            registry.status(&project_root),
+            Some(ProjectOpenAdvisoryPostOpenStatusV1::Warming)
+        );
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.status(&project_root) != Some(ProjectOpenAdvisoryPostOpenStatusV1::Ready)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("eventual advisory mount");
+        assert!(mounted.load(std::sync::atomic::Ordering::Acquire));
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn post_open_advisory_owner_cancels_stale_identity_and_restarts_unavailable_work() {
+        let registry = ProjectOpenAdvisoryPostOpenRegistryV1::default();
+        let project_root = PathBuf::from("/project/advisory-restart");
+        let first_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release_first = Arc::new(tokio::sync::Notify::new());
+        let replacement_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let cancelled_observation = Arc::clone(&first_cancelled);
+        let release_cancelled_owner = Arc::clone(&release_first);
+        assert_eq!(
+            registry.enqueue(
+                project_root.clone(),
+                advisory_work_key("first"),
+                move |cancel| async move {
+                    while !cancel.is_cancelled() {
+                        tokio::task::yield_now().await;
+                    }
+                    cancelled_observation.store(true, std::sync::atomic::Ordering::Release);
+                    release_cancelled_owner.notified().await;
+                    Err(TraceDecayError::Config {
+                        message: "cancelled stale advisory identity".to_owned(),
+                    })
+                }
+            ),
+            ProjectOpenAdvisoryPostOpenStatusV1::Warming
+        );
+        let replacement_observation = Arc::clone(&replacement_started);
+        assert_eq!(
+            registry.enqueue(
+                project_root.clone(),
+                advisory_work_key("second"),
+                move |_| async move {
+                    replacement_observation.store(true, std::sync::atomic::Ordering::Release);
+                    Err(TraceDecayError::Config {
+                        message: "transient provider outage".to_owned(),
+                    })
+                }
+            ),
+            ProjectOpenAdvisoryPostOpenStatusV1::Warming
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !first_cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stale owner cancellation");
+        assert!(
+            !replacement_started.load(std::sync::atomic::Ordering::Acquire),
+            "replacement must not race a stale owner that has not drained"
+        );
+        release_first.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.status(&project_root)
+                != Some(ProjectOpenAdvisoryPostOpenStatusV1::Unavailable)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("unavailable status");
+        assert!(replacement_started.load(std::sync::atomic::Ordering::Acquire));
+
+        assert_eq!(
+            registry.enqueue(
+                project_root.clone(),
+                advisory_work_key("second"),
+                |_| async { Ok(()) }
+            ),
+            ProjectOpenAdvisoryPostOpenStatusV1::Warming
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.status(&project_root) != Some(ProjectOpenAdvisoryPostOpenStatusV1::Ready)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restarted provider mount");
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn post_open_advisory_shutdown_cancels_and_drains_blocked_owner() {
+        let registry = ProjectOpenAdvisoryPostOpenRegistryV1::default();
+        let project_root = PathBuf::from("/project/advisory-shutdown");
+        let drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drained_work = Arc::clone(&drained);
+
+        assert_eq!(
+            registry.enqueue(
+                project_root,
+                advisory_work_key("first"),
+                move |cancellation| async move {
+                    cancellation.cancelled().await;
+                    drained_work.store(true, std::sync::atomic::Ordering::Release);
+                    Err(TraceDecayError::Config {
+                        message: "shutdown cancelled advisory owner".to_owned(),
+                    })
+                }
+            ),
+            ProjectOpenAdvisoryPostOpenStatusV1::Warming
+        );
+        tokio::time::timeout(Duration::from_secs(1), registry.shutdown())
+            .await
+            .expect("shutdown must drain the retained advisory owner");
+        assert!(drained.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    fn cached_provider_resolution(
+        head: &str,
+        remote_repository: &str,
+    ) -> CachedGitHubProviderResolutionV1 {
+        let target = GitHubRepositoryTargetV1 {
+            owner: "ScriptedAlchemy".to_owned(),
+            repository: remote_repository.to_owned(),
+            pull_request_number: 17,
+            pull_request_id: GitHubPullRequestIdV1::new("PR_kwDO17").expect("pull request id"),
+        };
+        let base = CommitId::new("d".repeat(40)).expect("base");
+        let head = CommitId::new(head.repeat(40)).expect("head");
+        CachedGitHubProviderResolutionV1 {
+            pull: crate::application::advisory::github_runtime::GitHubExactCommitPullRequestV1 {
+                target: target.clone(),
+                base_commit_id: base.clone(),
+                head_commit_id: head.clone(),
+            },
+            identity: GitHubReviewProviderIdentityV1 {
+                provider: ProviderId::new("provider.github").expect("provider"),
+                repository_owner: target.owner,
+                repository_name: target.repository,
+                pull_request_number: target.pull_request_number,
+                base_commit_id: base.clone(),
+                head_commit_id: head,
+                merge_base_commit_id: base,
+            },
+        }
+    }
+
+    #[test]
+    fn provider_cache_requires_exact_repository_head_and_remote_identity() {
+        let registry = ProjectOpenAdvisoryPostOpenRegistryV1::default();
+        let repository_id = RepositoryId::new("repository.cache").expect("repository");
+        let exact = GitHubProviderDiscoveryCacheKeyV1 {
+            repository_id: repository_id.clone(),
+            canonical_common_dir: PathBuf::from("/repo/.git"),
+            head_commit_id: CommitId::new("a".repeat(40)).expect("head"),
+            remote_identity: "git@github.com:ScriptedAlchemy/tracedecay.git".to_owned(),
+        };
+        let expected = cached_provider_resolution("a", "tracedecay");
+        registry.cache_provider(exact.clone(), expected.clone());
+
+        assert_eq!(
+            registry
+                .cached_provider(&exact)
+                .expect("exact cache entry")
+                .identity,
+            expected.identity
+        );
+        for mismatched in [
+            GitHubProviderDiscoveryCacheKeyV1 {
+                repository_id: RepositoryId::new("repository.other").expect("repository"),
+                ..exact.clone()
+            },
+            GitHubProviderDiscoveryCacheKeyV1 {
+                canonical_common_dir: PathBuf::from("/other/.git"),
+                ..exact.clone()
+            },
+            GitHubProviderDiscoveryCacheKeyV1 {
+                head_commit_id: CommitId::new("b".repeat(40)).expect("head"),
+                ..exact.clone()
+            },
+            GitHubProviderDiscoveryCacheKeyV1 {
+                remote_identity: "https://github.com/other/tracedecay.git".to_owned(),
+                ..exact.clone()
+            },
+        ] {
+            assert!(
+                registry.cached_provider(&mismatched).is_none(),
+                "cache must not fall back across repository, HEAD, or remote identity"
+            );
+        }
+    }
+
+    #[test]
+    fn github_remote_identity_uses_exact_root_without_parent_discovery() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let repository_root = temporary.path().join("repository");
+        let nested_non_repository = repository_root.join("nested");
+        std::fs::create_dir_all(&nested_non_repository).expect("nested directory");
+        assert!(
+            std::process::Command::new(crate::git::git_program())
+                .args(["init", "--quiet"])
+                .current_dir(&repository_root)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        assert!(
+            std::process::Command::new(crate::git::git_program())
+                .args([
+                    "config",
+                    "remote.origin.url",
+                    "git@github.com:ScriptedAlchemy/tracedecay.git",
+                ])
+                .current_dir(&repository_root)
+                .status()
+                .expect("git config")
+                .success()
+        );
+
+        let identity =
+            production_github_remote_identity(&repository_root).expect("exact repository identity");
+        assert_eq!(
+            identity.remote_identity,
+            "git@github.com:ScriptedAlchemy/tracedecay.git"
+        );
+        assert!(
+            production_github_remote_identity(&nested_non_repository).is_none(),
+            "a nested non-repository path must not inherit a parent remote"
+        );
+    }
+
+    #[test]
+    fn github_merge_base_honors_owner_cancellation_before_history_walk() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let feedback_scope = FeedbackScopeV1 {
+            project_id: ProjectId::new("project.cancelled-merge-base").expect("project"),
+            repository_id: RepositoryId::new("repository.cancelled-merge-base")
+                .expect("repository"),
+            worktree_id: tracedecay_domain::WorktreeId::new("worktree.cancelled-merge-base")
+                .expect("worktree"),
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: CommitId::new("b".repeat(40)).expect("head"),
+        };
+        let target = GitHubRepositoryTargetV1 {
+            owner: "ScriptedAlchemy".to_owned(),
+            repository: "tracedecay".to_owned(),
+            pull_request_number: 17,
+            pull_request_id: GitHubPullRequestIdV1::new("PR_kwDO17").expect("pull request id"),
+        };
+        let pull = crate::application::advisory::github_runtime::GitHubExactCommitPullRequestV1 {
+            target: target.clone(),
+            base_commit_id: CommitId::new("a".repeat(40)).expect("base"),
+            head_commit_id: feedback_scope.head_commit_id.clone(),
+        };
+        let cancellation = RuntimeCancellationToken::new();
+        cancellation.cancel();
+        let started = Instant::now();
+
+        assert!(
+            resolve_production_github_identity(
+                temporary.path(),
+                &feedback_scope,
+                &target,
+                pull,
+                cancellation,
+            )
+            .is_none()
+        );
+        assert!(started.elapsed() <= Duration::from_millis(50));
     }
 
     #[tokio::test]

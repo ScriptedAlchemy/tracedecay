@@ -829,6 +829,7 @@ pub fn api_migration_catalog_contribution()
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::Partial,
         ])?,

@@ -6,7 +6,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
@@ -21,6 +20,9 @@ use tracedecay_domain::{
 };
 use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_store::StoreShardIdV1;
+use tracedecay_temporal_query::{
+    TemporalKernelError, context::ContextError, hydration::HydrationError, ports::TemporalPortError,
+};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::application::context::{
@@ -381,7 +383,6 @@ pub(crate) struct DaemonSessionRetrievalService {
     database: Arc<RegisteredGlobalDb>,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
-    calls: Arc<AtomicU64>,
     refresh_status: Option<SessionTemporalRefreshWake>,
 }
 
@@ -389,7 +390,6 @@ impl DaemonSessionRetrievalService {
     pub(crate) fn new(
         database: Arc<RegisteredGlobalDb>,
         root: DaemonSessionRetrievalRoot,
-        calls: Arc<AtomicU64>,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
         Some(Self {
@@ -400,7 +400,6 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            calls,
             refresh_status,
         })
     }
@@ -409,7 +408,6 @@ impl DaemonSessionRetrievalService {
         database: Arc<RegisteredGlobalDb>,
         registered_database: Arc<RegisteredGlobalDb>,
         root: DaemonSessionRetrievalRoot,
-        calls: Arc<AtomicU64>,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
         let expected = root.expected_runtime_shard.as_ref()?;
@@ -427,7 +425,6 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            calls,
             refresh_status,
         })
     }
@@ -576,10 +573,6 @@ impl DaemonSessionRetrievalService {
         {
             return SessionRetrievalServiceOutcome::Unavailable(unavailable);
         }
-        // Count commands the service answers past the fast-path gate,
-        // including wrong-scope rejections: the counter proves the transport
-        // selected this service for the answer.
-        self.calls.fetch_add(1, Ordering::Relaxed);
         if !self.root.owns(&command) {
             return SessionRetrievalServiceOutcome::WrongScope;
         }
@@ -641,6 +634,9 @@ impl DaemonSessionRetrievalService {
                 SessionRetrievalServiceOutcome::BudgetExhausted
             }
             SessionRetrievalOutcome::Cancelled => SessionRetrievalServiceOutcome::Cancelled,
+            SessionRetrievalOutcome::DeadlineExceeded => {
+                SessionRetrievalServiceOutcome::DeadlineExceeded
+            }
         }
     }
 
@@ -951,7 +947,6 @@ impl DaemonSessionRetrievalService {
         if command.store_scope() != self.root.store_scope {
             return LcmDescribeServiceOutcome::WrongScope;
         }
-        self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
             Err(error) => return describe_execution_error(error, self.empty_temporal()),
@@ -1103,7 +1098,6 @@ impl DaemonSessionRetrievalService {
         if command.store_scope() != self.root.store_scope {
             return LcmExpandServiceOutcome::WrongScope;
         }
-        self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
             Err(error) => return expand_execution_error(error, self.empty_temporal()),
@@ -1126,7 +1120,7 @@ impl DaemonSessionRetrievalService {
             &Self::lcm_expand_target_key(&target),
             command.grain(),
             Some(command.content_slice()),
-            command.source_limit(),
+            Some(command.source_page_size()),
         );
         let retrieval_scope = if matches!(&target, LcmExpandTarget::RawMessage { .. })
             && direct.owner_session_id.as_str() != command.session_id().as_str()
@@ -1200,15 +1194,30 @@ impl DaemonSessionRetrievalService {
                 ),
             );
         };
-        let source_offset = match command.cursor() {
-            Some(cursor) => match executor
-                .decode_lcm_source_cursor(&result.snapshot, &binding, cursor)
-                .await
-            {
-                Ok(offset) => offset,
-                Err(error) => return expand_execution_error(error, self.empty_temporal()),
-            },
-            None => command.source_offset(),
+        let source_offset = match (command.cursor(), &target) {
+            (Some(cursor), LcmExpandTarget::SummaryNode { node_id }) => {
+                let boundary = match executor
+                    .decode_lcm_source_cursor(&result.snapshot, &binding, cursor)
+                    .await
+                {
+                    Ok(boundary) => boundary,
+                    Err(error) => return expand_execution_error(error, self.empty_temporal()),
+                };
+                match executor
+                    .lcm_source_offset_after(
+                        command.provider(),
+                        command.session_id(),
+                        node_id,
+                        &boundary,
+                    )
+                    .await
+                {
+                    Ok(offset) => offset,
+                    Err(error) => return expand_execution_error(error, self.empty_temporal()),
+                }
+            }
+            (Some(_), _) => return LcmExpandServiceOutcome::Denied,
+            (None, _) => 0,
         };
         let request = LcmExpandRequest {
             provider: command.provider().to_string(),
@@ -1216,7 +1225,7 @@ impl DaemonSessionRetrievalService {
             target,
             content_slice: Some(command.content_slice()),
             source_offset,
-            source_limit: command.source_limit(),
+            source_limit: Some(command.source_page_size()),
         };
         let rendered = executor.render_lcm_expand(request, canonical_content).await;
         let mut expansion = match rendered {
@@ -1236,13 +1245,24 @@ impl DaemonSessionRetrievalService {
             return expand_execution_error(error, self.empty_temporal());
         }
         let mut temporal = self.lcm_temporal_view(&result);
-        if let Some(offset) = expansion
+        if expansion
             .source_pagination
             .as_ref()
-            .and_then(|pagination| pagination.next_source_offset)
+            .is_some_and(|pagination| pagination.has_more)
         {
+            let Some(boundary) = expansion
+                .summary_sources
+                .last()
+                .map(|source| &source.source_ref)
+            else {
+                return LcmExpandServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::HydrationUnavailable,
+                    ),
+                );
+            };
             match executor
-                .encode_lcm_source_cursor(&result.snapshot, &binding, offset)
+                .encode_lcm_source_cursor(&result.snapshot, &binding, boundary)
                 .await
             {
                 Ok(cursor) => temporal.cursor = Some(cursor),
@@ -1375,6 +1395,17 @@ fn describe_execution_error(
     error: SessionTemporalExecutionError,
     temporal: SessionTemporalMetadataView,
 ) -> LcmDescribeServiceOutcome {
+    if let SessionTemporalExecutionError::Kernel(kernel) = &error {
+        match temporal_kernel_interruption(kernel) {
+            Some(TemporalInterruption::Cancelled) => {
+                return LcmDescribeServiceOutcome::Cancelled;
+            }
+            Some(TemporalInterruption::DeadlineExceeded) => {
+                return LcmDescribeServiceOutcome::DeadlineExceeded;
+            }
+            None => {}
+        }
+    }
     match error {
         SessionTemporalExecutionError::Locked => LcmDescribeServiceOutcome::Locked,
         SessionTemporalExecutionError::Redacted => LcmDescribeServiceOutcome::Redacted,
@@ -1385,6 +1416,9 @@ fn describe_execution_error(
             LcmDescribeServiceOutcome::BudgetExhausted
         }
         SessionTemporalExecutionError::Cancelled => LcmDescribeServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::DeadlineExceeded => {
+            LcmDescribeServiceOutcome::DeadlineExceeded
+        }
         SessionTemporalExecutionError::Stale { generation_lag } => {
             LcmDescribeServiceOutcome::Stale {
                 temporal,
@@ -1405,6 +1439,17 @@ fn expand_execution_error(
     error: SessionTemporalExecutionError,
     temporal: SessionTemporalMetadataView,
 ) -> LcmExpandServiceOutcome {
+    if let SessionTemporalExecutionError::Kernel(kernel) = &error {
+        match temporal_kernel_interruption(kernel) {
+            Some(TemporalInterruption::Cancelled) => {
+                return LcmExpandServiceOutcome::Cancelled;
+            }
+            Some(TemporalInterruption::DeadlineExceeded) => {
+                return LcmExpandServiceOutcome::DeadlineExceeded;
+            }
+            None => {}
+        }
+    }
     match error {
         SessionTemporalExecutionError::Locked => LcmExpandServiceOutcome::Locked,
         SessionTemporalExecutionError::Redacted => LcmExpandServiceOutcome::Redacted,
@@ -1413,6 +1458,9 @@ fn expand_execution_error(
         SessionTemporalExecutionError::Denied => LcmExpandServiceOutcome::Denied,
         SessionTemporalExecutionError::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => LcmExpandServiceOutcome::Cancelled,
+        SessionTemporalExecutionError::DeadlineExceeded => {
+            LcmExpandServiceOutcome::DeadlineExceeded
+        }
         SessionTemporalExecutionError::Stale { generation_lag } => LcmExpandServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(LcmDataFreshness::Stored { generation_lag }),
@@ -1424,6 +1472,34 @@ fn expand_execution_error(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
             ))
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporalInterruption {
+    Cancelled,
+    DeadlineExceeded,
+}
+
+fn temporal_kernel_interruption(error: &TemporalKernelError) -> Option<TemporalInterruption> {
+    match error {
+        TemporalKernelError::Cancelled => Some(TemporalInterruption::Cancelled),
+        TemporalKernelError::DeadlineExceeded => Some(TemporalInterruption::DeadlineExceeded),
+        TemporalKernelError::Port(TemporalPortError::Cancelled)
+        | TemporalKernelError::Hydration(HydrationError::Interrupted(
+            TemporalPortError::Cancelled,
+        ))
+        | TemporalKernelError::Context(ContextError::Interrupted(TemporalPortError::Cancelled)) => {
+            Some(TemporalInterruption::Cancelled)
+        }
+        TemporalKernelError::Port(TemporalPortError::DeadlineExceeded)
+        | TemporalKernelError::Hydration(HydrationError::Interrupted(
+            TemporalPortError::DeadlineExceeded,
+        ))
+        | TemporalKernelError::Context(ContextError::Interrupted(
+            TemporalPortError::DeadlineExceeded,
+        )) => Some(TemporalInterruption::DeadlineExceeded),
+        _ => None,
     }
 }
 
@@ -1443,6 +1519,7 @@ fn describe_retrieval_outcome(
             LcmDescribeServiceOutcome::BudgetExhausted
         }
         SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
+        SessionRetrievalOutcome::DeadlineExceeded => LcmDescribeServiceOutcome::DeadlineExceeded,
         SessionRetrievalOutcome::Stale { freshness } => LcmDescribeServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),
@@ -1483,6 +1560,7 @@ fn expand_retrieval_outcome(
             LcmExpandServiceOutcome::BudgetExhausted
         }
         SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
+        SessionRetrievalOutcome::DeadlineExceeded => LcmExpandServiceOutcome::DeadlineExceeded,
         SessionRetrievalOutcome::Stale { freshness } => LcmExpandServiceOutcome::Stale {
             temporal,
             retrieval: LcmRetrievalOutcome::stale(lcm_data_freshness(freshness)),
@@ -1923,6 +2001,24 @@ mod tests {
                 },
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn lcm_execution_preserves_kernel_deadline_and_cancellation_terminals() {
+        assert!(matches!(
+            describe_execution_error(
+                SessionTemporalExecutionError::Kernel(TemporalKernelError::DeadlineExceeded),
+                SessionTemporalMetadataView::default(),
+            ),
+            LcmDescribeServiceOutcome::DeadlineExceeded
+        ));
+        assert!(matches!(
+            expand_execution_error(
+                SessionTemporalExecutionError::Kernel(TemporalKernelError::Cancelled),
+                SessionTemporalMetadataView::default(),
+            ),
+            LcmExpandServiceOutcome::Cancelled
         ));
     }
 }

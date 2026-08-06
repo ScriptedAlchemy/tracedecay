@@ -16,8 +16,9 @@ use crate::traversal;
 use crate::vector;
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability, GraphEntity,
-    GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphProjectionId, GraphProperty,
-    GraphPropertyName, GraphPublication, GraphRelation, GraphRelationId, GraphWriteBatch,
+    GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
+    GraphProperty, GraphPropertyName, GraphPublication, GraphRelation, GraphRelationId,
+    GraphRelationKind, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWriteBatch,
     ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
     VectorSearchResult,
 };
@@ -298,6 +299,85 @@ impl GraphDb {
         traversal::traverse(database, &cached, request)
     }
 
+    /// Reads filtered outgoing relation identities for each start in input
+    /// order while holding one database and state read lock.
+    pub fn outgoing_relation_ids(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let cached = self.state_read_guard()?;
+        traversal::outgoing_relation_ids(
+            database,
+            &cached,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+        )
+    }
+
+    /// Reads filtered outgoing relations for each start in input order while
+    /// holding one database and state read lock.
+    pub fn outgoing_relations(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let cached = self.state_read_guard()?;
+        traversal::outgoing_relations(
+            database,
+            &cached,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+        )
+    }
+
+    /// Computes projection-scoped outgoing reachability for multiple starts
+    /// under one database and state read lock. Overrides replace the outgoing
+    /// adjacency of matching entities, allowing callers to validate a bounded
+    /// delta before it is committed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reachable_entities(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        outgoing_overrides: &BTreeMap<GraphEntityId, BTreeSet<GraphEntityId>>,
+        max_visits: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<BTreeSet<GraphEntityId>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let cached = self.state_read_guard()?;
+        traversal::reachable_entities(
+            database,
+            &cached,
+            namespace,
+            projection,
+            starts,
+            relation_kinds,
+            outgoing_overrides,
+            max_visits,
+            cancellation.as_ref(),
+        )
+    }
+
     pub(crate) fn point_read_state(
         &self,
         cancellation: &dyn GraphCancellation,
@@ -321,6 +401,72 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let cached = self.state_read_guard()?;
         vector::vector_search(database, &cached, request)
+    }
+
+    pub fn vector_index_status(
+        &self,
+        request: GraphVectorIndexRequest,
+    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
+        request.validate()?;
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let label = vector::native_vector_label(
+            &request.namespace,
+            &request.projection,
+            &request.property,
+            request.dimension,
+            request.metric,
+        );
+        let property = vector_property_key(&request.property, request.dimension, request.metric);
+        Ok(
+            if database.graph_store().has_vector_index(&label, &property) {
+                GraphVectorIndexStatus::Available
+            } else {
+                GraphVectorIndexStatus::Missing
+            },
+        )
+    }
+
+    /// Rebuilds one missing exact-projection HNSW index.
+    ///
+    /// This is intentionally not part of [`Self::open`]. The retained semantic
+    /// scheduler calls it while reporting `Indexing`, so graph admission and
+    /// exact/lexical retrieval never wait for a corpus scan after restart.
+    pub fn ensure_vector_index(
+        &self,
+        request: GraphVectorIndexRequest,
+    ) -> Result<GraphVectorIndexStatus, GraphDbError> {
+        request.validate()?;
+        let guard = self.write_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        if request.cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let label = vector::native_vector_label(
+            &request.namespace,
+            &request.projection,
+            &request.property,
+            request.dimension,
+            request.metric,
+        );
+        let property = vector_property_key(&request.property, request.dimension, request.metric);
+        if !database.graph_store().has_vector_index(&label, &property) {
+            database
+                .create_vector_index(
+                    &label,
+                    &property,
+                    Some(request.dimension),
+                    Some(request.metric.engine_name()),
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        }
+        if request.cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        Ok(GraphVectorIndexStatus::Available)
     }
 
     pub fn close(&self) -> Result<(), GraphDbError> {
@@ -356,6 +502,7 @@ impl GraphDb {
         publication: Option<(GraphIdempotencyKey, String)>,
     ) -> Result<GraphCommit, GraphDbError> {
         validate_references(state, &batch)?;
+        ensure_native_vector_indexes(database, &batch)?;
         let prepared = prepare_mutations(&batch)?;
         let sequence = state
             .sequence
@@ -388,7 +535,6 @@ impl GraphDb {
             .transpose()?;
         let sequence_value = i64::try_from(sequence)
             .map_err(|_| GraphDbError::unavailable("graph commit sequence exceeds i64"))?;
-
         let mut session = database.session();
         session
             .begin_transaction()
@@ -427,20 +573,77 @@ impl GraphDb {
             }
             return Err(GraphDbError::Cancelled);
         }
+        let wal_records_before_commit = if self.inner.durability == GraphDurability::Sync {
+            Some(
+                database
+                    .wal()
+                    .ok_or_else(|| {
+                        GraphDbError::unavailable("persistent graph WAL is unavailable")
+                    })?
+                    .record_count(),
+            )
+        } else {
+            None
+        };
         session.commit().map_err(map_commit_error)?;
         let (entities, relations) = overlay.into_delta();
+        let vector_updates = entities
+            .values()
+            .filter_map(Option::as_ref)
+            .flat_map(|(node, stored)| {
+                stored
+                    .entity
+                    .properties
+                    .iter()
+                    .filter_map(move |(name, property)| {
+                        let GraphProperty::Vector(vector) = property else {
+                            return None;
+                        };
+                        Some((
+                            *node,
+                            vector_property_key(name, vector.dimension, vector.metric),
+                            Value::Vector(vector.values.clone().into()),
+                        ))
+                    })
+            })
+            .collect::<Vec<_>>();
         apply_state_delta(state, entities, relations);
+        // Session mutations are transaction-aware but do not maintain Grafeo's
+        // HNSW side indexes. Re-apply only the current vectors through indexed
+        // CRUD. The GraphDb write guard remains held, so readers cannot observe
+        // the graph commit before its index delta.
+        for (node, property, value) in vector_updates {
+            database.set_node_property(node, &property, value);
+        }
         state.record_commit(stored_commit);
         if let Some(stored) = stored_publication {
             state.record_publication(stored);
         }
-        if self.inner.durability == GraphDurability::Sync
-            && let Err(error) = database.wal_checkpoint()
-        {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(GraphDbError::DurabilityUncertain {
-                message: error.to_string(),
-            });
+        if self.inner.durability == GraphDurability::Sync {
+            let sync_result = database
+                .wal()
+                .ok_or_else(|| GraphDbError::unavailable("persistent graph WAL is unavailable"))
+                .and_then(|wal| {
+                    let expected_records = wal_records_before_commit
+                        .ok_or_else(|| {
+                            GraphDbError::unavailable("persistent graph WAL baseline is missing")
+                        })?
+                        .checked_add(2)
+                        .ok_or_else(|| GraphDbError::unavailable("graph WAL counter exhausted"))?;
+                    if wal.record_count() < expected_records {
+                        return Err(GraphDbError::unavailable(
+                            "Grafeo did not record both graph commit markers",
+                        ));
+                    }
+                    wal.sync()
+                        .map_err(|error| GraphDbError::unavailable(error.to_string()))
+                });
+            if let Err(error) = sync_result {
+                self.inner.poisoned.store(true, Ordering::Release);
+                return Err(GraphDbError::DurabilityUncertain {
+                    message: error.to_string(),
+                });
+            }
         }
         Ok(commit)
     }
@@ -834,8 +1037,16 @@ fn upsert_entity(
         state.upsert_entity(key, *node_id, stored);
     } else {
         let mut properties = vec![(PAYLOAD_PROPERTY.to_owned(), Value::from(payload))];
+        let mut labels = vec![ENTITY_LABEL.to_owned()];
         properties.extend(entity.properties.iter().filter_map(|(name, property)| {
             if let GraphProperty::Vector(vector) = property {
+                labels.push(crate::vector::native_vector_label(
+                    &batch.namespace,
+                    &batch.projection,
+                    name,
+                    vector.dimension,
+                    vector.metric,
+                ));
                 Some((
                     vector_property_key(name, vector.dimension, vector.metric),
                     Value::Vector(vector.values.clone().into()),
@@ -846,13 +1057,56 @@ fn upsert_entity(
         }));
         let node_id = session
             .create_node_with_props(
-                &[ENTITY_LABEL],
+                &labels.iter().map(String::as_str).collect::<Vec<_>>(),
                 properties
                     .iter()
                     .map(|(name, value)| (name.as_str(), value.clone())),
             )
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         state.upsert_entity(key, node_id, stored);
+    }
+    Ok(())
+}
+
+fn ensure_native_vector_indexes(
+    database: &GrafeoDB,
+    batch: &GraphWriteBatch,
+) -> Result<(), GraphDbError> {
+    let store = database.graph_store();
+    for entity in batch
+        .mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            GraphMutation::UpsertEntity(entity) => Some(entity),
+            _ => None,
+        })
+    {
+        for (name, property) in &entity.properties {
+            let GraphProperty::Vector(vector) = property else {
+                continue;
+            };
+            let label = crate::vector::native_vector_label(
+                &batch.namespace,
+                &batch.projection,
+                name,
+                vector.dimension,
+                vector.metric,
+            );
+            let property = vector_property_key(name, vector.dimension, vector.metric);
+            if !store.has_vector_index(&label, &property) {
+                database
+                    .create_vector_index(
+                        &label,
+                        &property,
+                        Some(vector.dimension),
+                        Some(vector.metric.engine_name()),
+                        None,
+                        None,
+                        None,
+                    )
+                    .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+            }
+        }
     }
     Ok(())
 }
@@ -975,7 +1229,7 @@ fn map_open_error(
 fn map_commit_error(error: grafeo_common::utils::error::Error) -> GraphDbError {
     // Grafeo 0.5.42 returns commit errors before version finalization and rolls
     // conflicts back. Its post-finalization WAL failures are warning-only, so
-    // the mandatory Sync checkpoint above is the observable uncertainty gate.
+    // the mandatory Sync WAL flush above is the observable uncertainty gate.
     match error.error_code() {
         ErrorCode::TransactionConflict
         | ErrorCode::TransactionSerialization

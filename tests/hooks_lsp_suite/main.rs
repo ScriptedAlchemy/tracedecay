@@ -1,5 +1,5 @@
-//! Consolidated test suite for hook evaluation, hook branch routing, LSP
-//! diagnostics, and extract-worker hardening tests.
+//! Consolidated test suite for hook evaluation, LSP diagnostics, and
+//! extract-worker hardening tests.
 //!
 //! These tests spawn subprocesses (fake LSP servers, git, the tracedecay
 //! binary) or mutate process-wide environment variables, so they live in a
@@ -13,8 +13,6 @@
 mod common;
 
 mod extract_worker_test;
-#[cfg(feature = "test-transport")]
-mod hook_branch_routing_test;
 mod hook_lifecycle_lease_test;
 mod hook_replay_test;
 mod hooks_test;

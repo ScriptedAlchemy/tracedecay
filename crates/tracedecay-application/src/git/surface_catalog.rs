@@ -412,6 +412,7 @@ fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::EffectUnknown,
             TerminalState::Partial,
@@ -421,6 +422,7 @@ fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::Partial,
         ]

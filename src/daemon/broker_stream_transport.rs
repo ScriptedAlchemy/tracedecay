@@ -161,6 +161,11 @@ impl BrokerStreamTransport {
             let Some(request_key) = Self::request_key(request_id) else {
                 return;
             };
+            let Some((response, response_deadline)) =
+                self.request_ingress.cancelled_response(request_id)
+            else {
+                return;
+            };
             let cancelled = self
                 .active_requests
                 .lock()
@@ -168,11 +173,6 @@ impl BrokerStreamTransport {
             if !cancelled {
                 return;
             }
-            let Some((response, response_deadline)) =
-                self.request_ingress.cancelled_response(request_id)
-            else {
-                return;
-            };
             if let Ok(mut bytes) = serde_json::to_vec(&response) {
                 bytes.push(b'\n');
                 let bounded_write_deadline = tokio::time::Instant::now()
@@ -410,7 +410,7 @@ mod peer_close_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
-    async fn cancellation_preserves_request_for_the_canonical_receipt() {
+    async fn non_cancellable_notification_preserves_the_real_response_owner() {
         let (server, mut client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
         let transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
         let request_id = serde_json::json!("request-1");
@@ -421,7 +421,10 @@ mod peer_close_tests {
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "method": "tools/call",
-                    "params": {}
+                    "params": {
+                        "name": "tracedecay_diagnostics",
+                        "arguments": {}
+                    }
                 }),
                 crate::mcp::server::McpRequestStart::now(),
             )
@@ -445,7 +448,7 @@ mod peer_close_tests {
             "cancellation must leave response ownership with the adapter"
         );
 
-        let canonical = br#"{"jsonrpc":"2.0","id":"request-1","error":{"code":-32800,"message":"MCP request cancelled","data":{"reason_code":"tool_dispatch_cancelled","tracedecay/execution_receipt":{"terminal":"cancelled"}}}}"#.to_vec();
+        let canonical = br#"{"jsonrpc":"2.0","id":"request-1","result":{"content":[],"_meta":{"tracedecay/execution_receipt":{"terminal":"completed"}}}}"#.to_vec();
         BrokerStreamTransport::write_if_active(
             Arc::clone(&transport.writer),
             Arc::clone(&transport.active_requests),
@@ -466,6 +469,58 @@ mod peer_close_tests {
                 .lock()
                 .expect("active request registry")
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellable_tool_notification_claims_response_and_emits_receipt() {
+        let (server, mut client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+        let request_id = serde_json::json!("request-cancellable");
+        let request_key = BrokerStreamTransport::request_key(&request_id).expect("request key");
+        transport
+            .observe_incoming_message(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_search",
+                        "arguments": {"query": "cancel"}
+                    }
+                }),
+                crate::mcp::server::McpRequestStart::now(),
+            )
+            .await;
+        transport
+            .observe_incoming_message(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": "request-cancellable"}
+                }),
+                crate::mcp::server::McpRequestStart::now(),
+            )
+            .await;
+
+        let mut bytes = vec![0; 4096];
+        let count = tokio::time::timeout(Duration::from_secs(1), client.read(&mut bytes))
+            .await
+            .expect("cancellation response deadline")
+            .expect("cancellation response read");
+        let response: serde_json::Value =
+            serde_json::from_slice(&bytes[..count]).expect("cancellation response JSON");
+        assert_eq!(
+            response["error"]["data"]["tracedecay/execution_receipt"]["terminal"],
+            "cancelled"
+        );
+        assert!(
+            !transport
+                .active_requests
+                .lock()
+                .expect("active request registry")
+                .contains(&request_key),
+            "the cancellation response becomes the sole response owner"
         );
     }
 

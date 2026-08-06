@@ -40,14 +40,16 @@ tracedecay serve
 ```
 
 The manifest also registers Kimi's native `PostToolUse` and `Stop` hooks.
-Their stdin JSON is deliberately not forwarded or persisted: successful edit
-tools trigger `tracedecay sync`, while `Stop` triggers
-`tracedecay sessions ingest`. The installer renders both commands with the
-same absolute TraceDecay binary path used by MCP.
+Their stdin JSON is deliberately not forwarded or persisted. The hooks submit
+bounded edit/session lifecycle events through `tracedecay_hook_runtime`; the
+daemon owns incremental indexing, historical host capture, session projection,
+and LCM boundaries. Hooks do not run `sync`, call `sessions ingest`, open a
+store, or block on background work.
 
 `serve` resolves the active project by walking up from the working directory
-and then through the global project registry, so each indexed project keeps
-its own `.tracedecay/` store. If tools report that no project is registered,
+and then through the daemon project registry. The repository marker contains
+no database; the daemon resolves the canonical project owner shard and shared
+Grafeo/relational authorities. If tools report that no project is registered,
 run `tracedecay init` in the project first.
 
 Every MCP tool is also available from the shell as `tracedecay tool <name>`

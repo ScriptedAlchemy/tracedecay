@@ -12,9 +12,7 @@ use tracedecay::db::Database;
 use tracedecay::memory::diff::vector_similarity;
 use tracedecay::memory::encoding::HolographicEncoder;
 use tracedecay::memory::entities::{extract_entities, normalize_entity};
-use tracedecay::memory::trust::{
-    DEFAULT_TRUST, apply_feedback, clamp_trust, trust_bucket, trust_distribution,
-};
+use tracedecay::memory::trust::{DEFAULT_TRUST, clamp_trust, trust_bucket, trust_distribution};
 use tracedecay::memory::types::{
     AddFactDiffKind, AddFactRequest, FactRecord, FactRelationKind, FeedbackAction, FeedbackRequest,
     MemoryCategory, MemoryGroomingOperation, SearchFactsRequest, UpdateFactRequest,

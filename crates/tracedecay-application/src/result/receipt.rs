@@ -57,6 +57,7 @@ pub enum OperationTermination {
     Completed,
     Cancelled,
     TimedOut,
+    Unavailable,
     Failed,
     Partial,
     EffectUnknown,

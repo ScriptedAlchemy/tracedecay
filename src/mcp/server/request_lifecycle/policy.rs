@@ -75,6 +75,10 @@ impl McpToolLifecyclePolicy {
         self.maximum_duration
     }
 
+    pub(crate) const fn externally_cancellable(self) -> bool {
+        self.externally_cancellable
+    }
+
     pub(super) fn response_write_reserve(self) -> Duration {
         (self.maximum_duration / 10).min(MAX_RESPONSE_WRITE_RESERVE)
     }

@@ -7,9 +7,7 @@ use std::pin::Pin;
 
 use super::encoding::HolographicEncoder;
 use super::entities::{extract_entities, normalize_entity};
-use super::types::{
-    FactRecord, FactRelationKind, FactRelationRecord, FeedbackAction, MemoryCategory,
-};
+use super::types::{FactRecord, FactRelationKind, FactRelationRecord, MemoryCategory};
 use crate::db::MemoryConnection;
 use crate::db::engine::{IntoParams, Row, Rows, TransactionBehavior, Value, params};
 use crate::errors::{Result, TraceDecayError};
@@ -523,20 +521,6 @@ impl<'a> MemoryStore<'a> {
         Ok((fact_count, vectors))
     }
 
-    async fn last_insert_rowid(&self, operation: &str) -> Result<i64> {
-        let mut rows = self
-            .conn
-            .query("SELECT last_insert_rowid()", ())
-            .await
-            .map_err(|e| db_error(operation, e))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|e| db_error(operation, e))?
-            .ok_or_else(|| db_message(operation, "last_insert_rowid returned no rows"))?;
-        row.get::<i64>(0).map_err(|e| db_error(operation, e))
-    }
-
     fn encode_vector(
         &self,
         content: &str,
@@ -756,24 +740,6 @@ fn sql_i64_list(ids: &[i64]) -> Option<String> {
                 .collect::<Vec<_>>()
                 .join(", "),
         )
-    }
-}
-
-fn feedback_action_str(action: FeedbackAction) -> &'static str {
-    match action {
-        FeedbackAction::Helpful => "helpful",
-        FeedbackAction::Unhelpful => "unhelpful",
-    }
-}
-
-fn parse_feedback_action(value: &str, operation: &str) -> Result<FeedbackAction> {
-    match value {
-        "helpful" => Ok(FeedbackAction::Helpful),
-        "unhelpful" => Ok(FeedbackAction::Unhelpful),
-        other => Err(db_message(
-            operation,
-            format!("failed to parse feedback action: {other}"),
-        )),
     }
 }
 

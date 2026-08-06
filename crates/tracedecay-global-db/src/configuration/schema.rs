@@ -1,22 +1,49 @@
-//! Additive `SQLite` schema for the revisioned configuration control plane.
+//! Exact final `SQLite` schema for the revisioned configuration control plane.
 
+use std::collections::BTreeSet;
 use thiserror::Error;
 
-use tracedecay_runtime_core::db::engine::Executor;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
 /// Version of the sealed complete topology value stored by this schema.
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
-pub const WORK_TOPOLOGY_POLICY_MIGRATION_RECEIPT_NAME: &str = "work-topology-policy";
+const FINAL_CONFIGURATION_SCHEMA_REVISION: i64 = 1;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationSchemaError {
     #[error("configuration schema operation failed: {0}")]
     Storage(#[from] tracedecay_runtime_core::db::engine::Error),
+    #[error("configuration store is not the exact final shape: {message}")]
+    ResetRequired { message: String },
 }
 
-/// Tables are additive and append-only. Registration from the global schema
-/// lifecycle is intentionally performed by the shared migration spine.
+const FINAL_CONFIGURATION_TABLES: [&str; 16] = [
+    "configuration_access_rules",
+    "configuration_audit_events",
+    "configuration_audit_redaction_keys",
+    "configuration_change_plan_events",
+    "configuration_change_plan_operations",
+    "configuration_change_plans",
+    "configuration_component_activation_events",
+    "configuration_credential_references",
+    "configuration_entries",
+    "configuration_mutation_receipts",
+    "configuration_revisions",
+    "configuration_schema_metadata",
+    "configuration_source_bindings",
+    "configuration_topology_policies",
+    "configuration_topology_protected_refs",
+    "configuration_topology_roots",
+];
+
+/// Canonical schema installed only when no configuration object exists.
 const CONFIGURATION_SCHEMA_SQL: &str = r"
+CREATE TABLE configuration_schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    final_schema_revision INTEGER NOT NULL CHECK (final_schema_revision = 1)
+);
+INSERT INTO configuration_schema_metadata (singleton, final_schema_revision) VALUES (1, 1);
+
 CREATE TABLE IF NOT EXISTS configuration_revisions (
     revision_id TEXT PRIMARY KEY,
     parent_revision_id TEXT,
@@ -221,24 +248,6 @@ CREATE TABLE IF NOT EXISTS configuration_audit_redaction_keys (
     created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS configuration_migration_quarantine (
-    source_kind TEXT NOT NULL,
-    source_key_digest TEXT NOT NULL,
-    reason_code TEXT NOT NULL,
-    redacted_value_digest TEXT NOT NULL,
-    quarantined_at INTEGER NOT NULL,
-    PRIMARY KEY(source_kind, source_key_digest, redacted_value_digest)
-);
-
-CREATE TABLE IF NOT EXISTS configuration_migration_receipts (
-    receipt_name TEXT NOT NULL,
-    source_snapshot_digest TEXT NOT NULL,
-    initial_revision_id TEXT NOT NULL,
-    initial_snapshot_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY(receipt_name, source_snapshot_digest)
-);
-
 CREATE TABLE IF NOT EXISTS configuration_credential_references (
     reference_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -282,6 +291,12 @@ CREATE INDEX IF NOT EXISTS idx_configuration_audit_occurred_at
 CREATE INDEX IF NOT EXISTS idx_configuration_component_activation_latest
     ON configuration_component_activation_events(component, event_id DESC);
 
+CREATE TRIGGER IF NOT EXISTS configuration_schema_metadata_immutable_update
+BEFORE UPDATE ON configuration_schema_metadata
+BEGIN SELECT RAISE(ABORT, 'configuration schema metadata is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS configuration_schema_metadata_immutable_delete
+BEFORE DELETE ON configuration_schema_metadata
+BEGIN SELECT RAISE(ABORT, 'configuration schema metadata is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_revisions_immutable_update
 BEFORE UPDATE ON configuration_revisions
 BEGIN SELECT RAISE(ABORT, 'configuration revisions are immutable'); END;
@@ -360,18 +375,6 @@ BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); E
 CREATE TRIGGER IF NOT EXISTS configuration_audit_redaction_keys_immutable_delete
 BEFORE DELETE ON configuration_audit_redaction_keys
 BEGIN SELECT RAISE(ABORT, 'configuration audit redaction keys are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_quarantine_immutable_update
-BEFORE UPDATE ON configuration_migration_quarantine
-BEGIN SELECT RAISE(ABORT, 'configuration migration quarantine is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_quarantine_immutable_delete
-BEFORE DELETE ON configuration_migration_quarantine
-BEGIN SELECT RAISE(ABORT, 'configuration migration quarantine is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_receipts_immutable_update
-BEFORE UPDATE ON configuration_migration_receipts
-BEGIN SELECT RAISE(ABORT, 'configuration migration receipts are immutable'); END;
-CREATE TRIGGER IF NOT EXISTS configuration_migration_receipts_immutable_delete
-BEFORE DELETE ON configuration_migration_receipts
-BEGIN SELECT RAISE(ABORT, 'configuration migration receipts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS configuration_credential_references_immutable_update
 BEFORE UPDATE ON configuration_credential_references
 BEGIN SELECT RAISE(ABORT, 'configuration credential references are immutable'); END;
@@ -387,10 +390,83 @@ BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutab
 ";
 
 pub async fn ensure_configuration_schema(
-    connection: &impl Executor,
+    connection: &(impl Executor + QueryExecutor),
 ) -> Result<(), ConfigurationSchemaError> {
-    connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;
+    let actual = configuration_tables(connection).await?;
+    if actual.is_empty() {
+        connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;
+        return Ok(());
+    }
+    validate_configuration_schema_tables(connection, actual).await
+}
+
+/// Validates an already-created store without installing or repairing any
+/// configuration object.
+pub async fn validate_configuration_schema(
+    connection: &impl QueryExecutor,
+) -> Result<(), ConfigurationSchemaError> {
+    let actual = configuration_tables(connection).await?;
+    if actual.is_empty() {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            message: "configuration final schema is missing".to_owned(),
+        });
+    }
+    validate_configuration_schema_tables(connection, actual).await
+}
+
+async fn validate_configuration_schema_tables(
+    connection: &impl QueryExecutor,
+    actual: BTreeSet<String>,
+) -> Result<(), ConfigurationSchemaError> {
+    let expected = FINAL_CONFIGURATION_TABLES
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            message: "configuration tables are missing, partial, or from another schema".to_owned(),
+        });
+    }
+
+    let mut rows = connection
+        .query(
+            "SELECT final_schema_revision
+             FROM configuration_schema_metadata
+             WHERE singleton = 1",
+            (),
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            message: "configuration final-schema identity is missing".to_owned(),
+        });
+    };
+    let revision = row.get::<i64>(0)?;
+    if revision != FINAL_CONFIGURATION_SCHEMA_REVISION || rows.next().await?.is_some() {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            message: "configuration final-schema identity is incompatible".to_owned(),
+        });
+    }
     Ok(())
+}
+
+async fn configuration_tables(
+    connection: &impl QueryExecutor,
+) -> Result<BTreeSet<String>, tracedecay_runtime_core::db::engine::Error> {
+    let mut rows = connection
+        .query(
+            "SELECT name
+             FROM sqlite_master
+             WHERE type = 'table' AND name LIKE 'configuration_%'
+             ORDER BY name",
+            (),
+        )
+        .await?;
+    let mut tables = BTreeSet::new();
+    while let Some(row) = rows.next().await? {
+        tables.insert(row.get::<String>(0)?);
+    }
+    Ok(tables)
 }
 
 #[cfg(test)]
@@ -421,7 +497,7 @@ mod tests {
                 "INSERT INTO configuration_revisions VALUES
                     ('revision.1', NULL, 'snapshot.1', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
                      'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                     'actor.1', 'migration', 1);
+                     'actor.1', 'genesis', 1);
                  INSERT INTO configuration_entries VALUES
                     ('revision.1', 'analyzer.settings.v1', 'project', 'project.1', 1, '{}');
                  INSERT INTO configuration_topology_policies VALUES
@@ -462,20 +538,11 @@ mod tests {
                      'active',
                      'sha256:6666666666666666666666666666666666666666666666666666666666666666', 1);
                  INSERT INTO configuration_audit_events VALUES
-                    ('audit.1', 'actor.1', NULL, 'migration', 'revision.1', 'revision.1', NULL,
+                    ('audit.1', 'actor.1', NULL, 'genesis', 'revision.1', 'revision.1', NULL,
                      'sha256:7777777777777777777777777777777777777777777777777777777777777777',
                       NULL, NULL, NULL, 1);
                   INSERT INTO configuration_audit_redaction_keys VALUES
                      (1, zeroblob(32), 1);
-                 INSERT INTO configuration_migration_quarantine VALUES
-                    ('config_json',
-                     'sha256:8888888888888888888888888888888888888888888888888888888888888888',
-                     'unknown_key',
-                     'sha256:9999999999999999999999999999999999999999999999999999999999999999', 1);
-                 INSERT INTO configuration_migration_receipts VALUES
-                    ('configuration-control-plane-v1',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab',
-                     'revision.1', 'snapshot.1', 1);
                  INSERT INTO configuration_credential_references VALUES
                     ('credential.1', 'api_token',
                      'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac', 1, 0);
@@ -518,5 +585,49 @@ mod tests {
                 "{table} accepted a delete"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn prior_or_partial_configuration_schema_requires_reset_without_healing() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("configuration.db"),
+        );
+        connection
+            .execute_batch(
+                "CREATE TABLE configuration_revisions (revision_id TEXT PRIMARY KEY);
+                 CREATE TABLE configuration_prior_receipts (receipt_name TEXT PRIMARY KEY);",
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            ensure_configuration_schema(&*connection).await,
+            Err(ConfigurationSchemaError::ResetRequired { .. })
+        ));
+        let tables = configuration_tables(&*connection).await.unwrap();
+        assert!(tables.contains("configuration_prior_receipts"));
+        assert!(!tables.contains("configuration_schema_metadata"));
+    }
+
+    #[tokio::test]
+    async fn exact_final_configuration_schema_is_idempotent() {
+        let (_directory, connection) = connection().await;
+        ensure_configuration_schema(&*connection).await.unwrap();
+        validate_configuration_schema(&*connection).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn validation_never_installs_a_missing_configuration_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
+            &directory.path().join("configuration.db"),
+        );
+
+        assert!(matches!(
+            validate_configuration_schema(&*connection).await,
+            Err(ConfigurationSchemaError::ResetRequired { .. })
+        ));
+        assert!(configuration_tables(&*connection).await.unwrap().is_empty());
     }
 }

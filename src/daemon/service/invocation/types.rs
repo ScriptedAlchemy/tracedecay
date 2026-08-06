@@ -265,6 +265,7 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) database: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub(super) graph: Arc<tracedecay_graph_db::GraphDb>,
     pub(super) runtime:
         Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>>,
     pub(super) actor: ActorId,
@@ -272,6 +273,8 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) authority_digest: ManifestDigest,
     pub(super) policy_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,
+    pub(super) git_evidence_publisher:
+        Option<Arc<crate::daemon::work_git_evidence::WorkGitGraphEvidencePublisher>>,
 }
 
 impl RegisteredWorkRuntime {
@@ -280,6 +283,15 @@ impl RegisteredWorkRuntime {
     pub(in crate::daemon::service) fn into_runtime(
         self,
     ) -> Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>> {
+        if let Some(publisher) = &self.git_evidence_publisher {
+            if let Err(error) = publisher.shutdown() {
+                tracing::warn!(
+                    event = "work_git_graph_evidence_shutdown",
+                    outcome = "failed",
+                    error = %error,
+                );
+            }
+        }
         self.runtime
     }
 }

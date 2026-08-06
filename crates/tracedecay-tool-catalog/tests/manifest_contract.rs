@@ -93,6 +93,7 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
             TerminalState::Completed,
             TerminalState::Cancelled,
             TerminalState::TimedOut,
+            TerminalState::Unavailable,
             TerminalState::Failed,
             TerminalState::EffectUnknown,
             TerminalState::Partial,

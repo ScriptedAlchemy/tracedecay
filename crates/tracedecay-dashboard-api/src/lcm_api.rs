@@ -16,8 +16,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::State, http::StatusCode};
@@ -28,23 +26,11 @@ use serde_json::{Map, Value, json};
 use super::DashboardState;
 use super::lcm_service;
 use super::util::{JsonPath, JsonQuery, coerce_limit};
-use crate::request_identity::{
-    GlobalOpaqueIdentityKind, RequestIdentityError, mint_global_opaque_id,
-};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_sessions::runtime::lcm::{LcmGcConfig, query};
 
 type LcmResponse = (StatusCode, Json<Value>);
 type LcmResult = Result<LcmResponse, LcmResponse>;
-
-#[derive(Debug, Clone)]
-struct PayloadGcPreview {
-    token: String,
-    store_path: String,
-    provider: String,
-    session_id: Option<String>,
-    created_at: i64,
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct LcmSessionCountsV1 {
@@ -148,9 +134,6 @@ fn decode_lcm_contract<T: serde::de::DeserializeOwned>(
         .map_err(|error| format!("{label} did not match its response contract: {error}"))
 }
 
-static PAYLOAD_GC_PREVIEW: LazyLock<Mutex<Option<PayloadGcPreview>>> =
-    LazyLock::new(|| Mutex::new(None));
-
 fn ok(payload: Map<String, Value>) -> LcmResponse {
     (StatusCode::OK, Json(Value::Object(payload)))
 }
@@ -180,17 +163,6 @@ pub struct PayloadHealthParams {
     session_id: String,
     deep: Option<bool>,
     limit: Option<i64>,
-}
-
-#[derive(Deserialize)]
-pub struct PayloadGcApplyRequest {
-    #[serde(default)]
-    provider: String,
-    #[serde(default)]
-    session_id: String,
-    #[serde(default)]
-    dry_run_token: String,
-    confirm: Option<bool>,
 }
 
 /// `GET /api/plugins/hermes-lcm/overview`
@@ -453,22 +425,6 @@ pub async fn payloads_gc_preview(
                 format!("payload GC preview failed: {e}"),
             )
         })?;
-    let token = make_preview_token().map_err(|error| {
-        err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("payload GC preview identity is unavailable: {error}"),
-        )
-    })?;
-    if let Ok(mut preview) = PAYLOAD_GC_PREVIEW.lock() {
-        *preview = Some(PayloadGcPreview {
-            token: token.clone(),
-            store_path: state.lcm_db_path.clone(),
-            provider: provider.to_string(),
-            session_id: session_id.map(str::to_string),
-            created_at: now_unix(),
-        });
-    }
-
     Ok(ok(Map::from_iter([
         ("status".into(), json!("ok")),
         ("provider".into(), json!(provider)),
@@ -478,91 +434,6 @@ pub async fn payloads_gc_preview(
         ),
         ("storage_scope".into(), json!(state.lcm_scope)),
         ("path".into(), json!(state.lcm_db_path)),
-        ("dry_run".into(), json!(true)),
-        ("dry_run_token".into(), json!(token)),
-        (
-            "gc_report".into(),
-            serde_json::to_value(report).unwrap_or(Value::Null),
-        ),
-    ])))
-}
-
-/// `POST /api/plugins/hermes-lcm/payloads/gc`
-pub async fn payloads_gc_apply(
-    State(state): State<DashboardState>,
-    Json(body): Json<PayloadGcApplyRequest>,
-) -> LcmResult {
-    let db = state
-        .lcm_db
-        .as_ref()
-        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LCM store unavailable"))?;
-    let provider = if body.provider.trim().is_empty() {
-        "cursor"
-    } else {
-        body.provider.trim()
-    };
-    let session_id = (!body.session_id.trim().is_empty()).then_some(body.session_id.trim());
-    if body.confirm != Some(true) || body.dry_run_token.trim().is_empty() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "payload GC apply requires confirm=true and a prior dry_run_token",
-        ));
-    }
-    {
-        let preview = PAYLOAD_GC_PREVIEW.lock().map_err(|_| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "payload GC preview lock poisoned",
-            )
-        })?;
-        let Some(preview) = preview.as_ref() else {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "payload GC apply requires a prior dry-run preview",
-            ));
-        };
-        if preview.token != body.dry_run_token
-            || preview.store_path != state.lcm_db_path
-            || preview.provider != provider
-            || preview.session_id.as_deref() != session_id
-            || now_unix().saturating_sub(preview.created_at) > 300
-        {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "payload GC dry_run_token is missing, expired, or does not match the requested scope",
-            ));
-        }
-    }
-
-    let report = db
-        .lcm_run_payload_gc_apply(
-            &lcm_storage_root(&state),
-            provider,
-            session_id,
-            &LcmGcConfig::default(),
-            current_timestamp(),
-        )
-        .await
-        .map_err(|e| {
-            err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("payload GC apply failed: {e}"),
-            )
-        })?;
-    if let Ok(mut preview) = PAYLOAD_GC_PREVIEW.lock() {
-        *preview = None;
-    }
-
-    Ok(ok(Map::from_iter([
-        ("status".into(), json!("ok")),
-        ("provider".into(), json!(provider)),
-        (
-            "session_id".into(),
-            session_id.map_or(Value::Null, |value| json!(value)),
-        ),
-        ("storage_scope".into(), json!(state.lcm_scope)),
-        ("path".into(), json!(state.lcm_db_path)),
-        ("dry_run".into(), json!(false)),
         (
             "gc_report".into(),
             serde_json::to_value(report).unwrap_or(Value::Null),
@@ -600,30 +471,4 @@ fn lcm_storage_root(state: &DashboardState) -> PathBuf {
     Path::new(&state.lcm_db_path)
         .parent()
         .map_or_else(|| state.store_root.clone(), Path::to_path_buf)
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or_default()
-}
-
-fn make_preview_token() -> Result<String, RequestIdentityError> {
-    mint_global_opaque_id(GlobalOpaqueIdentityKind::DashboardPayloadGcPreview)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::make_preview_token;
-
-    #[test]
-    fn payload_gc_preview_tokens_are_globally_unique() {
-        let first = make_preview_token().unwrap();
-        let repeated = make_preview_token().unwrap();
-        let other_store = make_preview_token().unwrap();
-
-        assert_ne!(first, repeated);
-        assert_ne!(first, other_store);
-    }
 }

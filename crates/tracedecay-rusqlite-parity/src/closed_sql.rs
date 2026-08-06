@@ -86,11 +86,11 @@ pub(crate) fn session_table_spec(table: SessionStoreTable) -> TableSpec {
             "PRAGMA table_info(lcm_raw_messages)",
             "PRAGMA foreign_key_list(lcm_raw_messages)",
         ),
-        SessionStoreTable::SessionTemporalSchemaMigrations => session_table(
-            "session_temporal_schema_migrations",
-            "SELECT COUNT(*) FROM session_temporal_schema_migrations",
-            "PRAGMA table_info(session_temporal_schema_migrations)",
-            "PRAGMA foreign_key_list(session_temporal_schema_migrations)",
+        SessionStoreTable::SessionTemporalSchemaState => session_table(
+            "session_temporal_schema_state",
+            "SELECT COUNT(*) FROM session_temporal_schema_state",
+            "PRAGMA table_info(session_temporal_schema_state)",
+            "PRAGMA foreign_key_list(session_temporal_schema_state)",
         ),
         SessionStoreTable::SessionTemporalGenerations => session_table(
             "session_temporal_generations",
@@ -347,16 +347,16 @@ pub(crate) fn session_page_query(
                 Value::Integer(limit),
             ],
         ),
-        (SessionStoreTable::SessionTemporalSchemaMigrations, cursor) => (
-            "SELECT name, version, applied_at
-             FROM session_temporal_schema_migrations
-             WHERE ?1 IS NULL OR name > ?1
-             ORDER BY name
+        (SessionStoreTable::SessionTemporalSchemaState, cursor) => (
+            "SELECT domain, version, installed_at
+             FROM session_temporal_schema_state
+             WHERE ?1 IS NULL OR domain > ?1
+             ORDER BY domain
              LIMIT ?2",
             vec![
                 match cursor {
-                    Some(SessionStoreCursor::SessionTemporalSchemaMigrations { name }) => {
-                        Value::Text(name.clone())
+                    Some(SessionStoreCursor::SessionTemporalSchemaState { domain }) => {
+                        Value::Text(domain.clone())
                     }
                     _ => Value::Null,
                 },

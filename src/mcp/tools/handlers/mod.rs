@@ -150,16 +150,22 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
     if let tracedecay_tool_catalog::McpDispatchAvailability::Unavailable { reason, retryable } =
         contract.availability()
     {
-        return Err(TraceDecayError::project_route(
-            match reason {
-                tracedecay_tool_catalog::McpDispatchUnavailableReason::EffectJourneyUnverified => {
-                    "mcp_dispatch_effect_journey_unverified"
-                }
-            },
-            *retryable,
-            format!(
-                "MCP tool '{tool_name}' is advertised but unavailable until its effect journey is verified"
+        let (reason_code, message) = match reason {
+            tracedecay_tool_catalog::McpDispatchUnavailableReason::SurfaceNotMounted => (
+                "mcp_dispatch_surface_not_mounted",
+                format!("MCP tool '{tool_name}' has no mounted production journey"),
             ),
+            tracedecay_tool_catalog::McpDispatchUnavailableReason::EffectJourneyUnverified => (
+                "mcp_dispatch_effect_journey_unverified",
+                format!(
+                    "MCP tool '{tool_name}' is advertised but unavailable until its effect journey is verified"
+                ),
+            ),
+        };
+        return Err(TraceDecayError::project_route(
+            reason_code,
+            *retryable,
+            message,
         ));
     }
     Ok(())
@@ -219,6 +225,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
+    pub(crate) code_index_branch_diff_executor:
+        Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
     pub(crate) source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
     pub(crate) source_edit_reconciliation_executor:
         Option<crate::mcp::server::SourceEditReconciliationExecutor>,
@@ -258,6 +266,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_invocation_target: tracedecay_application::InvocationTarget::CurrentProject,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             source_edit_executor: None,
             source_edit_reconciliation_executor: None,
             code_index_search_authority: None,

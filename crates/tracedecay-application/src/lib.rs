@@ -147,9 +147,8 @@ pub use invocation::{
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use memory::{
-    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1,
-    DerivedMemoryFeedbackHistoryRepairV1, DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1,
-    converge_derived_memory,
+    DerivedMemoryConvergenceReportV1, DerivedMemoryConvergenceStateV1, DerivedMemoryRepairPort,
+    DerivedMemoryRepairStatsV1, converge_derived_memory,
 };
 pub use multi_root::{
     AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
@@ -228,11 +227,10 @@ pub use storage::{
     BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
     FreePageRatioV1, IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
     OrphanStoreRecordV1, QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1,
-    RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
-    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
-    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
+    RelativeArtifactPathV1, RetentionBacklogRecordV1, StorageByteSizeV1, StorageTelemetryFuture,
+    StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1, StoreSizeBudgetV1,
+    StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
     incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
-    stale_branch_dbs_finding,
 };
 pub use tracedecay_domain::framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, atomic_write_prepared, file_len,

@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_domain::FactCategoryV1;
+use tracedecay_domain::{FactCategoryV1, FeedbackResultId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -307,7 +307,7 @@ pub struct FeedbackRequest {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FeedbackResult {
-    pub event_id: i64,
+    pub result_id: FeedbackResultId,
     pub fact_id: i64,
     pub action: FeedbackAction,
     pub old_trust: f64,
@@ -319,6 +319,7 @@ pub struct FeedbackResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrustHistoryEntry {
+    pub result_id: FeedbackResultId,
     pub timestamp: i64,
     pub action: FeedbackAction,
     pub old_trust: f64,
@@ -353,8 +354,7 @@ pub struct MemoryStatus {
     pub repair: MemoryRepairStats,
     /// Adoption-funnel numbers for the fact store's feedback loop: how many
     /// facts get seen (retrieved) vs. how many ever get rated. Surfaced so a
-    /// model or user can see funnel health in one call instead of running
-    /// ad-hoc SQL against `memory_facts` / `memory_feedback_events`.
+    /// model or user can see funnel health in one call.
     pub feedback_funnel: MemoryFeedbackFunnel,
 }
 

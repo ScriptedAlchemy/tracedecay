@@ -638,7 +638,6 @@ async fn sweep_atomically_relinks_moved_store_to_registered_live_project() {
         data_root: store_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
-        branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
     };
     std::fs::write(
         store_root.join(crate::storage::STORE_MANIFEST_FILENAME),
@@ -875,7 +874,6 @@ async fn seed_store(
         data_root: data_root.clone(),
         graph_db_relpath: PathBuf::from("graph.db"),
         sessions_db_relpath: PathBuf::from("sessions.db"),
-        branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
     };
     std::fs::write(
         data_root.join(crate::storage::STORE_MANIFEST_FILENAME),
@@ -1292,9 +1290,8 @@ async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
 }
 
 /// A store is not one database. The durable-data check has to cover the
-/// manifest-selected main graph, every registered graph scope, and the branch
-/// databases discovered on disk — and refuse to answer at all when the
-/// manifest that names them cannot be read.
+/// manifest-selected main graph and every registered graph scope, and refuse
+/// to answer at all when the manifest that names them cannot be read.
 mod durable_inventory {
     use super::*;
 
@@ -1309,44 +1306,15 @@ mod durable_inventory {
             data_root: project_root,
             graph_db_relpath: PathBuf::from(graph_db_relpath),
             sessions_db_relpath: PathBuf::from("sessions.db"),
-            branch_meta_relpath: PathBuf::from(crate::storage::BRANCH_META_FILENAME),
         };
         serde_json::to_vec(&manifest).unwrap()
     }
 
     #[test]
-    fn branch_databases_are_part_of_the_inventory() {
-        let store = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(store.path().join("branches")).unwrap();
-        std::fs::write(store.path().join("branches/feature-x.db"), b"").unwrap();
-        std::fs::write(store.path().join("branches/main.db"), b"").unwrap();
-        // Non-database debris must not enter the inventory.
-        std::fs::write(store.path().join("branches/notes.txt"), b"").unwrap();
-
-        let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
-            store.path(),
-            Some(&manifest_bytes(crate::config::DB_FILENAME)),
-            &[],
-        ) else {
-            panic!("a readable manifest must resolve an inventory");
-        };
-
-        assert!(inventory.contains(&PathBuf::from(crate::config::DB_FILENAME)));
-        assert!(inventory.contains(&PathBuf::from("branches/feature-x.db")));
-        assert!(inventory.contains(&PathBuf::from("branches/main.db")));
-        assert!(
-            !inventory.contains(&PathBuf::from("branches/notes.txt")),
-            "only databases belong in the durable inventory"
-        );
-    }
-
-    #[test]
     fn registered_graph_scopes_at_custom_paths_are_covered() {
-        let store = tempfile::tempdir().unwrap();
         let custom = PathBuf::from("scopes/custom-scope.db");
 
         let DurableDatabaseInventoryV1::Resolved(inventory) = durable_database_inventory(
-            store.path(),
             Some(&manifest_bytes("custom-main.db")),
             std::slice::from_ref(&custom),
         ) else {
@@ -1362,9 +1330,8 @@ mod durable_inventory {
 
     #[test]
     fn a_missing_manifest_fails_closed() {
-        let store = tempfile::tempdir().unwrap();
         assert_eq!(
-            durable_database_inventory(store.path(), None, &[]),
+            durable_database_inventory(None, &[]),
             DurableDatabaseInventoryV1::Unverifiable,
             "without a manifest the store's graph path is a guess, not a fact"
         );
@@ -1372,9 +1339,8 @@ mod durable_inventory {
 
     #[test]
     fn a_malformed_manifest_fails_closed() {
-        let store = tempfile::tempdir().unwrap();
         assert_eq!(
-            durable_database_inventory(store.path(), Some(b"{ not json"), &[]),
+            durable_database_inventory(Some(b"{ not json"), &[]),
             DurableDatabaseInventoryV1::Unverifiable
         );
     }

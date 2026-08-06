@@ -1,6 +1,6 @@
 //! Generation-bound temporal session retrieval.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::de::DeserializeOwned;
 use tracedecay_domain::{
@@ -19,6 +19,7 @@ use tracedecay_store::{
 };
 
 use super::query::{now_micros, storage, storage_message};
+use super::relations::{SessionRelationProjection, SummarySourceRef};
 use crate::RegisteredGlobalDb;
 
 const EXPAND_OPERATION: &str = "retrieve session temporal page";
@@ -108,8 +109,14 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| storage(EXPAND_OPERATION, error))?;
         validate_frozen_snapshot(&read, request.snapshot()).await?;
+        let relation_projection = self
+            .session_relation_projection(
+                request.session_id(),
+                request.snapshot().watermarks().active_generation().value(),
+            )
+            .map_err(|error| storage(EXPAND_OPERATION, error))?;
         if request.grain() == tracedecay_domain::RetrievalGrainV1::Summary {
-            return retrieve_summary_page(&read, &request, generation).await;
+            return retrieve_summary_page(&read, &request, generation, &relation_projection).await;
         }
         let (after_knowledge, after_occurrence) = if let Some(after) = request.after_occurrence_id()
         {
@@ -244,31 +251,33 @@ impl RegisteredGlobalDb {
             MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE.saturating_sub(occurrences.len());
         let mut copies = Vec::new();
         if remaining != 0 {
+            let copies_by_occurrence = relation_projection
+                .logical_copies
+                .iter()
+                .fold(BTreeMap::<&str, Vec<_>>::new(), |mut copies, copy| {
+                    copies
+                        .entry(copy.occurrence_id.as_str())
+                        .or_default()
+                        .push(copy);
+                    copies
+                });
             for (occurrence_id, _) in &occurrence_anchors {
-                let mut copy_rows = read
-                    .query(
-                        "SELECT occurrence_id, copied_from_occurrence_id, proof_json,
-                                knowledge_at, valid_time_json
-                         FROM session_logical_copy_edges
-                         WHERE session_id = ?1
-                           AND generation = ?2
-                           AND occurrence_id = ?3
-                         ORDER BY copied_from_occurrence_id",
-                        params![
-                            request.session_id().as_str(),
-                            generation,
-                            occurrence_id.as_str()
-                        ],
-                    )
-                    .await
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?;
-                while remaining != 0
-                    && let Some(row) = copy_rows
-                        .next()
-                        .await
-                        .map_err(|error| storage(EXPAND_OPERATION, error))?
-                {
-                    copies.push(copy_from_row(&row)?);
+                let mut matching = copies_by_occurrence
+                    .get(occurrence_id.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                matching.sort_by(|left, right| {
+                    left.copied_from_occurrence_id
+                        .cmp(&right.copied_from_occurrence_id)
+                });
+                for copy in matching.into_iter().take(remaining) {
+                    copies.push(LogicalCopyRecordV1 {
+                        occurrence_id: copy.occurrence_id.clone(),
+                        copied_from_occurrence_id: copy.copied_from_occurrence_id.clone(),
+                        proof: copy.proof.clone(),
+                        knowledge_at: copy.knowledge_at,
+                        valid_time: copy.valid_time.clone(),
+                    });
                     remaining -= 1;
                 }
                 if remaining == 0 {
@@ -371,6 +380,7 @@ async fn retrieve_summary_page(
     read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
     request: &SessionTemporalRetrievalRequestV1,
     generation: i64,
+    relation_projection: &SessionRelationProjection,
 ) -> SessionStoreResult<SessionRetrievalPageV1> {
     if request.after_occurrence_id().is_some() {
         return Err(storage_message(
@@ -388,14 +398,6 @@ async fn retrieve_summary_page(
         .query(
             "SELECT node.summary_id, node.summary_anchor_id,
                     node.source_horizon_json, node.created_at,
-                    (
-                        SELECT predecessor.predecessor_summary_id
-                        FROM session_summary_successors AS predecessor
-                        WHERE predecessor.successor_summary_id = node.summary_id
-                        ORDER BY predecessor.created_at DESC,
-                                 predecessor.predecessor_summary_id
-                        LIMIT 1
-                    ),
                     node.publication_json
              FROM session_summary_nodes AS node
              JOIN session_summary_availability AS availability
@@ -445,40 +447,66 @@ async fn retrieve_summary_page(
             row.get::<i64>(3)
                 .map_err(|error| storage(EXPAND_OPERATION, error))?,
         );
-        let predecessor = row
+        let publication = row
             .get::<Option<String>>(4)
             .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let publication = row
-            .get::<Option<String>>(5)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let mut source_rows = read
-            .query(
-                "SELECT COALESCE(source.source_anchor_id, nested.summary_anchor_id)
-                 FROM session_summary_sources AS source
-                 LEFT JOIN session_summary_nodes AS nested
-                   ON nested.summary_id = source.source_summary_id
-                  AND nested.session_id = ?2
-                 WHERE source.summary_id = ?1
-                   AND (
-                       source.source_anchor_id IS NOT NULL
-                       OR nested.summary_anchor_id IS NOT NULL
-                   )
-                 ORDER BY source.source_ordinal",
-                params![summary_id.as_str(), request.session_id().as_str()],
-            )
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let mut source_anchors = Vec::new();
-        while let Some(source_row) = source_rows
-            .next()
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?
-        {
-            source_anchors.push(decode_text::<RetrievalAnchorId>(
-                source_row
-                    .get::<String>(0)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-            )?);
+        let relation = relation_projection
+            .summaries
+            .iter()
+            .find(|relation| relation.summary_id == summary_id.as_str())
+            .ok_or_else(|| {
+                storage_message(
+                    EXPAND_OPERATION,
+                    "active summary relation projection is pending",
+                )
+            })?;
+        let mut source_anchors = Vec::with_capacity(relation.sources.len());
+        for source in &relation.sources {
+            match source {
+                SummarySourceRef::Anchor { anchor_id } => {
+                    source_anchors.push(anchor_id.clone());
+                }
+                SummarySourceRef::Summary {
+                    summary_id: source_summary_id,
+                } => {
+                    let mut source_rows = read
+                        .query(
+                            "SELECT summary_anchor_id
+                             FROM session_summary_nodes
+                             WHERE session_id = ?1 AND summary_id = ?2
+                             LIMIT 2",
+                            params![request.session_id().as_str(), source_summary_id],
+                        )
+                        .await
+                        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+                    let source_row = source_rows
+                        .next()
+                        .await
+                        .map_err(|error| storage(EXPAND_OPERATION, error))?
+                        .ok_or_else(|| {
+                            storage_message(
+                                EXPAND_OPERATION,
+                                "summary relation source content is unavailable",
+                            )
+                        })?;
+                    source_anchors.push(decode_text::<RetrievalAnchorId>(
+                        source_row
+                            .get::<String>(0)
+                            .map_err(|error| storage(EXPAND_OPERATION, error))?,
+                    )?);
+                    if source_rows
+                        .next()
+                        .await
+                        .map_err(|error| storage(EXPAND_OPERATION, error))?
+                        .is_some()
+                    {
+                        return Err(storage_message(
+                            EXPAND_OPERATION,
+                            "summary relation source content is not unique",
+                        ));
+                    }
+                }
+            }
         }
         let mut summary = SessionSummaryRecordV1::new(
             summary_id,
@@ -488,8 +516,8 @@ async fn retrieve_summary_page(
             source_horizon,
             created_at,
         )?;
-        if let Some(predecessor) = predecessor {
-            summary = summary.with_predecessor(decode_text(predecessor)?)?;
+        if let Some(predecessor) = &relation.predecessor_summary_id {
+            summary = summary.with_predecessor(decode_text(predecessor.clone())?)?;
         }
         if let Some(publication) = publication {
             summary = summary.with_publication(decode_summary_publication(&publication)?)?;
@@ -608,25 +636,6 @@ fn occurrence_from_row(
         )?,
         "evidence": parse_json_value(
             row.get::<String>(13)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-    }))
-}
-
-fn copy_from_row(row: &Row) -> SessionStoreResult<LogicalCopyRecordV1> {
-    decode_json_value(serde_json::json!({
-        "occurrence_id": row.get::<String>(0)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "copied_from_occurrence_id": row.get::<String>(1)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "proof": parse_json_value(
-            row.get::<String>(2)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-        "knowledge_at": row.get::<i64>(3)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "valid_time": parse_json_value(
-            row.get::<String>(4)
                 .map_err(|error| storage(EXPAND_OPERATION, error))?
         )?,
     }))
