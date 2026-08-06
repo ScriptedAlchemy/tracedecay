@@ -855,8 +855,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
 
     use tracedecay_application::{CancellationContext, Deadline, IdempotencyKey};
     use tracedecay_domain::{
-        GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexSigningPolicyV1,
-        GitIndexTransactionOperationV1, RepositoryId, UtcMicros, WorktreeId,
+        GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexSigningPolicyV1,
+        GitIndexTransactionOperationV1, UtcMicros,
     };
 
     fn git(root: &std::path::Path, args: &[&str]) {
@@ -897,15 +897,12 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         &handshake.client_identity.profile_root,
         "git-socket-test",
     );
-    let (key, _, _, _) = engine
+    let _ = engine
         .open_project_server(&handshake)
         .await
         .expect("mount project owner");
     std::fs::write(repository.path().join("packet.txt"), "base\nnext\n").expect("changed file");
     git(repository.path(), &["add", "packet.txt"]);
-    let project_id =
-        tracedecay_domain::ProjectId::new(key.owner.project_id.expect("durable test project id"))
-            .expect("typed project id");
     let observed_at = UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -915,19 +912,6 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         )
         .unwrap_or(i64::MAX),
     );
-    let git_scope = super::super::project_open_owners::resolved_scope_for_project(
-        repository.path(),
-        &project_id,
-    )
-    .expect("daemon-authenticated Git scope");
-    let snapshot = super::super::git_transactions::capture_exact_snapshot_for_test(
-        repository.path(),
-        project_id.clone(),
-        git_scope.repository_id.clone(),
-        git_scope.worktree_id.clone(),
-        observed_at,
-    )
-    .expect("exact socket Git snapshot");
     let identity = GitCommitIdentityV1 {
         name: "TraceDecay Test".to_owned(),
         email: "tracedecay@example.com".to_owned(),
@@ -935,9 +919,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     };
     let request = crate::application_surface::GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_id: GitIndexPreviewId::new("preview.socket-git").expect("preview id"),
-        repository_snapshot: snapshot,
-        selected_hunks: Vec::new(),
+        preview_input_id: None,
+        selected_hunk_digests: Vec::new(),
         commit_intent: Some(
             GitIndexCommitIntentV1::new(
                 "socket Git transaction\n".to_owned(),
@@ -962,80 +945,6 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .expect("write handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
     let mut lines = tokio::io::BufReader::new(reader).lines();
-
-    let unauthorized_snapshot = super::super::git_transactions::capture_exact_snapshot_for_test(
-        repository.path(),
-        tracedecay_domain::ProjectId::new("project.unauthorized").unwrap(),
-        RepositoryId::new("repository.socket-git").unwrap(),
-        WorktreeId::new("worktree.socket-git").unwrap(),
-        observed_at,
-    )
-    .expect("unauthorized socket Git snapshot");
-    let unauthorized = super::super::DaemonInvocationRequest::git_preview(
-        "request.socket.unauthorized",
-        crate::application_surface::GitPreviewSurfaceRequest {
-            operation: GitIndexTransactionOperationV1::CommitIndex,
-            preview_id: GitIndexPreviewId::new("preview.socket-unauthorized").unwrap(),
-            repository_snapshot: unauthorized_snapshot,
-            selected_hunks: Vec::new(),
-            commit_intent: request.commit_intent.clone(),
-        },
-        observed_at,
-        deadline.clone(),
-        cancellation.clone(),
-    );
-    writer
-        .write_all(serde_json::to_string(&unauthorized).unwrap().as_bytes())
-        .await
-        .unwrap();
-    writer.write_all(b"\n").await.unwrap();
-    let response: Value = serde_json::from_str(
-        &lines
-            .next_line()
-            .await
-            .unwrap()
-            .expect("authorization response"),
-    )
-    .unwrap();
-    assert_eq!(response["status"], "application_problem");
-    assert_eq!(response["problem"]["kind"], "not_found_or_not_authorized");
-
-    let forged_scope_snapshot = super::super::git_transactions::capture_exact_snapshot_for_test(
-        repository.path(),
-        project_id.clone(),
-        RepositoryId::new("repository.caller-selected").unwrap(),
-        WorktreeId::new("worktree.caller-selected").unwrap(),
-        observed_at,
-    )
-    .expect("forged-scope socket Git snapshot");
-    let forged_scope = super::super::DaemonInvocationRequest::git_preview(
-        "request.socket.forged-scope",
-        crate::application_surface::GitPreviewSurfaceRequest {
-            operation: GitIndexTransactionOperationV1::CommitIndex,
-            preview_id: GitIndexPreviewId::new("preview.socket-forged-scope").unwrap(),
-            repository_snapshot: forged_scope_snapshot,
-            selected_hunks: Vec::new(),
-            commit_intent: request.commit_intent.clone(),
-        },
-        observed_at,
-        deadline.clone(),
-        cancellation.clone(),
-    );
-    writer
-        .write_all(serde_json::to_string(&forged_scope).unwrap().as_bytes())
-        .await
-        .unwrap();
-    writer.write_all(b"\n").await.unwrap();
-    let response: Value = serde_json::from_str(
-        &lines
-            .next_line()
-            .await
-            .unwrap()
-            .expect("forged scope response"),
-    )
-    .unwrap();
-    assert_eq!(response["status"], "application_problem");
-    assert_eq!(response["problem"]["kind"], "not_found_or_not_authorized");
 
     let preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.preview",
@@ -1063,12 +972,15 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     // rather than as the blocker the daemon actually found.
     assert_eq!(
         preview.disposition,
-        tracedecay_domain::GitIndexPreviewDispositionV1::Applicable,
+        tracedecay_domain::GitIndexPreviewDispositionV1::Unsupported(
+            tracedecay_domain::GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
+        ),
         "{preview_response:#}"
     );
 
     let apply = crate::application_surface::GitApplySurfaceRequest {
-        preview,
+        preview_id: preview.preview_id.clone(),
+        preview_digest: preview.preview_digest.clone(),
         idempotency_key: IdempotencyKey::new("idempotency.socket-git").expect("idempotency"),
     };
     let apply_request = super::super::DaemonInvocationRequest::git_apply(
@@ -1093,11 +1005,20 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
             response["status"], "git_apply",
             "attempt {attempt}: {response:#}"
         );
-        // Attempt 1 must commit; attempt 2 must replay that committed receipt.
-        // Naming the attempt is what separates an apply that never ran from a
-        // replay that lost the first attempt's outcome.
+        // Ref publication is typed-unavailable, so attempt 1 must abort with
+        // no repository change and attempt 2 must replay that same terminal
+        // failed receipt rather than re-entering native Git.
         assert_eq!(
-            response["effect"]["receipt"]["outcome"], "completed",
+            response["effect"]["receipt"]["outcome"], "failed",
+            "attempt {attempt}: {response:#}"
+        );
+        assert_eq!(
+            response["effect"]["payload"]["outcome"], "aborted_no_change",
+            "attempt {attempt}: {response:#}"
+        );
+        assert_eq!(
+            response["effect"]["payload"]["created_commit"],
+            Value::Null,
             "attempt {attempt}: {response:#}"
         );
         assert_ne!(response["effect"]["execution"]["started_at"], 1);
@@ -1106,7 +1027,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     let stale = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.stale",
         crate::application_surface::GitApplySurfaceRequest {
-            preview: apply.preview.clone(),
+            preview_id: apply.preview_id.clone(),
+            preview_digest: apply.preview_digest.clone(),
             idempotency_key: IdempotencyKey::new("idempotency.socket-stale").unwrap(),
         },
         observed_at,
@@ -1136,16 +1058,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         "request.socket.recovery-preview",
         crate::application_surface::GitPreviewSurfaceRequest {
             operation: GitIndexTransactionOperationV1::CommitIndex,
-            preview_id: GitIndexPreviewId::new("preview.socket-recovery").unwrap(),
-            repository_snapshot: super::super::git_transactions::capture_exact_snapshot_for_test(
-                repository.path(),
-                project_id.clone(),
-                git_scope.repository_id.clone(),
-                git_scope.worktree_id.clone(),
-                observed_at,
-            )
-            .expect("recovery socket Git snapshot"),
-            selected_hunks: Vec::new(),
+            preview_input_id: None,
+            selected_hunk_digests: Vec::new(),
             commit_intent: Some(
                 GitIndexCommitIntentV1::new(
                     "socket recovery fence\n".to_owned(),
@@ -1198,7 +1112,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     let recovery_blocked = super::super::DaemonInvocationRequest::git_apply(
         "request.socket.recovery-blocked",
         crate::application_surface::GitApplySurfaceRequest {
-            preview: recovery_preview,
+            preview_id: recovery_preview.preview_id,
+            preview_digest: recovery_preview.preview_digest,
             idempotency_key: IdempotencyKey::new("idempotency.socket-recovery").unwrap(),
         },
         observed_at,

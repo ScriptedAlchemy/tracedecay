@@ -7,13 +7,21 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    DomainError, GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1,
-    ManifestDigest, RepositoryId,
+    DomainError, GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId,
+    GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
+    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, ManifestDigest, RepositoryId,
+    UtcMicros,
 };
+
+pub const MAX_GIT_INDEX_PREVIEW_INPUT_BYTES: usize = 1_048_576;
+pub const MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH: usize = 256;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum GitIndexTransactionStoreError {
+    #[error("git index preview input conflicts with an existing immutable input")]
+    PreviewInputConflict,
+    #[error("git index preview input exceeds the durable payload budget")]
+    PreviewInputTooLarge,
     #[error("git index transaction preview conflicts with an existing immutable preview")]
     PreviewConflict,
     #[error("git index transaction idempotency key conflicts with a prior input")]
@@ -37,6 +45,16 @@ impl From<DomainError> for GitIndexTransactionStoreError {
 }
 
 pub type GitIndexTransactionStoreResult<T> = Result<T, GitIndexTransactionStoreError>;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GitIndexPreviewInputReadV1 {
+    Available(Box<GitIndexPreviewInputV1>),
+    Expired {
+        expired_at: UtcMicros,
+        purged_at: Option<UtcMicros>,
+    },
+    Missing,
+}
 
 /// Durable record keyed by the application idempotency key.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,12 +222,34 @@ impl GitIndexTransactionTerminalWriteV1 {
 
 /// Append-only preview/receipt store with a mutable, compare-and-swap journal.
 pub trait GitIndexTransactionStore {
+    fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()>;
+
+    fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1>;
+
+    fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize>;
+
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()>;
 
     fn read_preview(
         &self,
         preview_id: &tracedecay_domain::GitIndexPreviewId,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>>;
+
+    fn read_record(
+        &self,
+        idempotency_key: &GitIndexIdempotencyKey,
+    ) -> GitIndexTransactionStoreResult<Option<GitIndexTransactionRecordV1>>;
 
     fn begin_or_replay(
         &self,

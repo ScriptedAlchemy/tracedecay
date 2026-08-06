@@ -57,7 +57,8 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, FeedbackCycleTerminationV1, GitHeadStateV1,
-    GitIndexPreviewId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexTransactionOperationV1,
+    GitIndexTransactionReceiptV1,
     ManifestDigest, ProjectId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
     WorkAuthority, canonical_sha256,
 };
@@ -149,6 +150,7 @@ use crate::application_surface::{
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
+    capture_exact_snapshot,
 };
 // Re-exported so the long tail of daemon-internal call sites can keep naming the
 // contract through `service::invocation::` while the split settles.

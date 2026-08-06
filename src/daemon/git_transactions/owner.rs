@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +24,8 @@ use tracedecay_tool_catalog::CapabilityId;
 use crate::application::ProjectSourceAccessSnapshot;
 use crate::application::configuration::ConfigurationControlStore;
 use crate::catalog_composition::build_application_catalog_snapshot;
+#[cfg(test)]
+use crate::db::engine::{TestConnection, TransactionBehavior};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 
@@ -213,6 +216,14 @@ impl DaemonGitAuthoritySlot {
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)? = Some(source);
         Ok(())
     }
+
+    fn clear(&self) -> Result<(), GitIndexTransactionPortError> {
+        self.source
+            .write()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?
+            .take();
+        Ok(())
+    }
 }
 
 impl DaemonGitAuthoritySource for DaemonGitAuthoritySlot {
@@ -362,6 +373,7 @@ pub(crate) type DaemonProjectGitIndexTransactionService = DaemonGitIndexTransact
 #[derive(Clone)]
 pub(crate) struct DaemonGitInvocationOwner {
     pub(crate) project_id: ProjectId,
+    pub(crate) repository_root: PathBuf,
     pub(crate) service: Arc<DaemonProjectGitIndexTransactionService>,
     authority: Arc<DaemonGitAuthoritySlot>,
 }
@@ -418,6 +430,14 @@ pub(crate) struct DaemonGitIndexTransactionServiceRegistry {
     mutation_queue: Arc<RepositoryMutationQueue>,
     services: tokio::sync::Mutex<HashMap<ServiceKey, ServiceEntry>>,
     creation_gate: tokio::sync::Mutex<()>,
+    shutdown_fenced: AtomicBool,
+    shutdown_receipt: tokio::sync::Mutex<Option<DaemonGitIndexShutdownReceiptV1>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DaemonGitIndexShutdownReceiptV1 {
+    pub(crate) services_closed: usize,
+    pub(crate) store_actors_joined: usize,
 }
 
 impl DaemonGitIndexTransactionServiceRegistry {
@@ -428,6 +448,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
         project_id: ProjectId,
         observed_at: UtcMicros,
     ) -> Result<Arc<DaemonProjectGitIndexTransactionService>, GitIndexTransactionPortError> {
+        if self.shutdown_fenced.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionPortError::DaemonUnavailable);
+        }
         // `RegisteredGlobalDb` already carries the canonical path admitted by
         // its retained runtime authority. Do not rediscover identity through
         // the filesystem: a newly opened SQLite shard may not have
@@ -454,6 +477,19 @@ impl DaemonGitIndexTransactionServiceRegistry {
         let database_path = database_path
             .canonicalize()
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let database = TestConnection::open(&database_path);
+        let transaction = database
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        crate::global_db::ensure_git_index_transaction_schema(&transaction)
+            .await
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        drop(database);
         let store_path = database_path.clone();
         self.ensure_with(
             database_path,
@@ -478,6 +514,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
             super::SharedDaemonGitIndexTransactionStore,
         >,
     {
+        if self.shutdown_fenced.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionPortError::DaemonUnavailable);
+        }
         let repository_root = canonicalize_repository_root(&repository_root)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         if let Some(service) = self
@@ -488,6 +527,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
         }
 
         let _creation = self.creation_gate.lock().await;
+        if self.shutdown_fenced.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionPortError::DaemonUnavailable);
+        }
         if let Some(service) = self
             .existing(&database_path, &repository_root, &project_id)
             .await?
@@ -552,6 +594,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
         configuration_database: Arc<RegisteredGlobalDb>,
         runtime: tokio::runtime::Handle,
     ) -> Result<(), GitIndexTransactionPortError> {
+        if self.shutdown_fenced.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionPortError::DaemonUnavailable);
+        }
         let repository_root = canonicalize_repository_root(repository_root)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let services = self.services.lock().await;
@@ -586,6 +631,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
         &self,
         repository_root: &std::path::Path,
     ) -> Result<Option<DaemonGitInvocationOwner>, GitIndexTransactionPortError> {
+        if self.shutdown_fenced.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionPortError::DaemonUnavailable);
+        }
         let repository_root = canonicalize_repository_root(repository_root)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let services = self.services.lock().await;
@@ -600,9 +648,40 @@ impl DaemonGitIndexTransactionServiceRegistry {
         }
         Ok(Some(DaemonGitInvocationOwner {
             project_id: entry.project_id.clone(),
+            repository_root: entry.repository_root.clone(),
             service: Arc::clone(&entry.service),
             authority: Arc::clone(&entry.authority),
         }))
+    }
+
+    pub(crate) async fn shutdown(
+        &self,
+    ) -> Result<DaemonGitIndexShutdownReceiptV1, GitIndexTransactionPortError> {
+        self.shutdown_fenced.store(true, Ordering::SeqCst);
+        let _creation = self.creation_gate.lock().await;
+        if let Some(receipt) = *self.shutdown_receipt.lock().await {
+            return Ok(receipt);
+        }
+        let services = {
+            let mut retained = self.services.lock().await;
+            for entry in retained.values() {
+                entry.authority.clear()?;
+            }
+            retained.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
+        };
+        let services_closed = services.len();
+        drop(services);
+        let store_actors_joined = self
+            .stores
+            .shutdown_all()
+            .await
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        let receipt = DaemonGitIndexShutdownReceiptV1 {
+            services_closed,
+            store_actors_joined,
+        };
+        *self.shutdown_receipt.lock().await = Some(receipt);
+        Ok(receipt)
     }
 
     #[cfg(test)]

@@ -832,6 +832,23 @@ impl DaemonEngine {
     }
 
     pub(super) async fn shutdown_servers(&self) {
+        // Fence Git mutation admission and join every transaction store actor
+        // before project servers close, so no native Git work outlives the
+        // stores it journals into.
+        if let Err(error) = self
+            .store_administration
+            .git_index_transaction_services()
+            .shutdown()
+            .await
+        {
+            log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "git_transaction_shutdown_failed".to_string()),
+                    ("error", format!("{error:?}")),
+                ],
+            );
+        }
         shutdown_project_servers(&self.store_administration).await;
     }
 

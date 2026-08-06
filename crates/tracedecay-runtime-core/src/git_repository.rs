@@ -284,8 +284,17 @@ impl GitRepositoryAuthority {
                         let path = path_text(rela_path.as_ref(), "status")?;
                         match status {
                             EntryStatus::NeedsUpdate(_) => {}
+                            // Porcelain reports `git add --intent-to-add` as a
+                            // tracked entry with a worktree-side addition
+                            // (` A`), never as `??` untracked.
                             EntryStatus::IntentToAdd => {
-                                loose.insert(path.clone(), GitStatusEntryV1::Untracked { path });
+                                let builder = tracked
+                                    .entry(path.clone())
+                                    .or_insert_with(|| TrackedStatusBuilder::new(path));
+                                builder.worktree = GitChangeKindV1::Added;
+                                builder.index_mode = Some(mode(entry.mode)?);
+                                builder.worktree_mode =
+                                    worktree_mode(self.worktree_root.as_deref(), &builder.path)?;
                             }
                             EntryStatus::Conflict { entries, .. } => {
                                 let builder = tracked

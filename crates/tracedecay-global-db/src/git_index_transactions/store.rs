@@ -1,14 +1,15 @@
 use std::collections::BTreeSet;
 
 use tracedecay_domain::{
-    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
-    GitIndexTransactionReceiptV1, RepositoryId,
+    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewInputV1,
+    GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
-    GitIndexTransactionRecordV1, GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
-    GitIndexTransactionTerminalWriteV1,
+    GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1, GitIndexTransactionStoreError,
+    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
+    MAX_GIT_INDEX_PREVIEW_INPUT_BYTES, MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 
 use crate::RegisteredGlobalDb;
@@ -27,6 +28,12 @@ pub struct GlobalDbGitIndexTransactionStore<'db> {
     db: GitMutationDatabase<'db>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GitIndexPreviewInputGcResult {
+    pub purged: usize,
+    pub next_expiry: Option<UtcMicros>,
+}
+
 impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
@@ -39,6 +46,110 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         Self {
             db: GitMutationDatabase::Engine(db),
         }
+    }
+
+    pub async fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        input.validate().map_err(invalid_domain)?;
+        let encoded = encode(&input)?;
+        if encoded.len() > MAX_GIT_INDEX_PREVIEW_INPUT_BYTES {
+            return Err(GitIndexTransactionStoreError::PreviewInputTooLarge);
+        }
+        let transaction = self.begin_write().await?;
+        let outcome = insert_preview_input_if_absent(&transaction, &input, &encoded).await;
+        commit_outcome(transaction, outcome).await
+    }
+
+    pub async fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
+        preview_id.validate().map_err(invalid_domain)?;
+        let snapshot = self.read_snapshot().await?;
+        read_preview_input_from_transaction(&snapshot, preview_id, observed_at).await
+    }
+
+    pub async fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize> {
+        self.purge_expired_preview_inputs_and_next(observed_at, limit)
+            .await
+            .map(|result| result.purged)
+    }
+
+    pub async fn next_live_preview_input_expiry(
+        &self,
+    ) -> GitIndexTransactionStoreResult<Option<UtcMicros>> {
+        let snapshot = self.read_snapshot().await?;
+        next_live_preview_input_expiry(&snapshot).await
+    }
+
+    pub async fn purge_expired_preview_inputs_and_next(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputGcResult> {
+        if limit == 0 || limit > MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH {
+            return Err(invalid(
+                "git index preview input purge batch is outside its bounded range",
+            ));
+        }
+        let next_expiry = self.next_live_preview_input_expiry().await?;
+        if next_expiry.is_none_or(|expires_at| expires_at > observed_at) {
+            return Ok(GitIndexPreviewInputGcResult {
+                purged: 0,
+                next_expiry,
+            });
+        }
+        let transaction = self.begin_write().await?;
+        let outcome = async {
+            let mut rows = transaction
+                .query(
+                    "SELECT preview_id
+                     FROM git_index_preview_inputs
+                     WHERE input_json IS NOT NULL AND expires_at <= ?1
+                     ORDER BY expires_at, preview_id
+                     LIMIT ?2",
+                    params![observed_at.0, limit as i64],
+                )
+                .await
+                .map_err(unavailable)?;
+            let mut preview_ids = Vec::new();
+            while let Some(row) = rows.next().await.map_err(unavailable)? {
+                preview_ids.push(
+                    GitIndexPreviewId::new(text(&row, 0, "expired preview input id")?)
+                        .map_err(invalid_domain)?,
+                );
+            }
+            drop(rows);
+
+            let mut purged = 0usize;
+            for preview_id in preview_ids {
+                let changed = transaction
+                    .execute(
+                        "UPDATE git_index_preview_inputs
+                         SET input_json = NULL, purged_at = ?1
+                         WHERE preview_id = ?2
+                           AND input_json IS NOT NULL
+                           AND expires_at <= ?1",
+                        params![observed_at.0, preview_id.as_str()],
+                    )
+                    .await
+                    .map_err(unavailable)?;
+                purged = purged.saturating_add(changed as usize);
+            }
+            Ok(GitIndexPreviewInputGcResult {
+                purged,
+                next_expiry: next_live_preview_input_expiry(&transaction).await?,
+            })
+        }
+        .await;
+        commit_outcome(transaction, outcome).await
     }
 
     pub async fn save_preview(
@@ -429,6 +540,38 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     }
 }
 
+async fn next_live_preview_input_expiry<Q>(
+    transaction: &Q,
+) -> GitIndexTransactionStoreResult<Option<UtcMicros>>
+where
+    Q: QueryExecutor,
+{
+    let mut rows = transaction
+        .query(
+            "SELECT MIN(expires_at)
+             FROM git_index_preview_inputs
+             WHERE input_json IS NOT NULL",
+            (),
+        )
+        .await
+        .map_err(unavailable)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| invalid("git index preview expiry query returned no aggregate row"))?;
+    let expiry = row
+        .get::<Option<i64>>(0)
+        .map_err(|error| invalid(format!("read git index preview expiry: {error}")))?
+        .map(UtcMicros);
+    if rows.next().await.map_err(unavailable)?.is_some() {
+        return Err(invalid(
+            "git index preview expiry query returned multiple aggregate rows",
+        ));
+    }
+    Ok(expiry)
+}
+
 async fn commit_outcome<T>(
     transaction: GitMutationWriteTransaction<'_>,
     outcome: GitIndexTransactionStoreResult<T>,
@@ -492,6 +635,71 @@ where
         .map_err(unavailable)
 }
 
+async fn insert_preview_input_if_absent<E>(
+    transaction: &E,
+    input: &GitIndexPreviewInputV1,
+    encoded: &str,
+) -> GitIndexTransactionStoreResult<()>
+where
+    E: Executor,
+{
+    let mut rows = transaction
+        .query(
+            "SELECT preview_id, input_json
+             FROM git_index_preview_inputs
+             WHERE preview_id = ?1 OR input_digest = ?2
+             ORDER BY preview_id",
+            params![input.preview_id.as_str(), input.input_digest.as_str()],
+        )
+        .await
+        .map_err(unavailable)?;
+    let mut existing = Vec::new();
+    while let Some(row) = rows.next().await.map_err(unavailable)? {
+        existing.push((
+            text(&row, 0, "preview input id")?,
+            optional_text(&row, 1, "preview input payload")?,
+        ));
+    }
+    if !existing.is_empty() {
+        if existing.len() == 1
+            && existing[0].0 == input.preview_id.as_str()
+            && existing[0].1.as_deref() == Some(encoded)
+        {
+            return Ok(());
+        }
+        return Err(GitIndexTransactionStoreError::PreviewInputConflict);
+    }
+
+    transaction
+        .execute(
+            "INSERT INTO git_index_preview_inputs
+                (preview_id, input_digest, project_id, repository_id, worktree_id,
+                 operation, repository_snapshot_digest, created_at, expires_at,
+                 input_json, purged_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+            params![
+                input.preview_id.as_str(),
+                input.input_digest.as_str(),
+                input.repository_snapshot.project_id.as_str(),
+                input.repository_snapshot.repository_id.as_str(),
+                input
+                    .repository_snapshot
+                    .worktree_id
+                    .as_ref()
+                    .ok_or_else(|| invalid("git index preview input requires a worktree"))?
+                    .as_str(),
+                operation_code(input.operation),
+                input.repository_snapshot_digest.as_str(),
+                input.created_at.0,
+                input.expires_at.0,
+                encoded,
+            ],
+        )
+        .await
+        .map(|_| ())
+        .map_err(unavailable)
+}
+
 async fn insert_journal<E>(
     transaction: &E,
     idempotency_key: &GitIndexIdempotencyKey,
@@ -526,6 +734,59 @@ where
         .await
         .map(|_| ())
         .map_err(unavailable)
+}
+
+async fn read_preview_input_from_transaction<Q>(
+    transaction: &Q,
+    preview_id: &GitIndexPreviewId,
+    observed_at: UtcMicros,
+) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1>
+where
+    Q: QueryExecutor,
+{
+    let mut rows = transaction
+        .query(
+            "SELECT expires_at, input_json, purged_at
+             FROM git_index_preview_inputs
+             WHERE preview_id = ?1",
+            params![preview_id.as_str()],
+        )
+        .await
+        .map_err(unavailable)?;
+    let Some(row) = rows.next().await.map_err(unavailable)? else {
+        return Ok(GitIndexPreviewInputReadV1::Missing);
+    };
+    let expires_at = UtcMicros(
+        row.get::<i64>(0)
+            .map_err(|error| invalid(format!("read preview input expiry: {error}")))?,
+    );
+    let encoded = optional_text(&row, 1, "preview input payload")?;
+    let purged_at = row
+        .get::<Option<i64>>(2)
+        .map_err(|error| invalid(format!("read preview input purge time: {error}")))?
+        .map(UtcMicros);
+    if rows.next().await.map_err(unavailable)?.is_some() {
+        return Err(invalid("duplicate git index preview input"));
+    }
+    if observed_at >= expires_at {
+        return Ok(GitIndexPreviewInputReadV1::Expired {
+            expired_at: expires_at,
+            purged_at,
+        });
+    }
+    if purged_at.is_some() {
+        return Err(invalid("git index preview input was purged before expiry"));
+    }
+    let encoded =
+        encoded.ok_or_else(|| invalid("live git index preview input payload is missing"))?;
+    let input: GitIndexPreviewInputV1 = decode(&encoded)?;
+    if input.preview_id != *preview_id || input.expires_at != expires_at {
+        return Err(invalid(
+            "git index preview input key or expiry does not bind its payload",
+        ));
+    }
+    input.validate().map_err(invalid_domain)?;
+    Ok(GitIndexPreviewInputReadV1::Available(Box::new(input)))
 }
 
 async fn read_preview_from_transaction<Q>(

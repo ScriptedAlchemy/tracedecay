@@ -11,16 +11,16 @@ use tracedecay_application::{
     GitIndexTransactionPortError, OperationTermination,
 };
 use tracedecay_domain::{
-    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
-    GitIndexTransactionReceiptV1, GitOperationStateV1, ProjectId, RepositoryId,
-    RepositoryIndexStateV1, UtcMicros,
+    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewInputV1,
+    GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, GitOperationStateV1, ProjectId,
+    RepositoryId, RepositoryIndexStateV1, UtcMicros,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectClassifierV1};
 use tracedecay_store::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1, GitIndexTransactionStore,
-    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
-    GitIndexTransactionTerminalWriteV1,
+    GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
+    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
 };
 use tracedecay_tool_catalog::CapabilityId;
 
@@ -29,8 +29,9 @@ use super::queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
 use super::service::GitIndexPolicyRecheckPort;
 use super::store::DaemonGitIndexTransactionStore;
 use super::test_support::{
-    FakeNative, NativeMode, RecoveryMode, TestHarness, TestPolicy, apply_request, digest, id,
-    preview, preview_with_expiry, receipt_for, test_store, transaction_id_for,
+    FakeNative, NativeMode, RecoveryMode, TestHarness, TestPolicy, apply_request, digest,
+    fixture_time, id, preview, preview_input, preview_with_expiry, receipt_for, test_store,
+    transaction_id_for,
 };
 use super::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionPort, DaemonGitIndexTransactionService,
@@ -139,7 +140,7 @@ fn queued_repository_mutation_observes_live_cancellation() {
                     waiter_checks.fetch_add(1, Ordering::SeqCst);
                     waiter_cancellation
                         .load(Ordering::SeqCst)
-                        .then_some(UtcMicros(25))
+                        .then_some(fixture_time(25))
                 },
                 |observed| observed.is_some(),
             )
@@ -238,6 +239,29 @@ fn daemon_policy_recheck_rejects_a_capability_revoked_after_preview() {
 struct StartupUnavailableStore(DaemonGitIndexTransactionStore);
 
 impl GitIndexTransactionStore for StartupUnavailableStore {
+    fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.0.save_preview_input(input)
+    }
+
+    fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
+        self.0.read_preview_input(preview_id, observed_at)
+    }
+
+    fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize> {
+        self.0.purge_expired_preview_inputs(observed_at, limit)
+    }
+
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
         self.0.save_preview(preview)
     }
@@ -247,6 +271,13 @@ impl GitIndexTransactionStore for StartupUnavailableStore {
         preview_id: &GitIndexPreviewId,
     ) -> GitIndexTransactionStoreResult<Option<GitIndexPreviewV1>> {
         self.0.read_preview(preview_id)
+    }
+
+    fn read_record(
+        &self,
+        idempotency_key: &GitIndexIdempotencyKey,
+    ) -> GitIndexTransactionStoreResult<Option<tracedecay_store::GitIndexTransactionRecordV1>> {
+        self.0.read_record(idempotency_key)
     }
 
     fn begin_or_replay(
@@ -310,12 +341,14 @@ fn test_port(
     let directory = tempfile::tempdir().expect("store directory");
     let store = test_store(&directory);
     let preview = preview();
+    store
+        .save_preview_input(preview_input(&preview))
+        .expect("save preview input");
     store.save_preview(preview.clone()).expect("save preview");
     let request = apply_request(&preview, "idempotency.fixture");
     let native = FakeNative::new(native_modes, recovery_modes);
     let apply_calls = Arc::clone(&native.apply_calls);
     let recovery_calls = Arc::clone(&native.recovery_calls);
-    let discard_calls = Arc::clone(&native.discard_calls);
     let entered_native = Arc::clone(&native.entered_native);
     let policy = TestPolicy::allowing();
     let allow = Arc::clone(&policy.allow);
@@ -334,7 +367,6 @@ fn test_port(
         request,
         apply_calls,
         recovery_calls,
-        discard_calls,
         entered_native,
         allow,
         policy_calls,
@@ -441,7 +473,6 @@ fn terminal_replay_bypasses_revalidated_policy_but_conflicting_effect_input_reje
     assert_eq!(replay.receipt, first.receipt);
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
 
     let mut revalidated = harness.request.clone();
     revalidated.proof.configuration_digest = digest('e');
@@ -461,7 +492,7 @@ fn terminal_replay_bypasses_revalidated_policy_but_conflicting_effect_input_reje
 }
 
 #[test]
-fn rejected_admitted_apply_discards_ephemeral_preview_material() {
+fn rejected_admitted_apply_never_reaches_native_git() {
     let harness = test_port([], []);
     harness.allow.store(false, Ordering::SeqCst);
 
@@ -472,7 +503,6 @@ fn rejected_admitted_apply_discards_ephemeral_preview_material() {
         "a pre-native denial receives a no-change receipt"
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -493,7 +523,6 @@ fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
         GitIndexReceiptOutcomeV1::AbortedNoChange
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -504,7 +533,7 @@ fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
     let result = harness
         .port
         .apply_cancellable(&harness.request, || {
-            (cancellation_checks.fetch_add(1, Ordering::SeqCst) + 1 >= 5).then_some(UtcMicros(25))
+            (cancellation_checks.fetch_add(1, Ordering::SeqCst) + 1 >= 5).then_some(fixture_time(25))
         })
         .expect("pre-native cancellation is a durable no-change result");
 
@@ -522,7 +551,7 @@ fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
         .as_ref()
         .expect("canonical cancellation observation");
     assert_eq!(cancellation.stage, CancellationStage::BeforeEffect);
-    assert_eq!(cancellation.observed_at, UtcMicros(25));
+    assert_eq!(cancellation.observed_at, fixture_time(25));
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
     result
         .validate_for(&harness.request)
@@ -539,7 +568,7 @@ fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
             harness
                 .entered_native
                 .load(Ordering::SeqCst)
-                .then_some(UtcMicros(25))
+                .then_some(fixture_time(25))
         })
         .expect("native outcome remains authoritative");
 
@@ -556,7 +585,7 @@ fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
 fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
     let directory = tempfile::tempdir().expect("store directory");
     let store = test_store(&directory);
-    let preview = preview_with_expiry(UtcMicros(14));
+    let preview = preview_with_expiry(fixture_time(14));
     let request = apply_request(&preview, "idempotency.expired-replay");
     seed_terminal_abort(&store, &preview, &request);
     let native = FakeNative::new([], []);
@@ -579,6 +608,36 @@ fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
     assert_eq!(policy_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn unstarted_apply_reports_expired_private_input_without_entering_native_git() {
+    let directory = tempfile::tempdir().expect("store directory");
+    let store = test_store(&directory);
+    let preview = preview_with_expiry(fixture_time(14));
+    store
+        .save_preview_input(preview_input(&preview))
+        .expect("save preview input");
+    store
+        .save_preview(preview.clone())
+        .expect("save public preview");
+    let mut request = apply_request(&preview, "idempotency.expired-unstarted");
+    request.observed_at = fixture_time(14);
+    let native = FakeNative::new([], []);
+    let apply_calls = Arc::clone(&native.apply_calls);
+    let port = DaemonGitIndexTransactionPort::new(
+        store,
+        native,
+        GitEffectClassifierV1::default(),
+        TestPolicy::allowing(),
+        Arc::new(RepositoryMutationQueue::default()),
+    );
+
+    assert_eq!(
+        port.apply(&request),
+        Err(GitIndexTransactionPortError::ExpiredPreview)
+    );
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -681,7 +740,7 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
     let recovered = port
-        .recover_startup(UtcMicros(20))
+        .recover_startup(fixture_time(20))
         .expect("startup recovery");
     assert_eq!(recovered.len(), 1);
     assert_eq!(
@@ -689,7 +748,7 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
         GitIndexReceiptOutcomeV1::AbortedNoChange
     );
     assert!(
-        port.recover_startup(UtcMicros(21))
+        port.recover_startup(fixture_time(21))
             .expect("idempotent startup recovery")
             .is_empty()
     );
@@ -713,7 +772,7 @@ fn startup_service_recovers_before_exposing_the_mutation_port() {
         GitEffectClassifierV1::default(),
         TestPolicy::allowing(),
         Arc::new(RepositoryMutationQueue::default()),
-        UtcMicros(20),
+        fixture_time(20),
     )
     .expect("startup recovery completes before service publication");
     assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
@@ -741,7 +800,7 @@ fn startup_recovery_failure_returns_no_mutation_service() {
         GitEffectClassifierV1::default(),
         TestPolicy::allowing(),
         Arc::new(RepositoryMutationQueue::default()),
-        UtcMicros(20),
+        fixture_time(20),
     );
 
     assert!(matches!(
@@ -772,7 +831,7 @@ fn quarantine_clears_only_after_a_proven_recovery_receipt() {
 
     let cleared = harness
         .port
-        .recover_startup(UtcMicros(20))
+        .recover_startup(fixture_time(20))
         .expect("proven clear");
     assert_eq!(cleared.len(), 1);
     assert_eq!(
@@ -803,7 +862,7 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
             database_path.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
-            UtcMicros(20),
+            fixture_time(20),
         )
         .await
         .expect("first project service");
@@ -812,12 +871,63 @@ async fn daemon_owner_reuses_one_service_for_the_same_project_database() {
             database_path,
             directory.path().to_path_buf(),
             project_id,
-            UtcMicros(21),
+            fixture_time(21),
         )
         .await
         .expect("reused project service");
 
     assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[tokio::test]
+async fn daemon_owner_shutdown_fences_admission_clears_services_and_joins_store_actor() {
+    let directory = tempfile::tempdir().expect("project directory");
+    let database_path = directory.path().join("canonical-project.db");
+    rusqlite::Connection::open(&database_path).expect("canonical project database");
+    let registry = DaemonGitIndexTransactionServiceRegistry::default();
+    let project_id = id::<ProjectId>("project.shutdown.fixture");
+    let service = registry
+        .ensure_engine_test(
+            database_path.clone(),
+            directory.path().to_path_buf(),
+            project_id.clone(),
+            fixture_time(20),
+        )
+        .await
+        .expect("project service");
+
+    let receipt = registry.shutdown().await.expect("Git owner shutdown");
+
+    assert_eq!(
+        receipt,
+        super::owner::DaemonGitIndexShutdownReceiptV1 {
+            services_closed: 1,
+            store_actors_joined: 1,
+        }
+    );
+    assert_eq!(
+        registry.shutdown().await.expect("idempotent shutdown"),
+        receipt
+    );
+    assert!(matches!(
+        registry.for_repository_root(directory.path()).await,
+        Err(GitIndexTransactionPortError::DaemonUnavailable)
+    ));
+    assert!(matches!(
+        registry
+            .ensure_engine_test(
+                database_path,
+                directory.path().to_path_buf(),
+                project_id,
+                fixture_time(21),
+            )
+            .await,
+        Err(GitIndexTransactionPortError::DaemonUnavailable)
+    ));
+    assert_eq!(
+        service.read_preview(&GitIndexPreviewId::new("preview.after-shutdown").unwrap()),
+        Err(GitIndexTransactionPortError::DaemonUnavailable)
+    );
 }
 
 #[tokio::test]
@@ -833,7 +943,7 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
             database_path.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
-            UtcMicros(20),
+            fixture_time(20),
         )
         .await
         .expect("first project service");
@@ -842,7 +952,7 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
             database_path,
             alternate.path().to_path_buf(),
             project_id,
-            UtcMicros(21),
+            fixture_time(21),
         )
         .await
         .expect("linked worktree service");
@@ -892,12 +1002,12 @@ async fn daemon_owner_resolves_symlink_alias_to_the_canonical_mounted_root() {
             database_path.clone(),
             directory.path().to_path_buf(),
             project_id.clone(),
-            UtcMicros(30),
+            fixture_time(30),
         )
         .await
         .expect("mount through real root");
     let second = registry
-        .ensure_engine_test(database_path, alias, project_id, UtcMicros(31))
+        .ensure_engine_test(database_path, alias, project_id, fixture_time(31))
         .await
         .expect("reuse through symlink alias");
     assert!(

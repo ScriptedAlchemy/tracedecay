@@ -11,7 +11,7 @@ mod store;
 
 pub use read::GitIndexReadExecutor;
 pub use schema::ensure_git_index_transaction_schema;
-pub use store::GlobalDbGitIndexTransactionStore;
+pub use store::{GitIndexPreviewInputGcResult, GlobalDbGitIndexTransactionStore};
 
 #[cfg(test)]
 mod tests;

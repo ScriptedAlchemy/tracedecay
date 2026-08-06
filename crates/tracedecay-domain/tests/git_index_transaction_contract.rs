@@ -6,11 +6,11 @@ use tracedecay_domain::git::repository_state::{
 use tracedecay_domain::{
     GitBlobExpectationV1, GitCommitIdentityV1, GitCoverageV1, GitFileModeV1, GitHeadStateV1,
     GitIndexCommitIntentV1, GitIndexEntryExpectationV1, GitIndexJournalPhaseV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexReceiptId,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
+    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
-    GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RepositoryId,
-    UtcMicros, WorktreeId,
+    GitOperationStateV1, HunkDirectionV1, HunkRefV1, MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS,
+    ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -122,6 +122,73 @@ fn commit_intent(message: &str) -> GitIndexCommitIntentV1 {
         GitIndexSigningPolicyV1::UnsignedPermitted,
     )
     .expect("commit intent")
+}
+
+#[test]
+fn durable_preview_inputs_bind_bounded_hunks_or_one_exact_commit_intent() {
+    let repository_snapshot = snapshot();
+    let snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&repository_snapshot)
+        .expect("snapshot digest");
+    let preview_id = GitIndexPreviewId::new("git-preview.input.fixture").expect("preview id");
+    let reference = hunk(&preview_id, snapshot_digest);
+    let input = GitIndexPreviewInputV1::new_hunk_selection(
+        preview_id.clone(),
+        GitIndexTransactionOperationV1::StageHunks,
+        repository_snapshot.clone(),
+        vec![reference],
+        UtcMicros(10),
+        UtcMicros(30_000_010),
+    )
+    .expect("bounded hunk input");
+    input.validate().expect("input remains canonical");
+    assert!(!input.is_expired_at(UtcMicros(30_000_009)));
+    assert!(input.is_expired_at(UtcMicros(30_000_010)));
+
+    let intent = commit_intent("restart-stable intent\n");
+    let commit = GitIndexPreviewInputV1::new_commit(
+        GitIndexPreviewId::new("git-preview.commit-input.fixture").expect("preview id"),
+        repository_snapshot.clone(),
+        intent.clone(),
+        UtcMicros(20),
+        UtcMicros(30_000_020),
+    )
+    .expect("commit input");
+    commit.validate().expect("commit input remains canonical");
+    assert_eq!(commit.commit_intent.as_ref(), Some(&intent));
+    assert!(commit.hunks.is_empty());
+
+    let too_many_preview_id =
+        GitIndexPreviewId::new("git-preview.too-many-hunks").expect("preview id");
+    assert!(
+        GitIndexPreviewInputV1::new_hunk_selection(
+            too_many_preview_id.clone(),
+            GitIndexTransactionOperationV1::StageHunks,
+            repository_snapshot.clone(),
+            vec![
+                hunk(
+                    &too_many_preview_id,
+                    GitIndexPreviewV1::repository_snapshot_digest(&repository_snapshot)
+                        .expect("snapshot digest")
+                );
+                MAX_GIT_INDEX_PREVIEW_INPUT_HUNKS + 1
+            ],
+            UtcMicros(10),
+            UtcMicros(30_000_010),
+        )
+        .is_err(),
+        "preview inputs must not turn a bounded hunk read into an unbounded durable payload"
+    );
+    assert!(
+        GitIndexPreviewInputV1::new_commit(
+            GitIndexPreviewId::new("git-preview.long-lived-input").expect("preview id"),
+            repository_snapshot,
+            intent,
+            UtcMicros(10),
+            UtcMicros(30_000_011),
+        )
+        .is_err(),
+        "preview inputs must expire within the fixed handoff lifetime"
+    );
 }
 
 #[test]

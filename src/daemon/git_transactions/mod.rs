@@ -19,7 +19,10 @@ use tracedecay_application::{
     GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionPort,
     GitIndexTransactionPortError,
 };
-use tracedecay_domain::{GitIndexTransactionReceiptV1, UtcMicros};
+use tracedecay_domain::{
+    GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexTransactionReceiptV1,
+    UtcMicros,
+};
 use tracedecay_policy::GitEffectClassifier;
 use tracedecay_store::GitIndexTransactionStore;
 
@@ -36,9 +39,11 @@ pub(crate) fn canonicalize_repository_root(repository_root: &Path) -> std::io::R
 }
 
 pub(crate) use journal::{DurableGitIndexJournal, GitIndexJournalError};
-#[cfg(all(unix, any(test, feature = "test-transport")))]
+#[cfg(all(unix, feature = "test-transport"))]
 pub(crate) use native::capture_exact_snapshot_for_test;
-pub(crate) use native::{DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor};
+pub(crate) use native::{
+    DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor, capture_exact_snapshot,
+};
 pub(crate) use owner::{
     DaemonGitAuthorityStateV1, DaemonGitIndexTransactionServiceRegistry, DaemonGitInvocationOwner,
     DaemonProjectGitIndexTransactionService,
@@ -70,6 +75,28 @@ where
     S: GitIndexTransactionStore,
     N: GitIndexRecoveryExecutor,
 {
+    pub(crate) fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        self.port.save_preview_input(input)
+    }
+
+    pub(crate) fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> Result<GitIndexPreviewInputV1, GitIndexTransactionPortError> {
+        self.port.read_preview_input(preview_id, observed_at)
+    }
+
+    pub(crate) fn read_preview(
+        &self,
+        preview_id: &GitIndexPreviewId,
+    ) -> Result<GitIndexPreviewV1, GitIndexTransactionPortError> {
+        self.port.read_preview(preview_id)
+    }
+
     pub(crate) fn start(
         store: S,
         native: N,

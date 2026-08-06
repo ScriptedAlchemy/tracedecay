@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_store::{GitIndexTransactionStoreError, GitIndexTransactionStoreResult};
@@ -23,6 +24,7 @@ use super::SharedDaemonGitIndexTransactionStore;
 #[derive(Default)]
 pub(crate) struct GitIndexTransactionStoreRegistry {
     stores: Mutex<HashMap<PathBuf, SharedDaemonGitIndexTransactionStore>>,
+    closed: AtomicBool,
 }
 
 impl GitIndexTransactionStoreRegistry {
@@ -31,6 +33,9 @@ impl GitIndexTransactionStoreRegistry {
         &self,
         database: Arc<RegisteredGlobalDb>,
     ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionStoreError::Unavailable);
+        }
         // The registered runtime authority already supplies the canonical
         // database identity. Avoid a second filesystem lookup because a fresh
         // SQLite shard may not have materialized its path yet.
@@ -39,6 +44,9 @@ impl GitIndexTransactionStoreRegistry {
             .stores
             .lock()
             .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionStoreError::Unavailable);
+        }
         if let Some(existing) = stores.get(&path) {
             return Ok(existing.clone());
         }
@@ -54,6 +62,9 @@ impl GitIndexTransactionStoreRegistry {
         &self,
         path: PathBuf,
     ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionStoreError::Unavailable);
+        }
         let path = path
             .canonicalize()
             .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
@@ -61,6 +72,9 @@ impl GitIndexTransactionStoreRegistry {
             .stores
             .lock()
             .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(GitIndexTransactionStoreError::Unavailable);
+        }
         if let Some(existing) = stores.get(&path) {
             return Ok(existing.clone());
         }
@@ -69,5 +83,25 @@ impl GitIndexTransactionStoreRegistry {
         ));
         stores.insert(path, store.clone());
         Ok(store)
+    }
+
+    pub(crate) async fn shutdown_all(&self) -> GitIndexTransactionStoreResult<usize> {
+        self.closed.store(true, Ordering::SeqCst);
+        let stores = {
+            let mut retained = self
+                .stores
+                .lock()
+                .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+            retained.drain().map(|(_, store)| store).collect::<Vec<_>>()
+        };
+        tokio::task::spawn_blocking(move || {
+            let mut joined = 0usize;
+            for store in stores {
+                joined = joined.saturating_add(usize::from(store.shutdown()?));
+            }
+            Ok(joined)
+        })
+        .await
+        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
     }
 }

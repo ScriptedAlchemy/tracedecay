@@ -61,9 +61,8 @@ use tracedecay_domain::{
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_domain::{
-    GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1,
+    GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
+    GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
 };
 use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
@@ -493,19 +492,10 @@ fn run_application_tool(
 #[cfg(all(unix, feature = "test-transport"))]
 async fn preview_commit_via_mcp(
     fixture: &RuntimeFixture,
-    scope: &ResolvedScope,
     request_id: &str,
     message: &str,
 ) -> GitIndexPreviewV1 {
     let captured_at = wall_clock_micros();
-    let snapshot = tracedecay::daemon::capture_exact_git_snapshot_for_test(
-        &fixture.project,
-        scope.project_id.clone(),
-        scope.repository_id.clone(),
-        scope.worktree_id.clone(),
-        captured_at,
-    )
-    .expect("exact preview snapshot");
     let identity = GitCommitIdentityV1 {
         name: "TraceDecay Test".to_owned(),
         email: "tracedecay@example.com".to_owned(),
@@ -513,9 +503,8 @@ async fn preview_commit_via_mcp(
     };
     let request = GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_id: GitIndexPreviewId::new("preview.transport-input").expect("preview id"),
-        repository_snapshot: snapshot,
-        selected_hunks: Vec::new(),
+        preview_input_id: None,
+        selected_hunk_digests: Vec::new(),
         commit_intent: Some(
             GitIndexCommitIntentV1::new(
                 message.to_owned(),
@@ -545,6 +534,15 @@ async fn preview_commit_via_mcp(
     };
     serde_json::from_value(preview.payload.clone().expect("MCP immutable Git preview"))
         .expect("typed MCP Git preview")
+}
+
+#[cfg(all(unix, feature = "test-transport"))]
+fn repository_state_without_observation_identity(snapshot: &impl serde::Serialize) -> Value {
+    let mut value = serde_json::to_value(snapshot).expect("repository snapshot JSON");
+    let object = value.as_object_mut().expect("repository snapshot object");
+    object.remove("snapshot_id");
+    object.remove("captured_at");
+    value
 }
 
 async fn assert_application_transport_parity(
@@ -1250,14 +1248,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
 
     let original_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
     let captured_at = wall_clock_micros();
-    let snapshot = tracedecay::daemon::capture_exact_git_snapshot_for_test(
-        &fixture.project,
-        scope.project_id.clone(),
-        scope.repository_id.clone(),
-        scope.worktree_id.clone(),
-        captured_at,
-    )
-    .expect("exact transaction snapshot");
     let identity = GitCommitIdentityV1 {
         name: "TraceDecay Test".to_owned(),
         email: "tracedecay@example.com".to_owned(),
@@ -1265,9 +1255,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     };
     let preview_request = GitPreviewSurfaceRequest {
         operation: GitIndexTransactionOperationV1::CommitIndex,
-        preview_id: GitIndexPreviewId::new("preview.transport-parity").expect("preview id"),
-        repository_snapshot: snapshot,
-        selected_hunks: Vec::new(),
+        preview_input_id: None,
+        selected_hunk_digests: Vec::new(),
         commit_intent: Some(
             GitIndexCommitIntentV1::new(
                 "test: prove Git transport parity\n".to_owned(),
@@ -1278,11 +1267,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
             .expect("commit intent"),
         ),
     };
-    let mut preview_arguments = serde_json::to_value(&preview_request).expect("preview arguments");
-    preview_arguments
-        .as_object_mut()
-        .expect("preview object")
-        .remove("preview_id");
+    let preview_arguments = serde_json::to_value(&preview_request).expect("preview arguments");
 
     let cli_preview = run_application_tool(
         fixture.home(),
@@ -1333,8 +1318,9 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         serde_json::from_value(mcp_preview.payload.clone().expect("MCP immutable preview"))
             .expect("typed MCP preview");
     assert_eq!(
-        cli_preview_payload.repository_snapshot,
-        mcp_preview_payload.repository_snapshot
+        repository_state_without_observation_identity(&cli_preview_payload.repository_snapshot),
+        repository_state_without_observation_identity(&mcp_preview_payload.repository_snapshot),
+        "independent CLI and MCP observations must agree on every repository fact"
     );
     assert_eq!(
         cli_preview_payload.candidate_index_tree,
@@ -1350,7 +1336,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
 
     let apply_arguments = serde_json::to_value(GitApplySurfaceRequest {
-        preview: cli_preview_payload,
+        preview_id: cli_preview_payload.preview_id,
+        preview_digest: cli_preview_payload.preview_digest,
         idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity")
             .expect("idempotency key"),
     })
@@ -1442,7 +1429,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     git(&fixture.project, &["add", "src/main.rs"]);
     let conflicting_preview = preview_commit_via_mcp(
         &fixture,
-        &scope,
         "request.git-parity.conflicting-preview",
         "test: conflicting replay\n",
     )
@@ -1453,7 +1439,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         RequestId::new("request.git-parity.conflicting-replay")
             .expect("conflicting replay request id"),
         ApplicationSurfaceRequest::GitApply(GitApplySurfaceRequest {
-            preview: conflicting_preview,
+            preview_id: conflicting_preview.preview_id,
+            preview_digest: conflicting_preview.preview_digest,
             idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity")
                 .expect("reused idempotency key"),
         }),
@@ -1481,7 +1468,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
 
     let stale_preview = preview_commit_via_mcp(
         &fixture,
-        &scope,
         "request.git-parity.stale-preview",
         "test: stale CAS must not commit\n",
     )
@@ -1494,7 +1480,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     git(&fixture.project, &["add", "src/main.rs"]);
     let drifted_index_tree = git_stdout(&fixture.project, &["write-tree"]);
     let stale_apply_arguments = serde_json::to_value(GitApplySurfaceRequest {
-        preview: stale_preview,
+        preview_id: stale_preview.preview_id,
+        preview_digest: stale_preview.preview_digest,
         idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity.stale")
             .expect("stale apply idempotency key"),
     })
@@ -1538,7 +1525,6 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
 
     let cancellation_preview = preview_commit_via_mcp(
         &fixture,
-        &scope,
         "request.git-parity.cancellation-preview",
         "test: cancelled apply must not commit\n",
     )
@@ -1560,7 +1546,8 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
             ApplicationSurfaceOperation::GitApply,
             request_id,
             ApplicationSurfaceRequest::GitApply(GitApplySurfaceRequest {
-                preview: cancellation_preview.clone(),
+                preview_id: cancellation_preview.preview_id.clone(),
+                preview_digest: cancellation_preview.preview_digest.clone(),
                 idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity.cancelled")
                     .expect("cancelled apply idempotency key"),
             }),
