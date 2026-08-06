@@ -6,7 +6,7 @@ import { CanonicalCosts } from './CanonicalCosts.tsx';
 
 /**
  * The canonical cost read exists to make an unpriced ledger visible. Prices are
- * recorded at ingest, so a read over turns that were never priced arrives with
+ * resolved from provider usage, so a read with unpriced usage arrives with
  * `provider_cost: null` and `pricing_revision_unavailable` — and $0.00 is the
  * single most damaging thing this surface could print in its place.
  *
@@ -26,7 +26,7 @@ describe('Canonical cost observations', () => {
     renderCosts(
       readModel({
         usage: [
-          costMetric('provider_tokens', 1_284_000, 'tokens', 'ingested_provider_turns', 8_412),
+          costMetric('provider_tokens', 1_284_000, 'tokens', 'provider_usage_events', 8_412),
           costMetric('saved_tokens', 96_400, 'tokens', 'eligible_savings_calls', 512),
         ],
         estimated_cost: [pricedCost()],
@@ -35,7 +35,7 @@ describe('Canonical cost observations', () => {
 
     expect(await screen.findByText('provider tokens')).toBeTruthy();
     expect(screen.getByText('1,284,000')).toBeTruthy();
-    expect(screen.getByText('per ingested provider turns · 8,412')).toBeTruthy();
+    expect(screen.getByText('per provider usage events · 8,412')).toBeTruthy();
     expect(screen.getByText('saved tokens')).toBeTruthy();
     expect(screen.getByText('per eligible savings calls · 512')).toBeTruthy();
   });
@@ -44,7 +44,7 @@ describe('Canonical cost observations', () => {
     renderCosts(
       readModel({
         usage: [
-          costMetric('provider_tokens', 1_284_000, 'tokens', 'ingested_provider_turns', 8_412),
+          costMetric('provider_tokens', 1_284_000, 'tokens', 'provider_usage_events', 8_412),
         ],
         estimated_cost: [pricedCost()],
       }),
@@ -94,7 +94,7 @@ describe('Canonical cost observations', () => {
     const panel = document.querySelector('[data-costs-latency="unavailable"]');
     expect(panel?.textContent).toContain('no provider latency is measured');
     expect(panel?.textContent).toContain(
-      'Neither the accounting-turn ledger nor the savings ledger records a per-call duration',
+      'Neither the provider-usage observations nor the savings ledger record a per-call duration',
     );
     // Retrieval latency is named as living elsewhere, not shown as a figure.
     expect(panel?.textContent).toContain('feedback latency p95');
@@ -141,7 +141,7 @@ function readModel(overrides: {
   return {
     authorized_scope_ref: 'all',
     horizon: overrides.horizon ?? { since_micros: 0, until_micros: NOW_MICROS },
-    watermark: 'turns:8412:1753000000;savings:1753000000',
+    watermark: 'provider-usage:8412;savings:1753000000',
     observed_at_micros: NOW_MICROS,
     current: false,
     usage: overrides.usage,
@@ -202,10 +202,10 @@ function costMetric(
     },
     evidence_class: 'measurement',
     provenance: {
-      source: 'accounting_turn',
-      source_revision: 'accounting-turn.v1',
+      source: 'provider_usage_observation',
+      source_revision: 'provider-usage-observation.v1',
       projector_revision: 'costs-projector.v1',
-      watermark: 'turns:8412:1753000000',
+      watermark: 'provider-usage:8412',
     },
     cohort: { descriptor_revision: `${denominator}.v1`, eligible_population: denominator },
     temporal: {
@@ -219,11 +219,11 @@ function costMetric(
   };
 }
 
-/** The real shape `costs_read_model` emits when turns were counted but never
+/** The real shape `costs_read_model` emits when provider usage was observed but never
  * priced: a null cost carrying `pricing_revision_unavailable`. */
 function pricedCost(): MetricValueV1 {
   return {
-    ...costMetric('provider_cost', null, 'usd', 'priced_provider_turns', null),
+    ...costMetric('provider_cost', null, 'usd', 'priced_provider_usage_events', null),
     unavailable_reason: 'pricing_revision_unavailable',
     uncertainty: { lower: null, upper: null, reason: 'pricing_revision_unavailable' },
   };

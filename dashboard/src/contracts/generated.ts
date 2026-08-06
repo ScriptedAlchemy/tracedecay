@@ -1759,7 +1759,7 @@ export const MetricProvenanceV1Schema = z.object({
 });
 export type MetricProvenanceV1 = z.infer<typeof MetricProvenanceV1Schema>;
 
-export const MetricSourceV1Schema = z.enum(["accounting_turn", "feedback_observations", "observability_envelope", "savings_ledger"]);
+export const MetricSourceV1Schema = z.enum(["feedback_observations", "observability_envelope", "provider_usage_observation", "savings_ledger"]);
 export type MetricSourceV1 = z.infer<typeof MetricSourceV1Schema>;
 
 export const MetricTemporalV1Schema = z.object({
@@ -2053,6 +2053,17 @@ export type ProjectsPayloadV1 = z.infer<typeof ProjectsPayloadV1Schema>;
 export const ProposalIdSchema = z.string();
 export type ProposalId = z.infer<typeof ProposalIdSchema>;
 
+export const ProviderUsageSummaryV1Schema = z.object({
+  available: z.boolean(),
+  cost_basis: z.string().nullable(),
+  error: z.string().nullable(),
+  status: z.string().nullable(),
+  total_cost_usd: z.number().nullable(),
+  total_tokens: z.number().int().nullable(),
+  usage_event_count: z.number().int().nullable(),
+});
+export type ProviderUsageSummaryV1 = z.infer<typeof ProviderUsageSummaryV1Schema>;
+
 export const PublicCodeProjectSchema = z.object({
   canonical_root: z.string(),
   created_at: z.number().int(),
@@ -2206,9 +2217,9 @@ export type SavingsLifetimeProjectV1 = z.infer<typeof SavingsLifetimeProjectV1Sc
 export const SavingsOverviewPayloadV1Schema = z.object({
   costs: z.lazy(() => CostsReadModelV1Schema),
   pricing: z.lazy(() => SavingsPricingSummaryV1Schema),
+  provider_usage: z.lazy(() => ProviderUsageSummaryV1Schema),
   savings: z.lazy(() => SavingsAccountingSummaryV1Schema),
   sessions: z.lazy(() => SavingsSessionSummaryV1Schema),
-  turns: z.lazy(() => TurnsSummaryV1Schema),
 });
 export type SavingsOverviewPayloadV1 = z.infer<typeof SavingsOverviewPayloadV1Schema>;
 
@@ -2216,21 +2227,22 @@ export const SavingsPricingSummaryV1Schema = z.object({
   fetched_at: z.unknown(),
   model_count: z.unknown(),
   offline: z.unknown(),
+  revision: z.unknown(),
   source: z.unknown(),
 });
 export type SavingsPricingSummaryV1 = z.infer<typeof SavingsPricingSummaryV1Schema>;
 
 export const SavingsSessionModelV1Schema = z.object({
-  actual: z.lazy(() => TokenActualV1Schema),
   cost_basis: z.string(),
   estimated: z.lazy(() => TokenPairV1Schema),
   estimated_messages: z.number().int(),
   messages: z.number().int(),
   model: z.string().nullable(),
+  provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  provider_usage_events: z.number().int(),
   tokenized: z.lazy(() => TokenPairV1Schema),
   tokenized_messages: z.number().int(),
   tokenizer: z.unknown(),
-  usage_messages: z.number().int(),
 });
 export type SavingsSessionModelV1 = z.infer<typeof SavingsSessionModelV1Schema>;
 
@@ -2242,11 +2254,11 @@ export const SavingsSessionRowV1Schema = z.object({
   messages: z.number().int(),
   models: z.array(z.lazy(() => SavingsSessionModelV1Schema)),
   provider: z.string(),
+  provider_usage_events: z.number().int(),
   session_id: z.string(),
   started_at: z.number().int().nullable(),
   title: z.string().nullable(),
   tokenized_messages: z.number().int(),
-  usage_messages: z.number().int(),
 });
 export type SavingsSessionRowV1 = z.infer<typeof SavingsSessionRowV1Schema>;
 
@@ -2262,7 +2274,6 @@ export const SavingsSessionsPayloadV1Schema = z.object({
 export type SavingsSessionsPayloadV1 = z.infer<typeof SavingsSessionsPayloadV1Schema>;
 
 export const SavingsSessionSummaryV1Schema = z.object({
-  actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
   available: z.boolean(),
   cost_basis: z.string().nullable(),
   db: z.string(),
@@ -2271,6 +2282,8 @@ export const SavingsSessionSummaryV1Schema = z.object({
   estimated_messages: z.number().int().nullable(),
   messages: z.number().int().nullable(),
   model_count: z.number().int().nullable(),
+  provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  provider_usage_events: z.number().int().nullable(),
   scope: z.string().nullable(),
   session_count: z.number().int().nullable(),
   status: z.string().nullable(),
@@ -2278,7 +2291,6 @@ export const SavingsSessionSummaryV1Schema = z.object({
   tokenized: z.union([z.lazy(() => TokenPairV1Schema), z.null()]),
   tokenized_messages: z.number().int().nullable(),
   unknown_model_messages: z.number().int().nullable(),
-  usage_messages: z.number().int().nullable(),
 });
 export type SavingsSessionSummaryV1 = z.infer<typeof SavingsSessionSummaryV1Schema>;
 
@@ -2767,10 +2779,10 @@ export const TestMapMeasurementV1Schema = z.object({
 export type TestMapMeasurementV1 = z.infer<typeof TestMapMeasurementV1Schema>;
 
 export const TokenActualV1Schema = z.object({
-  cache_read_tokens: z.number().int(),
-  cache_write_tokens: z.number().int(),
-  input_tokens: z.number().int(),
-  output_tokens: z.number().int(),
+  cache_read_tokens: z.number().int().nullable(),
+  cache_write_tokens: z.number().int().nullable(),
+  input_tokens: z.number().int().nullable(),
+  output_tokens: z.number().int().nullable(),
 });
 export type TokenActualV1 = z.infer<typeof TokenActualV1Schema>;
 
@@ -2779,17 +2791,6 @@ export const TokenPairV1Schema = z.object({
   output_tokens: z.number().int(),
 });
 export type TokenPairV1 = z.infer<typeof TokenPairV1Schema>;
-
-export const TurnsSummaryV1Schema = z.object({
-  available: z.boolean(),
-  cost_basis: z.string().nullable(),
-  error: z.string().nullable(),
-  status: z.string().nullable(),
-  total_cost_usd: z.number().nullable(),
-  total_tokens: z.number().int().nullable(),
-  turn_count: z.number().int().nullable(),
-});
-export type TurnsSummaryV1 = z.infer<typeof TurnsSummaryV1Schema>;
 
 /** Strongly typed canonical identity: `UserProfileId`. */
 export const UserProfileIdSchema = z.string();

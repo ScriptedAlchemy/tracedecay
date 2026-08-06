@@ -284,34 +284,6 @@ fn canonical_message_metadata_from_facts(
         TranscriptLocation::new(location_cwd.as_deref(), location_provenance),
     );
 
-    if let Some(CanonicalObservationFactV1::Usage {
-        input_tokens,
-        output_tokens,
-        cache_read_tokens,
-        cache_write_tokens,
-        reasoning_tokens,
-    }) = envelope
-        .facts()
-        .iter()
-        .find(|fact| matches!(fact, CanonicalObservationFactV1::Usage { .. }))
-    {
-        let mut usage = Map::new();
-        for (key, value) in [
-            ("input_tokens", *input_tokens),
-            ("output_tokens", *output_tokens),
-            ("cache_read_input_tokens", *cache_read_tokens),
-            ("cache_creation_input_tokens", *cache_write_tokens),
-            ("reasoning_tokens", *reasoning_tokens),
-        ] {
-            if let Some(value) = value {
-                usage.insert(key.to_owned(), Value::from(value));
-            }
-        }
-        if !usage.is_empty() {
-            metadata.insert("usage".to_string(), Value::Object(usage));
-        }
-    }
-
     let mut tool_events = Vec::new();
     for fact in envelope.facts() {
         match fact {

@@ -27,6 +27,7 @@ pub(super) struct CodexMetaWithProvenance {
 }
 
 pub struct CodexTurnContext {
+    pub turn_id: Option<String>,
     pub model: Option<String>,
     pub cwd: Option<PathBuf>,
 }
@@ -149,6 +150,11 @@ pub fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
         return None;
     }
     let payload = record.get("payload").unwrap_or(record);
+    let turn_id = payload
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .filter(|turn_id| !turn_id.is_empty())
+        .map(str::to_string);
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -159,5 +165,9 @@ pub fn turn_context_from_record(record: &Value) -> Option<CodexTurnContext> {
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from);
-    Some(CodexTurnContext { model, cwd })
+    Some(CodexTurnContext {
+        turn_id,
+        model,
+        cwd,
+    })
 }

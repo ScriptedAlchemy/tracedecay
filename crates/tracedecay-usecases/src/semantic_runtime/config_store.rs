@@ -28,19 +28,21 @@ pub struct ProductionSemanticRetrievalConfigurationStoreV1 {
 }
 
 impl ProductionSemanticRetrievalConfigurationStoreV1 {
-    pub async fn open(
+    pub fn open(
         database: Arc<RegisteredGlobalDb>,
         scope: ResolvedScope,
     ) -> Result<Self, SemanticConfigurationBackendErrorV1> {
         scope
             .validate()
             .map_err(|_| SemanticConfigurationBackendErrorV1::Rejected)?;
-        let store = Self {
+        // The semantic retrieval tables are part of the canonical
+        // configuration schema, provisioned and shape-validated at registered
+        // database admission.
+        Ok(Self {
             database,
             scope,
             prepared_central_commits: Arc::new(Mutex::new(BTreeMap::new())),
-        };
-        Ok(store)
+        })
     }
 
     pub async fn install_initial_state(
@@ -907,9 +909,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let store = ProductionSemanticRetrievalConfigurationStoreV1::open(database, scope)
-            .await
-            .unwrap();
+        let store = ProductionSemanticRetrievalConfigurationStoreV1::open(database, scope).unwrap();
         assert_eq!(
             store.current_record().await.unwrap_err(),
             SemanticConfigurationBackendErrorV1::Unavailable

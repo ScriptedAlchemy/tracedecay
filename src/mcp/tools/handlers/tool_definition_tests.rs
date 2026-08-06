@@ -274,6 +274,7 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_context_scout_claim",
         "tracedecay_context_scout_delivery",
         "tracedecay_context_scout_feedback",
+        "tracedecay_dashboard",
     ];
     for tool in &tools {
         let ann = tool
@@ -297,6 +298,33 @@ fn test_tool_definitions_have_annotations() {
             ann["title"].is_string(),
             "{} missing title annotation",
             tool.name
+        );
+    }
+}
+
+#[test]
+fn advertised_read_only_matches_canonical_execution_effect() {
+    let catalog =
+        crate::mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
+    for tool in get_tool_definitions() {
+        if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool.name.as_str()) {
+            continue;
+        }
+        let advertised_read_only = tool
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations["readOnlyHint"].as_bool())
+            .unwrap_or(false);
+        let contract = catalog
+            .contract(&tool.name)
+            .unwrap_or_else(|| panic!("{} missing dispatch contract", tool.name));
+        assert_eq!(
+            advertised_read_only,
+            contract.read_only(),
+            "{} advertises readOnlyHint={advertised_read_only} but its canonical execution \
+             contract says read_only={}",
+            tool.name,
+            contract.read_only()
         );
     }
 }

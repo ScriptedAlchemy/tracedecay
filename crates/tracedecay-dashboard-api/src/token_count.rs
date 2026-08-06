@@ -1,15 +1,17 @@
 //! Tokenizer-backed token counting for the Savings & Cost tab.
 //!
-//! Cost estimation has three quality tiers (best wins per message):
+//! Content-size estimation has two quality tiers:
 //!
-//! 1. **actual** — the transcript recorded real usage data.
-//! 2. **tokenized** — no usage data, but the stored text is counted with a
+//! 1. **tokenized** — stored text counted with a
 //!    real BPE tokenizer (tiktoken). Exact for OpenAI-family models
 //!    (`o200k_base` / `cl100k_base` per family); for other vendors
 //!    (Claude/Gemini have no public tokenizer) `o200k_base` serves as a
 //!    much-better-than-chars/4 approximation and is labeled as such.
-//! 3. **estimated** — the legacy `(len+3)/4` chars/4 heuristic, used when
+//! 2. **estimated** — the legacy `(len+3)/4` chars/4 heuristic, used when
 //!    the `token-counting` feature is compiled out (or a count failed).
+//!
+//! Provider-reported billing usage comes exclusively from the canonical raw
+//! provider-usage projection. Message metadata is not an accounting fallback.
 //!
 //! Counting 15k+ stored messages per request would be far too slow, so
 //! counts are cached in process keyed by `(provider, message_id)` with a
@@ -32,11 +34,8 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, param
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
 
-/// Per-message provenance + token columns, derived once and reused by every
-/// savings aggregate. Usage fields accept both the Anthropic
-/// (`input_tokens`/`output_tokens`) and `OpenAI` (`prompt_tokens`/
-/// `completion_tokens`) transcript shapes; `json_valid` guards keep one
-/// malformed `metadata_json` row from failing the whole query.
+/// Per-message content-token columns, derived once and reused by every savings
+/// aggregate. Billing usage never enters this content-sizing projection.
 pub(super) const MESSAGE_TOKENS_CTE: &str = "
     SELECT provider,
            message_id,
@@ -45,21 +44,7 @@ pub(super) const MESSAGE_TOKENS_CTE: &str = "
            timestamp,
            TRIM(COALESCE(model, '')) AS model,
            LENGTH(COALESCE(text, '')) AS msg_len,
-           (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(COALESCE(json_extract(metadata_json, '$.usage.input_tokens'),
-                             json_extract(metadata_json, '$.usage.prompt_tokens')) AS INTEGER)
-           END AS usage_in,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(COALESCE(json_extract(metadata_json, '$.usage.output_tokens'),
-                             json_extract(metadata_json, '$.usage.completion_tokens')) AS INTEGER)
-           END AS usage_out,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(json_extract(metadata_json, '$.usage.cache_read_input_tokens') AS INTEGER)
-           END AS usage_cache_read,
-           CASE WHEN json_valid(metadata_json) THEN
-               CAST(json_extract(metadata_json, '$.usage.cache_creation_input_tokens') AS INTEGER)
-           END AS usage_cache_write
+           (LENGTH(COALESCE(text, '')) + 3) / 4 AS est_tokens
     FROM session_messages
     WHERE kind IS NULL OR kind NOT IN ('summary', 'tool_event', 'hook_event', 'reasoning')";
 
@@ -147,8 +132,8 @@ struct CachedCount {
 /// built from.
 struct OverlayCache {
     /// Cheap aggregate fingerprint of `session_messages` at build time.
-    /// Includes metadata/text/model lengths so usage backfills invalidate the
-    /// overlay even when they update existing rows in place.
+    /// Includes text/model lengths. Provider-accounting metadata is deliberately
+    /// excluded because it is not content-token evidence.
     fingerprint: OverlayFingerprint,
     overlay: Arc<Vec<MessageTokens>>,
 }
@@ -236,7 +221,7 @@ pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<
 async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<OverlayFingerprint> {
     let rows = query_rows(
         conn,
-        "SELECT rowid, provider, message_id, model, metadata_json, LENGTH(text) AS text_len
+        "SELECT rowid, provider, message_id, model, LENGTH(text) AS text_len
          FROM session_messages ORDER BY rowid",
         (),
     )
@@ -251,7 +236,6 @@ async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<Ove
         row_str(row, "provider").hash(&mut hasher);
         row_str(row, "message_id").hash(&mut hasher);
         row_str(row, "model").hash(&mut hasher);
-        row_str(row, "metadata_json").hash(&mut hasher);
         row.get("text_len")
             .and_then(Value::as_i64)
             .unwrap_or(0)
@@ -267,7 +251,7 @@ async fn build_overlay(
     // Metadata only — text never leaves SQLite unless a count is missing.
     let sql = format!(
         "SELECT provider, message_id, session_id, role, timestamp, model, msg_len
-         FROM ({MESSAGE_TOKENS_CTE}) WHERE usage_in IS NULL AND usage_out IS NULL"
+         FROM ({MESSAGE_TOKENS_CTE})"
     );
     let rows = query_rows(conn, &sql, ()).await.ok()?;
 
@@ -521,7 +505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overlay_fingerprint_changes_when_metadata_is_backfilled() {
+    async fn provider_usage_metadata_neither_suppresses_content_counts_nor_invalidates_cache() {
         let (_dir, conn) = test_conn();
         if let Err(err) = conn
             .execute_batch(
@@ -568,7 +552,10 @@ mod tests {
 
         assert_eq!(before.0, after.0, "row count should be unchanged");
         assert_eq!(before.1, after.1, "max rowid should be unchanged");
-        assert_ne!(before, after, "metadata backfill must invalidate overlay");
+        assert_eq!(
+            before, after,
+            "provider accounting metadata is not a content-token authority"
+        );
 
         let Some(first_backfill) = overlay_fingerprint(&*conn).await else {
             panic!("overlay fingerprint should exist after first backfill");
@@ -601,9 +588,23 @@ mod tests {
             "{\"usage\":{\"input_tokens\":9,\"output_tokens\":8}}".len(),
             "regression fixture must keep metadata string length stable"
         );
-        assert_ne!(
+        assert_eq!(
             first_backfill, second_backfill,
-            "same-length metadata edits must invalidate overlay"
+            "provider accounting metadata never participates in the content cache"
+        );
+
+        let sql = format!("SELECT * FROM ({MESSAGE_TOKENS_CTE})");
+        let rows = query_rows(&*conn, &sql, ()).await.expect("token rows");
+        assert_eq!(rows.len(), 1);
+        assert!(
+            [
+                "usage_in",
+                "usage_out",
+                "usage_cache_read",
+                "usage_cache_write"
+            ]
+            .iter()
+            .all(|field| rows[0].get(field).is_none())
         );
     }
 

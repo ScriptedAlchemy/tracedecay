@@ -33,12 +33,18 @@ seams that `cargo check` does not compile.
 | `crate::store::GlobalDbTranscriptStore`, `crate::global_db::RegisteredGlobalDb` (ingest) | Inverted behind `runtime::ingest::SessionIngestAuthority`. |
 | `crate::global_db::RegisteredGlobalDb` (backfill) | Inverted behind `runtime::store_port::SessionStoreAuthority`. |
 | `crate::agents::{vscode_data_dir, kiro_data_dir}` | Owned as pure layout helpers in `crate::host_ports`. |
-| `crate::accounting::parser::parse_timestamp` | Owned as `crate::host_ports::parse_timestamp` over the kernel RFC 3339 parser. |
+| Provider-native timestamp parsing | Owned as `crate::host_ports::parse_timestamp` over the kernel RFC 3339 parser. |
 | `crate::context::read_cache::digest_bytes` | Owned as a private helper in `runtime::git_correlation`. |
 | `crate::agents::hermes::read_config_pinned_project_root` | Inverted behind `host_ports::hermes_profile_pin`. |
 | `crate::hooks::schedule_user_session_review` | Inverted behind `host_ports::session_review`. |
 | `crate::user_config::UserConfig` (LCM redaction) | Inverted behind `host_ports::lcm_redaction`. |
 | `HostAdmissionAuthorities::unregistered_*` | Inverted behind `host_ports::unregistered_admission`. |
+
+Provider usage is no longer a Claude-only accounting-parser seam. Every runtime
+retains immutable provider-usage observations from exact native evidence, with
+native scope, counter semantics, and correlation kept explicit. Reads are
+provider-neutral and side-effect-free; unknown or unavailable evidence remains
+typed and is never inferred from an adjacent message or turned into a zero.
 
 ### Why `tracedecay-global-db` is *not* a dependency
 

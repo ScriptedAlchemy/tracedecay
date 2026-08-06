@@ -11,6 +11,7 @@ use tracedecay_application::session_sync::{
     SessionSyncRequestV1, SessionSyncScopeV1, SessionSyncServicePort, SessionTranscriptImportV1,
 };
 use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
+use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
@@ -172,6 +173,26 @@ impl<'a> AdminCliContext<'a> {
         self.project.map(TraceDecay::project_root)
     }
 
+    fn provider_usage_scope(&self) -> Result<Option<ObservationScopeV1>> {
+        let Some(project) = self.project else {
+            return Ok(None);
+        };
+        let project_id = project
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon project identity is unavailable".to_string(),
+            })
+            .and_then(|value| {
+                ProjectId::new(value).map_err(|error| TraceDecayError::Config {
+                    message: error.to_string(),
+                })
+            })?;
+        Ok(Some(ObservationScopeV1::Project { project_id }))
+    }
+
     fn require_registered_project_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
         self.registered_project_session_db
             .ok_or_else(|| TraceDecayError::Config {
@@ -249,7 +270,15 @@ async fn dispatch_admin_cli(
     let global_db = context.global_db;
     let value = match action {
         AdminCliAction::CostSummary { range } => {
-            cost_summary(context.require_accounting_db()?, &range).await?
+            let provider_scope = context.provider_usage_scope()?;
+            cost_summary(
+                context.require_accounting_db()?,
+                context.registered_project_session_db.map(Arc::as_ref),
+                provider_scope.as_ref(),
+                context.project_root(),
+                &range,
+            )
+            .await?
         }
         AdminCliAction::SessionsImport => {
             execute_session_sync(
@@ -540,54 +569,97 @@ async fn registry_context(
     }))
 }
 
-async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Result<Value> {
+async fn cost_summary(
+    savings_db: &RegisteredGlobalDb,
+    provider_usage_db: Option<&RegisteredGlobalDb>,
+    provider_scope: Option<&ObservationScopeV1>,
+    project_root: Option<&Path>,
+    range: &str,
+) -> Result<Value> {
     let accounting_error = |message| TraceDecayError::Config { message };
-    crate::accounting::pricing::refresh_if_stale();
-    let ingest = crate::accounting::parser::ingest(global_db).await;
-    let since = crate::accounting::metrics::parse_range(range);
-    let tokens_saved = global_db
-        .try_global_tokens_saved()
-        .await
+    let since = crate::application::provider_usage::provider_usage_range_start(range)
         .map_err(accounting_error)?;
-    let summary = crate::accounting::metrics::cost_summary(global_db, since, tokens_saved)
-        .await
+    let since_seconds = i64::try_from(since).map_err(|_| TraceDecayError::Config {
+        message: "provider usage range exceeds the supported timestamp domain".to_owned(),
+    })?;
+    let tokens_saved = match project_root {
+        Some(project_root) => savings_db
+            .try_get_project_tokens(project_root)
+            .await
+            .map_err(accounting_error)?,
+        None => savings_db
+            .try_global_tokens_saved()
+            .await
+            .map_err(accounting_error)?,
+    };
+    let summary = match (provider_usage_db, provider_scope) {
+        (Some(db), Some(scope)) => {
+            crate::application::provider_usage::provider_usage_cost_summary(
+                db,
+                scope,
+                None,
+                None,
+                since_seconds,
+            )
+            .await
+        }
+        _ => unavailable_provider_usage_cost_summary(),
+    };
+    let consumed = summary
+        .total_input_tokens
+        .zip(summary.total_output_tokens)
+        .and_then(|(input, output)| input.checked_add(output));
+    let efficiency_ratio = consumed.and_then(|consumed| {
+        let denominator = tokens_saved.checked_add(consumed)?;
+        (denominator > 0).then_some(tokens_saved as f64 / denominator as f64)
+    });
+    let today_since = crate::application::provider_usage::provider_usage_range_start("today")
         .map_err(accounting_error)?;
-    let today_since = crate::accounting::metrics::parse_range("today");
-    let today_cost = global_db
-        .try_total_cost_since(today_since)
-        .await
-        .map_err(accounting_error)?;
-    let today_breakdown = global_db
-        .try_token_breakdown_since(today_since)
-        .await
-        .map_err(accounting_error)?;
-    let costs =
-        crate::application::observability::costs_read_model(global_db, None, since as i64).await;
+    let today_since_seconds = i64::try_from(today_since).map_err(|_| TraceDecayError::Config {
+        message: "provider usage range exceeds the supported timestamp domain".to_owned(),
+    })?;
+    let today = match (provider_usage_db, provider_scope) {
+        (Some(db), Some(scope)) => {
+            crate::application::provider_usage::provider_usage_cost_summary(
+                db,
+                scope,
+                None,
+                None,
+                today_since_seconds,
+            )
+            .await
+        }
+        _ => unavailable_provider_usage_cost_summary(),
+    };
     Ok(json!({
         "range": range,
-        "ingest": {
-            "turns_inserted": ingest.turns_inserted,
-            "cost_usd": ingest.cost_usd,
-            "tokens_consumed": ingest.tokens_consumed,
-        },
         "summary": {
-            "total_cost": summary.total_cost,
-            "total_input_tokens": summary.total_input_tokens,
-            "total_output_tokens": summary.total_output_tokens,
-            "total_cache_read_tokens": summary.total_cache_read_tokens,
-            "by_model": summary.by_model,
-            "by_category": summary.by_category,
-            "tokens_saved": summary.tokens_saved,
-            "efficiency_ratio": summary.efficiency_ratio,
+            "provider_usage": summary,
+            "tokens_saved": tokens_saved,
+            "efficiency_ratio": efficiency_ratio,
         },
         "today": {
-            "cost": today_cost,
-            "input_tokens": today_breakdown.0,
-            "output_tokens": today_breakdown.1,
-            "cache_read_tokens": today_breakdown.2,
+            "provider_usage": today,
         },
-        "costs": costs,
     }))
+}
+
+fn unavailable_provider_usage_cost_summary()
+-> crate::application::provider_usage::ProviderUsageCostSummaryV1 {
+    crate::application::provider_usage::ProviderUsageCostSummaryV1 {
+        coverage: crate::application::provider_usage::ProviderUsageCoverageV1::Unavailable,
+        pricing_revision: crate::application::provider_pricing::load_table()
+            .revision
+            .clone(),
+        usage_events: 0,
+        unpriced_events: 0,
+        total_cost_usd: None,
+        total_input_tokens: None,
+        total_output_tokens: None,
+        total_cache_read_tokens: None,
+        total_cache_write_tokens: None,
+        by_model: Vec::new(),
+    }
 }
 
 async fn execute_session_sync(

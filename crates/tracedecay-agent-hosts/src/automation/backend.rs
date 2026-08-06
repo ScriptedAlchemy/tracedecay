@@ -141,6 +141,7 @@ impl AgentTaskBackend for CodexAppServerBackend {
             output_json,
             output_text: summary.text,
             model: summary.model.or_else(|| self.config.model.clone()),
+            provider: Some("codex".to_owned()),
             input_tokens: None,
             output_tokens: None,
         })

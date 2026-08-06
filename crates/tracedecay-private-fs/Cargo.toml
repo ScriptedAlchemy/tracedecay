@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-private-fs"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 description = "Cross-platform owner-private filesystem authority for TraceDecay stores"
 license = "MIT"

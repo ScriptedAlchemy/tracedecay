@@ -207,7 +207,7 @@ pub(super) async fn projectless_tools_call_response(
             )
             .await;
         return match crate::mcp::tools::handle_projectless_hook_runtime(
-            arguments,
+            arguments.clone(),
             &client_identity.profile_root,
             session_runtime_registry,
             global_db.as_ref(),
@@ -218,10 +218,27 @@ pub(super) async fn projectless_tools_call_response(
         )
         .await
         {
-            Ok(result) => {
-                refresh_wake.wake();
+            Ok(result) if crate::mcp::server::tool_result_has_semantic_error(&result) => {
                 JsonRpcResponse::success(id, result.value)
             }
+            Ok(result) => match crate::mcp::server::join_required_live_transcript_refresh(
+                tool_name,
+                &arguments,
+                false,
+                None,
+                Some(&refresh_wake),
+            )
+            .await
+            {
+                Ok(crate::mcp::server::LiveTranscriptRefreshJoin::PublicationJoined) => {
+                    JsonRpcResponse::success(id, result.value)
+                }
+                Ok(crate::mcp::server::LiveTranscriptRefreshJoin::NotRequired) => {
+                    refresh_wake.wake();
+                    JsonRpcResponse::success(id, result.value)
+                }
+                Err(error) => crate::mcp::server::tool_error_response(id, tool_name, &error),
+            },
             Err(error) => JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string()),
         };
     }

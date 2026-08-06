@@ -6,9 +6,10 @@ use std::pin::Pin;
 
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    HandoffAuthoritySnapshotV1, HandoffOpenBindingV1, HandoffOpenError, HandoffOpenService,
-    HandoffOpenTargetError, HandoffOpenTargetPort, HandoffOpenToken, HandoffSessionId,
-    OpenTaskHandoffRequestV1, RequestContext, RequestId, ResolvedScope,
+    HandoffAuthoritySnapshotV1, HandoffOpenAuthorityError, HandoffOpenAuthorityPort,
+    HandoffOpenBindingV1, HandoffOpenError, HandoffOpenService, HandoffOpenTargetError,
+    HandoffOpenTargetPort, HandoffOpenToken, HandoffSessionId, OpenTaskHandoffRequestV1,
+    RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, TaskId, UtcMicros, WorkVersion, WorktreeId,
@@ -182,6 +183,69 @@ fn consume_is_atomic_secret_free_and_idempotent_across_restart() {
             .unwrap();
         assert_eq!(consumed_rows, 1);
     });
+}
+
+#[test]
+fn changed_input_for_the_same_request_is_an_idempotency_conflict() {
+    let store = RegisteredWorkflowStore::start("handoff-open-idempotency-conflict");
+    let sqlite = HandoffOpenSqliteAuthority::from_registered(store.storage().clone()).unwrap();
+    let issue_context = context("request.handoff.issue-idempotency-conflict");
+    let service = HandoffOpenService::new(sqlite.clone(), CurrentTarget);
+    let token = HandoffOpenToken::new(TOKEN_SECRET.to_owned()).unwrap();
+    let grant = run(service.issue(
+        &issue_context,
+        binding(&issue_context),
+        &token,
+        UtcMicros(1_000_000),
+        UtcMicros(61_000_000),
+    ))
+    .unwrap();
+
+    let open_context = context("request.handoff.open-idempotency-conflict");
+    let request = OpenTaskHandoffRequestV1 {
+        token: TOKEN_SECRET.to_owned(),
+        session_id: id::<HandoffSessionId>("lsp-session.handoff.runtime-store"),
+    };
+    let first = run(service.open_task(
+        &open_context,
+        request.clone(),
+        authority_snapshot(),
+        UtcMicros(2_000_000),
+    ))
+    .unwrap();
+    let replay = run(service.open_task(
+        &open_context,
+        request,
+        authority_snapshot(),
+        UtcMicros(2_100_000),
+    ))
+    .unwrap();
+    assert_eq!(replay.receipt, first.receipt);
+
+    assert_eq!(
+        sqlite.consume(
+            grant.token_digest(),
+            grant.context(),
+            open_context.request_id(),
+            &digest('d'),
+            UtcMicros(2_200_000),
+        ),
+        Err(HandoffOpenAuthorityError::IdempotencyConflict)
+    );
+
+    let wrong_session = OpenTaskHandoffRequestV1 {
+        token: TOKEN_SECRET.to_owned(),
+        session_id: id::<HandoffSessionId>("lsp-session.handoff.wrong"),
+    };
+    assert_eq!(
+        run(service.open_task(
+            &context("request.handoff.wrong-session-after-conflict"),
+            wrong_session,
+            authority_snapshot(),
+            UtcMicros(2_300_000),
+        )),
+        Err(HandoffOpenError::NotFoundOrNotAuthorized)
+    );
 }
 
 #[test]

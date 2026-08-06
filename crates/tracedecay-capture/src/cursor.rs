@@ -1,10 +1,13 @@
+use std::collections::BTreeSet;
+
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalUnknownStateV1, CanonicalWorkflowEvidenceKindV1,
-    ObservationId, ObservationOrderingDomainV1, ProviderId, SessionId,
+    ObservationId, ObservationOrderingDomainV1, ProviderId, ProviderUsageContractDimensionV1,
+    SessionId,
 };
 use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatch_tool};
 
@@ -288,12 +291,21 @@ fn append_cursor_usage_fact(
     message: Option<&Value>,
     facts: &mut Vec<CanonicalObservationFactV1>,
 ) {
-    let usage = native
-        .get("usage")
-        .or_else(|| native.get("tokenCount"))
-        .or_else(|| message.and_then(|message| message.get("usage")))
-        .or_else(|| message.and_then(|message| message.get("tokenCount")));
-    let Some(usage) = usage else {
+    let usage = [
+        (native.get("usage"), "usage"),
+        (native.get("tokenCount"), "tokenCount"),
+        (
+            message.and_then(|message| message.get("usage")),
+            "message.usage",
+        ),
+        (
+            message.and_then(|message| message.get("tokenCount")),
+            "message.tokenCount",
+        ),
+    ]
+    .into_iter()
+    .find_map(|(usage, field)| usage.map(|usage| (usage, field)));
+    let Some((usage, native_field)) = usage else {
         return;
     };
     let input_tokens = canonical_u64(
@@ -321,18 +333,36 @@ fn append_cursor_usage_fact(
             .get("reasoning_tokens")
             .or_else(|| usage.get("reasoningTokens")),
     );
+    let total_tokens = canonical_u64(
+        usage
+            .get("total_tokens")
+            .or_else(|| usage.get("totalTokens")),
+    );
     if input_tokens.is_some()
         || output_tokens.is_some()
         || cache_read_tokens.is_some()
         || cache_write_tokens.is_some()
         || reasoning_tokens.is_some()
+        || total_tokens.is_some()
     {
-        facts.push(CanonicalObservationFactV1::Usage {
+        facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
             reasoning_tokens,
+            total_tokens,
+            native_kind: native
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("message")
+                .to_string(),
+            native_field: native_field.to_string(),
+            missing_dimensions: BTreeSet::from([
+                ProviderUsageContractDimensionV1::Model,
+                ProviderUsageContractDimensionV1::Scope,
+                ProviderUsageContractDimensionV1::CounterSemantics,
+            ]),
         });
     }
 }

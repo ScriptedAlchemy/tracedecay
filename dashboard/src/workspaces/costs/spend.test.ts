@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { logFraction } from '../../viz/scale.ts';
 import {
-  costPerTurn,
+  costPerUsageEvent,
   summarizeCoverage,
   summarizeProjectSpread,
   summarizeTokenMix,
@@ -140,33 +140,28 @@ describe('logFraction over ledger magnitudes', () => {
   });
 });
 
-describe('costPerTurn', () => {
+describe('costPerUsageEvent', () => {
   it('derives the live figure', () => {
-    expect(costPerTurn(8148.9744974, 57_704)).toBeCloseTo(0.1412, 4);
+    expect(costPerUsageEvent(8148.9744974, 57_704)).toBeCloseTo(0.1412, 4);
   });
 
   it('returns null rather than zero when either side is missing', () => {
-    expect(costPerTurn(undefined, 100)).toBeNull();
-    expect(costPerTurn(100, 0)).toBeNull();
-    expect(costPerTurn(100, undefined)).toBeNull();
+    expect(costPerUsageEvent(undefined, 100)).toBeNull();
+    expect(costPerUsageEvent(100, 0)).toBeNull();
+    expect(costPerUsageEvent(100, undefined)).toBeNull();
   });
 });
 
 describe('summarizeCoverage', () => {
-  it('measures how much of the ledger is provider-reported', () => {
+  it('keeps content tokenization and estimation classes separate', () => {
     const coverage = summarizeCoverage({
       messages: 1_751_214,
-      usage_messages: 138_317,
       tokenized_messages: 400_000,
-      estimated_messages: 1_212_897,
+      estimated_messages: 1_351_214,
       unknown_model_messages: 187_066,
     })!;
-    // "cost_basis: mixed" in one word; this is what the mix actually is.
-    expect(Math.round(coverage.measuredShare! * 100)).toBe(8);
     expect(coverage.tokenized).toBe(400_000);
-    expect(coverage.estimated! + coverage.tokenized! + coverage.usage!).toBe(
-      coverage.messages,
-    );
+    expect(coverage.estimated! + coverage.tokenized!).toBe(coverage.messages);
   });
 
   /** An endpoint that never reported a class and one that counted the class at
@@ -179,17 +174,15 @@ describe('summarizeCoverage', () => {
       tokenized_messages: 0,
     })!;
     expect(coverage.messages).toBe(41_204);
-    expect(coverage.usage).toBeNull();
-    expect(coverage.measuredShare).toBeNull();
     // Served, and served as none — the one figure here that is a measurement.
     expect(coverage.tokenized).toBe(0);
     expect(coverage.estimated).toBeNull();
     expect(coverage.unknownModel).toBeNull();
   });
 
-  it('still measures the share when only the other classes are missing', () => {
-    const coverage = summarizeCoverage({ messages: 200, usage_messages: 50 })!;
-    expect(coverage.measuredShare).toBe(0.25);
+  it('keeps missing estimate coverage unknown', () => {
+    const coverage = summarizeCoverage({ messages: 200, tokenized_messages: 50 })!;
+    expect(coverage.tokenized).toBe(50);
     expect(coverage.estimated).toBeNull();
   });
 

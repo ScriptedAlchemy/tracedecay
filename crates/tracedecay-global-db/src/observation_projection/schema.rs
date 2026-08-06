@@ -76,6 +76,110 @@ pub(in super::super) async fn ensure_observation_projection_schema(
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
+        CREATE TABLE IF NOT EXISTS observation_provider_usage (
+            projector_version TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            usage_ordinal INTEGER NOT NULL CHECK(usage_ordinal >= 0),
+            receipt_id TEXT NOT NULL,
+            observation_sequence INTEGER NOT NULL CHECK(observation_sequence > 0),
+            scope_kind TEXT NOT NULL CHECK(scope_kind IN ('profile', 'project')),
+            project_id TEXT CHECK(project_id IS NULL OR length(project_id) > 0),
+            provider TEXT NOT NULL,
+            model_json TEXT NOT NULL CHECK(json_valid(model_json)),
+            native_scope TEXT NOT NULL CHECK(
+                native_scope IN (
+                    'request', 'message', 'turn', 'session', 'unknown', 'unavailable'
+                )
+            ),
+            counter_semantics TEXT NOT NULL CHECK(
+                counter_semantics IN ('delta', 'cumulative', 'unknown', 'unavailable')
+            ),
+            counters_json TEXT NOT NULL CHECK(json_valid(counters_json)),
+            session_id TEXT NOT NULL,
+            turn_id TEXT,
+            message_id TEXT,
+            request_id TEXT,
+            native_kind TEXT NOT NULL,
+            native_field TEXT NOT NULL,
+            ordering_domain TEXT NOT NULL,
+            source_start INTEGER NOT NULL CHECK(source_start >= 0),
+            source_end INTEGER NOT NULL CHECK(source_end > source_start),
+            native_timestamp INTEGER,
+            CHECK(
+                (scope_kind = 'profile' AND project_id IS NULL)
+                OR (scope_kind = 'project' AND project_id IS NOT NULL)
+            ),
+            PRIMARY KEY(projector_version, observation_id, usage_ordinal),
+            FOREIGN KEY(observation_id) REFERENCES observations(observation_id),
+            FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS observation_provider_usage_no_update
+        BEFORE UPDATE ON observation_provider_usage
+        BEGIN
+            SELECT RAISE(ABORT, 'provider usage observations are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS observation_provider_usage_receipt_binding
+        BEFORE INSERT ON observation_provider_usage
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM observations
+            WHERE observation_id = NEW.observation_id
+              AND receipt_id = NEW.receipt_id
+              AND sequence = NEW.observation_sequence
+              AND json_extract(observation_json, '$.identity.scope.kind') = NEW.scope_kind
+              AND json_extract(
+                    observation_json, '$.identity.scope.project_id'
+                  ) IS NEW.project_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'provider usage provenance does not match observation');
+        END;
+        CREATE TRIGGER IF NOT EXISTS observation_provider_usage_no_delete
+        BEFORE DELETE ON observation_provider_usage
+        BEGIN
+            SELECT RAISE(ABORT, 'provider usage observations are immutable');
+        END;
+        CREATE TABLE IF NOT EXISTS observation_projection_rebuild_provider_usage (
+            projector_version TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            observation_id TEXT NOT NULL,
+            usage_ordinal INTEGER NOT NULL CHECK(usage_ordinal >= 0),
+            receipt_id TEXT NOT NULL,
+            observation_sequence INTEGER NOT NULL CHECK(observation_sequence > 0),
+            scope_kind TEXT NOT NULL CHECK(scope_kind IN ('profile', 'project')),
+            project_id TEXT CHECK(project_id IS NULL OR length(project_id) > 0),
+            provider TEXT NOT NULL,
+            model_json TEXT NOT NULL CHECK(json_valid(model_json)),
+            native_scope TEXT NOT NULL CHECK(
+                native_scope IN (
+                    'request', 'message', 'turn', 'session', 'unknown', 'unavailable'
+                )
+            ),
+            counter_semantics TEXT NOT NULL CHECK(
+                counter_semantics IN ('delta', 'cumulative', 'unknown', 'unavailable')
+            ),
+            counters_json TEXT NOT NULL CHECK(json_valid(counters_json)),
+            session_id TEXT NOT NULL,
+            turn_id TEXT,
+            message_id TEXT,
+            request_id TEXT,
+            native_kind TEXT NOT NULL,
+            native_field TEXT NOT NULL,
+            ordering_domain TEXT NOT NULL,
+            source_start INTEGER NOT NULL CHECK(source_start >= 0),
+            source_end INTEGER NOT NULL CHECK(source_end > source_start),
+            native_timestamp INTEGER,
+            CHECK(
+                (scope_kind = 'profile' AND project_id IS NULL)
+                OR (scope_kind = 'project' AND project_id IS NOT NULL)
+            ),
+            PRIMARY KEY (
+                projector_version, generation, observation_id, usage_ordinal
+            ),
+            FOREIGN KEY(projector_version, generation)
+                REFERENCES observation_projection_rebuilds(projector_version, generation)
+                ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS observation_projection_rebuilds (
             projector_version TEXT PRIMARY KEY,
             generation TEXT NOT NULL,
@@ -216,6 +320,10 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
         "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
          ON observation_workflow_facts
             (provider, session_id, semantic_kind, status, observation_sequence);",
+        "CREATE INDEX IF NOT EXISTS idx_observation_provider_usage_scope
+         ON observation_provider_usage
+            (projector_version, scope_kind, project_id, provider, session_id,
+             observation_sequence, usage_ordinal);",
         "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_item
          ON observation_workflow_facts
             (provider, session_id, semantic_kind, item_id, provider_reference,
@@ -278,6 +386,31 @@ const CURRENT_REBUILD_MESSAGE_COLUMNS: &[&str] = &[
     "snippet_text",
     "index_text",
 ];
+const CURRENT_REBUILD_PROVIDER_USAGE_COLUMNS: &[&str] = &[
+    "projector_version",
+    "generation",
+    "observation_id",
+    "usage_ordinal",
+    "receipt_id",
+    "observation_sequence",
+    "scope_kind",
+    "project_id",
+    "provider",
+    "model_json",
+    "native_scope",
+    "counter_semantics",
+    "counters_json",
+    "session_id",
+    "turn_id",
+    "message_id",
+    "request_id",
+    "native_kind",
+    "native_field",
+    "ordering_domain",
+    "source_start",
+    "source_end",
+    "native_timestamp",
+];
 
 async fn projection_rebuild_column_names(
     conn: &impl QueryExecutor,
@@ -319,16 +452,46 @@ const CURRENT_PROVENANCE_COLUMNS: &[&str] = &[
     "retrieval_anchor_id",
 ];
 
+const CURRENT_PROVIDER_USAGE_COLUMNS: &[&str] = &[
+    "projector_version",
+    "observation_id",
+    "usage_ordinal",
+    "receipt_id",
+    "observation_sequence",
+    "scope_kind",
+    "project_id",
+    "provider",
+    "model_json",
+    "native_scope",
+    "counter_semantics",
+    "counters_json",
+    "session_id",
+    "turn_id",
+    "message_id",
+    "request_id",
+    "native_kind",
+    "native_field",
+    "ordering_domain",
+    "source_start",
+    "source_end",
+    "native_timestamp",
+];
+
 /// Tables whose V4 shape is asserted by exact column list.
 const EXACT_SHAPE_TABLES: &[(&str, &[&str])] = &[
     (
         "observation_projection_provenance",
         CURRENT_PROVENANCE_COLUMNS,
     ),
+    ("observation_provider_usage", CURRENT_PROVIDER_USAGE_COLUMNS),
     ("observation_projection_rebuilds", CURRENT_REBUILD_COLUMNS),
     (
         "observation_projection_rebuild_messages",
         CURRENT_REBUILD_MESSAGE_COLUMNS,
+    ),
+    (
+        "observation_projection_rebuild_provider_usage",
+        CURRENT_REBUILD_PROVIDER_USAGE_COLUMNS,
     ),
 ];
 

@@ -498,7 +498,13 @@ fn print_table_rows(rows: &[Vec<(&str, String)>], cell_width: usize, num_cols: u
     }
 }
 
-pub fn print_gain_total(project: &str, range: &str, saved_tokens: u64, calls: u64, usd: f64) {
+pub fn print_gain_total(
+    project: &str,
+    range: &str,
+    saved_tokens: u64,
+    calls: u64,
+    usd: Option<f64>,
+) {
     let saved_str = format_token_count(saved_tokens);
     println!("  {:<28} {:>12}", "Scope", project);
     println!("  {:<28} {:>12}", "Range", range);
@@ -507,11 +513,14 @@ pub fn print_gain_total(project: &str, range: &str, saved_tokens: u64, calls: u6
     println!(
         "  {:<28} {:>12}",
         "USD saved (Sonnet input)",
-        format!("${usd:.2}")
+        usd.map_or_else(|| "unavailable".to_owned(), |value| format!("${value:.2}"))
     );
 }
 
-pub fn print_gain_history<F: Fn(u64) -> f64>(rows: &[crate::global_db::SavingsDay], to_usd: F) {
+pub fn print_gain_history<F: Fn(u64) -> Option<f64>>(
+    rows: &[crate::global_db::SavingsDay],
+    to_usd: F,
+) {
     println!(
         "  {:<12} {:>10} {:>8} {:>10}",
         "Day (UTC)", "Tokens", "Calls", "USD"
@@ -526,7 +535,7 @@ pub fn print_gain_history<F: Fn(u64) -> f64>(rows: &[crate::global_db::SavingsDa
             date,
             saved_str,
             r.calls,
-            format!("${usd:.2}")
+            usd.map_or_else(|| "unavailable".to_owned(), |value| format!("${value:.2}"))
         );
     }
 }

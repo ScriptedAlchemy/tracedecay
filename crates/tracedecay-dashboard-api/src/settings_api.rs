@@ -516,12 +516,10 @@ fn pr_autotrack_payload(state: &DashboardState) -> PrAutoTrackPayloadV1 {
 
 fn environment_payload() -> EnvironmentSettingsPayloadV1 {
     let accounting_mode = tracedecay_global_db::global_accounting_mode();
-    let pricing_offline =
-        std::env::var("TRACEDECAY_OFFLINE").is_ok_and(|v| !v.is_empty() && v != "0");
     EnvironmentSettingsPayloadV1 {
         global_accounting_mode: accounting_mode.as_str().to_owned(),
         global_accounting_enabled: accounting_mode.enabled(),
-        pricing_offline,
+        pricing_offline: true,
         variables: vec![
             env_variable(
                 "TRACEDECAY_ENABLE_GLOBAL_DB",
@@ -530,10 +528,6 @@ fn environment_payload() -> EnvironmentSettingsPayloadV1 {
             env_variable(
                 "TRACEDECAY_DISABLE_GLOBAL_DB",
                 "A truthy value disables global savings/accounting recording.",
-            ),
-            env_variable(
-                "TRACEDECAY_OFFLINE",
-                "Skips network pricing fetches; the Savings tab uses cached or fallback model prices.",
             ),
             env_variable(
                 "TRACEDECAY_GLOBAL_DB",

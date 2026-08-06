@@ -1,9 +1,11 @@
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
     ObservationOrderingDomainV1, ObservationSourceRangeV1, PayloadReferenceV1, ProviderId,
-    SessionId,
+    ProviderUsageContractDimensionV1, SessionId,
 };
 
 use crate::ObservationRecordParseErrorV1;
@@ -187,18 +189,33 @@ fn append_usage(
         token_count(usage, &["cache_read_input_tokens", "cached_input_tokens"])?;
     let cache_write_tokens = token_count(usage, &["cache_creation_input_tokens"])?;
     let reasoning_tokens = token_count(usage, &["reasoning_tokens", "reasoning_output_tokens"])?;
+    let total_tokens = token_count(usage, &["total_tokens"])?;
     if input_tokens.is_some()
         || output_tokens.is_some()
         || cache_read_tokens.is_some()
         || cache_write_tokens.is_some()
         || reasoning_tokens.is_some()
+        || total_tokens.is_some()
     {
-        facts.push(CanonicalObservationFactV1::Usage {
+        facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
             input_tokens,
             output_tokens,
             cache_read_tokens,
             cache_write_tokens,
             reasoning_tokens,
+            total_tokens,
+            native_kind: "message".to_owned(),
+            native_field: if native.get("usage").is_some() {
+                "usage"
+            } else {
+                "message.usage"
+            }
+            .to_owned(),
+            missing_dimensions: BTreeSet::from([
+                ProviderUsageContractDimensionV1::Model,
+                ProviderUsageContractDimensionV1::Scope,
+                ProviderUsageContractDimensionV1::CounterSemantics,
+            ]),
         });
     }
     Ok(())

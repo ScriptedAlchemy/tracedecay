@@ -80,7 +80,10 @@ const FINAL_CONFIGURATION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "configuration_format"),
     ("table", "configuration_mutation_receipts"),
     ("table", "configuration_revisions"),
-    ("table", "configuration_semantic_accepted_profile_receipt_key_v1"),
+    (
+        "table",
+        "configuration_semantic_accepted_profile_receipt_key_v1",
+    ),
     ("table", "configuration_semantic_accepted_profiles_v1"),
     ("table", "configuration_semantic_retrieval_pending_v1"),
     ("table", "configuration_semantic_retrieval_state_v1"),
@@ -412,6 +415,45 @@ CREATE TABLE IF NOT EXISTS configuration_component_activation_events (
         ON UPDATE RESTRICT ON DELETE RESTRICT
 );
 
+-- Semantic retrieval state is scoped compare-and-swap configuration: the
+-- latest epoch per scope is current, and pending rows stage transitions until
+-- a central commit lands them.
+CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
+    scope_digest TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    configuration_revision TEXT NOT NULL,
+    transition_digest TEXT,
+    activation_receipt_digest TEXT,
+    state_json TEXT NOT NULL,
+    activation_receipt_json TEXT,
+    PRIMARY KEY (scope_digest, epoch)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS configuration_semantic_retrieval_transition_v1
+    ON configuration_semantic_retrieval_state_v1(scope_digest, transition_digest)
+    WHERE transition_digest IS NOT NULL;
+CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_pending_v1 (
+    scope_digest TEXT NOT NULL,
+    transition_digest TEXT NOT NULL,
+    base_epoch INTEGER NOT NULL CHECK (base_epoch >= 0),
+    base_configuration_revision TEXT NOT NULL,
+    transition_json TEXT NOT NULL,
+    resulting_state_json TEXT NOT NULL,
+    staged_at INTEGER NOT NULL,
+    PRIMARY KEY (scope_digest, transition_digest)
+);
+CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
+    profile_digest TEXT PRIMARY KEY NOT NULL,
+    authority_json TEXT NOT NULL
+);
+-- Retained accepted-profile receipts do not carry a fallback signer.
+-- Replacing this singleton would invalidate every accepted profile, so its
+-- database lifetime is enforced rather than allowing an unjournaled key
+-- rotation.
+CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_v1 (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    key_material BLOB NOT NULL CHECK (length(key_material) = 32)
+);
+
 CREATE INDEX IF NOT EXISTS idx_configuration_revision_parent
     ON configuration_revisions(parent_revision_id);
 CREATE INDEX IF NOT EXISTS idx_configuration_entry_key
@@ -523,45 +565,6 @@ BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutab
 CREATE TRIGGER IF NOT EXISTS configuration_component_activation_events_immutable_delete
 BEFORE DELETE ON configuration_component_activation_events
 BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
-
--- Semantic retrieval runtime state. The semantic runtime reads and writes
--- these rows through this database, so their shape is published here: the
--- exact-final-schema validation covers the whole configuration_% namespace
--- and runtime code must never issue its own DDL.
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
-    scope_digest TEXT NOT NULL,
-    epoch INTEGER NOT NULL CHECK (epoch >= 0),
-    configuration_revision TEXT NOT NULL,
-    transition_digest TEXT,
-    activation_receipt_digest TEXT,
-    state_json TEXT NOT NULL,
-    activation_receipt_json TEXT,
-    PRIMARY KEY (scope_digest, epoch)
-);
-CREATE UNIQUE INDEX IF NOT EXISTS configuration_semantic_retrieval_transition_v1
-    ON configuration_semantic_retrieval_state_v1(scope_digest, transition_digest)
-    WHERE transition_digest IS NOT NULL;
-CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_pending_v1 (
-    scope_digest TEXT NOT NULL,
-    transition_digest TEXT NOT NULL,
-    base_epoch INTEGER NOT NULL CHECK (base_epoch >= 0),
-    base_configuration_revision TEXT NOT NULL,
-    transition_json TEXT NOT NULL,
-    resulting_state_json TEXT NOT NULL,
-    staged_at INTEGER NOT NULL,
-    PRIMARY KEY (scope_digest, transition_digest)
-);
-CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
-    profile_digest TEXT PRIMARY KEY NOT NULL,
-    authority_json TEXT NOT NULL
-);
--- Retained receipts do not carry a fallback signer. Replacing this singleton
--- would invalidate every accepted profile, so its database lifetime is
--- enforced rather than allowing an unjournaled key rotation.
-CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_v1 (
-    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-    key_material BLOB NOT NULL CHECK (length(key_material) = 32)
-);
 CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_update_v1
 BEFORE UPDATE ON configuration_semantic_accepted_profile_receipt_key_v1
 BEGIN
@@ -794,10 +797,19 @@ mod tests {
             .await
             .unwrap();
 
+        // The semantic retrieval state, pending-transition, and accepted
+        // profile tables are compare-and-swap surfaces whose rows are
+        // rewritten or cleared by production commits, so they are not part of
+        // the append-only contract.
         let mut rows = connection
             .query(
                 "SELECT name FROM sqlite_master
                  WHERE type = 'table' AND name LIKE 'configuration_%'
+                   AND name NOT IN (
+                        'configuration_semantic_accepted_profiles_v1',
+                        'configuration_semantic_retrieval_pending_v1',
+                        'configuration_semantic_retrieval_state_v1'
+                   )
                  ORDER BY name",
                 (),
             )
@@ -809,20 +821,7 @@ mod tests {
         }
         drop(rows);
         assert!(!tables.is_empty());
-        // Semantic runtime state advances by compare-and-swap under the
-        // configuration authority: epochs append, pending transitions are
-        // consumed, and accepted profiles allow only an idempotent no-op
-        // upsert. Those tables are runtime state, not immutable revision
-        // evidence, so the append-only sweep does not apply to them.
-        let mutable_semantic_runtime_state = [
-            "configuration_semantic_accepted_profiles_v1",
-            "configuration_semantic_retrieval_pending_v1",
-            "configuration_semantic_retrieval_state_v1",
-        ];
         for table in tables {
-            if mutable_semantic_runtime_state.contains(&table.as_str()) {
-                continue;
-            }
             assert!(
                 connection
                     .execute(&format!("UPDATE {table} SET rowid = rowid"), ())

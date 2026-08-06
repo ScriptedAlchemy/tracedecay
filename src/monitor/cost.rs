@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use crate::application::provider_usage::{ProviderUsageCostSummaryV1, ProviderUsageCoverageV1};
 use crate::daemon::DaemonHandshake;
 use crate::errors::{Result, TraceDecayError};
 
@@ -24,8 +25,8 @@ pub(super) struct CostSnapshot {
     pub(super) week_cost: f64,
     pub(super) tokens_saved: u64,
     pub(super) efficiency_pct: f64,
-    pub(super) top_model: String,
-    pub(super) top_model_cost: f64,
+    pub(super) top_model: Option<String>,
+    pub(super) top_model_cost: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,21 +122,20 @@ impl CostCache {
 
 #[derive(serde::Deserialize)]
 struct CostAdminPayload {
-    summary: Option<CostSummaryPayload>,
+    summary: CostSummaryPayload,
     today: TodayCostPayload,
 }
 
 #[derive(serde::Deserialize)]
 struct CostSummaryPayload {
-    total_cost: f64,
-    by_model: Vec<(String, f64, u64)>,
+    provider_usage: ProviderUsageCostSummaryV1,
     tokens_saved: u64,
-    efficiency_ratio: f64,
+    efficiency_ratio: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]
 struct TodayCostPayload {
-    cost: f64,
+    provider_usage: ProviderUsageCostSummaryV1,
 }
 
 fn map_cost_payloads(
@@ -146,47 +146,73 @@ fn map_cost_payloads(
         .map_err(|error| format!("invalid daemon 7d cost response: {error}"))?;
     let today = serde_json::from_value::<CostAdminPayload>(today)
         .map_err(|error| format!("invalid daemon today cost response: {error}"))?;
-    let Some(week_summary) = week.summary else {
+    let week_usage = week.summary.provider_usage;
+    let today_usage = today.today.provider_usage;
+    if week_usage.coverage == ProviderUsageCoverageV1::Unavailable
+        || today_usage.coverage == ProviderUsageCoverageV1::Unavailable
+    {
         return Ok(None);
-    };
-    let today_models = today
+    }
+    if week_usage.coverage != ProviderUsageCoverageV1::Complete
+        || today_usage.coverage != ProviderUsageCoverageV1::Complete
+    {
+        return Err("canonical provider usage is incomplete".to_string());
+    }
+    let week_cost = week_usage
+        .total_cost_usd
+        .ok_or_else(|| "7d provider usage is not fully priced".to_string())?;
+    let today_cost = today_usage
+        .total_cost_usd
+        .ok_or_else(|| "today provider usage is not fully priced".to_string())?;
+    let efficiency_ratio = week
         .summary
-        .as_ref()
-        .map(|summary| summary.by_model.as_slice())
-        .unwrap_or_default();
-    if !today.today.cost.is_finite()
-        || today.today.cost < 0.0
-        || !week_summary.total_cost.is_finite()
-        || week_summary.total_cost < 0.0
-        || !week_summary.efficiency_ratio.is_finite()
-        || !(0.0..=1.0).contains(&week_summary.efficiency_ratio)
+        .efficiency_ratio
+        .ok_or_else(|| "provider usage efficiency is unavailable".to_string())?;
+    if !today_cost.is_finite()
+        || today_cost < 0.0
+        || !week_cost.is_finite()
+        || week_cost < 0.0
+        || !efficiency_ratio.is_finite()
+        || !(0.0..=1.0).contains(&efficiency_ratio)
     {
         return Err("daemon cost response contains invalid numeric values".to_string());
     }
-    if week_summary
+    if week_usage
         .by_model
         .iter()
-        .chain(today_models)
-        .any(|(_, cost, _)| !cost.is_finite() || *cost < 0.0)
+        .chain(&today_usage.by_model)
+        .filter_map(|model| model.cost_usd)
+        .any(|cost| !cost.is_finite() || cost < 0.0)
     {
         return Err("daemon cost response contains an invalid model cost".to_string());
     }
-    let (top_model, top_model_cost) = today_models
-        .first()
-        .map(|(model, cost, _)| (model.clone(), *cost))
-        .unwrap_or_default();
+    let top_model = today_usage
+        .by_model
+        .iter()
+        .filter_map(|model| {
+            model
+                .cost_usd
+                .map(|cost| (format!("{}/{}", model.provider, model.model), cost))
+        })
+        .max_by(|(_, left), (_, right)| left.total_cmp(right));
+    let (top_model, top_model_cost) = match top_model {
+        Some((model, cost)) => (Some(model), Some(cost)),
+        None => (None, None),
+    };
     Ok(Some(CostSnapshot {
-        today_cost: today.today.cost,
-        week_cost: week_summary.total_cost,
-        tokens_saved: week_summary.tokens_saved,
-        efficiency_pct: week_summary.efficiency_ratio * 100.0,
+        today_cost,
+        week_cost,
+        tokens_saved: week.summary.tokens_saved,
+        efficiency_pct: efficiency_ratio * 100.0,
         top_model,
         top_model_cost,
     }))
 }
 
 fn global_cost_handshake() -> Result<DaemonHandshake> {
-    DaemonHandshake::for_current_client(None, None, false, false)
+    let cwd = std::env::current_dir()?;
+    let project_root = crate::config::discover_project_root(&cwd);
+    DaemonHandshake::for_current_client(project_root, None, false, false)
 }
 
 async fn call_cost_summary(handshake: &DaemonHandshake, range: &str) -> Result<serde_json::Value> {
@@ -245,26 +271,62 @@ mod tests {
 
     fn payload(
         total_cost: f64,
+        coverage: &str,
         model: &str,
         model_cost: f64,
         today_cost: f64,
     ) -> serde_json::Value {
         serde_json::json!({
             "summary": {
-                "total_cost": total_cost,
-                "by_model": [[model, model_cost, 900]],
+                "provider_usage": {
+                    "coverage": coverage,
+                    "pricing_revision": "fixture",
+                    "usage_events": 1,
+                    "unpriced_events": 0,
+                    "total_cost_usd": total_cost,
+                    "total_input_tokens": 600,
+                    "total_output_tokens": 300,
+                    "total_cache_read_tokens": 0,
+                    "total_cache_write_tokens": 0,
+                    "by_model": [{
+                        "provider": "codex",
+                        "model": model,
+                        "usage_events": 1,
+                        "total_tokens": 900,
+                        "cost_usd": model_cost
+                    }]
+                },
                 "tokens_saved": 1200,
                 "efficiency_ratio": 0.6
             },
-            "today": { "cost": today_cost }
+            "today": {
+                "provider_usage": {
+                    "coverage": coverage,
+                    "pricing_revision": "fixture",
+                    "usage_events": 1,
+                    "unpriced_events": 0,
+                    "total_cost_usd": today_cost,
+                    "total_input_tokens": 600,
+                    "total_output_tokens": 300,
+                    "total_cache_read_tokens": 0,
+                    "total_cache_write_tokens": 0,
+                    "by_model": [{
+                        "provider": "codex",
+                        "model": model,
+                        "usage_events": 1,
+                        "total_tokens": 900,
+                        "cost_usd": model_cost
+                    }]
+                }
+            }
         })
     }
 
     #[test]
     fn daemon_cost_response_uses_today_model_and_week_totals() {
         let snapshot = map_cost_payloads(
-            payload(4.5, "week-leader", 3.25, 1.5),
-            payload(1.5, "today-leader", 1.25, 1.5),
+            payload(4.5, "complete", "week-leader", 3.25, 1.5),
+            payload(1.5, "complete", "today-leader", 1.25, 1.5),
         )
         .unwrap()
         .unwrap();
@@ -272,8 +334,20 @@ mod tests {
         assert!((snapshot.week_cost - 4.5).abs() < f64::EPSILON);
         assert_eq!(snapshot.tokens_saved, 1200);
         assert!((snapshot.efficiency_pct - 60.0).abs() < f64::EPSILON);
-        assert_eq!(snapshot.top_model, "today-leader");
-        assert!((snapshot.top_model_cost - 1.25).abs() < f64::EPSILON);
+        assert_eq!(snapshot.top_model.as_deref(), Some("codex/today-leader"));
+        assert_eq!(snapshot.top_model_cost, Some(1.25));
+    }
+
+    #[test]
+    fn daemon_cost_response_preserves_absent_top_model() {
+        let week = payload(0.0, "complete", "unused", 0.0, 0.0);
+        let mut today = payload(0.0, "complete", "unused", 0.0, 0.0);
+        today["today"]["provider_usage"]["by_model"] = serde_json::json!([]);
+
+        let snapshot = map_cost_payloads(week, today).unwrap().unwrap();
+
+        assert_eq!(snapshot.top_model, None);
+        assert_eq!(snapshot.top_model_cost, None);
     }
 
     #[test]
@@ -289,21 +363,37 @@ mod tests {
             week_cost: 4.5,
             tokens_saved: 1200,
             efficiency_pct: 60.0,
-            top_model: "today-leader".to_string(),
-            top_model_cost: 1.25,
+            top_model: Some("today-leader".to_string()),
+            top_model_cost: Some(1.25),
         };
         cache.apply_refresh(Ok(Some(snapshot.clone())));
         cache.apply_refresh(Err("daemon epoch changed".to_string()));
         assert_eq!(cache.snapshot, Some(snapshot));
         assert!(matches!(cache.state, CostCacheState::Stale(_)));
         assert!(
-            map_cost_payloads(payload(-1.0, "a", 1.0, 0.0), payload(0.0, "a", 0.0, 0.0)).is_err()
+            map_cost_payloads(
+                payload(-1.0, "complete", "a", 1.0, 0.0),
+                payload(0.0, "complete", "a", 0.0, 0.0)
+            )
+            .is_err()
+        );
+        assert_eq!(
+            map_cost_payloads(
+                payload(0.0, "unavailable", "a", 0.0, 0.0),
+                payload(0.0, "unavailable", "a", 0.0, 0.0)
+            )
+            .unwrap(),
+            None
         );
     }
 
     #[test]
-    fn global_cost_handshake_is_projectless() {
-        assert!(global_cost_handshake().unwrap().project_path.is_none());
+    fn cost_handshake_preserves_discovered_project_identity() {
+        let handshake = global_cost_handshake().unwrap();
+        assert_eq!(
+            handshake.project_path,
+            crate::config::discover_project_root(&std::env::current_dir().unwrap())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -381,8 +471,8 @@ mod tests {
                 week_cost: 5.0,
                 tokens_saved: 10,
                 efficiency_pct: 50.0,
-                top_model: "new".to_string(),
-                top_model_cost: 2.0,
+                top_model: Some("new".to_string()),
+                top_model_cost: Some(2.0),
             }))
         });
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -391,6 +481,9 @@ mod tests {
             std::thread::yield_now();
         }
         assert_eq!(calls.load(Ordering::Acquire), 2);
-        assert_eq!(replacement.snapshot.unwrap().top_model, "new");
+        assert_eq!(
+            replacement.snapshot.unwrap().top_model.as_deref(),
+            Some("new")
+        );
     }
 }

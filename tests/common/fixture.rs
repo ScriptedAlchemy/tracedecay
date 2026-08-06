@@ -34,10 +34,8 @@
 //! * [`GitFixture`] builds repositories through [`tracedecay::git::git_program`]
 //!   from a template built once per target directory.
 //!
-//! Negative identity states stay expressible on purpose, through named
-//! constructors: [`TestProfile::unenrolled`] for a checkout this profile never
-//! enrolled and [`RegisteredProject::into_legacy_split`] for a registered store
-//! whose marker is deliberately absent.
+//! Negative identity states stay expressible on purpose through
+//! [`TestProfile::unenrolled`] for a checkout this profile never enrolled.
 
 use std::fs;
 use std::io;
@@ -400,29 +398,6 @@ impl RegisteredProject {
             _registry: registry,
         }
     }
-
-    /// Drops this project's enrollment marker while keeping its registry row
-    /// and its store, for tests that exercise the legacy split-identity scan.
-    ///
-    /// Consuming `self` is deliberate: once the marker is gone the enrolled
-    /// open helpers above no longer describe this checkout, so they must not
-    /// stay reachable.
-    pub fn into_legacy_split(self) -> LegacySplitProject {
-        let marker_path = storage::enrollment_marker_path(&self.root);
-        fs::remove_file(&marker_path).unwrap_or_else(|err| {
-            panic!(
-                "failed to remove fixture enrollment marker '{}': {err}",
-                marker_path.display()
-            )
-        });
-        LegacySplitProject {
-            _profile: self.profile,
-            root: self.root,
-            project_id: self.project_id,
-            data_root: self.layout.data_root,
-            _registry: self.registry,
-        }
-    }
 }
 
 /// An enrolled project whose retained graph has been closed.
@@ -511,29 +486,6 @@ pub struct UnenrolledProject {
 impl UnenrolledProject {
     pub fn root(&self) -> &Path {
         &self.root
-    }
-}
-
-/// A registered store whose enrollment marker is deliberately absent.
-pub struct LegacySplitProject {
-    _profile: TestProfile,
-    _registry: Arc<HostAdmissionTestRuntimeV1>,
-    root: PathBuf,
-    project_id: String,
-    data_root: PathBuf,
-}
-
-impl LegacySplitProject {
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    pub fn project_id(&self) -> &str {
-        &self.project_id
-    }
-
-    pub fn data_root(&self) -> &Path {
-        &self.data_root
     }
 }
 

@@ -1,5 +1,5 @@
 {
- "_comment": "Curated static fallback of OpenRouter model pricing (https://openrouter.ai/api/v1/models), captured 2026-06-11. Used when the dashboard is offline and no cached fetch exists. Prices are USD per token, same shape as the live API.",
+ "_comment": "Curated static fallback of OpenRouter model pricing (https://openrouter.ai/api/v1/models), captured 2026-06-11. Shared by every provider-cost consumer when offline. Prices are USD per token, same shape as the live API.",
  "data": [
   {
    "id": "anthropic/claude-3-haiku",

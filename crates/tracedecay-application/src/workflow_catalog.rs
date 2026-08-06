@@ -69,45 +69,54 @@ pub fn workflow_executable_binding_registry()
     ExecutableBindingRegistryV1::new(
         WORKFLOW_APPLICATION_OPERATION_IDS
             .iter()
-            .map(|(operation, _, _)| match *operation {
-                "register_definition" => {
-                    available::<
-                        WorkflowDefinitionRegisterRequest,
-                        tracedecay_domain::WorkflowDefinition,
-                    >(operation, "/application/workflow/register-definition")
-                }
-                "validate_definition" => available::<
-                    WorkflowDefinitionValidateRequest,
-                    WorkflowDefinitionValidation,
-                >(operation, "/application/workflow/validate-definition"),
-                "get_definition" => available::<
-                    WorkflowDefinitionGetRequest,
-                    tracedecay_domain::WorkflowDefinition,
-                >(operation, "/application/workflow/get-definition"),
-                "list_definitions" => available::<
-                    WorkflowDefinitionListRequest,
-                    Vec<tracedecay_domain::WorkflowDefinition>,
-                >(operation, "/application/workflow/list-definitions"),
-                "definition_history" => available::<
-                    WorkflowDefinitionHistoryRequest,
-                    Vec<tracedecay_domain::WorkflowDefinition>,
-                >(operation, "/application/workflow/definition-history"),
-                "diff_definition" => available::<
-                    WorkflowDefinitionDiffRequest,
-                    WorkflowDefinitionDiff,
-                >(operation, "/application/workflow/diff-definition"),
-                "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
-                    operation,
-                    "/application/workflow/handoff-issue",
-                ),
-                "handoff_redeem" => available::<TaskHandoffRedeemRequest, TaskHandoffRedeemed>(
-                    operation,
-                    "/application/workflow/handoff-redeem",
-                ),
-                _ => unreachable!("static Workflow operation is exhaustive"),
-            })
+            .map(|(operation, _, _)| workflow_binding(operation))
             .collect::<Result<Vec<_>, _>>()?,
     )
+}
+
+fn workflow_binding(
+    operation: &str,
+) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError> {
+    match operation {
+        "register_definition" => {
+            available::<
+                WorkflowDefinitionRegisterRequest,
+                tracedecay_domain::WorkflowDefinition,
+            >(operation, "/application/workflow/register-definition")
+        }
+        "validate_definition" => available::<
+            WorkflowDefinitionValidateRequest,
+            WorkflowDefinitionValidation,
+        >(operation, "/application/workflow/validate-definition"),
+        "get_definition" => available::<
+            WorkflowDefinitionGetRequest,
+            tracedecay_domain::WorkflowDefinition,
+        >(operation, "/application/workflow/get-definition"),
+        "list_definitions" => available::<
+            WorkflowDefinitionListRequest,
+            Vec<tracedecay_domain::WorkflowDefinition>,
+        >(operation, "/application/workflow/list-definitions"),
+        "definition_history" => available::<
+            WorkflowDefinitionHistoryRequest,
+            Vec<tracedecay_domain::WorkflowDefinition>,
+        >(operation, "/application/workflow/definition-history"),
+        "diff_definition" => available::<
+            WorkflowDefinitionDiffRequest,
+            WorkflowDefinitionDiff,
+        >(operation, "/application/workflow/diff-definition"),
+        "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
+            operation,
+            "/application/workflow/handoff-issue",
+        ),
+        "handoff_redeem" => available::<TaskHandoffRedeemRequest, TaskHandoffRedeemed>(
+            operation,
+            "/application/workflow/handoff-redeem",
+        ),
+        _ => Err(invalid_catalog_value(
+            "workflow operation",
+            "operation has no executable binding",
+        )),
+    }
 }
 
 fn available<Request, Output>(
@@ -126,15 +135,16 @@ where
     let binding = ExecutableBindingV1::direct(
         &manifest,
         OperationId::new(format!("operation.workflow.{operation}"))
-            .expect("static Workflow operation ID is valid"),
-        ServiceId::new(WORKFLOW_SERVICE_ID).expect("static Workflow service ID is valid"),
+            .map_err(|_| invalid_catalog_value("workflow operation ID", "ID is invalid"))?,
+        ServiceId::new(WORKFLOW_SERVICE_ID)
+            .map_err(|_| invalid_catalog_value("workflow service ID", "ID is invalid"))?,
         request_schema,
         result_schema,
         CodecBindingKey::new(format!("codec.workflow.{operation}.json.v1"))
-            .expect("static Workflow codec ID is valid"),
+            .map_err(|_| invalid_catalog_value("workflow codec ID", "ID is invalid"))?,
         RouteExposureV1::Public {
             binding_id: BindingId::new(format!("binding.http.workflow.{operation}"))
-                .expect("static Workflow binding ID is valid"),
+                .map_err(|_| invalid_catalog_value("workflow binding ID", "ID is invalid"))?,
             route_path: route_path.to_owned(),
         },
     )?;
@@ -151,12 +161,12 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
             | "diff_definition"
     );
     let binding_id = BindingId::new(format!("binding.http.workflow.{operation}"))
-        .expect("static Workflow binding ID is valid");
+        .map_err(|_| invalid_catalog_value("workflow binding ID", "ID is invalid"))?;
     CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id: CapabilityId::new(format!("capability.workflow.{operation}"))
-            .expect("static Workflow capability ID is valid"),
+            .map_err(|_| invalid_catalog_value("workflow capability ID", "ID is invalid"))?,
         use_case_id: UseCaseId::new(format!("use-case.workflow.{operation}"))
-            .expect("static Workflow use-case ID is valid"),
+            .map_err(|_| invalid_catalog_value("workflow use-case ID", "ID is invalid"))?,
         routing: RoutingContractV1::new(
             1,
             format!("Workflow {operation}"),
@@ -247,7 +257,8 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
         availability: AvailabilityContract::Available,
         binding_ids: vec![binding_id],
         profile_eligibility: vec![
-            ProfileId::new("profile.default").expect("static profile ID is valid"),
+            ProfileId::new("profile.default")
+                .map_err(|_| invalid_catalog_value("workflow profile ID", "ID is invalid"))?,
         ],
         required_features: Vec::new(),
     })
@@ -255,9 +266,17 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
 
 fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
     SchemaRef::new(
-        SchemaId::new(id).expect("static Workflow schema ID is valid"),
+        SchemaId::new(id)
+            .map_err(|_| invalid_catalog_value("workflow schema ID", "ID is invalid"))?,
         1,
     )
+}
+
+const fn invalid_catalog_value(
+    field: &'static str,
+    reason: &'static str,
+) -> CatalogValidationError {
+    CatalogValidationError::InvalidValue { field, reason }
 }
 
 #[cfg(test)]

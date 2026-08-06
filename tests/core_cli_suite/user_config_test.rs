@@ -30,7 +30,6 @@ fn round_trip_serialization() {
         last_flags_fetch_at: 0,
         last_installed_version: "1.2.3".to_string(),
         previous_version: String::new(),
-        last_pricing_fetch_at: 0,
         extraction_timeout_secs: 60,
         automation: Default::default(),
         memory_injection_enabled: true,

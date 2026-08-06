@@ -248,7 +248,7 @@ const CURSOR_NATIVE_EXTENSION_FILES: &[PluginFile] = &[
     plugin_file!("package.json", "cursor-native-extension/package.json"),
     plugin_file!(
         "dist/extension.js",
-        "cursor-native-extension/dist/extension.js"
+        "cursor-native-extension/embedded/extension.js"
     ),
     plugin_file!("README.md", "cursor-native-extension/README.md"),
     plugin_file!("LICENSE", "cursor-native-extension/LICENSE"),

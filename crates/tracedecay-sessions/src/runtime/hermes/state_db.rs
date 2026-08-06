@@ -167,6 +167,19 @@ pub fn select_new_messages_sql(
     } else {
         "1"
     };
+    let session_usage_frontier = if message_columns.contains("active") {
+        "CASE WHEN m.active != 0 AND m.id = (
+             SELECT MAX(frontier.id)
+             FROM messages frontier
+             WHERE frontier.session_id = m.session_id AND frontier.active != 0
+         ) THEN 1 ELSE 0 END"
+    } else {
+        "CASE WHEN m.id = (
+             SELECT MAX(frontier.id)
+             FROM messages frontier
+             WHERE frontier.session_id = m.session_id
+         ) THEN 1 ELSE 0 END"
+    };
     let tool_name_raw = if message_columns.contains("tool_name") {
         "m.tool_name"
     } else {
@@ -312,7 +325,8 @@ pub fn select_new_messages_sql(
                 {reasoning_tokens}, {active},
                 CAST(({measured}) AS INTEGER) AS measured_bytes,
                 CAST(({typed_oversized}) AS INTEGER) AS value_oversized,
-                CAST(({row_fits_budget}) AS INTEGER) AS row_fits_budget
+                CAST(({row_fits_budget}) AS INTEGER) AS row_fits_budget,
+                CAST(({session_usage_frontier}) AS INTEGER) AS session_usage_frontier
          FROM messages m LEFT JOIN sessions s ON s.id = m.session_id
          WHERE m.id > ?1
          ORDER BY m.id
@@ -744,6 +758,7 @@ fn map_row(rowid: i64, row: &rusqlite::Row<'_>, sql_measured_bytes: u64) -> Opti
         session_cache_read_tokens: row.get::<_, Option<i64>>(17).ok().flatten(),
         session_cache_write_tokens: row.get::<_, Option<i64>>(18).ok().flatten(),
         session_reasoning_tokens: row.get::<_, Option<i64>>(19).ok().flatten(),
+        is_session_usage_frontier: row_i64_flag(row, 24) != 0,
         active: row.get::<_, Option<i64>>(20).ok().flatten().unwrap_or(1),
         sql_value_oversized,
         sql_measured_bytes,

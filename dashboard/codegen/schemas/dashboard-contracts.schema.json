@@ -8161,7 +8161,7 @@
       "enum": [
         "observability_envelope",
         "feedback_observations",
-        "accounting_turn",
+        "provider_usage_observation",
         "savings_ledger"
       ],
       "type": "string"
@@ -9224,6 +9224,68 @@
       "description": "Strongly typed canonical identity: `ProposalId`.",
       "type": "string"
     },
+    "ProviderUsageSummaryV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "cost_basis": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total_cost_usd": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_tokens": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usage_event_count": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "status",
+        "error",
+        "usage_event_count",
+        "total_cost_usd",
+        "total_tokens",
+        "cost_basis"
+      ],
+      "type": "object"
+    },
     "PublicCodeProject": {
       "properties": {
         "canonical_root": {
@@ -9674,20 +9736,20 @@
         "pricing": {
           "$ref": "#/$defs/SavingsPricingSummaryV1"
         },
+        "provider_usage": {
+          "$ref": "#/$defs/ProviderUsageSummaryV1"
+        },
         "savings": {
           "$ref": "#/$defs/SavingsAccountingSummaryV1"
         },
         "sessions": {
           "$ref": "#/$defs/SavingsSessionSummaryV1"
-        },
-        "turns": {
-          "$ref": "#/$defs/TurnsSummaryV1"
         }
       },
       "required": [
         "savings",
         "sessions",
-        "turns",
+        "provider_usage",
         "pricing",
         "costs"
       ],
@@ -9698,10 +9760,12 @@
         "fetched_at": true,
         "model_count": true,
         "offline": true,
+        "revision": true,
         "source": true
       },
       "required": [
         "source",
+        "revision",
         "fetched_at",
         "offline",
         "model_count"
@@ -9710,9 +9774,6 @@
     },
     "SavingsSessionModelV1": {
       "properties": {
-        "actual": {
-          "$ref": "#/$defs/TokenActualV1"
-        },
         "cost_basis": {
           "type": "string"
         },
@@ -9733,6 +9794,20 @@
             "null"
           ]
         },
+        "provider_actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_usage_events": {
+          "format": "int64",
+          "type": "integer"
+        },
         "tokenized": {
           "$ref": "#/$defs/TokenPairV1"
         },
@@ -9740,21 +9815,17 @@
           "format": "int64",
           "type": "integer"
         },
-        "tokenizer": true,
-        "usage_messages": {
-          "format": "int64",
-          "type": "integer"
-        }
+        "tokenizer": true
       },
       "required": [
         "model",
         "tokenizer",
         "messages",
-        "usage_messages",
+        "provider_usage_events",
         "tokenized_messages",
         "estimated_messages",
         "cost_basis",
-        "actual",
+        "provider_actual",
         "tokenized",
         "estimated"
       ],
@@ -9792,6 +9863,10 @@
         "provider": {
           "type": "string"
         },
+        "provider_usage_events": {
+          "format": "int64",
+          "type": "integer"
+        },
         "session_id": {
           "type": "string"
         },
@@ -9811,10 +9886,6 @@
         "tokenized_messages": {
           "format": "int64",
           "type": "integer"
-        },
-        "usage_messages": {
-          "format": "int64",
-          "type": "integer"
         }
       },
       "required": [
@@ -9825,7 +9896,7 @@
         "last_message_at",
         "is_subagent",
         "messages",
-        "usage_messages",
+        "provider_usage_events",
         "tokenized_messages",
         "estimated_messages",
         "cost_basis",
@@ -9835,17 +9906,6 @@
     },
     "SavingsSessionSummaryV1": {
       "properties": {
-        "actual": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TokenActualV1"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
         "available": {
           "type": "boolean"
         },
@@ -9894,6 +9954,25 @@
           ]
         },
         "model_count": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "provider_actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provider_usage_events": {
           "default": null,
           "format": "int64",
           "type": [
@@ -9956,14 +10035,6 @@
             "integer",
             "null"
           ]
-        },
-        "usage_messages": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
         }
       },
       "required": [
@@ -9973,11 +10044,11 @@
         "status",
         "error",
         "messages",
-        "usage_messages",
+        "provider_usage_events",
         "tokenized_messages",
         "estimated_messages",
         "cost_basis",
-        "actual",
+        "provider_actual",
         "tokenized",
         "estimated",
         "session_count",
@@ -11790,19 +11861,31 @@
       "properties": {
         "cache_read_tokens": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "cache_write_tokens": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "input_tokens": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "output_tokens": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -11827,68 +11910,6 @@
       "required": [
         "input_tokens",
         "output_tokens"
-      ],
-      "type": "object"
-    },
-    "TurnsSummaryV1": {
-      "properties": {
-        "available": {
-          "type": "boolean"
-        },
-        "cost_basis": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "error": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "status": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "total_cost_usd": {
-          "default": null,
-          "format": "double",
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "total_tokens": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "turn_count": {
-          "default": null,
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "available",
-        "status",
-        "error",
-        "turn_count",
-        "total_cost_usd",
-        "total_tokens",
-        "cost_basis"
       ],
       "type": "object"
     },

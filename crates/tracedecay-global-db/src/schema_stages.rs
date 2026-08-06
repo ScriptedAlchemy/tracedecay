@@ -87,23 +87,6 @@ const REGISTRY_SCHEMA: &str = "
 ";
 
 const TRANSCRIPT_SCHEMA: &str = "
-    CREATE TABLE IF NOT EXISTS turns (
-        message_id TEXT PRIMARY KEY,
-        project_hash TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        model TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        input_tokens INTEGER NOT NULL,
-        output_tokens INTEGER NOT NULL,
-        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-        cost_usd REAL NOT NULL,
-        category TEXT NOT NULL,
-        tool_names TEXT NOT NULL DEFAULT ''
-    );
-    CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_turns_project ON turns(project_hash);
-    CREATE INDEX IF NOT EXISTS idx_turns_model ON turns(model);
     CREATE TABLE IF NOT EXISTS parse_offsets (
         file_path TEXT PRIMARY KEY,
         byte_offset INTEGER NOT NULL,

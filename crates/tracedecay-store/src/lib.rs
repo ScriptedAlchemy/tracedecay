@@ -152,12 +152,12 @@ pub use observation::{
 pub use projection::{
     CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ClaudeObservationProjection,
     ClaudeSessionMessageProjection, ObservationProjection, ObservationProjectionStore,
-    ProjectedObservation, ProjectionCheckpoint, ProjectionPersistOutcome, ProjectionProvenance,
-    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, WorkflowFactProjection,
-    WorkflowFactRecord,
+    PROVIDER_USAGE_PROJECTOR_VERSION, ProjectedObservation, ProjectionCheckpoint,
+    ProjectionPersistOutcome, ProjectionProvenance, ProjectionRebuildOutcome, ProjectionSkipReason,
+    ProjectionStoreError, ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V1, SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+    SESSION_MESSAGE_PROJECTOR_VERSION_V3, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
 };
 pub use remote_recovery::*;
 pub use retrieval_anchor::{

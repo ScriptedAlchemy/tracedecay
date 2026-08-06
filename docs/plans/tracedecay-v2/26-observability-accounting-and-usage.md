@@ -669,6 +669,23 @@ overflow is reported as capped coverage rather than silently dropped.
 
 ### Resource accounting and benchmark evidence
 
+Provider usage is an immutable observation family, not a turn ledger or a
+Claude-only transcript parser. Each `ProviderUsageObservationV1` retains exact
+native provider/model evidence, native scope and counter semantics, native
+field/kind, source range, and available request/message/turn/session
+correlations. Reads pin an observation watermark and are side-effect-free;
+pagination, cumulative-to-delta derivation, duplicate checkpoints, resets, and
+counter mismatches produce deterministic issue and coverage states. Missing,
+unknown, or unavailable evidence is never zero-filled or inferred from a
+neighboring record.
+
+Cost reads resolve those observations against one deterministic bundled
+all-provider pricing table and expose its content-digest revision. They do not
+trigger a network refresh, read a home-directory pricing cache, or consult a
+pricing environment override. An unknown model, missing counter, or unavailable
+pricing row remains typed unknown/unavailable and cannot become a fabricated
+cost.
+
 `OperationResourceObservedV1` records p50/p95/p99-eligible scheduled-arrival
 and service latency; closed `SpanStageV1` queue, store-lock, index-lock, I/O,
 parse, projection, model, rank, merge, hydration, synthesis, render, persist,

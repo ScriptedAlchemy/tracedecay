@@ -117,27 +117,6 @@ async fn unenrolled_root_stays_unenrolled() {
     );
 }
 
-#[tokio::test]
-async fn legacy_split_keeps_its_store_without_a_marker() {
-    let profile = TestProfile::acquire().await;
-    let repo = GitFixture::primary(profile.path("project"));
-    let project = profile.enroll(repo.root()).await;
-    let expected_project_id = project.project_id().to_owned();
-
-    let legacy = project.into_legacy_split();
-
-    assert_eq!(legacy.project_id(), expected_project_id);
-    assert!(
-        legacy.data_root().is_dir(),
-        "the legacy split case keeps its store: {}",
-        legacy.data_root().display()
-    );
-    assert!(
-        !storage::enrollment_marker_path(legacy.root()).exists(),
-        "the legacy split case is defined by the absent marker"
-    );
-}
-
 /// A server built from a bare direct context has no registry database and no
 /// retained project-graph resolver, so hook notifications fail closed before
 /// reaching the code under test. The authority's server must arrive with both.

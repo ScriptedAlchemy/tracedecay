@@ -70,11 +70,11 @@ pub struct RegisteredSemanticAcceptedProfileAuthorityV1 {
 }
 
 impl RegisteredSemanticAcceptedProfileAuthorityV1 {
-    pub async fn open(
-        database: Arc<RegisteredGlobalDb>,
-    ) -> Result<Self, SemanticAcceptedProfileAuthorityErrorV1> {
-        let authority = Self { database };
-        Ok(authority)
+    /// The accepted-profile tables are part of the canonical configuration
+    /// schema, provisioned and shape-validated at registered database
+    /// admission, so construction performs no schema work.
+    pub fn new(database: Arc<RegisteredGlobalDb>) -> Self {
+        Self { database }
     }
 
     /// Persists only a profile whose private evaluation value can be
@@ -770,9 +770,7 @@ mod tests {
             .await
             .unwrap();
         let database = runtime.profile_database_arc();
-        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::open(Arc::clone(&database))
-            .await
-            .unwrap();
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(Arc::clone(&database));
 
         let transaction = database.begin_write_transaction().await.unwrap();
         let original_key = ensure_validation_receipt_key(&transaction).await.unwrap();
@@ -817,9 +815,7 @@ mod tests {
         assert_eq!(remounted_key.as_slice(), original_key.as_slice());
         drop(snapshot);
 
-        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::open(Arc::clone(&remounted))
-            .await
-            .unwrap();
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(Arc::clone(&remounted));
         assert_eq!(
             authority.resolve_record(&profile_digest).await,
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)

@@ -118,10 +118,10 @@ export interface TokenMix {
  * reason.
  */
 export function summarizeTokenMix(actual: {
-  input_tokens?: number | undefined;
-  output_tokens?: number | undefined;
-  cache_read_tokens?: number | undefined;
-  cache_write_tokens?: number | undefined;
+  input_tokens?: number | null | undefined;
+  output_tokens?: number | null | undefined;
+  cache_read_tokens?: number | null | undefined;
+  cache_write_tokens?: number | null | undefined;
 }): TokenMix | null {
   const raw = [
     { label: 'cache read', tokens: actual.cache_read_tokens ?? 0 },
@@ -143,15 +143,15 @@ export function summarizeTokenMix(actual: {
   };
 }
 
-/** Cost per turn, derived. Null when either side is missing — a dash is a
+/** Cost per provider usage event, derived. Null when either side is missing — a dash is a
  * reading, a zero is a claim. */
-export function costPerTurn(
+export function costPerUsageEvent(
   totalCostUsd: number | null | undefined,
-  turnCount: number | null | undefined,
+  usageEventCount: number | null | undefined,
 ): number | null {
-  if (totalCostUsd == null || turnCount == null || !Number.isFinite(totalCostUsd)) return null;
-  if (!Number.isFinite(turnCount) || turnCount <= 0) return null;
-  return totalCostUsd / turnCount;
+  if (totalCostUsd == null || usageEventCount == null || !Number.isFinite(totalCostUsd)) return null;
+  if (!Number.isFinite(usageEventCount) || usageEventCount <= 0) return null;
+  return totalCostUsd / usageEventCount;
 }
 
 export interface LedgerCoverage {
@@ -159,39 +159,27 @@ export interface LedgerCoverage {
   /** Each class is null when the ledger served no count for it. A class the
    * ledger never reported is not a class that measured zero, and the two must
    * not arrive here as the same number. */
-  usage: number | null;
   tokenized: number | null;
   estimated: number | null;
   unknownModel: number | null;
-  /** Share of messages whose token counts came from the provider, 0–1. Null
-   * when the provider-reported class itself went unreported — there is then no
-   * share to state, rather than a share of nothing. */
-  measuredShare: number | null;
 }
 
 /**
- * How much of the session ledger is measured versus inferred.
- *
- * `cost_basis: "mixed"` on the wire is the whole story in one word, and the
- * page printed it as a header annotation with no way to see what the mix was.
+ * How session content was sized independently of provider billing events.
  */
 export function summarizeCoverage(sessions: {
   messages?: number | null | undefined;
-  usage_messages?: number | null | undefined;
   tokenized_messages?: number | null | undefined;
   estimated_messages?: number | null | undefined;
   unknown_model_messages?: number | null | undefined;
 }): LedgerCoverage | null {
   const messages = served(sessions.messages);
   if (messages == null || messages <= 0) return null;
-  const usage = served(sessions.usage_messages);
   return {
     messages,
-    usage,
     tokenized: served(sessions.tokenized_messages),
     estimated: served(sessions.estimated_messages),
     unknownModel: served(sessions.unknown_model_messages),
-    measuredShare: usage == null ? null : usage / messages,
   };
 }
 

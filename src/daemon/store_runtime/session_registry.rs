@@ -31,8 +31,10 @@ mod code_graph;
 mod code_reads;
 mod maintenance;
 mod mounts;
+mod retained_hook_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
+use retained_hook_tasks::RetainedHookTasks;
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
@@ -76,8 +78,25 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
+    retained_hook_tasks: RetainedHookTasks,
     #[cfg(test)]
     long_lived_session_maintenance_for_test: AtomicBool,
+}
+
+impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) fn retain_hook_task<F, Fut>(
+        &self,
+        provider: &str,
+        session_id: &str,
+        operation: F,
+    ) -> bool
+    where
+        F: FnOnce(crate::application::observation::ObservationCancellation) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.retained_hook_tasks
+            .retain(provider, session_id, operation)
+    }
 }
 
 impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {

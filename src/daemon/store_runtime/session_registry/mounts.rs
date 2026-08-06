@@ -15,9 +15,9 @@ use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, LifecycleShardRuntimePublisher,
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
     LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, ProfileAuthorityPinResult,
-    RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, StoreRuntimeOpenRequest,
-    StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver, open_runtime,
-    register_registered_schema_installer, registry_open_error, runtime_incarnation,
+    RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, RetainedHookTasks,
+    StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver,
+    open_runtime, register_registered_schema_installer, registry_open_error, runtime_incarnation,
     session_registry_error,
 };
 
@@ -85,6 +85,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             project_memory: Mutex::new(BTreeMap::new()),
             project_sessions: Mutex::new(BTreeMap::new()),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
+            retained_hook_tasks: RetainedHookTasks::new(),
             #[cfg(test)]
             long_lived_session_maintenance_for_test: AtomicBool::new(false),
         })

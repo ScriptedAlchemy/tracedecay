@@ -2,8 +2,7 @@
 //! (`/api/plugins/savings/*`), against a seeded temp global DB for accounting
 //! and the resolved project session store for transcript cost rows.
 //!
-//! Pricing runs offline (`TRACEDECAY_OFFLINE=1`) with the cache pointed at a
-//! nonexistent temp path, so the bundled fallback snapshot is exercised.
+//! Pricing uses the deterministic bundled all-provider snapshot.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -23,7 +22,6 @@ use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::global_db::ParseOffset;
 use tracedecay::sessions::SessionRecord;
-use tracedecay::types::CostTurn;
 
 struct Fixture {
     _tmp: TempDir,
@@ -103,14 +101,6 @@ impl SavingsSeed<'_> {
             .await;
     }
 
-    async fn insert_turn(&self, turn: &CostTurn) -> bool {
-        self.0.insert_turn_for_test(turn).await
-    }
-
-    async fn insert_turns(&self, turns: &[CostTurn]) -> usize {
-        self.0.insert_turns_for_test(turns).await
-    }
-
     async fn upsert_session(&self, session: &SessionRecord) -> bool {
         self.0
             .upsert_session_for_test(HostAdmissionScope::Project, session)
@@ -175,26 +165,9 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
     seed_ledger_db(runtime, project, day_start).await;
     let gdb = SavingsSeed(runtime);
 
-    // Claude Code accounting turn (cost computed from real usage at ingest).
-    assert!(
-        gdb.insert_turn(&CostTurn {
-            message_id: "turn-1".to_string(),
-            project_hash: "fixture".to_string(),
-            session_id: "claude-sess".to_string(),
-            model: "claude-opus-4-6".to_string(),
-            timestamp: (day_start + 50) as u64,
-            input_tokens: 100_000,
-            output_tokens: 20_000,
-            cache_write_tokens: 0,
-            cache_read_tokens: 0,
-            cost_usd: 1.25,
-            category: "code".to_string(),
-            tool_names: String::new(),
-        })
-        .await
-    );
-
-    // S1: every message has transcript usage (Anthropic field names) → actual.
+    // S1: transcript metadata carries Anthropic usage fields. The costs
+    // projection must ignore them because only admitted provider observations
+    // are authoritative for billing.
     assert!(
         gdb.upsert_session(&session(
             "sess-usage",
@@ -330,9 +303,8 @@ async fn seed_global_db(runtime: &DashboardTestRuntimeV1, project: &Path, day_st
         .await
     );
 
-    // S5: the exact shape the Codex transcript backfill writes
-    // (`token_count` events normalized to Anthropic-style keys with cached
-    // input split into cache_read, plus total_tokens) → actual.
+    // S5: transcript metadata carries the shape Codex backfill writes. It is
+    // still content metadata, not provider-usage billing authority.
     assert!(
         gdb.upsert_session(&session(
             "sess-codex",
@@ -430,25 +402,6 @@ async fn seed_daily_limit_regression(
         )
         .await
     );
-
-    let mut turns = Vec::new();
-    for offset in 0..=366 {
-        turns.push(CostTurn {
-            message_id: format!("turn-daily-limit-{offset}"),
-            project_hash: "fixture".to_string(),
-            session_id: "turns-daily-limit".to_string(),
-            model: "claude-opus-4-6".to_string(),
-            timestamp: (latest_day - (offset * 86_400) + 120) as u64,
-            input_tokens: 100 + offset as u64,
-            output_tokens: 50,
-            cache_write_tokens: 0,
-            cache_read_tokens: 0,
-            cost_usd: 0.01,
-            category: "code".to_string(),
-            tool_names: String::new(),
-        });
-    }
-    assert_eq!(gdb.insert_turns(&turns).await, turns.len());
 }
 
 async fn start_fixture(seed: FixtureSeed) -> Fixture {
@@ -469,13 +422,6 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
         // `.cargo/config.toml` disables global accounting for cargo-launched
         // processes; opt back in so the recording state reads "enabled".
         EnvVarGuard::set("TRACEDECAY_ENABLE_GLOBAL_DB", "1"),
-        EnvVarGuard::set("TRACEDECAY_OFFLINE", "1"),
-        // Point the pricing cache at a path that never exists → the bundled
-        // fallback snapshot must serve.
-        EnvVarGuard::set(
-            "TRACEDECAY_MODEL_PRICES_PATH",
-            tmp.path().join("no-such-prices.json"),
-        ),
     ];
 
     let now = now_unix();
@@ -676,26 +622,12 @@ fn daily_model_series_limits_days_not_model_rows() {
             "row limit included an older day outside the 366-day window: {daily:?}"
         );
 
-        let turns_daily = models["turns"]["by_day"].as_array().expect("turn daily rows");
-        assert!(
-            turns_daily
-                .iter()
-                .any(|row| row["day"] == fixture.day_start),
-            "latest actual-cost day was truncated: {turns_daily:?}"
-        );
-        assert!(
-            turns_daily.iter().any(|row| row["day"] == oldest_included_day),
-            "expected the 366th latest actual-cost day to remain: {turns_daily:?}"
-        );
-        assert!(
-            turns_daily.iter().all(|row| row["day"] != excluded_day),
-            "actual-cost day limit included an older day outside the 366-day window: {turns_daily:?}"
-        );
+        assert_eq!(models["provider_usage"]["available"], false);
     });
 }
 
 #[test]
-fn session_costs_label_actual_vs_tokenized_vs_estimated() {
+fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evidence() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -725,23 +657,14 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
         assert_eq!(payload["available"], true);
         assert_eq!(payload["total"], 5);
 
-        // S1: usage-backed → actual, with exact usage token counts.
+        // Session metadata is content context, never billing authority.
         let usage_session = find_session(&payload, "sess-usage");
-        assert_eq!(usage_session["cost_basis"], "actual");
-        assert_eq!(usage_session["usage_messages"], 1);
-        assert_eq!(usage_session["tokenized_messages"], 0);
-        assert_eq!(usage_session["estimated_messages"], 0);
+        assert_eq!(usage_session["cost_basis"], nonusage_basis);
+        assert_eq!(usage_session["provider_usage_events"], 0);
         let usage_model = &usage_session["models"][0];
         assert_eq!(usage_model["model"], "claude-fable-5-thinking-high");
-        assert_eq!(usage_model["cost_basis"], "actual");
-        assert_eq!(usage_model["actual"]["input_tokens"], 1_200);
-        assert_eq!(usage_model["actual"]["output_tokens"], 350);
-        assert_eq!(usage_model["actual"]["cache_read_tokens"], 9_000);
-        assert_eq!(usage_model["actual"]["cache_write_tokens"], 50);
-        assert_eq!(usage_model["estimated"]["input_tokens"], 0);
-        assert_eq!(usage_model["estimated"]["output_tokens"], 0);
-        assert_eq!(usage_model["tokenized"]["input_tokens"], 0);
-        assert_eq!(usage_model["tokenized"]["output_tokens"], 0);
+        assert_eq!(usage_model["cost_basis"], nonusage_basis);
+        assert!(usage_model["provider_actual"].is_null());
 
         // S2: no usage → tokenized (BPE-counted) when the tokenizer is
         // compiled in, chars/4 estimated otherwise. gpt-5.5-high maps to
@@ -751,7 +674,7 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
         let nonusage_model = &nonusage_session["models"][0];
         assert_eq!(nonusage_model["model"], "gpt-5.5-high");
         assert_eq!(nonusage_model["cost_basis"], nonusage_basis);
-        assert_eq!(nonusage_model["actual"]["input_tokens"], 0);
+        assert!(nonusage_model["provider_actual"].is_null());
         if counting {
             assert_eq!(nonusage_model["tokenizer"]["encoder"], "o200k_base");
             assert_eq!(nonusage_model["tokenizer"]["exact"], true);
@@ -793,27 +716,20 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
             );
         }
 
-        // S5: Codex-backfill usage shape (Anthropic-style keys, cached
-        // input split into cache_read) → actual, with the cache read priced.
+        // Codex-shaped metadata is ignored for the same reason.
         let codex_session = find_session(&payload, "sess-codex");
-        assert_eq!(codex_session["cost_basis"], "actual");
+        assert_eq!(codex_session["cost_basis"], nonusage_basis);
         let codex_model = &codex_session["models"][0];
         assert_eq!(codex_model["model"], "gpt-5.3-codex-high");
-        assert_eq!(codex_model["cost_basis"], "actual");
-        assert_eq!(codex_model["actual"]["input_tokens"], 900);
-        assert_eq!(codex_model["actual"]["output_tokens"], 150);
-        assert_eq!(codex_model["actual"]["cache_read_tokens"], 4_000);
-        assert_eq!(codex_model["tokenized"]["input_tokens"], 0);
-        assert_eq!(codex_model["estimated"]["input_tokens"], 0);
+        assert_eq!(codex_model["cost_basis"], nonusage_basis);
+        assert!(codex_model["provider_actual"].is_null());
 
-        // S4: usage + non-usage on one model → mixed (regardless of which
-        // tier the non-usage message lands in), OpenAI usage keys read.
+        // Mixed metadata/no-metadata rows remain one content-count tier.
         let mixed_session = find_session(&payload, "sess-mixed");
-        assert_eq!(mixed_session["cost_basis"], "mixed");
+        assert_eq!(mixed_session["cost_basis"], nonusage_basis);
         let mixed_model = &mixed_session["models"][0];
-        assert_eq!(mixed_model["cost_basis"], "mixed");
-        assert_eq!(mixed_model["actual"]["input_tokens"], 500);
-        assert_eq!(mixed_model["actual"]["output_tokens"], 700);
+        assert_eq!(mixed_model["cost_basis"], nonusage_basis);
+        assert!(mixed_model["provider_actual"].is_null());
         if counting {
             // claude-* has no public tokenizer → labeled approximation.
             assert_eq!(mixed_model["tokenizer"]["exact"], false);
@@ -825,7 +741,7 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
             );
         }
 
-        // Models endpoint: per-model aggregates + turns accounting + daily.
+        // Models endpoint: per-model content aggregates and canonical provider usage.
         let (_, models) = get_json(
             &agent,
             &format!("{}/api/plugins/savings/models?range=all", fixture.base_url),
@@ -834,16 +750,15 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
             &models["models"],
             &Value::String("claude-fable-5-thinking-high".into()),
         );
-        assert_eq!(fable["cost_basis"], "actual");
+        assert_eq!(fable["cost_basis"], nonusage_basis);
         assert_eq!(fable["sessions"], 1);
         let unknown = find_model(&models["models"], &Value::Null);
         assert_eq!(unknown["cost_basis"], nonusage_basis);
 
-        let turns_by_model = models["turns"]["by_model"].as_array().expect("turns");
-        assert_eq!(turns_by_model.len(), 1);
-        assert_eq!(turns_by_model[0]["model"], "claude-opus-4-6");
-        assert_eq!(turns_by_model[0]["cost_basis"], "actual");
-        assert!((turns_by_model[0]["cost_usd"].as_f64().expect("cost") - 1.25).abs() < 1e-9);
+        let usage_by_model = models["provider_usage"]["by_model"]
+            .as_array()
+            .expect("provider usage");
+        assert!(usage_by_model.is_empty());
 
         let daily = models["daily"].as_array().expect("daily");
         assert_eq!(
@@ -863,34 +778,35 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
             daily.iter().any(|row| row["model"].is_null()),
             "unknown-model daily rows should remain explicit"
         );
-        let turns_by_day = models["turns"]["by_day"].as_array().expect("turns by day");
-        assert_eq!(turns_by_day.len(), 1);
+        let usage_by_day = models["provider_usage"]["by_day"]
+            .as_array()
+            .expect("provider usage by day");
+        assert!(usage_by_day.is_empty());
 
-        // Overview session stats roll the same numbers up: 7 messages, 3
-        // usage-backed, 4 non-usage (tokenized or chars/4 by build).
+        // Overview session stats roll the same seven content messages up.
         let sessions = &overview["sessions"];
         assert_eq!(sessions["available"], true);
         assert_eq!(sessions["session_count"], 5);
         assert_eq!(sessions["messages"], 7);
-        assert_eq!(sessions["usage_messages"], 3);
+        assert_eq!(sessions["provider_usage_events"], 0);
         if counting {
-            assert_eq!(sessions["tokenized_messages"], 4);
+            assert_eq!(sessions["tokenized_messages"], 7);
             assert_eq!(sessions["estimated_messages"], 0);
         } else {
             assert_eq!(sessions["tokenized_messages"], 0);
-            assert_eq!(sessions["estimated_messages"], 4);
+            assert_eq!(sessions["estimated_messages"], 7);
         }
         assert_eq!(sessions["unknown_model_messages"], 1);
         assert_eq!(sessions["model_count"], 4);
-        assert_eq!(sessions["cost_basis"], "mixed");
-        assert_eq!(overview["turns"]["available"], true);
-        assert_eq!(overview["turns"]["turn_count"], 1);
-        assert_eq!(overview["turns"]["total_tokens"], 120_000);
+        assert_eq!(sessions["cost_basis"], nonusage_basis);
+        assert_eq!(overview["provider_usage"]["available"], false);
+        assert!(overview["provider_usage"]["usage_event_count"].is_null());
+        assert!(overview["provider_usage"]["total_tokens"].is_null());
     });
 }
 
 #[test]
-fn pricing_serves_bundled_fallback_when_offline() {
+fn pricing_serves_content_addressed_bundled_snapshot() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -904,7 +820,7 @@ fn pricing_serves_bundled_fallback_when_offline() {
             &format!("{}/api/plugins/savings/pricing", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(pricing["source"], "fallback");
+        assert_eq!(pricing["source"], "bundled");
         assert_eq!(pricing["offline"], true);
         assert!(pricing["fetched_at"].is_null());
         assert!(
@@ -925,7 +841,7 @@ fn pricing_serves_bundled_fallback_when_offline() {
             &agent,
             &format!("{}/api/plugins/savings/overview", fixture.base_url),
         );
-        assert_eq!(overview["pricing"]["source"], "fallback");
+        assert_eq!(overview["pricing"]["source"], "bundled");
         assert_eq!(overview["pricing"]["offline"], true);
     });
 }
