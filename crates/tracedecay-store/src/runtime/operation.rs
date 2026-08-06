@@ -6,10 +6,11 @@ use tracedecay_domain::{ObservationScopeV1, UtcMicros};
 use crate::{
     AnchoredObservationWrite, ConfigurationCommitV1, DiagnosticGenerationSupersessionV1,
     EvidenceAssemblyWriteV1, FactWriteBatch, GitIndexTransactionRecordV1, ObservationCursorAdvance,
-    RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    SanitizedCleanDiagnosticSnapshotV1, SessionSummaryPublicationRequestV1,
-    SessionTemporalProjectionBatchV1, SourceAcquisitionQueueCasV1, SourceCommitV1,
-    SourceProjectionCommitV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1, RetrievalAnchorDerivativeV1,
+    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
+    SourceAcquisitionQueueCasV1, SourceCommitV1, SourceProjectionCommitV1,
+    TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 use super::identity::{canonical_id, validate_canonical_id};
@@ -768,6 +769,8 @@ pub enum RepositoryWritePayloadV1 {
     Fact(Box<FactWriteBatch>),
     Observation(Box<AnchoredObservationWrite>),
     ObservationCursorAdvance(Box<ObservationCursorAdvance>),
+    RemoteObservationReplay(Box<RemoteObservationReplayWriteV1>),
+    RemoteWriterFenceInstall(Box<RemoteWriterFenceInstallV1>),
     Diagnostics(Box<SanitizedCleanDiagnosticSnapshotV1>),
     DiagnosticSupersession(Box<DiagnosticGenerationSupersessionV1>),
     EvidenceAssembly(Box<EvidenceAssemblyWriteV1>),
@@ -791,6 +794,8 @@ impl RepositoryWritePayloadV1 {
             Self::Fact(_) => "commit fact lineage",
             Self::Observation(_) => "commit observation",
             Self::ObservationCursorAdvance(_) => "advance observation source cursor",
+            Self::RemoteObservationReplay(_) => "replay remote observation",
+            Self::RemoteWriterFenceInstall(_) => "install remote writer fence",
             Self::Diagnostics(_) => "publish diagnostics",
             Self::DiagnosticSupersession(_) => "supersede diagnostic generation",
             Self::EvidenceAssembly(_) => "publish evidence assembly",
@@ -815,7 +820,10 @@ impl RepositoryWritePayloadV1 {
     fn family_name(&self) -> &'static str {
         match self {
             Self::Configuration(_) => "profile",
-            Self::Observation(_) | Self::ObservationCursorAdvance(_) => "observation",
+            Self::Observation(_)
+            | Self::ObservationCursorAdvance(_)
+            | Self::RemoteObservationReplay(_)
+            | Self::RemoteWriterFenceInstall(_) => "observation",
             Self::Fact(_)
             | Self::Diagnostics(_)
             | Self::DiagnosticSupersession(_)
@@ -839,6 +847,14 @@ impl RepositoryWritePayloadV1 {
             }
             Self::ObservationCursorAdvance(advance) => {
                 observation_scope_matches(advance.next_cursor().scope(), scope)
+            }
+            Self::RemoteObservationReplay(write) => matches!(
+                scope,
+                StoreShardScopeV1::ProjectSessions { project_id }
+                    if project_id == &write.project_id
+            ),
+            Self::RemoteWriterFenceInstall(_) => {
+                matches!(scope, StoreShardScopeV1::ProjectSessions { .. })
             }
             Self::Fact(_) => {
                 matches!(
@@ -960,6 +976,8 @@ impl RepositoryWritePayloadV1 {
                     payload: self.name(),
                 }
             }),
+            Self::RemoteObservationReplay(write) => write.validate(),
+            Self::RemoteWriterFenceInstall(install) => install.validate(),
             Self::Fact(_)
             | Self::Observation(_)
             | Self::ObservationCursorAdvance(_)
@@ -1011,6 +1029,7 @@ impl RepositoryOperationEnvelopeV1 {
                     StoreShardScopeV1::Profile => "profile",
                     StoreShardScopeV1::ProfileMemory => "profile_memory",
                     StoreShardScopeV1::ProfileSessions => "profile_sessions",
+                    StoreShardScopeV1::RemoteNode { .. } => "remote_node",
                     StoreShardScopeV1::Project { .. } => "project",
                     StoreShardScopeV1::ProjectSessions { .. } => "sessions",
                     StoreShardScopeV1::Code { .. } => "code",
@@ -1109,6 +1128,14 @@ impl RepositoryOperationEnvelopeV1 {
                     shard_family: "external_source",
                 });
             }
+        }
+        if let RepositoryWritePayloadV1::RemoteObservationReplay(write) = &self.payload
+            && self.metadata.shard_id.scope.project_id() != Some(&write.project_id)
+        {
+            return Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
+                operation: self.payload.family_name(),
+                shard_family: "sessions",
+            });
         }
         if let RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) = &self.payload
             && !retrieval_anchor_owner_matches_shard(record.owner(), &self.metadata.shard_id)

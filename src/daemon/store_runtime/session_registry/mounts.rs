@@ -6,23 +6,61 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tracedecay_application::{
     ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
+    remote::auth::RemoteEnrollmentAdmissionEvidenceV1,
 };
 use tracedecay_domain::canonical_sha256;
+use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
+use tracedecay_rusqlite_runtime::remote::{
+    RemoteRecoverySqliteAuthorityV1, RemoteSpoolKeyV1, RemoteSpoolKeyringV1,
+    RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
+};
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 
+use super::remote_recovery::{
+    DaemonRemoteRecoveryPhysicalEffectsV1, RemoteRecoveryPublicationContextV1,
+};
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, LifecycleShardRuntimePublisher,
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
     LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, ProfileAuthorityPinResult,
     RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, RetainedHookTasks,
     StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver,
-    open_runtime, register_registered_schema_installer, registry_open_error, runtime_incarnation,
-    session_registry_error,
+    open_runtime, open_runtime_with_presence, register_registered_schema_installer,
+    registry_open_error, runtime_incarnation, session_registry_error,
 };
+
+struct UnavailableRemoteSpoolKeyringV1;
+
+impl RemoteSpoolKeyringV1 for UnavailableRemoteSpoolKeyringV1 {
+    fn active_key(&self) -> std::result::Result<Arc<RemoteSpoolKeyV1>, RemoteSqliteStorageErrorV1> {
+        Err(RemoteSqliteStorageErrorV1::Unavailable)
+    }
+
+    fn key(
+        &self,
+        _revision: u64,
+    ) -> std::result::Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
+        Err(RemoteSqliteStorageErrorV1::Unavailable)
+    }
+}
 
 impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
+        let remote_credential_authority = Arc::new(
+            crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+            ),
+        );
+        let remote_replay_transaction = Arc::new(
+            crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
+                tokio::runtime::Handle::current(),
+            )
+            .map_err(|error| {
+                session_registry_error("start remote replay transaction authority", error)
+            })?,
+        );
         // The kernel's registry initialises profile- and session-scoped shards
         // through a fail-closed port, because the registered schema lives in
         // `tracedecay-global-db` (which depends on the kernel transitively).
@@ -70,7 +108,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ));
             }
         };
-        Ok(Self {
+        let registry = Self {
             identity,
             incarnation,
             resolver,
@@ -82,13 +120,60 @@ impl DaemonSessionRuntimeRegistryV1 {
             profile_database: Mutex::new(None),
             profile_memory: Mutex::new(None),
             profile_sessions: Mutex::new(None),
+            remote_nodes: Mutex::new(BTreeMap::new()),
+            remote_credential_authority,
+            remote_replay_transaction,
+            remote_recovery_authorities: Mutex::new(BTreeMap::new()),
             project_memory: Mutex::new(BTreeMap::new()),
-            project_sessions: Mutex::new(BTreeMap::new()),
+            project_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             retained_hook_tasks: RetainedHookTasks::new(),
             #[cfg(test)]
             long_lived_session_maintenance_for_test: AtomicBool::new(false),
-        })
+        };
+        registry.mount_registered_remote_nodes().await?;
+        Ok(registry)
+    }
+
+    async fn mount_registered_remote_nodes(&self) -> Result<()> {
+        let nodes_root = self.identity.profile_root().join("remote").join("nodes");
+        if !nodes_root.exists() {
+            return Ok(());
+        }
+        let entries = std::fs::read_dir(&nodes_root).map_err(|error| {
+            session_registry_error("discover registered Remote Brain nodes", error.to_string())
+        })?;
+        let mut databases = entries
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path().join("remote.db"))
+                    .map_err(|error| {
+                        session_registry_error(
+                            "discover registered Remote Brain node",
+                            error.to_string(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        databases.retain(|path| path.is_file());
+        databases.sort();
+        let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
+        for database in databases {
+            let node_id = RemoteSqliteStorageV1::discover_registered_node(
+                &database,
+                self.identity.brain_id(),
+                self.identity.profile_id(),
+            )
+            .map_err(|error| {
+                session_registry_error(
+                    "discover registered Remote Brain node identity",
+                    error.to_string(),
+                )
+            })?;
+            self.remote_node_storage(node_id, Arc::clone(&keyring))
+                .await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn profile_database(&self) -> Result<Arc<RegisteredGlobalDb>> {
@@ -163,6 +248,222 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
+    pub(crate) async fn remote_node_storage(
+        &self,
+        node_id: BrainNodeId,
+        keyring: Arc<dyn RemoteSpoolKeyringV1>,
+    ) -> Result<RemoteSqliteStorageV1> {
+        self.mount_remote_node_storage(node_id, keyring, false)
+            .await
+    }
+
+    pub(crate) async fn provision_remote_node(
+        &self,
+        grant: EnrollmentGrantV1,
+        admission: RemoteEnrollmentAdmissionEvidenceV1,
+    ) -> Result<()> {
+        grant.validate().map_err(|error| {
+            session_registry_error("provision Remote Brain node", error.to_string())
+        })?;
+        admission.validate_for(&grant).map_err(|error| {
+            session_registry_error("authenticate Remote Brain provisioning", error.to_string())
+        })?;
+        if &grant.brain_id != self.identity.brain_id() {
+            return Err(session_registry_error(
+                "provision Remote Brain node",
+                "grant brain identity does not match the profile authority".to_owned(),
+            ));
+        }
+        let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
+        let storage = self
+            .mount_remote_node_storage(grant.node_id.clone(), keyring, true)
+            .await?;
+        storage
+            .store_enrollment_grant(&grant, &admission)
+            .map_err(|error| {
+                session_registry_error("publish Remote Brain enrollment grant", error.to_string())
+            })?;
+        self.remote_credential_authority
+            .refresh_storage(&grant.node_id)
+            .map_err(|error| {
+                session_registry_error("register Remote Brain enrollment grant", error.to_string())
+            })
+    }
+
+    async fn mount_remote_node_storage(
+        &self,
+        node_id: BrainNodeId,
+        keyring: Arc<dyn RemoteSpoolKeyringV1>,
+        provision_if_new: bool,
+    ) -> Result<RemoteSqliteStorageV1> {
+        let (database, newly_mounted, existed) = {
+            let mut mounted = self.remote_nodes.lock().await;
+            if let Some(database) = mounted.get(&node_id) {
+                (Arc::clone(database), false, true)
+            } else {
+                let shard_id = StoreShardIdV1::remote_node(
+                    self.identity.brain_id().clone(),
+                    self.identity.profile_id().clone(),
+                    node_id.clone(),
+                );
+                let (runtime, existed) = open_runtime_with_presence(
+                    &self.registry,
+                    self.resolver.as_ref(),
+                    shard_id,
+                    self.incarnation,
+                    Some(self.profile_pin.clone()),
+                    None,
+                    true,
+                    "mount Remote Brain node store",
+                )
+                .await?;
+                let database = Arc::new(
+                    Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?,
+                );
+                mounted.insert(node_id.clone(), Arc::clone(&database));
+                (database, true, existed)
+            }
+        };
+        let authority = database.write_authority()?;
+        let runtime = database.retained_runtime();
+        let handle = runtime
+            .authorized_exact_sql_handle(authority)
+            .map_err(|error| {
+                session_registry_error(
+                    "attach Remote Brain node store",
+                    format!("registered storage handle unavailable: {error:?}"),
+                )
+            })?;
+        let recovery_handle = handle.clone();
+        let storage = if provision_if_new && newly_mounted && !existed {
+            RemoteSqliteStorageV1::provision_registered(handle, runtime.binding().clone(), keyring)
+        } else {
+            RemoteSqliteStorageV1::from_registered(handle, runtime.binding().clone(), keyring)
+        }
+        .map_err(|error| {
+            session_registry_error("attach Remote Brain node store", error.to_string())
+        })?;
+        if newly_mounted {
+            storage
+                .recover_interrupted_replay_attempts(tracedecay_application::clock::now_micros())
+                .map_err(|error| {
+                    session_registry_error(
+                        "recover interrupted Remote Brain replay",
+                        error.to_string(),
+                    )
+                })?;
+        }
+        self.remote_credential_authority
+            .register_storage(node_id.clone(), storage.clone())
+            .map_err(|error| {
+                session_registry_error(
+                    "register Remote Brain credential authority",
+                    error.to_string(),
+                )
+            })?;
+        let mut recovery_authorities = self.remote_recovery_authorities.lock().await;
+        if !recovery_authorities.contains_key(&node_id) {
+            let publication = RemoteRecoveryPublicationContextV1::new(
+                self.identity.clone(),
+                self.incarnation,
+                Arc::clone(&self.resolver),
+                self.registry.clone(),
+                self.profile_pin.clone(),
+                Arc::clone(&self.project_sessions),
+                Arc::clone(&self.remote_replay_transaction),
+            );
+            let backup_root = database
+                .database_path()
+                .parent()
+                .ok_or_else(|| {
+                    session_registry_error(
+                        "attach remote recovery authority",
+                        "RemoteNode database has no parent directory".to_owned(),
+                    )
+                })?
+                .join("recovery-artifacts");
+            let effects = Arc::new(DaemonRemoteRecoveryPhysicalEffectsV1::new(
+                storage.clone(),
+                backup_root,
+                Arc::clone(&self.remote_replay_transaction),
+                publication,
+                tokio::runtime::Handle::current(),
+            ));
+            let recovery =
+                RemoteRecoverySqliteAuthorityV1::from_registered(recovery_handle, effects)
+                    .map_err(|error| {
+                        session_registry_error(
+                            "attach remote recovery authority",
+                            error.to_string(),
+                        )
+                    })?;
+            let recovery = Arc::new(recovery);
+            self.remote_credential_authority
+                .register_recovery_authority(&node_id, Arc::clone(&recovery))
+                .map_err(|error| {
+                    session_registry_error(
+                        "mount remote recovery protocol authority",
+                        error.to_string(),
+                    )
+                })?;
+            recovery_authorities.insert(node_id.clone(), recovery);
+        } else if let Some(recovery) = recovery_authorities.get(&node_id) {
+            self.remote_credential_authority
+                .register_recovery_authority(&node_id, Arc::clone(recovery))
+                .map_err(|error| {
+                    session_registry_error(
+                        "remount remote recovery protocol authority",
+                        error.to_string(),
+                    )
+                })?;
+        }
+        let recovery = recovery_authorities.get(&node_id).cloned();
+        drop(recovery_authorities);
+        if let Some(recovery) = recovery {
+            let projects = self
+                .project_sessions
+                .lock()
+                .await
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            for project_id in projects {
+                recovery
+                    .reconcile_interrupted_promotions(&project_id)
+                    .map_err(|error| {
+                        session_registry_error(
+                            "reconcile interrupted remote promotion",
+                            format!("{error:?}"),
+                        )
+                    })?;
+            }
+        }
+        Ok(storage)
+    }
+
+    pub(crate) fn remote_credential_authority(
+        &self,
+    ) -> Arc<crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1> {
+        Arc::clone(&self.remote_credential_authority)
+    }
+
+    pub(crate) fn remote_replay_transaction(
+        &self,
+    ) -> Arc<dyn tracedecay_application::remote::replay::RemoteReplayTransactionPortV1> {
+        self.remote_replay_transaction.clone()
+    }
+
+    pub(crate) async fn remote_recovery_authority(
+        &self,
+        node_id: &BrainNodeId,
+    ) -> Option<Arc<RemoteRecoverySqliteAuthorityV1>> {
+        self.remote_recovery_authorities
+            .lock()
+            .await
+            .get(node_id)
+            .cloned()
+    }
+
     pub(crate) async fn mounted_session_databases(&self) -> Vec<Arc<RegisteredGlobalDb>> {
         let mut databases = Vec::new();
         if let Some(database) = self.profile_sessions.lock().await.as_ref() {
@@ -212,10 +513,34 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount project session store",
         )
         .await?;
+        let replay_authority = runtime
+            .database_authority("register remote replay target")
+            .map_err(|failure| registry_open_error("register remote replay target", failure))?;
+        let replay_runtime = runtime.clone();
         let database = self
             .attach_registered(runtime, "mount project session store")
             .await?;
-        mounted.insert(project_id, Arc::clone(&database));
+        self.remote_replay_transaction
+            .register_target(project_id.clone(), replay_runtime, replay_authority)
+            .map_err(|error| session_registry_error("register remote replay target", error))?;
+        mounted.insert(project_id.clone(), Arc::clone(&database));
+        let recoveries = self
+            .remote_recovery_authorities
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for recovery in recoveries {
+            recovery
+                .reconcile_interrupted_promotions(&project_id)
+                .map_err(|error| {
+                    session_registry_error(
+                        "reconcile interrupted remote promotion",
+                        format!("{error:?}"),
+                    )
+                })?;
+        }
         Ok(database)
     }
 

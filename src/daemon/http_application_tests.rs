@@ -13,7 +13,8 @@ use tracedecay_application::{
     OperationTermination, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, BrainId, BrainNodeId, ManifestDigest, ProjectId, RefId, RepositoryId, UserProfileId,
+    UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -47,15 +48,28 @@ async fn request_path(
     authorization: Option<&str>,
     origin: Option<&str>,
 ) -> String {
+    request_path_body(service, method, path, authorization, origin, "").await
+}
+
+async fn request_path_body(
+    service: &DaemonHttpApplicationService,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    origin: Option<&str>,
+    body: &str,
+) -> String {
     let mut stream = tokio::net::TcpStream::connect(service.endpoint())
         .await
         .expect("connect daemon HTTP application service");
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\n\
          Host: {}\r\n\
-         Content-Length: 0\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
          Connection: close\r\n",
-        service.endpoint()
+        service.endpoint(),
+        body.len(),
     );
     if let Some(authorization) = authorization {
         request.push_str("Authorization: ");
@@ -68,6 +82,7 @@ async fn request_path(
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
+    request.push_str(body);
     stream
         .write_all(request.as_bytes())
         .await
@@ -519,4 +534,105 @@ async fn daemon_http_shutdown_marks_registry_inactive() {
     service.shutdown().await.expect("shutdown HTTP service");
 
     assert!(!registry.is_active());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_remote_node_provisioning_creates_and_registers_first_store() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint =
+        super::transport::DaemonEndpoint::Unix(profile_root.join("remote-provisioning.sock"));
+    #[cfg(not(unix))]
+    let endpoint = super::transport::default_loopback_endpoint();
+    let daemon_authority =
+        super::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
+            .expect("daemon authority");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote HTTP provisioning",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let runtime = Arc::new(
+        super::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .expect("session runtime registry"),
+    );
+    let node_id = BrainNodeId::new("node.remote-http-provision").expect("node identity");
+    let secret = [7_u8; 32];
+    let grant =
+        super::remote_protocol_tests::grant(identity.brain_id().clone(), node_id.clone(), &secret);
+    let admission = super::remote_protocol_tests::admission(&grant);
+    let payload = serde_json::json!({
+        "grant": grant,
+        "admission": admission,
+    })
+    .to_string();
+    let credentials = runtime.remote_credential_authority();
+    let remote =
+        super::remote_protocol::build_daemon_remote_protocol_router(Arc::clone(&credentials))
+            .expect("remote protocol router");
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_remote(remote, credentials, Some(Arc::clone(&runtime)))
+        .expect("install Remote Brain router");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let origin = service.origin().to_owned();
+
+    let unauthenticated = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/provision",
+        None,
+        Some(&origin),
+        &payload,
+    )
+    .await;
+    assert_eq!(status(&unauthenticated), StatusCode::UNAUTHORIZED);
+    assert!(runtime.remote_recovery_authority(&node_id).await.is_none());
+
+    let authenticated = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/provision",
+        Some(&format!("Bearer {AUTH_TOKEN}")),
+        Some(&origin),
+        &payload,
+    )
+    .await;
+    assert_eq!(status(&authenticated), StatusCode::NO_CONTENT);
+    assert!(runtime.remote_recovery_authority(&node_id).await.is_some());
+
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admission() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let credentials = Arc::new(
+        super::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+            BrainId::new("brain.remote-http").expect("remote brain identity"),
+            UserProfileId::new("profile.remote-http").expect("remote profile identity"),
+        ),
+    );
+    let router =
+        super::remote_protocol::build_daemon_remote_protocol_router(Arc::clone(&credentials))
+            .expect("remote protocol router");
+    registry
+        .install_remote(router, credentials, None)
+        .expect("install Remote Brain router");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+
+    let response = request_path(&service, "POST", "/remote/query", None, None).await;
+
+    assert_eq!(status(&response), StatusCode::NOT_FOUND);
+    service.shutdown().await.expect("shutdown HTTP service");
 }

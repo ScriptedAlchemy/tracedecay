@@ -52,6 +52,8 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         &http_application_registry,
         store_administration.clone(),
     )?;
+    install_remote_http_application_router(&http_application_registry, &store_administration)
+        .await?;
     let http_application_service = http_application::DaemonHttpApplicationService::bind(
         http_application_registry.clone(),
         authority.auth_token(),
@@ -232,6 +234,11 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         &http_application_registry,
         engine.store_administration.clone(),
     )?;
+    install_remote_http_application_router(
+        &http_application_registry,
+        &engine.store_administration,
+    )
+    .await?;
     let http_application_service = http_application::DaemonHttpApplicationService::bind(
         http_application_registry.clone(),
         authority.auth_token(),

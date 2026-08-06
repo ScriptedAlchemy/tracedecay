@@ -54,13 +54,22 @@ impl RemoteWriterAuthorityV1 {
         self.scope
             .validate()
             .map_err(|_| RemoteCaptureApplicationErrorV1::WriterFenceMismatch)?;
+        if self.project_id != self.scope.project_id {
+            return Err(RemoteCaptureApplicationErrorV1::WriterFenceMismatch);
+        }
         self.authority
             .validate()
             .map_err(|_| RemoteCaptureApplicationErrorV1::WriterFenceMismatch)
     }
+
+    pub fn target_project_id(&self) -> Result<&ProjectId, RemoteCaptureApplicationErrorV1> {
+        self.validate()?;
+        Ok(&self.scope.project_id)
+    }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteOfflineCaptureCommandV1 {
     pub enrollment: EnrollmentCredentialRecordV1,
     pub writer: RemoteWriterAuthorityV1,
@@ -70,7 +79,8 @@ pub struct RemoteOfflineCaptureCommandV1 {
     pub captured_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AdmittedRemoteCaptureV1 {
     pub enrollment_id: EntityId,
     pub enrollment_revision: u64,
@@ -287,6 +297,40 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+
+    #[test]
+    fn writer_authority_rejects_conflicting_project_targets() {
+        let mut writer: RemoteWriterAuthorityV1 = serde_json::from_value(serde_json::json!({
+            "project_id": "project.writer",
+            "scope": {
+                "project_id": "project.scope",
+                "repository_id": "repository.remote",
+                "worktree_id": "worktree.remote",
+                "reference": null,
+                "snapshot_id": "snapshot.remote"
+            },
+            "authority": {
+                "fence": {
+                    "brain_id": "brain.remote",
+                    "shard_id": "shard.remote",
+                    "generation_id": "generation.remote",
+                    "placement_revision": 1,
+                    "authority_epoch": 1,
+                    "authority_node_id": "node.remote"
+                },
+                "credential_revision": 1,
+                "observed_at": 10
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            writer.validate(),
+            Err(RemoteCaptureApplicationErrorV1::WriterFenceMismatch)
+        );
+        writer.project_id = writer.scope.project_id.clone();
+        assert_eq!(writer.target_project_id(), Ok(&writer.scope.project_id));
+    }
 
     struct FakeCapturePort {
         authority: CurrentRemoteAuthorityStateV1,

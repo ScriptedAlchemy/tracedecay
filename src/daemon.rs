@@ -199,8 +199,11 @@ mod graph_resolution;
 use graph_resolution::retained_project_graph_resolver;
 mod http_application;
 mod http_application_router;
+mod remote_protocol;
+mod remote_replay_transaction;
 use http_application_router::{
-    install_http_application_cold_resolver, mount_http_application_router,
+    install_http_application_cold_resolver, install_remote_http_application_router,
+    mount_http_application_router,
 };
 mod invocation_dispatch;
 #[cfg(any(not(unix), test))]
@@ -374,3 +377,7 @@ mod tests;
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod http_application_tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod remote_protocol_tests;

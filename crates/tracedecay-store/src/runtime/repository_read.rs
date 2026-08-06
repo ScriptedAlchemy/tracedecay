@@ -280,6 +280,7 @@ fn shard_family(scope: &StoreShardScopeV1) -> &'static str {
         StoreShardScopeV1::Profile => "profile",
         StoreShardScopeV1::ProfileMemory => "profile_memory",
         StoreShardScopeV1::ProfileSessions => "profile_sessions",
+        StoreShardScopeV1::RemoteNode { .. } => "remote_node",
         StoreShardScopeV1::Project { .. } => "project",
         StoreShardScopeV1::ProjectSessions { .. } => "project_sessions",
         StoreShardScopeV1::Code { .. } => "code",

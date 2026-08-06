@@ -21,9 +21,10 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use sha2::{Digest, Sha256};
 use tracedecay_store::{
-    BrainId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1, UserProfileId,
-    VerifiedStoreLocatorV1, canonical_store_locator_digest as store_locator_digest,
+    BrainId, BrainNodeId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1,
+    UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest as store_locator_digest,
 };
 
 use super::registry::{
@@ -35,6 +36,7 @@ use crate::storage;
 mod graph;
 
 const PROFILE_DATABASE_FILENAME: &str = "global.db";
+const REMOTE_NODE_DATABASE_FILENAME: &str = "remote.db";
 /// Explicit local authority for one typed profile.
 ///
 /// `profile_root` is a locator supplied by the daemon's profile authority. It
@@ -383,6 +385,12 @@ impl LocalStoreRuntimeResolverV1 {
                     filesystem_safety,
                 )
             }
+            StoreShardScopeV1::RemoteNode { node_id } => self.resolve_remote_node_locator(
+                key,
+                node_id,
+                &canonical_profile_root,
+                filesystem_safety,
+            ),
             StoreShardScopeV1::Project { project_id } => self.resolve_project_locator(
                 key,
                 project_id,
@@ -437,6 +445,35 @@ impl LocalStoreRuntimeResolverV1 {
             canonical_profile_root.to_path_buf(),
             canonical_store_root,
             canonical_path,
+            filesystem_safety,
+        )
+    }
+
+    fn resolve_remote_node_locator(
+        &self,
+        key: &StoreRuntimeKey,
+        node_id: &BrainNodeId,
+        canonical_profile_root: &Path,
+        filesystem_safety: &dyn Fn(&Path) -> FilesystemSafety,
+    ) -> LocalStoreLocatorResult<VerifiedLocalStoreLocatorV1> {
+        let node_digest = hex::encode(Sha256::digest(node_id.as_str().as_bytes()));
+        let canonical_store_root = canonical_or_prospective_directory(
+            &canonical_profile_root
+                .join("remote")
+                .join("nodes")
+                .join(node_digest),
+            canonical_profile_root,
+        )?;
+        let locator_path = canonical_or_prospective_regular_file(
+            &canonical_store_root.join(REMOTE_NODE_DATABASE_FILENAME),
+            &canonical_store_root,
+        )?;
+        verified_locator(
+            key,
+            LocalStoreLocatorKindV1::RemoteNode,
+            canonical_profile_root.to_path_buf(),
+            canonical_store_root,
+            locator_path,
             filesystem_safety,
         )
     }
@@ -523,6 +560,7 @@ impl LocalStoreRuntimeResolverV1 {
             LocalStoreLocatorKindV1::ProfileAuthority
             | LocalStoreLocatorKindV1::ProfileMemory
             | LocalStoreLocatorKindV1::ProfileSessions
+            | LocalStoreLocatorKindV1::RemoteNode
             | LocalStoreLocatorKindV1::Code => {
                 return Err(LocalStoreLocatorUnavailableReasonV1::UnsupportedShardScope);
             }
@@ -639,6 +677,7 @@ pub enum LocalStoreLocatorKindV1 {
     ProfileAuthority,
     ProfileMemory,
     ProfileSessions,
+    RemoteNode,
     Project,
     ProjectSessions,
     Code,
@@ -1319,7 +1358,9 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
-    use tracedecay_store::{BrainId, ProjectId, StoreIncarnationV1, StoreShardIdV1, UserProfileId};
+    use tracedecay_store::{
+        BrainId, BrainNodeId, ProjectId, StoreIncarnationV1, StoreShardIdV1, UserProfileId,
+    };
 
     use super::*;
 
@@ -1578,6 +1619,30 @@ mod tests {
             LocalStoreLocatorKindV1::ProfileSessions
         );
 
+        let node_id = id::<BrainNodeId>("node.local-resolver");
+        let remote_node_key = StoreRuntimeKey::new(
+            StoreShardIdV1::remote_node(
+                id::<BrainId>("brain.local-resolver"),
+                id::<UserProfileId>("profile.local-resolver"),
+                node_id.clone(),
+            ),
+            incarnation(),
+        );
+        let remote_node = resolved(resolve_as_local(&resolver, &remote_node_key));
+        assert_eq!(
+            remote_node.locator().path(),
+            fixture
+                .profile_root
+                .join("remote")
+                .join("nodes")
+                .join(hex::encode(Sha256::digest(node_id.as_str().as_bytes())))
+                .join(REMOTE_NODE_DATABASE_FILENAME)
+        );
+        assert_eq!(
+            remote_node.metadata().kind,
+            LocalStoreLocatorKindV1::RemoteNode
+        );
+
         let sessions_key = StoreRuntimeKey::new(
             StoreShardIdV1::project_sessions(
                 id::<BrainId>("brain.local-resolver"),
@@ -1603,6 +1668,7 @@ mod tests {
             !profile.locator().path().exists()
                 && !profile_memory.locator().path().exists()
                 && !profile_sessions.locator().path().exists()
+                && !remote_node.locator().path().exists()
                 && !sessions.locator().path().exists(),
             "resolution must not create or read live database files"
         );
