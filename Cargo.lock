@@ -6248,6 +6248,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-global-db",
+ "tracedecay-graph-db",
  "tracedecay-hooks",
  "tracedecay-host-integration",
  "tracedecay-lsp",
