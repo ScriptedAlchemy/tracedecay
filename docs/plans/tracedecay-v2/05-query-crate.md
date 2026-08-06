@@ -52,7 +52,7 @@ Every product surface can run the same bounded query use case and receive determ
 ## Owns
 
 - Shared query primitives: explicit scope, page request, opaque cursor, cost budget, cancellation, frozen watermark, coverage, timing, and safe explanation metadata.
-- Shared renderer- and transport-neutral `MeasurementEnvelope` value
+- Shared renderer- and transport-neutral `ObservabilityEnvelopeV1` value
   primitives: descriptor and revision, entity occurrence, raw value and unit,
   numerator and denominator, eligible/covered/unknown/excluded counts,
   coverage state, uncertainty kind, cohort identity, optional normalization,
