@@ -1,5 +1,7 @@
 //! Database-backed authority for append-only facts, evidence, and provenance.
 
+use std::sync::Arc;
+
 use crate::db::Database;
 
 use tracedecay_domain::{
@@ -91,18 +93,58 @@ use primitives::OwnerKey;
 /// transactions are delegated to the retained [`Database`] authority.
 pub struct DatabaseFactStore<'a> {
     db: &'a Database,
+    write_control: Option<FactWriteControl>,
+}
+
+/// Transport-neutral arbitration for one externally controlled fact write.
+#[derive(Clone)]
+pub struct FactWriteControl {
+    interrupted: Arc<dyn Fn() -> bool + Send + Sync>,
+    try_begin_commit: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl FactWriteControl {
+    pub fn new(
+        interrupted: Arc<dyn Fn() -> bool + Send + Sync>,
+        try_begin_commit: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Self {
+        Self {
+            interrupted,
+            try_begin_commit,
+        }
+    }
+
+    fn interrupted(&self) -> bool {
+        (self.interrupted)()
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        (self.try_begin_commit)()
+    }
 }
 
 impl<'a> DatabaseFactStore<'a> {
     pub const fn new(db: &'a Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            write_control: None,
+        }
+    }
+
+    pub fn new_controlled(db: &'a Database, write_control: FactWriteControl) -> Self {
+        Self {
+            db,
+            write_control: Some(write_control),
+        }
     }
 }
 
 impl FactStore for DatabaseFactStore<'_> {
     async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
         match runtime::retained_fact_runtime(self.db)? {
-            Some(runtime) => runtime::commit_fact(self.db, runtime, batch).await,
+            Some(runtime) => {
+                runtime::commit_fact(self.db, runtime, batch, self.write_control.clone()).await
+            }
             None => self.commit_batch(&batch).await,
         }
     }

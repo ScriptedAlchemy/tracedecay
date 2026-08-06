@@ -260,6 +260,16 @@ impl DatabaseFactStore<'_> {
             Box<dyn Future<Output = FactCompatibilityResult<T>> + Send + 'tx>,
         >,
     ) -> FactCompatibilityResult<T> {
+        if self
+            .write_control
+            .as_ref()
+            .is_some_and(super::FactWriteControl::interrupted)
+        {
+            return Err(FactCompatibilityStoreError::Store(storage_message(
+                COMPATIBILITY_WRITE_OPERATION,
+                "fact write was interrupted before transaction admission",
+            )));
+        }
         let transaction = self
             .db
             .begin_memory_write_transaction(COMPATIBILITY_WRITE_OPERATION)
@@ -273,6 +283,24 @@ impl DatabaseFactStore<'_> {
         let result = work(&transaction).await;
         match result {
             Ok(value) => {
+                if self
+                    .write_control
+                    .as_ref()
+                    .is_some_and(|control| !control.try_begin_commit())
+                {
+                    return match transaction.rollback().await {
+                        Ok(()) => Err(FactCompatibilityStoreError::Store(storage_message(
+                            COMPATIBILITY_WRITE_OPERATION,
+                            "fact write was interrupted before durable commit",
+                        ))),
+                        Err(rollback) => Err(FactCompatibilityStoreError::Store(storage_error(
+                            COMPATIBILITY_WRITE_OPERATION,
+                            std::io::Error::other(format!(
+                                "fact write was interrupted before durable commit; transaction rollback also failed: {rollback}"
+                            )),
+                        ))),
+                    };
+                }
                 transaction.commit().await.map_err(|error| {
                     FactCompatibilityStoreError::Store(storage_error(
                         COMPATIBILITY_WRITE_OPERATION,

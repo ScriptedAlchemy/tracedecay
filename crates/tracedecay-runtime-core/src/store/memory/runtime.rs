@@ -17,7 +17,7 @@ use tracedecay_store::{
     VerifiedStoreLocatorV1,
 };
 
-use super::Database;
+use super::{Database, FactWriteControl};
 // The store-runtime registry moved into this kernel, so the fact store reaches
 // the concrete handle directly rather than through an erased port.
 use crate::store_runtime::registry::StoreRuntimeHandle;
@@ -127,6 +127,7 @@ pub(super) async fn commit_fact(
     db: &Database,
     runtime: &StoreRuntimeHandle,
     batch: FactWriteBatch,
+    write_control: Option<FactWriteControl>,
 ) -> FactStoreResult<FactCommitOutcome> {
     validate_owner_binding(runtime.binding(), batch.owner(), COMMIT_OPERATION)?;
     let command = fact_command(&batch);
@@ -150,7 +151,10 @@ pub(super) async fn commit_fact(
         digest.as_str(),
         &idempotency_key,
     )?;
-    let probe = Arc::new(RuntimeFactProbe::from_control(request.control()));
+    let probe = Arc::new(RuntimeFactProbe::from_control(
+        request.control(),
+        write_control,
+    ));
     let write_authority = db
         .write_authority()
         .map_err(|error| runtime_error(COMMIT_OPERATION, error.to_string()))?;
@@ -274,7 +278,7 @@ fn dispatch_fact_read(
     operation_name: &'static str,
 ) -> FactStoreResult<FactReadResultV1> {
     let request = build_read_request(runtime.binding(), operation, operation_name)?;
-    let probe = RuntimeFactProbe::from_control(request.control());
+    let probe = RuntimeFactProbe::from_control(request.control(), None);
     let outcome = runtime
         .dispatch_read(request, &probe)
         .map_err(|error| runtime_error(operation_name, format!("{error:?}")))?;
@@ -448,13 +452,18 @@ fn runtime_now() -> UtcMicros {
 struct RuntimeFactProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
+    write_control: Option<FactWriteControl>,
 }
 
 impl RuntimeFactProbe {
-    fn from_control(control: &RuntimeRequestControlV1) -> Self {
+    fn from_control(
+        control: &RuntimeRequestControlV1,
+        write_control: Option<FactWriteControl>,
+    ) -> Self {
         Self {
             cancellation: control.cancellation.clone(),
             deadline: control.deadline.clone(),
+            write_control,
         }
     }
 }
@@ -469,7 +478,21 @@ impl RuntimeRequestProbeV1 for RuntimeFactProbe {
     }
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        None
+        self.write_control
+            .as_ref()
+            .is_some_and(FactWriteControl::interrupted)
+            .then_some(RuntimeInterruptionV1::Cancelled)
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.write_control.as_ref().map_or_else(
+            || self.interruption().is_none(),
+            FactWriteControl::try_begin_commit,
+        )
+    }
+
+    fn requires_isolated_commit(&self) -> bool {
+        self.write_control.is_some()
     }
 }
 

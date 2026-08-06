@@ -295,7 +295,7 @@ impl McpServer {
         // mutex leaves every in-flight request uncancelled and the shutdown
         // drain waits forever.
         let cancellations =
-            crate::mcp::server::requests::recover_lock(&self.application_surface_cancellations);
+            crate::mcp::server::requests::recover_lock(self.dispatch_authority.cancellations());
         let now = crate::mcp::server::requests::mcp_now_micros();
         for cancellation in cancellations.values() {
             cancellation.cancel(now);

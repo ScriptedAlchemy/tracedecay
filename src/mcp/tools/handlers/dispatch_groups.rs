@@ -69,48 +69,6 @@ pub(crate) fn tool_dispatch_ceiling(tool_name: &str) -> std::time::Duration {
     }
 }
 
-/// The bound one tool call dispatches under: the admission-carried client
-/// deadline when it is present and shorter, otherwise the tool's own ceiling.
-///
-/// `None` means the carried deadline has already elapsed, which must be
-/// rejected rather than dispatched — the same rule the git and memory wraps
-/// apply to a non-positive budget.
-pub(crate) fn tool_dispatch_budget(
-    tool_name: &str,
-    deadline: Option<&tracedecay_application::Deadline>,
-) -> Option<std::time::Duration> {
-    let ceiling = tool_dispatch_ceiling(tool_name);
-    match deadline {
-        // A carried deadline is preferred whenever it is shorter; the ceiling
-        // still clamps a pathologically distant one so it can never be a way
-        // out of the bound.
-        Some(deadline) => crate::daemon_client::deadline_remaining(deadline)
-            .map(|remaining| remaining.min(ceiling)),
-        None => Some(ceiling),
-    }
-}
-
-/// The typed, retryable problem a tool call reports when it exhausts the
-/// universal dispatch ceiling.
-///
-/// Mirrors the shape `memory_deadline_error` established (stable `reason_code`,
-/// `retryable`, human `detail`) so the MCP boundary surfaces a structured error
-/// instead of holding the transport open. Retry is safe: the ceiling is a
-/// backstop over work that was already admitted, never a commit signal.
-pub(crate) fn tool_dispatch_deadline_error(
-    tool_name: &str,
-    budget: std::time::Duration,
-) -> TraceDecayError {
-    TraceDecayError::project_route(
-        "tool_dispatch_deadline_exceeded",
-        true,
-        format!(
-            "tool '{tool_name}' exceeded its {}s dispatch ceiling and was cancelled",
-            budget.as_secs()
-        ),
-    )
-}
-
 /// Dispatch code-graph navigation and lookup tools (`tracedecay_search`,
 /// `tracedecay_callers`, ...). Returns `None` when `tool_name` belongs to a
 /// different domain so the caller can try the next dispatch group.
@@ -369,45 +327,19 @@ pub(super) async fn dispatch_git_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: Value,
-    options: ToolCallRegistryOptions<'_>,
+    _options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    // Every git handler below performs unbounded gix work — tree walks,
-    // revwalks, diffs, the branch-add index build — so a diverged or
-    // pathological ref would hang the request. The admission layer carries a
-    // dispatch deadline for exactly this (thirty seconds by default, see
-    // `dispatch_deadline_horizon_micros`); enforcing it here bounds every
-    // handler uniformly and reports exhaustion as the same typed semantic
-    // error the other git failures surface.
-    let carried_deadline = options.application_deadline.as_ref();
-    let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
-
-    let handler = async {
-        match tool_name {
-            "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
-            "tracedecay_affected" => git::handle_affected(cg, args).await,
-            "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
-            "tracedecay_changelog" => git::handle_changelog(cg, args).await,
-            "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
-            "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
-            "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
-            "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
-            "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
-            _ => Err(unknown_tool_error(tool_name)),
-        }
-    };
-
-    match (carried_deadline.is_some(), remaining) {
-        (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
-            Ok(result) => result,
-            Err(_elapsed) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
-        },
-        // `deadline_remaining` yields `None` for a non-positive budget, so a
-        // carried deadline that already elapsed must be rejected rather than
-        // dispatched unbounded.
-        (true, None) => Ok(git::git_dispatch_deadline_result(cg, tool_name)),
-        // Standalone / non-admission callers carry no deadline and stay
-        // unbounded.
-        (false, None) => handler.await,
+    match tool_name {
+        "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
+        "tracedecay_affected" => git::handle_affected(cg, args).await,
+        "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
+        "tracedecay_changelog" => git::handle_changelog(cg, args).await,
+        "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
+        "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
+        "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
+        "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
+        "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
+        _ => Err(unknown_tool_error(tool_name)),
     }
 }
 
@@ -511,16 +443,7 @@ pub(super) async fn dispatch_retained_application_tools(
     .await
 }
 
-/// Dispatch a retained memory operation (add/search/feedback/status) under one
-/// central deadline.
-///
-/// Mirrors [`dispatch_git_tools`]: every memory handler performs unbounded
-/// store-touching work — the add-path holographic encode, a serialized write
-/// transaction, an optional digest refresh — so an admission-carried client
-/// deadline bounds them all uniformly here, degrading a stalled store to a
-/// typed, retryable problem instead of pinning the MCP transport open. A
-/// standalone caller that carries no deadline stays unbounded; a carried
-/// deadline that has already elapsed is rejected rather than dispatched.
+/// Routes memory operations under the outer retained dispatch authority.
 pub(super) async fn dispatch_memory_operation(
     operation: RetainedSurfaceOperation,
     cg: &TraceDecay,
@@ -528,45 +451,29 @@ pub(super) async fn dispatch_memory_operation(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     let global_db = options.global_db.map(std::sync::Arc::as_ref);
-    let operation_label = match operation {
-        RetainedSurfaceOperation::FactStore => "fact_store",
-        RetainedSurfaceOperation::FactFeedback => "fact_feedback",
-        RetainedSurfaceOperation::MemoryStatus => "memory_status",
-        _ => unreachable!("dispatch_memory_operation handles memory operations only"),
-    };
-
-    let handler = async {
-        match operation {
-            RetainedSurfaceOperation::FactStore => {
-                memory::handle_fact_store(cg, args, global_db).await
-            }
-            RetainedSurfaceOperation::FactFeedback => {
-                memory::handle_fact_feedback(cg, args, global_db).await
-            }
-            RetainedSurfaceOperation::MemoryStatus => {
-                memory::handle_memory_status(cg, args, global_db).await
-            }
-            _ => unreachable!("dispatch_memory_operation handles memory operations only"),
+    match operation {
+        RetainedSurfaceOperation::FactStore => {
+            memory::handle_fact_store(
+                cg,
+                args,
+                global_db,
+                options.application_cancellation.clone(),
+            )
+            .await
         }
-    };
-
-    let carried_deadline = options.application_deadline.as_ref();
-    let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
-    match (carried_deadline.is_some(), remaining) {
-        (_, Some(remaining)) => match tokio::time::timeout(remaining, handler).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(memory::memory_deadline_error(operation_label, remaining)),
-        },
-        // `deadline_remaining` yields `None` for a non-positive budget, so a
-        // carried deadline that already elapsed must be rejected rather than
-        // dispatched unbounded.
-        (true, None) => Err(memory::memory_deadline_error(
-            operation_label,
-            std::time::Duration::ZERO,
-        )),
-        // Standalone / non-admission callers carry no deadline and stay
-        // unbounded.
-        (false, None) => handler.await,
+        RetainedSurfaceOperation::FactFeedback => {
+            memory::handle_fact_feedback(
+                cg,
+                args,
+                global_db,
+                options.application_cancellation.clone(),
+            )
+            .await
+        }
+        RetainedSurfaceOperation::MemoryStatus => {
+            memory::handle_memory_status(cg, args, global_db).await
+        }
+        _ => unreachable!("dispatch_memory_operation handles memory operations only"),
     }
 }
 
