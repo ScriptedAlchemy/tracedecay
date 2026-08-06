@@ -17,18 +17,23 @@ use tracedecay_tool_catalog::{
 
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, ReplanDependenciesCommand, ReviewProposalRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    CreateWorkCommand, GenerateProposalRequest, GeneratedWorkProposal, ReplanDependenciesCommand,
+    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 9] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 10] = [
     (
         "snapshot",
         "capability.work.snapshot",
         "use-case.work.snapshot",
     ),
     ("delta", "capability.work.delta", "use-case.work.delta"),
+    (
+        "generate_proposal",
+        "capability.work.generate_proposal",
+        "use-case.work.generate_proposal",
+    ),
     ("create", "capability.work.create", "use-case.work.create"),
     (
         "replan_dependencies",
@@ -73,6 +78,11 @@ pub fn work_executable_binding_registry()
         available::<WorkProjectionDeltaRequestV1, WorkProjectionDeltaV1>(
             "delta",
             "/application/work/delta",
+            EffectClass::Read,
+        )?,
+        available::<GenerateProposalRequest, GeneratedWorkProposal>(
+            "generate_proposal",
+            "/application/work/generate-proposal",
             EffectClass::Read,
         )?,
         available::<CreateWorkCommand, WorkProjection>(
@@ -320,5 +330,4 @@ mod tests {
             "WorkProjectionDeltaV1"
         );
     }
-
 }

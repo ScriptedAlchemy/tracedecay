@@ -26,9 +26,9 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationProblem,
-    AttachRuntimeEvidenceCommand, CreateWorkCommand, ReplanDependenciesCommand, RequestId,
-    RetryDirective, ReviewProposalRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1,
+    AttachRuntimeEvidenceCommand, CreateWorkCommand, GenerateProposalRequest,
+    GeneratedWorkProposal, ReplanDependenciesCommand, RequestId, RetryDirective,
+    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 
@@ -46,6 +46,7 @@ fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
 pub enum WorkOperation {
     Snapshot,
     Delta,
+    GenerateProposal,
     Create,
     ReplanDependencies,
     ReviewProposal,
@@ -104,6 +105,7 @@ macro_rules! work_operations {
 work_operations! {
     Snapshot: "snapshot", "snapshot";
     Delta: "delta", "delta";
+    GenerateProposal: "generate_proposal", "generate-proposal";
     Create: "create", "create";
     ReplanDependencies: "replan_dependencies", "replan-dependencies";
     ReviewProposal: "review_proposal", "review-proposal";
@@ -115,9 +117,10 @@ work_operations! {
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Snapshot,
         Self::Delta,
+        Self::GenerateProposal,
         Self::Create,
         Self::ReplanDependencies,
         Self::ReviewProposal,
@@ -134,7 +137,7 @@ impl WorkOperation {
 
     /// Whether the operation reads without producing a durable effect.
     pub const fn is_read_only(self) -> bool {
-        matches!(self, Self::Snapshot | Self::Delta)
+        matches!(self, Self::Snapshot | Self::Delta | Self::GenerateProposal)
     }
 
     /// The generated name of the schema this operation's request satisfies.
@@ -142,6 +145,7 @@ impl WorkOperation {
         match self {
             Self::Snapshot => schema_name::<WorkProjectionSnapshotRequestV1>(),
             Self::Delta => schema_name::<WorkProjectionDeltaRequestV1>(),
+            Self::GenerateProposal => schema_name::<GenerateProposalRequest>(),
             Self::Create => schema_name::<CreateWorkCommand>(),
             Self::ReplanDependencies => schema_name::<ReplanDependenciesCommand>(),
             Self::ReviewProposal => schema_name::<ReviewProposalRequestV1>(),
@@ -157,6 +161,7 @@ impl WorkOperation {
         match self {
             Self::Snapshot => schema_name::<WorkProjectionSnapshotV1>(),
             Self::Delta => schema_name::<WorkProjectionDeltaV1>(),
+            Self::GenerateProposal => schema_name::<GeneratedWorkProposal>(),
             Self::Create
             | Self::ReplanDependencies
             | Self::ReviewProposal
@@ -349,14 +354,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_projection_reads_are_read_only() {
+    fn only_the_projection_reads_and_proposal_generation_are_read_only() {
         let read_only = WorkOperation::ALL
             .into_iter()
             .filter(|operation| operation.is_read_only())
             .collect::<Vec<_>>();
         assert_eq!(
             read_only,
-            vec![WorkOperation::Snapshot, WorkOperation::Delta]
+            vec![
+                WorkOperation::Snapshot,
+                WorkOperation::Delta,
+                WorkOperation::GenerateProposal
+            ]
         );
     }
 }

@@ -5,10 +5,11 @@ use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    AuthorizedScopeSet, CostsReadModelV1, CreateWorkCommand, MultiRootExecuteRequestV1,
-    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
-    ObservatoryReadModelV1, ReplanDependenciesCommand, ReviewProposalCommand,
-    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    AuthorizedScopeSet, CostsReadModelV1, CreateWorkCommand, GenerateProposalRequest,
+    GeneratedWorkProposal, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, ObservatoryReadModelV1,
+    ReplanDependenciesCommand, ReviewProposalCommand, ReviewProposalRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 
@@ -95,6 +96,8 @@ struct DashboardContractCatalogV1 {
     work_projection_snapshot: WorkProjectionSnapshotV1,
     work_projection_delta_request: WorkProjectionDeltaRequestV1,
     work_projection_delta: WorkProjectionDeltaV1,
+    work_generate_proposal_request: GenerateProposalRequest,
+    work_generated_proposal: GeneratedWorkProposal,
     work_create_command: CreateWorkCommand,
     work_replan_dependencies_command: ReplanDependenciesCommand,
     work_review_proposal_request: ReviewProposalRequestV1,
@@ -200,6 +203,8 @@ mod tests {
                 "WorkProjectionDeltaRequestV1",
             ),
             ("work_projection_delta", "WorkProjectionDeltaV1"),
+            ("work_generate_proposal_request", "GenerateProposalRequest"),
+            ("work_generated_proposal", "GeneratedWorkProposal"),
             ("work_create_command", "CreateWorkCommand"),
             (
                 "work_replan_dependencies_command",
