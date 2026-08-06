@@ -52,6 +52,7 @@ pub use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
 use self::sql::TemporalSqlRead;
+use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content_with_checkpoint;
 
 pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
@@ -97,7 +98,7 @@ impl RegisteredGlobalDb {
     }
 }
 
-/// Transitional PR8 rendering adapter over one registry-owned session shard.
+/// Registry-backed rendering adapter over one session shard.
 pub struct RegisteredGlobalDbSessionTemporalExecution<'db> {
     db: &'db RegisteredGlobalDb,
 }
@@ -199,6 +200,97 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         registered_lcm_render::expand(&snapshot, request, canonical_content)
             .await
             .map_err(map_lcm_error)
+    }
+
+    pub async fn hydrate_lcm_external_payload(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        anchor_id: &RetrievalAnchorId,
+        provider: &str,
+        session_id: &SessionId,
+        payload_ref: &str,
+        max_bytes: usize,
+    ) -> Result<String, SessionTemporalExecutionError> {
+        let read_snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let resolution = hydration::resolve_external_target(
+            &TemporalSqlRead::registered(&read_snapshot),
+            snapshot,
+            anchor_id,
+            provider,
+            session_id.as_str(),
+            payload_ref,
+        )
+        .await
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let descriptor = match resolution {
+            hydration::HydrationResolution::Available(descriptor) => descriptor,
+            hydration::HydrationResolution::Unavailable(state) => {
+                return Err(match state {
+                    HydrationStateV1::Locked => SessionTemporalExecutionError::Locked,
+                    HydrationStateV1::Redacted => SessionTemporalExecutionError::Redacted,
+                    HydrationStateV1::Deleted | HydrationStateV1::RetentionExpired => {
+                        SessionTemporalExecutionError::Deleted
+                    }
+                    HydrationStateV1::Unauthorized => SessionTemporalExecutionError::Denied,
+                    HydrationStateV1::Available
+                    | HydrationStateV1::RetainedButUnavailable
+                    | HydrationStateV1::UnverifiableLegacy => {
+                        SessionTemporalExecutionError::Unavailable
+                    }
+                });
+            }
+        };
+        if descriptor.byte_count > max_bytes {
+            return Err(SessionTemporalExecutionError::BudgetExhausted);
+        }
+        let hydration::PayloadSource::External {
+            provider: descriptor_provider,
+            session_id: descriptor_session,
+            payload_ref: descriptor_ref,
+            char_count,
+        } = descriptor.source
+        else {
+            return Err(SessionTemporalExecutionError::Unavailable);
+        };
+        if descriptor_provider != provider
+            || descriptor_session != session_id.as_str()
+            || descriptor_ref != payload_ref
+        {
+            return Err(SessionTemporalExecutionError::Denied);
+        }
+        let storage_root = self
+            .db
+            .db_path()
+            .parent()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let control = snapshot.request().execution_control();
+        let mut checkpoint = || {
+            control.checkpoint().map_err(|error| match error {
+                tracedecay_temporal_query::ports::TemporalPortError::Cancelled => {
+                    LcmError::Cancelled
+                }
+                tracedecay_temporal_query::ports::TemporalPortError::DeadlineExceeded => {
+                    LcmError::DeadlineExceeded
+                }
+                tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
+                    LcmError::BudgetExhausted
+                }
+                _ => LcmError::Db("temporal verification control failed".to_string()),
+            })
+        };
+        read_verified_payload_content_with_checkpoint(
+            storage_root,
+            &descriptor_ref,
+            &descriptor.content_hash,
+            descriptor.byte_count,
+            char_count,
+            &mut checkpoint,
+        )
+        .map_err(map_lcm_error)
     }
 
     pub async fn hydrate_lcm_summary_sources(
@@ -767,6 +859,10 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
         LcmError::PayloadNotOwnedBySession | LcmError::SummarySourceNotOwnedBySession => {
             SessionTemporalExecutionError::Denied
         }
+        LcmError::Cancelled | LcmError::DeadlineExceeded => {
+            SessionTemporalExecutionError::Cancelled
+        }
+        LcmError::BudgetExhausted => SessionTemporalExecutionError::BudgetExhausted,
         _ => SessionTemporalExecutionError::Unavailable,
     }
 }

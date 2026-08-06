@@ -2,7 +2,7 @@ use std::future::Future;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{EntityKind, RetrievalAnchorRecord, RetrievalAnchorTargetV2};
-use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
 use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_sessions::runtime::lcm::{
@@ -476,8 +476,8 @@ async fn verify_receipt_row(
     Ok(())
 }
 
-async fn load_and_verify_receipt(
-    conn: &impl Executor,
+pub(in crate::session_temporal) async fn load_and_verify_receipt(
+    conn: &(impl QueryExecutor + ?Sized),
     summary_id: &str,
     manifest: &CanonicalPublicationManifest,
     created_at: i64,

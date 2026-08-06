@@ -10,7 +10,9 @@ use std::time::Duration;
 #[cfg(feature = "test-transport")]
 use std::time::SystemTime;
 use tempfile::TempDir;
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
+};
 use tracedecay::mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
 use tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication;
@@ -2866,6 +2868,11 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         })
         .await
         .expect("register test graph scope");
+    let payload_storage_root = cg
+        .db_path()
+        .parent()
+        .expect("project database storage root")
+        .join("lcm-payloads");
     let server = real_mcp_server(cg).await;
 
     let raw_result = handle_real_server_tool_call(
@@ -2879,17 +2886,139 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
     )
     .await;
     let raw_payload: Value = serde_json::from_str(extract_real_server_text(&raw_result)).unwrap();
-    assert_eq!(raw_payload["status"], "ok", "{raw_payload}");
+    assert_eq!(raw_payload["status"], "partial", "{raw_payload}");
+    assert_eq!(raw_payload["omitted"], 1, "{raw_payload}");
+    assert_eq!(
+        raw_payload["retrieval"]["outcome"], "partial",
+        "{raw_payload}"
+    );
+    assert_eq!(
+        raw_payload["expansion"]["content_range"]["truncated"], true,
+        "{raw_payload}"
+    );
     assert_eq!(raw_payload["expansion"]["from_current_session"], false);
     assert!(raw_payload["expansion"]["externalized_note"].is_null());
     let payload_ref = raw_payload["expansion"]["payload_ref"]
         .as_str()
         .expect("cross-session external row should surface payload_ref")
         .to_string();
-    let owner_session = raw_payload["expansion"]["raw_message"]["session_id"]
+    let raw_message = &raw_payload["expansion"]["raw_message"];
+    assert!(raw_message.is_object(), "{raw_payload}");
+    assert_eq!(raw_message["content"], raw_payload["expansion"]["content"]);
+    let raw_metadata_text = raw_message["metadata_json"]
+        .as_str()
+        .expect("external raw-message metadata must be canonical JSON");
+    let raw_metadata: Value =
+        serde_json::from_str(raw_metadata_text).expect("canonical external raw-message metadata");
+    let owner_session = raw_message["session_id"]
         .as_str()
         .expect("owner session id should be surfaced")
         .to_string();
+    let original_manifest = db
+        .lcm_external_payload_manifest_for_test(&payload_ref)
+        .await
+        .expect("read external payload manifest")
+        .expect("external payload manifest");
+    let manifest: Value = serde_json::from_str(&original_manifest.manifest_json)
+        .expect("canonical external payload manifest");
+    let payload_metadata: Value = serde_json::from_str(
+        manifest["metadata"]
+            .as_str()
+            .expect("external payload manifest metadata"),
+    )
+    .expect("canonical external payload metadata");
+    let raw_metadata_object = raw_metadata
+        .as_object()
+        .expect("external raw-message metadata object");
+    for admitted in [
+        "external_payload",
+        "payload_ref",
+        "kind",
+        "byte_count",
+        "char_count",
+        "sha256",
+        "ingest_protection",
+    ] {
+        assert!(
+            raw_metadata_object.contains_key(admitted),
+            "missing admitted `{admitted}` metadata: {raw_metadata}"
+        );
+    }
+    assert_eq!(
+        raw_metadata_object.len(),
+        7,
+        "provider/private metadata must not escape the public expansion: {raw_metadata}"
+    );
+    assert_eq!(raw_metadata["external_payload"], true);
+    assert_eq!(raw_metadata["payload_ref"], payload_ref);
+    assert_eq!(raw_metadata["kind"], manifest["kind"]);
+    assert_eq!(raw_metadata["byte_count"], manifest["byte_count"]);
+    assert_eq!(raw_metadata["char_count"], manifest["char_count"]);
+    assert_eq!(raw_metadata["sha256"], original_manifest.payload_digest);
+    assert_eq!(
+        raw_metadata["ingest_protection"], payload_metadata["ingest_protection"],
+        "the public safety receipt must be the manifest-bound receipt"
+    );
+    let ingest_protection = raw_metadata["ingest_protection"]
+        .as_object()
+        .expect("canonical ingest protection metadata");
+    assert_eq!(
+        ingest_protection.len(),
+        1,
+        "fixture must expose only its safety receipt: {raw_metadata}"
+    );
+    let receipt = &raw_metadata["ingest_protection"]["sanitization_receipt"];
+    assert_eq!(
+        receipt.as_object().map(serde_json::Map::len),
+        Some(4),
+        "receipt must expose only reference, disposition, sensitivity, and payload binding"
+    );
+    assert_eq!(receipt["disposition"], "accepted");
+    assert_eq!(receipt["sensitivity"], "non_sensitive");
+    assert_eq!(
+        receipt["receipt"].as_object().map(serde_json::Map::len),
+        Some(2),
+        "receipt reference must remain opaque"
+    );
+    assert_eq!(
+        receipt["receipt"]["sanitizer_version"],
+        "privacy.lcm-payload.v1"
+    );
+    assert!(
+        receipt["receipt"]["receipt_id"]
+            .as_str()
+            .is_some_and(|receipt_id| receipt_id.starts_with("privacy.lcm-payload.v1.")),
+        "receipt identity must remain opaque and version-bound: {receipt}"
+    );
+    assert_eq!(
+        receipt["payload"].as_object().map(serde_json::Map::len),
+        Some(2),
+        "payload binding must expose only digest and byte length"
+    );
+    assert!(
+        receipt["payload"]["digest"].as_str().is_some_and(|digest| {
+            digest.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }),
+        "payload binding must remain a tagged opaque digest: {receipt}"
+    );
+    assert_eq!(
+        receipt["payload"]["byte_len"].as_u64(),
+        manifest["byte_count"]
+            .as_u64()
+            .and_then(|byte_count| byte_count.checked_add(2)),
+        "the canonical JSON string binding includes its two quote bytes"
+    );
+    assert!(
+        !raw_metadata_text.contains("data:image/png;base64"),
+        "metadata must not copy external payload content"
+    );
+    let payload_path = payload_storage_root.join(&payload_ref);
+    assert!(
+        payload_path.is_file(),
+        "external payload fixture is missing"
+    );
 
     let denied_payload = handle_real_server_tool_call(
         &server,
@@ -2912,13 +3041,19 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         json!({
             "provider": "cursor",
             "session_id": owner_session,
-            "target": {"kind": "external_payload", "payload_ref": payload_ref},
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
             "content_limit": 80
         }),
     )
     .await;
     let payload: Value = serde_json::from_str(extract_real_server_text(&payload_result)).unwrap();
-    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_eq!(payload["status"], "partial", "{payload}");
+    assert_eq!(payload["omitted"], 1, "{payload}");
+    assert_eq!(payload["retrieval"]["outcome"], "partial", "{payload}");
+    assert_eq!(
+        payload["expansion"]["content_range"]["truncated"], true,
+        "{payload}"
+    );
     assert_eq!(payload["expansion"]["kind"], "external_payload");
     assert!(
         payload["expansion"]["content"]
@@ -2926,6 +3061,144 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
             .expect("external payload content")
             .starts_with("data:image/png;base64,")
     );
+
+    let wrong_provider_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "claude",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let wrong_provider: Value =
+        serde_json::from_str(extract_real_server_text(&wrong_provider_result)).unwrap();
+    assert_eq!(wrong_provider["status"], "deleted", "{wrong_provider}");
+
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplaceOccurrenceProvider {
+        session_id: owner_session.clone(),
+        message_id: "origin-external-message".to_string(),
+        source_provider: "claude".to_string(),
+    })
+    .await
+    .expect("tamper occurrence provider binding");
+    let wrong_occurrence_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let wrong_occurrence: Value =
+        serde_json::from_str(extract_real_server_text(&wrong_occurrence_result)).unwrap();
+    assert_eq!(wrong_occurrence["status"], "denied", "{wrong_occurrence}");
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplaceOccurrenceProvider {
+        session_id: owner_session.clone(),
+        message_id: "origin-external-message".to_string(),
+        source_provider: "cursor".to_string(),
+    })
+    .await
+    .expect("restore occurrence provider binding");
+
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplacePublicationReceipt {
+        receipt_id: original_manifest.receipt_id.clone(),
+        sanitizer_version: "tampered-sanitizer".to_string(),
+        payload_digest: "tampered-summary-digest".to_string(),
+        receipt_json: r#"{"summary_id":"tampered-receipt"}"#.to_string(),
+    })
+    .await
+    .expect("tamper frozen publication receipt");
+    let tampered_receipt_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let tampered_receipt: Value =
+        serde_json::from_str(extract_real_server_text(&tampered_receipt_result)).unwrap();
+    assert_eq!(
+        tampered_receipt["status"], "unavailable",
+        "{tampered_receipt}"
+    );
+    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::ReplacePublicationReceipt {
+        receipt_id: original_manifest.receipt_id.clone(),
+        sanitizer_version: original_manifest.receipt_sanitizer_version.clone(),
+        payload_digest: original_manifest.receipt_payload_digest.clone(),
+        receipt_json: original_manifest.receipt_json.clone(),
+    })
+    .await
+    .expect("restore frozen publication receipt");
+
+    let mut wrong_session_manifest = original_manifest.clone();
+    wrong_session_manifest.session_id = "wrong-session".to_string();
+    db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &wrong_session_manifest)
+        .await
+        .expect("tamper external payload session");
+    let wrong_session_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let wrong_session: Value =
+        serde_json::from_str(extract_real_server_text(&wrong_session_result)).unwrap();
+    assert_eq!(wrong_session["status"], "unavailable", "{wrong_session}");
+
+    db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &original_manifest)
+        .await
+        .expect("restore external payload session");
+    let mut tampered_manifest = original_manifest.clone();
+    tampered_manifest.payload_digest = "tampered-publication-digest".to_string();
+    db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &tampered_manifest)
+        .await
+        .expect("tamper external payload digest");
+    let tampered_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref.clone()},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let tampered: Value = serde_json::from_str(extract_real_server_text(&tampered_result)).unwrap();
+    assert_eq!(tampered["status"], "unavailable", "{tampered}");
+
+    db.replace_lcm_external_payload_manifest_for_test(&payload_ref, &original_manifest)
+        .await
+        .expect("restore external payload manifest");
+    std::fs::remove_file(&payload_path).expect("remove external payload fixture");
+    let missing_result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand",
+        json!({
+            "provider": "cursor",
+            "session_id": owner_session,
+            "target": {"kind": "external_payload", "payload_ref": payload_ref},
+            "content_limit": 80
+        }),
+    )
+    .await;
+    let missing: Value = serde_json::from_str(extract_real_server_text(&missing_result)).unwrap();
+    assert_eq!(missing["status"], "deleted", "{missing}");
     server.shutdown().await;
 }
 

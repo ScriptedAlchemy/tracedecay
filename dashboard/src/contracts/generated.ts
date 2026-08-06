@@ -407,7 +407,7 @@ export type DashboardCoverageV1 = z.infer<typeof DashboardCoverageV1Schema>;
 /** The normative dashboard domain-state union.
 
 The first sixteen variants are the plan's exact `DashboardDomainState`
-discriminated union. [`Self::Unsupported`] is the PR14 backend-gap binding
+discriminated union. [`Self::Unsupported`] is the backend-gap binding
 state: the read model's HTTP surface exists, but its live producer/source is
 not yet wired server-side. It is never healthy or empty — the frontend
 renders a distinct "not yet available" state — and it is deliberately
@@ -758,7 +758,7 @@ export const DoctorEvidenceRefV1Schema = z.object({
 });
 export type DoctorEvidenceRefV1 = z.infer<typeof DoctorEvidenceRefV1Schema>;
 
-/** Exact Doctor evidence states from Plan 09 §PR14.
+/** Exact Doctor evidence states.
 
 Missing, partial, or unknown truth never becomes healthy or clean. Only
 [`DoctorEvidenceStateV1::HealthyCompleteCoverage`] asserts a healthy result,
@@ -789,8 +789,8 @@ export type DoctorFamilyUnavailableReasonV1 = z.infer<typeof DoctorFamilyUnavail
 
 /** Stable Doctor finding families.
 
-The initial list is derived from Plan 14's observable classes (advisory
-findings from Brain/Explorer/Loom/Code/Observatory) and the legacy
+The initial list covers advisory findings from
+Brain, Explorer, Loom, Code, and Observatory, plus the legacy
 `core_doctor` checks (graph quick-check, temporal/migration health,
 configuration compatibility drift, semantic runtime, session ingest).
 Each family maps to one audited typed input surface. The set is kept small
@@ -841,11 +841,10 @@ export const DoctorReportEntryV1Schema = z.object({
 });
 export type DoctorReportEntryV1 = z.infer<typeof DoctorReportEntryV1Schema>;
 
-/** Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family
-(Plan 38 §7).
+/** Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family.
 
 The storage family never reports a silent overage: each subclass names one
-observable retention/size condition Doctor surfaces over the Plan 26 size
+observable retention/size condition Doctor surfaces over canonical size
 observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
 export const DoctorStorageFindingKindV1Schema = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth")]);
@@ -1212,9 +1211,9 @@ export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
 
 export const LcmCompressionSummaryV1Schema = z.object({
   node_count: z.number().int(),
-  ratio: z.number(),
-  source_token_count: z.number().int(),
-  token_count: z.number().int(),
+  ratio: z.number().nullable(),
+  source_token_count: z.number().int().nullable(),
+  token_count: z.number().int().nullable(),
 });
 export type LcmCompressionSummaryV1 = z.infer<typeof LcmCompressionSummaryV1Schema>;
 
@@ -1252,7 +1251,8 @@ export const LcmMessageV1Schema = z.object({
   store_id: z.number().int().nullable(),
   summary_node_ids: z.array(z.string()),
   timestamp: z.number().int().nullable(),
-  token_estimate: z.number().int().nullable(),
+  token_count: z.number().int().nullable(),
+  token_count_provenance: z.union([z.lazy(() => LcmTokenCountProvenanceV1Schema), z.null()]),
   tool_name: z.string().nullable(),
 });
 export type LcmMessageV1 = z.infer<typeof LcmMessageV1Schema>;
@@ -1311,7 +1311,7 @@ export const LcmSearchPayloadV1Schema = z.object({
   filters: z.lazy(() => LcmSearchFiltersV1Schema),
   limit: z.number().int(),
   matches: z.lazy(() => LcmMatchesV1Schema),
-  offset: z.number().int(),
+  next_cursor: z.string().nullable(),
   path: z.string(),
   query: z.string(),
   storage_scope: z.string(),
@@ -1327,10 +1327,9 @@ export type LcmSearchTotalsV1 = z.infer<typeof LcmSearchTotalsV1Schema>;
 
 export const LcmSessionCountsV1Schema = z.object({
   message_count: z.number().int(),
-  source_token_count: z.number().int(),
+  source_token_count: z.number().int().nullable(),
   summary_node_count: z.number().int(),
-  summary_token_count: z.number().int(),
-  token_estimate_total: z.number().int(),
+  summary_token_count: z.number().int().nullable(),
 });
 export type LcmSessionCountsV1 = z.infer<typeof LcmSessionCountsV1Schema>;
 
@@ -1342,8 +1341,7 @@ export const LcmSessionPayloadV1Schema = z.object({
   has_more_summary_nodes: z.boolean(),
   limit: z.number().int(),
   messages: z.array(z.lazy(() => LcmMessageV1Schema)),
-  offset: z.number().int(),
-  order: z.string(),
+  next_cursor: z.string().nullable(),
   path: z.string(),
   session_id: z.string(),
   storage_scope: z.string(),
@@ -1367,17 +1365,20 @@ export const LcmSummaryNodeV1Schema = z.object({
   recency: z.number().int().nullable(),
   session_id: z.string(),
   snippet: z.string().nullable(),
-  source_token_count: z.number().int(),
+  source_token_count: z.number().int().nullable(),
   source_type: z.string(),
   summary: z.string(),
-  token_count: z.number().int(),
+  token_count: z.number().int().nullable(),
 });
 export type LcmSummaryNodeV1 = z.infer<typeof LcmSummaryNodeV1Schema>;
 
 export const LcmTimelineBucketV1Schema = z.object({
   bucket: z.string(),
   count: z.number().int(),
-  token_estimate: z.number().int(),
+  known_message_count: z.number().int(),
+  token_count: z.number().int().nullable(),
+  token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
+  unknown_message_count: z.number().int(),
 });
 export type LcmTimelineBucketV1 = z.infer<typeof LcmTimelineBucketV1Schema>;
 
@@ -1412,9 +1413,15 @@ export type LcmTimelinePayloadV1 = z.infer<typeof LcmTimelinePayloadV1Schema>;
 
 export const LcmTimelineUndatedV1Schema = z.object({
   count: z.number().int(),
-  token_estimate: z.number().int(),
+  known_message_count: z.number().int(),
+  token_count: z.number().int().nullable(),
+  token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
+  unknown_message_count: z.number().int(),
 });
 export type LcmTimelineUndatedV1 = z.infer<typeof LcmTimelineUndatedV1Schema>;
+
+export const LcmTokenCountProvenanceV1Schema = z.enum(["o200k_approximate", "unavailable"]);
+export type LcmTokenCountProvenanceV1 = z.infer<typeof LcmTokenCountProvenanceV1Schema>;
 
 export const LoomBranchSpanV1Schema = z.object({
   branch: z.string().nullable(),
@@ -2096,7 +2103,7 @@ export type ReplanDependenciesCommand = z.infer<typeof ReplanDependenciesCommand
 export const RepositoryIdSchema = z.string();
 export type RepositoryId = z.infer<typeof RepositoryIdSchema>;
 
-/** The resolved PR11 scope is one exact project/repository/worktree root.
+/** The resolved resolved configuration scope is one exact project/repository/worktree root.
 
 Paths, CWDs, labels, and mutable branch spellings are deliberately absent. */
 export const ResolvedScopeSchema = z.object({
@@ -2118,7 +2125,9 @@ export const ReviewProposalCommandSchema = z.object({
 });
 export type ReviewProposalCommand = z.infer<typeof ReviewProposalCommandSchema>;
 
-/** A proposal review records a non-accepting disposition. */
+/** A proposal review records a non-accepting disposition. Acceptance remains a
+separate command so callers cannot accidentally collapse review into
+approval. */
 export const ReviewProposalDispositionV1Schema = z.enum(["rejected", "superseded"]);
 export type ReviewProposalDispositionV1 = z.infer<typeof ReviewProposalDispositionV1Schema>;
 

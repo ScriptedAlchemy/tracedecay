@@ -4,7 +4,7 @@
     "method": "POST",
     "url": "https://api.github.com/graphql",
     "operation_kind": "query",
-    "operation_name": "TraceDecayPR13ReviewThreads",
+    "operation_name": "TraceDecayGitHubReviewThreads",
     "documentation": "https://docs.github.com/en/graphql/reference/objects#pullrequestreviewthread"
   },
   "response": {

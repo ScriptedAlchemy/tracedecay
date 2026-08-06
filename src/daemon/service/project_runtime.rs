@@ -8,23 +8,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 
-use tokio::sync::watch;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 use tracedecay_lsp::FeedbackCycleRuntimePort;
 
-use crate::application::feedback::Pr12FeedbackCycleRuntime;
-use crate::application::feedback::concrete::Pr12FeedbackRuntime;
-use crate::application::primitives::Pr12PrimitiveProjectRuntime;
+use crate::application::feedback::FeedbackCycleRuntime;
+use crate::application::feedback::concrete::FeedbackRuntime;
+use crate::application::primitives::PrimitiveProjectRuntime;
 
 use super::invocation::{
     DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
-    Pr13HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
+    HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
     RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
     UnavailableFeedbackCycleRuntimeV1,
 };
 
-mod reaper;
 mod shutdown;
-use reaper::RuntimeReaper;
 use shutdown::ShutdownState;
 
 #[cfg(test)]
@@ -109,14 +107,14 @@ pub(crate) struct ProjectRuntime {
     callable_code: Option<RegisteredCallableCodeRuntime>,
     feedback: Option<RegisteredFeedbackRuntime>,
     advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
-    feedback_cycle: Option<Arc<Pr12FeedbackCycleRuntime>>,
+    feedback_cycle: Option<Arc<FeedbackCycleRuntime>>,
     feedback_cycle_input: Option<Arc<SwitchableFeedbackCycleRuntimeV1>>,
-    primitive: Option<Pr12PrimitiveProjectRuntime>,
+    primitive: Option<PrimitiveProjectRuntime>,
     configuration: Option<RegisteredConfigurationRuntime>,
     work: Option<RegisteredWorkRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     advisory: Option<Arc<dyn Any + Send + Sync>>,
-    advisory_hook_orchestrator: Option<Arc<dyn Pr13HookOrchestrationPortV1>>,
+    advisory_hook_orchestrator: Option<Arc<dyn HookOrchestrationPortV1>>,
     external_acquisition:
         Option<Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
@@ -195,14 +193,14 @@ project_runtime_components!(
     RegisteredCallableCodeRuntime => callable_code,
     RegisteredFeedbackRuntime => feedback,
     DaemonAdvisoryCycleInvocationOwner => advisory_cycle,
-    Arc<Pr12FeedbackCycleRuntime> => feedback_cycle,
+    Arc<FeedbackCycleRuntime> => feedback_cycle,
     Arc<SwitchableFeedbackCycleRuntimeV1> => feedback_cycle_input,
-    Pr12PrimitiveProjectRuntime => primitive,
+    PrimitiveProjectRuntime => primitive,
     RegisteredConfigurationRuntime => configuration,
     RegisteredWorkRuntime => work,
     DaemonLspInvocationOwner => lsp_owner,
     Arc<dyn Any + Send + Sync> => advisory,
-    Arc<dyn Pr13HookOrchestrationPortV1> => advisory_hook_orchestrator,
+    Arc<dyn HookOrchestrationPortV1> => advisory_hook_orchestrator,
     Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1> => external_acquisition,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
@@ -390,7 +388,7 @@ impl ProjectRuntimePublication {
 /// views taken at five different moments.
 #[derive(Default)]
 pub(super) struct ProjectRequestRuntimesV1 {
-    pub(super) feedback: Option<Arc<Pr12FeedbackRuntime>>,
+    pub(super) feedback: Option<Arc<FeedbackRuntime>>,
     pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
     pub(super) advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
     pub(super) configuration: Option<RegisteredConfigurationRuntime>,
@@ -433,7 +431,10 @@ pub(crate) struct ProjectRuntimeRegistryV1 {
     runtimes: Arc<StdMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
     reservation_changed: watch::Sender<u64>,
     reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
-    shutdown_reaper: RuntimeReaper,
+    /// The blocking drain is retained independently of whichever async
+    /// shutdown caller first requested it. A retry can therefore join the
+    /// same work after that caller is cancelled.
+    shutdown_task: Arc<AsyncMutex<Option<tokio::task::JoinHandle<()>>>>,
     closed: Arc<AtomicBool>,
     shutdown_started: Arc<AtomicBool>,
     shutdown_complete: watch::Sender<ShutdownState>,
@@ -451,7 +452,7 @@ impl Default for ProjectRuntimeRegistryV1 {
             runtimes: Arc::new(StdMutex::new(BTreeMap::new())),
             reservation_changed,
             reservation_blocking_changed: Arc::new((StdMutex::new(0), Condvar::new())),
-            shutdown_reaper: RuntimeReaper::new("tracedecay-runtime-shutdown-reaper"),
+            shutdown_task: Arc::new(AsyncMutex::new(None)),
             closed: Arc::new(AtomicBool::new(false)),
             shutdown_started: Arc::new(AtomicBool::new(false)),
             shutdown_complete,
@@ -715,7 +716,7 @@ impl ProjectRuntimeRegistryV1 {
     pub(crate) async fn publish_feedback_cycle_atomically(
         &self,
         project_root: PathBuf,
-        runtime: Arc<Pr12FeedbackCycleRuntime>,
+        runtime: Arc<FeedbackCycleRuntime>,
         production_input: Arc<dyn FeedbackCycleRuntimePort>,
     ) -> Result<(), FeedbackCyclePublicationError> {
         loop {
@@ -727,7 +728,7 @@ impl ProjectRuntimeRegistryV1 {
                 }
                 let incumbent = runtimes.entry(project_root.clone()).or_default();
                 let reserved = incumbent.reservations.iter().any(|type_id| {
-                    *type_id == TypeId::of::<Arc<Pr12FeedbackCycleRuntime>>()
+                    *type_id == TypeId::of::<Arc<FeedbackCycleRuntime>>()
                         || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
                 });
                 if !reserved {

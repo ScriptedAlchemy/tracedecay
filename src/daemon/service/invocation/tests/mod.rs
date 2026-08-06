@@ -177,3 +177,4 @@ mod lsp_lease_tests;
 mod lsp_tests;
 mod primitive_tests;
 mod types_tests;
+mod work_tests;

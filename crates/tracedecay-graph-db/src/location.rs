@@ -40,7 +40,7 @@ impl GraphFormatVersion {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphDurability {
     Memory,
-    /// Requests Grafeo's synchronous WAL mode for a persistent directory.
+    /// Requests Grafeo's synchronous WAL mode for a persistent database file.
     /// Grafeo does not surface every WAL append failure from session commit, so
     /// this is a configuration request rather than a proof of durable commit.
     WalSync,
@@ -72,12 +72,12 @@ pub(crate) struct ValidatedOpen {
     pub(crate) preexisting_store: bool,
 }
 
-/// The registry prepares the leaf directory before Grafeo opens it.  Its
-/// creation outcome, rather than a best-effort directory scan, determines
-/// whether an unmarked store may receive the TraceDecay format marker.
+/// The registry inspects the database-file leaf before Grafeo opens it.
+/// The retained daemon store authority excludes a competing creator while
+/// Grafeo atomically creates and exclusively locks a prospective file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PersistentGraphStoreState {
-    Created,
+    Prospective,
     Existing,
 }
 
@@ -112,7 +112,7 @@ impl GraphDbOpenOptions {
                 }
                 validate_persistent_path(&path)?;
                 let preexisting_store = match persistent_store_state {
-                    Some(PersistentGraphStoreState::Created) => false,
+                    Some(PersistentGraphStoreState::Prospective) => false,
                     Some(PersistentGraphStoreState::Existing) => true,
                     None => path.try_exists().map_err(|error| {
                         GraphDbError::unavailable(format!(
@@ -130,7 +130,7 @@ impl GraphDbOpenOptions {
                     }
                 };
                 let config = Config::persistent(path)
-                    .with_storage_format(StorageFormat::WalDirectory)
+                    .with_storage_format(StorageFormat::SingleFile)
                     .with_wal_durability(durability);
                 Ok(ValidatedOpen {
                     config,
@@ -146,7 +146,7 @@ impl GraphDbOpenOptions {
 fn validate_persistent_path(path: &Path) -> Result<(), GraphDbError> {
     let Some(parent) = path.parent() else {
         return Err(GraphDbError::invalid(
-            "persistent graph path must have a parent directory",
+            "persistent graph database file must have a parent directory",
         ));
     };
     if !parent.is_dir() {
@@ -157,12 +157,17 @@ fn validate_persistent_path(path: &Path) -> Result<(), GraphDbError> {
     }
     if path.file_name().and_then(|name| name.to_str()).is_none() {
         return Err(GraphDbError::invalid(
-            "persistent graph directory name must be valid UTF-8",
+            "persistent graph database filename must be valid UTF-8",
+        ));
+    }
+    if path.extension().and_then(|extension| extension.to_str()) != Some("grafeo") {
+        return Err(GraphDbError::invalid(
+            "persistent graph database filename must end in .grafeo",
         ));
     }
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
-            GraphDbError::invalid("persistent graph path must be a real directory"),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
+            GraphDbError::invalid("persistent graph path must be a regular file"),
         ),
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

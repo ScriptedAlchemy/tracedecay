@@ -14,19 +14,14 @@ import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
-import { LcmTimelinePayloadV1Schema } from '../../contracts/generated.ts';
+import {
+  LcmOverviewPayloadV1Schema,
+  LcmTimelinePayloadV1Schema,
+} from '../../contracts/generated.ts';
 import { SessionInspector } from './SessionInspector.tsx';
 
 const BASE = '/api/plugins/hermes-lcm';
 
-/**
- * The inner overview and search schemas bridge the generated-contract update.
- * Both already arrive through DashboardEnvelopeV1, so a bare response is a
- * schema refusal rather than an empty session list.
- */
-const OverviewPayload = z
-  .object({ exists: z.boolean().optional(), latest_sessions: z.array(AnyObject).optional() })
-  .passthrough();
 /** Wire-true transcript search (lcm_api.rs search): hits nest under
  * matches.messages / matches.summary_nodes. */
 const SearchPayload = z
@@ -48,7 +43,11 @@ const SearchPayload = z
 /** Sessions: LCM store — overview stats, transcript search across every
  * provider, session list, and drill-down. */
 export function SessionsPage() {
-  const overview = useEnvelope(['lcm', 'overview'], `${BASE}/overview`, OverviewPayload);
+  const overview = useEnvelope(
+    ['lcm', 'overview'],
+    `${BASE}/overview`,
+    LcmOverviewPayloadV1Schema,
+  );
   const timeline = useEnvelope(['lcm', 'timeline'], `${BASE}/timeline`, LcmTimelinePayloadV1Schema);
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
   const [query, setQuery] = useState('');
@@ -102,18 +101,17 @@ export function SessionsPage() {
             const buckets = data.buckets.map((b) => ({
               label: b.bucket,
               value: b.count,
-              hint: `~${b.token_estimate.toLocaleString()} tokens`,
+              hint: timelineTokenLabel(
+                b.token_count,
+                b.token_count_provenance,
+                b.known_message_count,
+                b.unknown_message_count,
+              ),
             }));
             const total = buckets.reduce((sum, b) => sum + b.value, 0);
             const split = splitCount(total);
             const coverage = data.coverage;
-            // `undated` is still a bare map on the Rust side, so its one known
-            // key is read rather than typed. A non-numeric value means the
-            // daemon reported something this build cannot count, which is not
-            // the same as counting zero — so the line below stays unrendered
-            // rather than claiming there are no undated messages.
-            const undatedCount = data.undated['count'];
-            const undated = typeof undatedCount === 'number' ? undatedCount : null;
+            const undated = data.undated.count;
             return (
               <div className="flex flex-col gap-3">
                 <div className="td-raised border border-edge-subtle px-3 py-3">
@@ -259,52 +257,38 @@ export function SessionsPage() {
             // heaviest session actually loaded turns thirty near-identical
             // three-digit numbers into a shape the eye can rank.
             const heaviest = rows.reduce(
-              (max, row) => Math.max(max, Number(row['message_count'] ?? 0)),
+              (max, row) => Math.max(max, row.message_count),
               0,
             );
             return (
               <VirtualList
                 items={rows}
-                getKey={(row, i) => String(row['session_id'] ?? row['id'] ?? i)}
-                renderItem={(row, i) => {
-                  const id = String(row['session_id'] ?? row['id'] ?? i);
-                  const provider = String(row['provider'] ?? row['source'] ?? '');
-                  const count = row['message_count'];
-                  const when = row['last_timestamp']
-                    ? formatStamp(Number(row['last_timestamp']))
+                getKey={(row) => row.session_id}
+                renderItem={(row) => {
+                  const id = row.session_id;
+                  const count = row.message_count;
+                  const when = row.last_timestamp
+                    ? formatStamp(row.last_timestamp)
                     : '';
                   return (
                     <DataRow
                       selected={
                         selected != null &&
-                        ((row['session_id'] != null &&
-                          selected['session_id'] === row['session_id']) ||
-                          (row['session_id'] == null &&
-                            row['id'] != null &&
-                            selected['id'] === row['id']))
+                        selected['session_id'] === row.session_id
                       }
                       onSelect={() => setSelected(row)}
                     >
-                      {/* The session id carries the provider as its own prefix,
-                       * so under 768px the separate provider column and the
-                       * wall-clock stamp both go: keeping them collapsed the
-                       * id -- the only unique thing on the row -- to nothing. */}
-                      {provider ? (
-                        <span className="td-legend w-14 shrink-0 truncate max-md:hidden">
-                          {provider}
-                        </span>
-                      ) : null}
+                      {/* The canonical aggregate deliberately exposes no
+                       * provider guess for a cross-provider session id. */}
                       <span className="td-value min-w-0 flex-1 truncate text-text-primary">
                         {id}
                       </span>
-                      {count !== undefined ? (
-                        <FigureRail
-                          value={String(count)}
-                          unit="msg"
-                          width="wide"
-                          fraction={heaviest > 0 ? Number(count) / heaviest : null}
-                        />
-                      ) : null}
+                      <FigureRail
+                        value={String(count)}
+                        unit="msg"
+                        width="wide"
+                        fraction={heaviest > 0 ? count / heaviest : null}
+                      />
                       <span
                         className="td-value w-28 shrink-0 whitespace-nowrap text-right text-2xs text-text-muted max-md:hidden"
                         data-cell="numeric"
@@ -327,6 +311,25 @@ export function SessionsPage() {
       }
     />
   );
+}
+
+function timelineTokenLabel(
+  tokenCount: number | null,
+  provenance: 'o200k_approximate' | 'unavailable',
+  knownMessageCount: number,
+  unknownMessageCount: number,
+): string | undefined {
+  if (tokenCount == null) {
+    return unknownMessageCount > 0
+      ? `${knownMessageCount.toLocaleString()} known · ${unknownMessageCount.toLocaleString()} unknown token counts`
+      : undefined;
+  }
+  switch (provenance) {
+    case 'o200k_approximate':
+      return `~${tokenCount.toLocaleString()} tokens · o200k approximate`;
+    case 'unavailable':
+      return undefined;
+  }
 }
 
 /**

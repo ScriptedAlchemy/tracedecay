@@ -1,4 +1,4 @@
-//! Daemon-mountable owner for the four PR12 feedback reads.
+//! Daemon-mountable owner for the four feedback reads.
 //!
 //! The owner resolves an opaque request handle through daemon authority, then
 //! delegates to the transport-neutral application service. Durable
@@ -80,7 +80,7 @@ pub type FeedbackReadRequestAuthorityFuture<'a> = Pin<
     >,
 >;
 
-/// Daemon-owned registry for opaque PR12 request handles. Implementations must
+/// Daemon-owned registry for opaque feedback request handles. Implementations must
 /// mint handles server-side, bind them to one operation and exact authorized
 /// scope, enforce expiry and one-shot/reuse policy, and return the same
 /// non-disclosing outcome for unknown, expired, cross-operation, and

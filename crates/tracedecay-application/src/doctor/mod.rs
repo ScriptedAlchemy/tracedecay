@@ -1,4 +1,4 @@
-//! Doctor kernel (Plan 09 §PR14).
+//! Doctor kernel.
 //!
 //! The transport-neutral Doctor application kernel: typed finding families,
 //! evidence states, coverage, the narrow source ports each authority is reached

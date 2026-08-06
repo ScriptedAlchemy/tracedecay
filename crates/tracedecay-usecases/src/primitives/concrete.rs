@@ -22,14 +22,14 @@ use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecu
 ///
 /// It reuses the existing path resolver, source decoder, read modes, symbol
 /// projection, and cross-session cache. The typed scope is retained as the
-/// extension seam for PR15; this adapter intentionally admits exactly one
+/// extension seam for independently authorized roots; this adapter intentionally admits exactly one
 /// project/repository/worktree scope.
-pub struct Pr12SourceReadAdapter {
+pub struct SourceReadAdapter {
     graph: Arc<TraceDecay>,
     scope: ResolvedScope,
 }
 
-impl Pr12SourceReadAdapter {
+impl SourceReadAdapter {
     pub fn new(
         graph: Arc<TraceDecay>,
         scope: ResolvedScope,
@@ -39,7 +39,7 @@ impl Pr12SourceReadAdapter {
     }
 }
 
-impl SourceReadPrimitivePort for Pr12SourceReadAdapter {
+impl SourceReadPrimitivePort for SourceReadAdapter {
     fn source_read<'a>(
         &'a self,
         context: SourceReadPortContext<'a>,
@@ -61,7 +61,7 @@ impl SourceReadPrimitivePort for Pr12SourceReadAdapter {
     }
 }
 
-impl Pr12SourceReadAdapter {
+impl SourceReadAdapter {
     async fn read(
         &self,
         request: &SourceReadPrimitiveRequest,
@@ -350,7 +350,7 @@ mod tests {
     fn authenticated_cursor_rechecks_query_snapshot_bindings() {
         let (scope, context, _) = application_context("symbol-graph");
         let key = SignedCursorKeyRefV1 {
-            key_id: SessionCursorKeyIdV1::new("cursor.pr12").expect("key id"),
+            key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key id"),
             version: SessionCursorVersionV1::new(1).expect("key version"),
         };
         let authenticator =
@@ -380,7 +380,7 @@ mod tests {
                 &scope,
                 &context,
                 SignedCursorKeyRefV1 {
-                    key_id: SessionCursorKeyIdV1::new("cursor.pr12").expect("key id"),
+                    key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key id"),
                     version: SessionCursorVersionV1::new(1).expect("key version"),
                 },
                 12,
@@ -411,7 +411,7 @@ mod tests {
         watermark: u64,
     ) -> TemporalExecutionSnapshot {
         let request = TemporalSnapshotRequest::new(
-            SessionId::new("session.pr12.symbol-graph").expect("session"),
+            SessionId::new("session.symbol-graph").expect("session"),
             scope.scope_digest.as_str(),
             format!("sha256:{}", "d".repeat(64)),
             context.grant().digest.as_str(),

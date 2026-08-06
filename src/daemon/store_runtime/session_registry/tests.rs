@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use super::maintenance::RegisteredSchemaConvergenceStatus;
 use super::{
@@ -7,7 +7,7 @@ use super::{
     LocalProfileIdentityAuthorityV1, ProjectId, StoreShardIdV1, process_runtime_generation,
 };
 use crate::db::engine::{Executor, TestConnection};
-use tracedecay_store::DURABLE_GRAPH_STORE_DIRECTORY;
+use tracedecay_store::RetainedGraphStoreLeaseV1;
 
 async fn project_sessions_pending_convergence(
     project_name: &str,
@@ -107,10 +107,6 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .expect("first session runtime registry");
-    assert!(
-        profile_root.join(DURABLE_GRAPH_STORE_DIRECTORY).is_dir(),
-        "profile-store initialization must create the graph resolver root"
-    );
     let stale = first_registry.profile_runtime.binding().clone();
     assert_eq!(
         stale.incarnation.get(),
@@ -299,15 +295,6 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
         )
     );
     assert_eq!(first.db_path(), sessions_path);
-    assert!(
-        first
-            .db_path()
-            .parent()
-            .expect("project session store parent")
-            .join(DURABLE_GRAPH_STORE_DIRECTORY)
-            .is_dir(),
-        "project-session initialization must create the graph resolver root"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -674,13 +661,78 @@ async fn worktree_graph_mount_does_not_require_git() {
         .expect("non-git graph runtime");
 
     assert_eq!(database.database_path(), database_path);
-    assert!(
-        database_path
-            .parent()
-            .expect("worktree store parent")
-            .join(DURABLE_GRAPH_STORE_DIRECTORY)
-            .is_dir(),
-        "writable code-store initialization must create the graph resolver root"
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn linked_worktree_generations_share_the_project_graph_runtime() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary
+        .path()
+        .canonicalize()
+        .expect("canonical fixture root");
+    let profile_root = root.join("profile");
+    let primary_root = root.join("primary");
+    let linked_root = root.join("linked");
+    std::fs::create_dir_all(&primary_root).expect("primary project root");
+    std::fs::create_dir_all(&linked_root).expect("linked project root");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.shared-code-graph").expect("project id");
+    for project_root in [&primary_root, &linked_root] {
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("project enrollment");
+    }
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 17, "shared code graph")
+            .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(
+            project_id.clone(),
+            [primary_root.clone(), linked_root.clone()],
+        )
+        .await
+        .expect("mount project authority");
+    let repository_id = tracedecay_domain::RepositoryId::new("repo:shared").expect("repository id");
+    let primary = registry
+        .retain_code_graph_runtime(
+            project_id.clone(),
+            repository_id.clone(),
+            tracedecay_domain::WorktreeId::new("worktree:primary").expect("primary worktree"),
+            None,
+            tracedecay_domain::CodeGenerationId::new("generation:primary")
+                .expect("primary generation"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("primary graph runtime");
+    let linked = registry
+        .retain_code_graph_runtime(
+            project_id,
+            repository_id,
+            tracedecay_domain::WorktreeId::new("worktree:linked").expect("linked worktree"),
+            None,
+            tracedecay_domain::CodeGenerationId::new("generation:linked")
+                .expect("linked generation"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("linked graph runtime");
+
+    assert!(Arc::ptr_eq(&primary.database, &linked.database));
+    assert_eq!(primary.authority.binding(), linked.authority.binding());
+    assert_ne!(primary.authority.namespace(), linked.authority.namespace());
+    assert_eq!(
+        primary.authority.canonical_path(),
+        project_database.database_path().with_extension("grafeo")
     );
 }
 

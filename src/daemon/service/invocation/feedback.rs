@@ -610,7 +610,7 @@ impl DaemonInvocationService {
     pub(crate) async fn feedback_runtime(
         &self,
         project_root: Option<&Path>,
-    ) -> Option<Arc<Pr12FeedbackRuntime>> {
+    ) -> Option<Arc<FeedbackRuntime>> {
         self.project_runtimes
             .read::<RegisteredFeedbackRuntime, _, _>(project_root?, |registered| {
                 registered.runtime.clone()
@@ -622,7 +622,7 @@ impl DaemonInvocationService {
     pub(crate) async fn feedback_cycle(
         &self,
         project_root: Option<&Path>,
-    ) -> Option<Arc<Pr12FeedbackCycleRuntime>> {
+    ) -> Option<Arc<FeedbackCycleRuntime>> {
         self.project_runtimes.get(project_root?).await
     }
 

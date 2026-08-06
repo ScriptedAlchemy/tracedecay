@@ -1,4 +1,4 @@
-//! Process-local singleton ownership for PR11 Git index transaction stores.
+//! Process-local singleton ownership for Git index transaction stores.
 //!
 //! One bounded store actor is retained per registered project-session path.
 //! Startup recovery and later mutation services must share that actor so a

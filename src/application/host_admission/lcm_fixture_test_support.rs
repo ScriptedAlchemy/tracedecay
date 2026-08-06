@@ -50,6 +50,17 @@ pub enum LcmLineageFaultForTest {
         ordinal: i64,
         source_summary_id: String,
     },
+    ReplacePublicationReceipt {
+        receipt_id: String,
+        sanitizer_version: String,
+        payload_digest: String,
+        receipt_json: String,
+    },
+    ReplaceOccurrenceProvider {
+        session_id: String,
+        message_id: String,
+        source_provider: String,
+    },
 }
 
 #[doc(hidden)]
@@ -71,6 +82,9 @@ pub struct LcmExternalPayloadManifestTestRecord {
     pub payload_digest: String,
     pub manifest_json: String,
     pub receipt_id: String,
+    pub receipt_sanitizer_version: String,
+    pub receipt_payload_digest: String,
+    pub receipt_json: String,
     pub created_at: i64,
     pub external_created_at: i64,
 }
@@ -856,6 +870,42 @@ impl HostAdmissionTestRuntimeV1 {
                     )
                     .await
             }
+            LcmLineageFaultForTest::ReplacePublicationReceipt {
+                receipt_id,
+                sanitizer_version,
+                payload_digest,
+                receipt_json,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE sanitization_receipts
+                         SET sanitizer_version = ?2,
+                             payload_digest = ?3,
+                             receipt_json = ?4
+                         WHERE receipt_id = ?1",
+                        crate::db::engine::params![
+                            receipt_id,
+                            sanitizer_version,
+                            payload_digest,
+                            receipt_json
+                        ],
+                    )
+                    .await
+            }
+            LcmLineageFaultForTest::ReplaceOccurrenceProvider {
+                session_id,
+                message_id,
+                source_provider,
+            } => {
+                transaction
+                    .execute(
+                        "UPDATE session_occurrences
+                         SET source_provider = ?3
+                         WHERE session_id = ?1 AND message_id = ?2",
+                        crate::db::engine::params![session_id, message_id, source_provider],
+                    )
+                    .await
+            }
         };
         result.map_err(|error| TraceDecayError::Database {
             operation: "apply bounded lcm lineage fault fixture".to_owned(),
@@ -891,6 +941,10 @@ impl HostAdmissionTestRuntimeV1 {
             LcmLineageFaultForTest::ReplaceSummarySourceWithSummary { .. } => (
                 "DROP TRIGGER IF EXISTS session_summary_sources_immutable_update_v1",
                 "prepare corrupt lcm summary source fixture",
+            ),
+            LcmLineageFaultForTest::ReplacePublicationReceipt { .. } => (
+                "DROP TRIGGER IF EXISTS sanitization_receipts_immutable_update_v1",
+                "prepare corrupt lcm publication receipt fixture",
             ),
             _ => return Ok(()),
         };
@@ -1182,7 +1236,8 @@ impl HostAdmissionTestRuntimeV1 {
             .query(
                 "SELECT manifest.payload_ref, manifest.session_id,
                         manifest.payload_digest, manifest.manifest_json,
-                        receipt.receipt_id, manifest.created_at, external.created_at
+                        receipt.receipt_id, manifest.created_at, external.created_at,
+                        receipt.sanitizer_version, receipt.payload_digest, receipt.receipt_json
                  FROM session_external_payload_manifests manifest
                  JOIN sanitization_receipts receipt
                    ON receipt.receipt_id = manifest.receipt_id
@@ -1203,6 +1258,9 @@ impl HostAdmissionTestRuntimeV1 {
             receipt_id: row.get(4)?,
             created_at: row.get(5)?,
             external_created_at: row.get(6)?,
+            receipt_sanitizer_version: row.get(7)?,
+            receipt_payload_digest: row.get(8)?,
+            receipt_json: row.get(9)?,
         }))
     }
 

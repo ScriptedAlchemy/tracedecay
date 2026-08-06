@@ -1,7 +1,7 @@
 # Code topography — concept mockups
 
-Four screenshot-ready HTML sheets exploring a "code topography" direction for the
-PR14 dashboard: the codebase drawn as **measured terrain and flow** rather than as
+Four screenshot-ready HTML sheets explore a "code topography" direction: the
+dashboard concept draws the codebase as **measured terrain and flow** rather than as
 boxes and arrows, and callers/callees drawn as **structure** rather than as a route
 between two points.
 

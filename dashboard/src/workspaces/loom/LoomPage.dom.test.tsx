@@ -53,18 +53,18 @@ const SESSIONS = {
   ],
 };
 
-/** `lcm_queries` selects a literal `0 AS pinned` and never resolves a source or
- * storage kind for these rows, so every column below the tool name comes back
- * as the null (or zero) the query left behind. */
+/** Canonically hydrated chain message with truthful nullable token accounting. */
 function chainMessage(over: Record<string, unknown>) {
   return {
     session_id: 'sess-open',
     role: null,
     content: null,
+    snippet: null,
     ordinal: null,
     timestamp: null,
     tool_name: null,
-    token_estimate: null,
+    token_count: null,
+    token_count_provenance: null,
     pinned: 0,
     source: 'cursor',
     storage_kind: 'message',
@@ -86,9 +86,9 @@ const CHAIN = {
   has_more: false,
   has_more_messages: false,
   has_more_summary_nodes: false,
+  next_cursor: null,
   counts: {
     message_count: 405,
-    token_estimate_total: 5583,
     source_token_count: 0,
     summary_node_count: 0,
     summary_token_count: 0,
@@ -100,7 +100,8 @@ const CHAIN = {
       role: 'user',
       content: 'Verify durable code-generation restart.',
       ordinal: 0,
-      token_estimate: 12,
+      token_count: 12,
+      token_count_provenance: 'o200k_approximate',
     }),
     chainMessage({
       message_id: 'm1',
@@ -108,7 +109,8 @@ const CHAIN = {
       content: 'Reading the reconciliation path.',
       ordinal: 1,
       tool_name: 'Read',
-      token_estimate: 20,
+      token_count: 20,
+      token_count_provenance: 'o200k_approximate',
     }),
     chainMessage({
       message_id: 'm2',
@@ -116,17 +118,52 @@ const CHAIN = {
       content: 'Running the suite.',
       ordinal: 2,
       tool_name: 'Bash',
-      token_estimate: 26,
+      token_count: null,
+      token_count_provenance: null,
     }),
   ],
 };
 
 const TIMELINE = {
+  path: 'daemon://session-temporal',
+  storage_scope: 'project',
+  exists: true,
   bucket: 'day',
+  session_id: null,
   buckets: [
-    { bucket: '2026-07-23', count: 1204, token_estimate: 41_000 },
-    { bucket: '2026-07-24', count: 8801, token_estimate: 92_000 },
+    {
+      bucket: '2026-07-23',
+      count: 1204,
+      token_count: 41_000,
+      token_count_provenance: 'o200k_approximate',
+      known_message_count: 1204,
+      unknown_message_count: 0,
+    },
+    {
+      bucket: '2026-07-24',
+      count: 8801,
+      token_count: null,
+      token_count_provenance: 'unavailable',
+      known_message_count: 8700,
+      unknown_message_count: 101,
+    },
   ],
+  node_buckets: [],
+  undated: {
+    count: 0,
+    token_count: null,
+    token_count_provenance: 'unavailable',
+    known_message_count: 0,
+    unknown_message_count: 0,
+  },
+  coverage: {
+    limit: 400,
+    returned_buckets: 2,
+    total_dated_buckets: 2,
+    truncated: false,
+    ordering: 'most_recent',
+    next_before_bucket: null,
+  },
 };
 
 const TEMPORAL = {
@@ -294,6 +331,10 @@ const TEMPORAL_RETRIEVAL_UNAVAILABLE = {
   payload: null,
 };
 
+function readyEnvelope(payload: unknown) {
+  return { ...TEMPORAL, domain_state: 'ready', payload };
+}
+
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -447,6 +488,21 @@ describe('LoomPage', () => {
     expect(screen.queryByText('ordinal order')).toBeNull();
   });
 
+  it('renders chain token provenance and keeps unknown counts unknown', async () => {
+    renderLoom({
+      ...HAPPY,
+      '/api/plugins/hermes-lcm/session/': {
+        status: 200,
+        body: readyEnvelope(CHAIN),
+      },
+    });
+    await userEvent.click(await screen.findByText('Deliver Git primitive runtime'));
+
+    expect(await screen.findByText('~12 tokens · o200k approximate')).toBeTruthy();
+    expect(screen.getByText('~20 tokens · o200k approximate')).toBeTruthy();
+    expect(screen.getByText('tokens unknown')).toBeTruthy();
+  });
+
   it('continues the chain through durable causal rows', async () => {
     renderLoom();
     const row = await screen.findByText('Deliver Git primitive runtime');
@@ -508,7 +564,10 @@ describe('LoomPage', () => {
           payload: { ...TEMPORAL.payload, available: false, total: 0, sessions: [] },
         },
       },
-      '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
+      '/api/plugins/hermes-lcm/timeline': {
+        status: 200,
+        body: readyEnvelope(TIMELINE),
+      },
     });
     await screen.findByText(/reported its session store\s+unavailable/);
     expect(screen.queryByText(/No thread to weave/)).toBeNull();
@@ -523,7 +582,10 @@ describe('LoomPage', () => {
           payload: { ...TEMPORAL.payload, total: 0, sessions: [] },
         },
       },
-      '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
+      '/api/plugins/hermes-lcm/timeline': {
+        status: 200,
+        body: readyEnvelope(TIMELINE),
+      },
     });
     await screen.findByText('No thread to weave');
     expect(
@@ -550,7 +612,10 @@ describe('LoomPage', () => {
           },
         },
       },
-      '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
+      '/api/plugins/hermes-lcm/timeline': {
+        status: 200,
+        body: readyEnvelope(TIMELINE),
+      },
     });
 
     await screen.findByText('Deliver Git primitive runtime');

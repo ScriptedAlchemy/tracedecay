@@ -2,7 +2,7 @@
 //!
 //! Provider records retain their own provenance and coverage. This owner
 //! projects canonical anchored findings into the existing Plan 09 cycle and
-//! PR12 durable publication store without another packet, ledger, or loop.
+//! durable feedback publication store without another packet, ledger, or loop.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -28,8 +28,8 @@ use tracedecay_domain::feedback::{
 
 use crate::configuration::ConfigurationControlStore;
 use crate::context::MonotonicDeadline;
-use crate::feedback::concrete::{ConcretePr12FeedbackOwner, ProjectFeedbackStore};
-use crate::feedback::cycle_runtime::{Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleRuntime};
+use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
+use crate::feedback::cycle_runtime::{CanonicalFeedbackResultV1, FeedbackCycleRuntime};
 use crate::feedback::observations::{
     Plan26AdvisoryProviderV1, Plan26CiProviderV1, Plan26CoverageV1,
     Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1, Plan26FeedbackOutcomeV1,
@@ -44,27 +44,25 @@ use super::ci_runtime::{
     ProductionCiFailureDiscoveryOutcomeV1,
 };
 use super::github_runtime::GitHubSourceAccessAuthorityV1;
-use super::proximity_runtime::{
-    ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1,
-};
+use super::proximity_runtime::{ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1};
 use super::{
     CanonicalProximityEvidenceAuthorityV1, GitHubCanonicalReviewAnchorAuthorityV1,
     GitHubCurrentBranchRemapper, GitHubReviewRefreshOutcomeV1, GitHubReviewRuntimeOwnerConfigV1,
     GitHubReviewRuntimeOwnerV1, build_github_review_runtime_owner_v1,
-    concrete_ci_failure_localization_owner_v1, context_matches_scope, open_pr13_proximity_runtime,
+    concrete_ci_failure_localization_owner_v1, context_matches_scope, open_proximity_runtime,
 };
 
 mod cycle;
 mod model;
 mod registration;
 
-pub use cycle::Pr13AdvisoryRuntime;
+pub use cycle::AdvisoryRuntime;
 pub use model::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, Pr13AdvisoryContributionsV1,
-    Pr13AdvisoryProviderAuthoritiesV1, Pr13AdvisoryProviderStateV1, Pr13AdvisoryProviderV1,
-    Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
+    AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
+    AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1, AdvisoryProviderV1,
+    AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
 };
-pub use registration::{Pr13AdvisoryDaemonRegistrationV1, open_pr13_advisory_daemon_registration};
+pub use registration::{AdvisoryDaemonRegistrationV1, open_advisory_daemon_registration};
 
 #[cfg(test)]
 #[path = "runtime/tests.rs"]

@@ -4,7 +4,7 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Pr13HookOrchestrationAdmissionV1 {
+pub(crate) enum HookOrchestrationAdmissionV1 {
     Enqueued,
     Backpressured,
     UnsupportedTrigger,
@@ -12,22 +12,22 @@ pub(crate) enum Pr13HookOrchestrationAdmissionV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pr13HookOrchestrationTriggerV1 {
+pub(crate) enum HookOrchestrationTriggerV1 {
     SavedEdit,
     Stop,
     Explicit,
 }
 
 #[derive(Clone)]
-pub(crate) struct Pr13HookOrchestrationRequestV1 {
+pub(crate) struct HookOrchestrationRequestV1 {
     pub hook: AdmittedContextScoutHookV1,
     pub lifecycle: Option<ContextScoutLifecycleAddressV1>,
     pub hook_configuration_revision: u64,
-    pub trigger: Pr13HookOrchestrationTriggerV1,
+    pub trigger: HookOrchestrationTriggerV1,
     pub(super) completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
 }
 
-impl Pr13HookOrchestrationRequestV1 {
+impl HookOrchestrationRequestV1 {
     pub(in crate::daemon) fn from_envelope(
         envelope: HookEventEnvelopeV2,
         binding: &HookScopeBindingV1,
@@ -37,13 +37,13 @@ impl Pr13HookOrchestrationRequestV1 {
     ) -> Option<Self> {
         let hook = AdmittedContextScoutHookV1::new(envelope, binding)?;
         let trigger = if explicit {
-            Pr13HookOrchestrationTriggerV1::Explicit
+            HookOrchestrationTriggerV1::Explicit
         } else {
             match &hook.envelope().event {
-                HookEventV2::SavedEdit { .. } => Pr13HookOrchestrationTriggerV1::SavedEdit,
+                HookEventV2::SavedEdit { .. } => HookOrchestrationTriggerV1::SavedEdit,
                 HookEventV2::SessionBoundary {
                     boundary: HookBoundaryV1::End | HookBoundaryV1::TurnComplete,
-                } => Pr13HookOrchestrationTriggerV1::Stop,
+                } => HookOrchestrationTriggerV1::Stop,
                 _ => return None,
             }
         };
@@ -60,26 +60,26 @@ impl Pr13HookOrchestrationRequestV1 {
 /// Process-local bridge from an authenticated Hook V2 callback to the
 /// project-open advisory owner. Implementations must return before provider,
 /// retrieval, or model work begins.
-pub(crate) trait Pr13HookOrchestrationPortV1: Send + Sync {
-    fn admit(&self, request: Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationAdmissionV1;
+pub(crate) trait HookOrchestrationPortV1: Send + Sync {
+    fn admit(&self, request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1;
 }
 
-type Pr13HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type Pr13HookOrchestrationWorkV1 =
-    dyn Fn(Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationFutureV1 + Send + Sync;
+type HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type HookOrchestrationWorkV1 =
+    dyn Fn(HookOrchestrationRequestV1) -> HookOrchestrationFutureV1 + Send + Sync;
 
-pub(crate) struct BoundedPr13HookOrchestratorV1 {
+pub(crate) struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
-    work: Arc<Pr13HookOrchestrationWorkV1>,
+    work: Arc<HookOrchestrationWorkV1>,
 }
 
-impl BoundedPr13HookOrchestratorV1 {
+impl BoundedHookOrchestratorV1 {
     pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
-        F: Fn(Pr13HookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
+        F: Fn(HookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let work: Arc<Pr13HookOrchestrationWorkV1> =
+        let work: Arc<HookOrchestrationWorkV1> =
             Arc::new(move |request| Box::pin(work(request)));
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
@@ -90,15 +90,15 @@ impl BoundedPr13HookOrchestratorV1 {
     }
 }
 
-impl Pr13HookOrchestrationPortV1 for BoundedPr13HookOrchestratorV1 {
-    fn admit(&self, request: Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationAdmissionV1 {
+impl HookOrchestrationPortV1 for BoundedHookOrchestratorV1 {
+    fn admit(&self, request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
         let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-            return Pr13HookOrchestrationAdmissionV1::Backpressured;
+            return HookOrchestrationAdmissionV1::Backpressured;
         };
         let work = Arc::clone(&self.work);
         let completion = request.completion.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return Pr13HookOrchestrationAdmissionV1::Unavailable;
+            return HookOrchestrationAdmissionV1::Unavailable;
         };
         handle.spawn(async move {
             (work)(request).await;
@@ -107,37 +107,37 @@ impl Pr13HookOrchestrationPortV1 for BoundedPr13HookOrchestratorV1 {
             }
             drop(permit);
         });
-        Pr13HookOrchestrationAdmissionV1::Enqueued
+        HookOrchestrationAdmissionV1::Enqueued
     }
 }
 
-type Pr13HookOrchestrationRegistryKey = ([u8; 16], [u8; 16]);
-type Pr13HookOrchestrationRegistry =
-    StdMutex<BTreeMap<Pr13HookOrchestrationRegistryKey, Weak<dyn Pr13HookOrchestrationPortV1>>>;
+type HookOrchestrationRegistryKey = ([u8; 16], [u8; 16]);
+type HookOrchestrationRegistry =
+    StdMutex<BTreeMap<HookOrchestrationRegistryKey, Weak<dyn HookOrchestrationPortV1>>>;
 
-pub(super) fn pr13_hook_orchestration_registry() -> &'static Pr13HookOrchestrationRegistry {
-    static REGISTRY: OnceLock<Pr13HookOrchestrationRegistry> = OnceLock::new();
+pub(super) fn hook_orchestration_registry() -> &'static HookOrchestrationRegistry {
+    static REGISTRY: OnceLock<HookOrchestrationRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
-pub(crate) fn admit_registered_pr13_hook_orchestration(
+pub(crate) fn admit_registered_hook_orchestration(
     envelope: HookEventEnvelopeV2,
     binding: HookScopeBindingV1,
     lifecycle: Option<ContextScoutLifecycleAddressV1>,
     configuration_revision: u64,
     explicit: bool,
     completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
-) -> Pr13HookOrchestrationAdmissionV1 {
-    let Some(mut request) = Pr13HookOrchestrationRequestV1::from_envelope(
+) -> HookOrchestrationAdmissionV1 {
+    let Some(mut request) = HookOrchestrationRequestV1::from_envelope(
         envelope,
         &binding,
         lifecycle,
         configuration_revision,
         explicit,
     ) else {
-        return Pr13HookOrchestrationAdmissionV1::UnsupportedTrigger;
+        return HookOrchestrationAdmissionV1::UnsupportedTrigger;
     };
-    let Some(runtime) = pr13_hook_orchestration_registry()
+    let Some(runtime) = hook_orchestration_registry()
         .lock()
         .ok()
         .and_then(|registry| {
@@ -150,7 +150,7 @@ pub(crate) fn admit_registered_pr13_hook_orchestration(
         })
         .and_then(|runtime| runtime.upgrade())
     else {
-        return Pr13HookOrchestrationAdmissionV1::Unavailable;
+        return HookOrchestrationAdmissionV1::Unavailable;
     };
     request.completion = completion;
     runtime.admit(request)
@@ -274,7 +274,7 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
 
 pub(in crate::daemon::service) struct RegisteredFeedbackRuntime {
     pub(super) project_id: ProjectId,
-    pub(super) runtime: Arc<Pr12FeedbackRuntime>,
+    pub(super) runtime: Arc<FeedbackRuntime>,
 }
 
 impl RegisteredFeedbackRuntime {
@@ -282,7 +282,7 @@ impl RegisteredFeedbackRuntime {
         &self.project_id
     }
 
-    pub(in crate::daemon::service) fn runtime(&self) -> Arc<Pr12FeedbackRuntime> {
+    pub(in crate::daemon::service) fn runtime(&self) -> Arc<FeedbackRuntime> {
         Arc::clone(&self.runtime)
     }
 

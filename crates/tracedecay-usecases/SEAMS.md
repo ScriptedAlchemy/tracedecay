@@ -88,9 +88,11 @@ this crate.
 
 ### Stores and response handles
 
-The observation, external-source, evidence-assembly, retrieval-anchor, and
-vector-generation adapters are owned here and are constructed from
-`RegisteredGlobalDb::{runtime,authority}`.
+The observation, external-source, and vector-generation adapters are owned
+here and are constructed from `RegisteredGlobalDb::{runtime,authority}`.
+Evidence-assembly and retrieval-anchor persistence remain canonical store and
+runtime capabilities; their unmounted use-case adapters were removed until a
+production journey needs them.
 
 Transport-independent response handles are owned by
 `tracedecay_usecases::response_handles`; MCP adapters should call that module

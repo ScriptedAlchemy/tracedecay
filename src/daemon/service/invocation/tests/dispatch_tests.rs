@@ -77,7 +77,7 @@ fn test_results_invocation_retains_the_transport_page() {
     let request = DaemonInvocationRequest::primitive(
         "request.test-results.page",
         crate::application_surface::ApplicationSurfaceOperation::TestResults,
-        Pr12PrimitiveRequest::RecentTestResults(page.clone()),
+        PrimitiveRequest::RecentTestResults(page.clone()),
         UtcMicros(1),
         Deadline::new(UtcMicros(2)).expect("deadline"),
         CancellationContext::active("cancel.test-results.page").expect("cancellation"),

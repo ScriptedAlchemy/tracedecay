@@ -39,10 +39,31 @@ fn results_envelope(action: &str, results: &Value, count: usize) -> Value {
     })
 }
 
+pub(super) fn controlled_memory_application<'a>(
+    target_memory: &'a TargetMemoryDb<'_>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<MemoryApplication<DatabaseFactStore<'a>>> {
+    let store = match cancellation {
+        Some(cancellation) => {
+            let interruption = cancellation.clone();
+            DatabaseFactStore::new_controlled(
+                target_memory.db(),
+                crate::store::memory::FactWriteControl::new(
+                    std::sync::Arc::new(move || interruption.is_cancelled()),
+                    std::sync::Arc::new(move || cancellation.try_begin_commit()),
+                ),
+            )
+        }
+        None => DatabaseFactStore::new(target_memory.db()),
+    };
+    MemoryApplication::new(target_memory.owner().clone(), store).map_err(memory_application_error)
+}
+
 pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
@@ -52,12 +73,14 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
             "cross-project fact_store writes are not supported; omit project_selector to write the active project",
         ));
     }
-    // The store-touching work (open + dispatch, including the add-path
-    // holographic encode, the serialized write, and any digest refresh) is
-    // bounded once, centrally, by the retained memory dispatch off the
-    // admission-carried client deadline (dispatch_groups::dispatch_memory_operation).
     let target_memory = open_target_memory_db(cg, &args, global_db).await?;
-    handle_fact_store_for_target(args, cross_project_selector, target_memory).await
+    handle_fact_store_for_target_controlled(
+        args,
+        cross_project_selector,
+        target_memory,
+        cancellation,
+    )
+    .await
 }
 
 pub(super) async fn handle_fact_store_for_target(
@@ -65,10 +88,24 @@ pub(super) async fn handle_fact_store_for_target(
     cross_project_selector: bool,
     target_memory: TargetMemoryDb<'_>,
 ) -> Result<ToolResult> {
+    handle_fact_store_for_target_controlled(args, cross_project_selector, target_memory, None).await
+}
+
+async fn handle_fact_store_for_target_controlled(
+    args: Value,
+    cross_project_selector: bool,
+    target_memory: TargetMemoryDb<'_>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let action_kind = FactStoreAction::parse(action)
         .ok_or_else(|| config_error(format!("unknown fact_store action: {action}")))?;
-    let memory = memory_application(&target_memory)?;
+    let settlement_cancellation = cancellation.clone();
+    let memory = if action_kind.writes() {
+        controlled_memory_application(&target_memory, cancellation)?
+    } else {
+        memory_application(&target_memory)?
+    };
     let mut refresh_digest = false;
     let out = match action_kind {
         FactStoreAction::Add => {
@@ -208,7 +245,10 @@ pub(super) async fn handle_fact_store_for_target(
             json!({ "action": action, "removed": removed, "count": usize::from(removed) })
         }
     };
-    if refresh_digest && !target_memory.user_scope {
+    let controlled_write_committed = settlement_cancellation
+        .as_ref()
+        .is_none_or(tracedecay_application::CancellationSignal::commit_started);
+    if refresh_digest && controlled_write_committed && !target_memory.user_scope {
         refresh_target_memory_digest(&memory, &target_memory).await;
     }
     Ok(rendered_fact_store(

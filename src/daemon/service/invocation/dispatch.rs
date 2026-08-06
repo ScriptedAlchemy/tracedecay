@@ -306,7 +306,7 @@ impl DaemonInvocationService {
                     project_root,
                     request_id,
                     crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
-                    Pr12PrimitiveRequest::Impact(request),
+                    PrimitiveRequest::Impact(request),
                     observed_at,
                     deadline,
                     cancellation,
@@ -324,7 +324,7 @@ impl DaemonInvocationService {
                     project_root,
                     request_id,
                     crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
-                    Pr12PrimitiveRequest::AffectedFileTests(request),
+                    PrimitiveRequest::AffectedFileTests(request),
                     observed_at,
                     deadline,
                     cancellation,
@@ -342,7 +342,7 @@ impl DaemonInvocationService {
                     project_root,
                     request_id,
                     crate::application_surface::ApplicationSurfaceOperation::TestResults,
-                    Pr12PrimitiveRequest::RecentTestResults(page),
+                    PrimitiveRequest::RecentTestResults(page),
                     observed_at,
                     deadline,
                     cancellation,
@@ -480,8 +480,26 @@ impl DaemonInvocationService {
                     DaemonInvocationProblem::InvalidRequest,
                 )
             }
-            DaemonInvocationPayload::WorkApplication { .. } => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+            DaemonInvocationPayload::WorkApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let Some(registered) = work_runtime else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                execute_work_application(
+                    registered,
+                    request_id,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
             }
             DaemonInvocationPayload::WorkflowApplication {
                 request,
@@ -533,9 +551,6 @@ impl DaemonInvocationService {
                     cancellation,
                 ))
                 .await
-            }
-            DaemonInvocationPayload::WorkAttempt { .. } => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
             }
             DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
                 self.execute_semantic_evaluation(project_root, request_id, *candidate)

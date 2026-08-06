@@ -27,6 +27,7 @@ use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 
+mod code_graph;
 mod code_reads;
 mod maintenance;
 mod mounts;
@@ -65,6 +66,8 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     incarnation: StoreIncarnationV1,
     resolver: Arc<LocalStoreRuntimeResolverV1>,
     registry: StoreRuntimeRegistry,
+    graph_registry: tracedecay_graph_db::GraphDbRegistry,
+    graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
     profile_runtime: StoreRuntimeHandle,
     profile_database: Mutex<Option<Arc<RegisteredGlobalDb>>>,
@@ -147,22 +150,6 @@ fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
                 .map(|timestamp| timestamp ^ u64::from(std::process::id()))
         })?;
     Some((raw & i64::MAX as u64).max(1))
-}
-
-/// Creates the root before any graph resolver can lease a child beside this
-/// runtime's canonical relational store. Resolver code only validates this
-/// authority and never creates it itself.
-pub(super) fn initialize_durable_graph_store_root(runtime: &StoreRuntimeHandle) -> Result<()> {
-    let store_root = runtime.canonical_path().parent().ok_or_else(|| {
-        session_registry_error(
-            "initialize durable graph-store root",
-            format!(
-                "canonical store path has no parent: {}",
-                runtime.canonical_path().display()
-            ),
-        )
-    })?;
-    crate::storage::ensure_durable_graph_store_root(store_root).map(|_| ())
 }
 
 async fn open_runtime(

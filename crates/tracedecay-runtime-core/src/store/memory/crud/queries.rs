@@ -1186,6 +1186,16 @@ impl DatabaseFactStore<'_> {
         &self,
         batch: &FactWriteBatch,
     ) -> FactStoreResult<FactCommitOutcome> {
+        if self
+            .write_control
+            .as_ref()
+            .is_some_and(super::super::FactWriteControl::interrupted)
+        {
+            return Err(storage_message(
+                COMMIT_OPERATION,
+                "fact commit was interrupted before transaction admission",
+            ));
+        }
         let transaction = self
             .db
             .begin_memory_write_transaction(COMMIT_OPERATION)
@@ -1206,6 +1216,20 @@ impl DatabaseFactStore<'_> {
             }
         };
         if attempt.wrote {
+            if self
+                .write_control
+                .as_ref()
+                .is_some_and(|control| !control.try_begin_commit())
+            {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+                return Err(storage_message(
+                    COMMIT_OPERATION,
+                    "fact commit was interrupted before durable commit",
+                ));
+            }
             transaction
                 .commit()
                 .await

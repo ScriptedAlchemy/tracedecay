@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tracedecay_application::{
     ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
 };
 use tracedecay_domain::canonical_sha256;
+use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 
 use super::{
@@ -16,9 +16,9 @@ use super::{
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
     LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, ProfileAuthorityPinResult,
     RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, StoreRuntimeOpenRequest,
-    StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver,
-    initialize_durable_graph_store_root, open_runtime, register_registered_schema_installer,
-    registry_open_error, runtime_incarnation, session_registry_error,
+    StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver, open_runtime,
+    register_registered_schema_installer, registry_open_error, runtime_incarnation,
+    session_registry_error,
 };
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -44,6 +44,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
         let registry =
             StoreRuntimeRegistry::new(registry_resolver, Arc::new(LifecycleShardRuntimePublisher));
+        let graph_registry =
+            GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 8 }).map_err(|error| {
+                session_registry_error("create graph runtime registry", error.to_string())
+            })?;
         let profile_shard =
             StoreShardIdV1::profile(identity.brain_id().clone(), identity.profile_id().clone());
         let profile_runtime = open_runtime(
@@ -57,7 +61,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount profile authority store",
         )
         .await?;
-        initialize_durable_graph_store_root(&profile_runtime)?;
         let profile_pin = match registry.profile_authority_pin(&profile_shard) {
             ProfileAuthorityPinResult::Pinned(pin) => pin,
             outcome => {
@@ -72,6 +75,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             incarnation,
             resolver,
             registry,
+            graph_registry,
+            graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
             profile_pin,
             profile_runtime,
             profile_database: Mutex::new(None),
@@ -120,7 +125,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount profile session store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database = self
             .attach_registered(runtime, "mount profile session store")
             .await?;
@@ -151,7 +155,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount profile memory store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
@@ -208,7 +211,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount project session store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database = self
             .attach_registered(runtime, "mount project session store")
             .await?;
@@ -362,7 +364,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount project memory store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::ensure_schema_current(database.as_ref()).await?;

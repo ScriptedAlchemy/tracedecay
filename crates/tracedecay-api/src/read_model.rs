@@ -1,4 +1,4 @@
-//! Typed presentation contract shared by the PR14 V2 read-model routes.
+//! Typed presentation contract shared by the V2 read-model routes.
 //!
 //! This module is the **generation source** for the dashboard frontend's
 //! `contracts/` wire boundary (docs/plans/tracedecay-v2/11-dashboard-frontend.md
@@ -42,7 +42,7 @@ pub const DASHBOARD_SCHEMA_REVISION_V1: u32 = 1;
 /// The normative dashboard domain-state union.
 ///
 /// The first sixteen variants are the plan's exact `DashboardDomainState`
-/// discriminated union. [`Self::Unsupported`] is the PR14 backend-gap binding
+/// discriminated union. [`Self::Unsupported`] is the backend-gap binding
 /// state: the read model's HTTP surface exists, but its live producer/source is
 /// not yet wired server-side. It is never healthy or empty — the frontend
 /// renders a distinct "not yet available" state — and it is deliberately

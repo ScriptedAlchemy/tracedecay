@@ -37,16 +37,16 @@ use url::Url;
 use super::concrete::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
 use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
-    DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest,
-    FileDependentsPrimitiveResult, FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult,
-    FileMetadataRecord, ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
+    DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, ExtendedPrimitiveFuture,
+    ExtendedPrimitivePort, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
+    FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, FileMetadataRecord,
+    ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
     ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
-    Pr12ExtendedPrimitiveFuture, Pr12ExtendedPrimitivePort, Pr12OperationalPrimitive,
-    Pr12OperationalPrimitiveFuture, Pr12OperationalPrimitivePort, Pr12OperationalPrimitiveRequest,
-    Pr12PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
-    SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
-    SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
-    StorageStatusPrimitiveResult, open_pr12_primitive_project_runtime,
+    OperationalPrimitive, OperationalPrimitiveFuture, OperationalPrimitivePort,
+    OperationalPrimitiveRequest, PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest,
+    QualifiedNamePrimitiveResult, SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult,
+    SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1,
+    StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult, open_primitive_project_runtime,
 };
 use super::support::{
     ScanResult, affected_test_proximity, build_matcher, collect_affected_test_files,
@@ -793,7 +793,7 @@ impl TemporalRetrievalPort for TraceDecayTemporalPortV1 {
     ) -> RetrievalPortOutcome<SessionLookupResult> {
         let _ = (context, &self.session_db, request);
         let finished_at = now_observed();
-        // Session temporal anchors are owned by the PR8 kernel; when no exact
+        // Session temporal anchors are owned by the session-temporal kernel; when no exact
         // session handle is supplied on this compatibility port, return an
         // authoritative empty page rather than inventing anchors.
         completed(
@@ -1078,12 +1078,12 @@ pub(crate) async fn canonical_storage_status(
     }
 }
 
-impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
+impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
     fn qualified_name<'a>(
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a QualifiedNamePrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
         Box::pin(async move {
             let Ok(nodes) = self
                 .graph
@@ -1113,7 +1113,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a CallChainPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult> {
         Box::pin(async move {
             let Ok(path) = self
                 .graph
@@ -1152,7 +1152,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a FileDependentsPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult> {
         Box::pin(async move {
             let Ok(dependent_files) = self.graph.get_file_dependents(&request.file).await else {
                 return failed(EvidenceDomain::Graph, now_observed());
@@ -1172,7 +1172,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a SourceBodyPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult> {
         Box::pin(async move {
             let Some(node) = self.graph.get_node(&request.node_id).await.ok().flatten() else {
                 return failed(EvidenceDomain::Source, now_observed());
@@ -1207,7 +1207,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a SourceOutlinePrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult> {
         Box::pin(async move {
             let Ok(nodes) = self.graph.get_nodes_by_file(&request.file).await else {
                 return failed(EvidenceDomain::Source, now_observed());
@@ -1230,7 +1230,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a ModuleApiPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult> {
         Box::pin(async move {
             let Ok(nodes) = self.graph.get_all_nodes().await else {
                 return failed(EvidenceDomain::Symbol, now_observed());
@@ -1250,7 +1250,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a FileMetadataPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult> {
         Box::pin(async move {
             let mut files = Vec::new();
             for file in &request.files {
@@ -1275,7 +1275,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a HealthDeltaRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
+    ) -> ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
         Box::pin(async move {
             match self
                 .graph
@@ -1296,7 +1296,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a StorageStatusPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
         Box::pin(async move {
             completed(
                 canonical_storage_status(self.graph.as_ref(), request.include_details).await,
@@ -1310,7 +1310,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         &'a self,
         context: RetrievalPortContext<'a>,
         request: &'a DiagnosticsPrimitiveRequest,
-    ) -> Pr12ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult> {
+    ) -> ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult> {
         Box::pin(async move {
             let finished_at = now_observed();
             if !(1..=1_000).contains(&request.maximum_diagnostics) {
@@ -1483,14 +1483,14 @@ impl TraceDecayOperationalPrimitivePortV1 {
     }
 }
 
-impl Pr12OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
+impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
     fn read<'a>(
         &'a self,
         context: &'a RequestContext,
         operation: &'a tracedecay_application::ApplicationOperation,
-        request: &'a Pr12OperationalPrimitiveRequest,
+        request: &'a OperationalPrimitiveRequest,
         observed_at: UtcMicros,
-    ) -> Pr12OperationalPrimitiveFuture<'a> {
+    ) -> OperationalPrimitiveFuture<'a> {
         Box::pin(async move {
             use tracedecay_application::{
                 ApplicationEnvelope, AuthorityReceipt, CoverageDomainState, EvidenceAuthority,
@@ -1500,11 +1500,11 @@ impl Pr12OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
             use tracedecay_domain::ComponentVersion;
             let branch = self.graph.branch_diagnostics();
             let status = match request.operation {
-                Pr12OperationalPrimitive::Project
-                | Pr12OperationalPrimitive::Status
-                | Pr12OperationalPrimitive::Files
-                | Pr12OperationalPrimitive::Configuration
-                | Pr12OperationalPrimitive::RuntimeStatus => {
+                OperationalPrimitive::Project
+                | OperationalPrimitive::Status
+                | OperationalPrimitive::Files
+                | OperationalPrimitive::Configuration
+                | OperationalPrimitive::RuntimeStatus => {
                     if branch.serving_db_exists {
                         if branch.is_fallback { "degraded" } else { "ok" }
                     } else {
@@ -2106,7 +2106,7 @@ fn operational_problem(
 
 /// Owned authorities and admitted project state required to open the complete
 /// application primitive runtime.
-pub struct Pr12ProductionPrimitiveOpenRequestV1 {
+pub struct ProductionPrimitiveOpenRequestV1 {
     database: Database,
     graph: Arc<TraceDecay>,
     session_db: Arc<RegisteredGlobalDb>,
@@ -2120,7 +2120,7 @@ pub struct Pr12ProductionPrimitiveOpenRequestV1 {
     configuration_digest: ManifestDigest,
 }
 
-impl Pr12ProductionPrimitiveOpenRequestV1 {
+impl ProductionPrimitiveOpenRequestV1 {
     pub fn new(
         graph: Arc<TraceDecay>,
         session_db: Arc<RegisteredGlobalDb>,
@@ -2151,10 +2151,10 @@ impl Pr12ProductionPrimitiveOpenRequestV1 {
 }
 
 /// Opens the complete owned application primitive runtime from production authorities.
-pub async fn open_pr12_production_primitive_runtime(
-    request: Pr12ProductionPrimitiveOpenRequestV1,
-) -> Result<Pr12PrimitiveProjectRuntime, ApplicationContractError> {
-    let Pr12ProductionPrimitiveOpenRequestV1 {
+pub async fn open_production_primitive_runtime(
+    request: ProductionPrimitiveOpenRequestV1,
+) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
+    let ProductionPrimitiveOpenRequestV1 {
         database,
         graph,
         session_db,
@@ -2223,7 +2223,7 @@ pub async fn open_pr12_production_primitive_runtime(
             authenticator,
         },
     ));
-    open_pr12_primitive_project_runtime(
+    open_primitive_project_runtime(
         database,
         Arc::clone(&graph),
         cursors,
@@ -2259,7 +2259,7 @@ impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
                 .current_identity(project_root, None)
                 .await
                 .map_err(|_| ApplicationContractError::Inconsistent {
-                    field: "PR12 managed test result code generation",
+                    field: "managed test result code generation",
                 })?;
             Ok(ManagedTestRunCurrentIdentity {
                 head_commit_id,
@@ -2274,14 +2274,14 @@ fn current_managed_test_run_head(
 ) -> Result<CommitId, ApplicationContractError> {
     let repository =
         gix::open(project_root).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 managed test result repository",
+            field: "managed test result repository",
         })?;
     let head_commit_id = repository
         .head_commit()
         .ok()
         .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
         .ok_or(ApplicationContractError::Inconsistent {
-            field: "PR12 managed test result head",
+            field: "managed test result head",
         })?;
     Ok(head_commit_id)
 }

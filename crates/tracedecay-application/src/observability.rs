@@ -1,4 +1,4 @@
-//! Transport-neutral observability record/query boundary and PR14 read models.
+//! Transport-neutral observability record/query boundary and dashboard read models.
 
 use std::future::Future;
 use std::pin::Pin;

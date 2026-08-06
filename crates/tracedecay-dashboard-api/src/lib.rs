@@ -84,7 +84,12 @@ mod graph_service;
 mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
-mod lcm_queries;
+pub use lcm_api::{
+    DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
+    DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1,
+    DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
+    DashboardLcmReadStateV1, DashboardLcmTimelineBucketV1,
+};
 mod loom_api;
 mod memory_analysis;
 mod memory_api;
@@ -213,6 +218,7 @@ pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sy
 pub struct DashboardStateCompositionV1 {
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
     pub registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
@@ -285,13 +291,16 @@ pub struct DashboardState {
     pub mem_db: Arc<Database>,
     /// Display path of the project memory database.
     pub mem_db_path: String,
-    /// Registered LCM session store for the resolved active project store.
-    /// Absent when exact project-session authority is unavailable.
+    /// Registered LCM session store retained for legacy analytics and
+    /// accounting routes that have not yet moved to application read models.
     pub lcm_db: Option<Arc<RegisteredGlobalDb>>,
-    /// Display path of the LCM session store actually being served.
+    /// Display path of the retained legacy session store.
     pub lcm_db_path: String,
-    /// Which store `lcm_db` points at: project storage mode or `"unavailable"`.
+    /// Storage scope of the retained legacy session store.
     pub lcm_scope: String,
+    /// Daemon-owned canonical session retrieval authority used by LCM browse
+    /// routes. Those routes never retain or open a session database.
+    pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
     /// Global accounting DB (savings ledger, lifetime counters, turns) used
     /// by the Savings & Cost tab, when available.
     pub savings_db: Option<Arc<RegisteredGlobalDb>>,
@@ -416,21 +425,13 @@ impl DashboardState {
     }
 }
 
-/// The LCM session store the dashboard will serve.
+/// The retained session store for legacy dashboard routes.
 pub struct LcmStoreSelection {
     pub lcm_db: Option<Arc<RegisteredGlobalDb>>,
     pub path: String,
     pub scope: String,
 }
 
-/// Selects the LCM session store for the resolved active project store.
-///
-/// Transcript ingest writes to the active code-project store selected by the
-/// storage resolver. For profile-backed projects, that is the user-level shard
-/// under `~/.tracedecay/projects/<project_id>/`, not a repo-local DB.
-///
-/// Session storage fails closed when the project authority is unavailable;
-/// the global accounting DB is never a fallback LCM destination.
 pub async fn resolve_lcm_store(
     cg: &TraceDecay,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
@@ -499,6 +500,7 @@ async fn build_state_inner(
     let DashboardStateCompositionV1 {
         project_graph_resolver,
         registered_project_session_db,
+        lcm_read_authority,
         registered_savings_db,
         automation_scheduler_reconciler,
         automation_writer,
@@ -546,6 +548,7 @@ async fn build_state_inner(
         lcm_db: lcm.lcm_db,
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
+        lcm_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
@@ -585,6 +588,7 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         DashboardStateCompositionV1 {
             project_graph_resolver: None,
             registered_project_session_db: None,
+            lcm_read_authority: None,
             registered_savings_db: None,
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
@@ -619,6 +623,7 @@ pub async fn build_selected_project_state(
         DashboardStateCompositionV1 {
             project_graph_resolver: active.project_graph_resolver.clone(),
             registered_project_session_db: None,
+            lcm_read_authority: None,
             registered_savings_db: active.savings_db.clone(),
             automation_scheduler_reconciler: None,
             automation_writer: Arc::clone(&active.automation_writer),
@@ -801,6 +806,7 @@ where
             project_graph_resolver: test_project_graph_resolver,
             registered_project_session_db: test_authority
                 .map(|authority| Arc::clone(&authority.project_sessions)),
+            lcm_read_authority: None,
             registered_savings_db: test_authority
                 .map(|authority| Arc::clone(&authority.profile_database)),
             automation_scheduler_reconciler: None,
@@ -949,7 +955,7 @@ fn dashboard_request_forbidden(detail: &'static str) -> Response {
 /// Canonical application routes bound to one exact project daemon.
 ///
 /// The active project mounts every route below. The selected-project gateway
-/// constructs only the PR14 feedback read subset from its retained graph.
+/// constructs only the dashboard feedback read subset from its retained graph.
 struct ActiveProjectApplicationRoutes {
     http_router: Router,
     dashboard_configuration_router: Router,
@@ -1029,7 +1035,7 @@ pub async fn router(
         }
     }
 
-    // PR12 application routes are bound to the active-project daemon. When the
+    // application primitive routes are bound to the active-project daemon. When the
     // daemon authority record is unavailable (standalone `tracedecay dashboard`
     // or the in-process test server), mounting them would otherwise fail the
     // whole server before it binds. Degrade gracefully instead — serve the core
@@ -1080,7 +1086,7 @@ fn router_with_active_application(
         .route("/api/delivery/{*tail}", any(active_api_gateway))
         .route("/api/explorer/{*tail}", any(active_api_gateway))
         .route("/api/loom/{*tail}", any(active_api_gateway))
-        // PR14 V2 read-model surfaces bound through the active-project gateway,
+        // V2 read-model surfaces bound through the active-project gateway,
         // mirroring the project-scoped `/api/projects/{id}/…` gateway path.
         .route("/api/doctor/{*tail}", any(active_api_gateway))
         .route("/api/storage/{*tail}", any(active_api_gateway))
@@ -1358,7 +1364,7 @@ fn project_api_router() -> Router<DashboardState> {
             get(explorer_api::read_context),
         )
         .route("/api/loom/temporal", get(loom_api::temporal))
-        // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
+        // V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
         // Read-only Doctor/health paths come from the API-owned descriptors in
@@ -1557,7 +1563,7 @@ fn selected_project_application_read(
         "feedback/get" | "feedback/expand" | "feedback/list" => {
             Some(SelectedProjectApplicationRead::Feedback)
         }
-        _ => WorkOperation::CORE
+        _ => WorkOperation::ALL
             .into_iter()
             .filter(|operation| operation.is_read_only())
             .any(|operation| tail.strip_prefix("work/") == Some(operation.route_segment()))
@@ -1589,7 +1595,7 @@ async fn forward_project_request(
 /// Capability discovery for hosts and future delegated-host extensions. The UI
 /// (or a wrapper) can probe this to decide which panels/actions to enable.
 async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
-    let has_lcm = state.lcm_db.is_some();
+    let has_lcm = state.lcm_read_authority.is_some();
     let global_automation = crate::user_config::UserConfig::load().automation;
     let project_automation = automation_config::load_project_config(&state.dashboard_root)
         .await
@@ -1677,6 +1683,50 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 mod authority_tests {
     use super::*;
 
+    struct FakeDashboardLcmRead;
+
+    impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
+        fn read(
+            &self,
+            _project_id: Option<&str>,
+            request: DashboardLcmReadRequestV1,
+        ) -> DashboardLcmReadFutureV1<'_> {
+            Box::pin(async move {
+                let next_cursor = match request {
+                    DashboardLcmReadRequestV1::Overview { .. }
+                    | DashboardLcmReadRequestV1::Timeline { .. } => None,
+                    DashboardLcmReadRequestV1::Search { .. } => {
+                        Some("opaque-search-cursor".to_owned())
+                    }
+                    DashboardLcmReadRequestV1::Session { .. } => {
+                        Some("opaque-session-cursor".to_owned())
+                    }
+                };
+                DashboardLcmReadOutcomeV1::Ready(DashboardLcmCanonicalPageV1 {
+                    messages: vec![DashboardLcmCanonicalMessageV1 {
+                        session_id: "session.dashboard".to_owned(),
+                        provider: "claude".to_owned(),
+                        role: "assistant".to_owned(),
+                        timestamp: Some(1),
+                        ordinal: 1,
+                        content: "canonically hydrated".to_owned(),
+                        message_id: "message.dashboard".to_owned(),
+                        metadata_json: None,
+                        tool_names: None,
+                    }],
+                    summary_nodes: Vec::new(),
+                    overview_matches: None,
+                    stats: DashboardLcmCanonicalStatsV1 {
+                        message_count: 1,
+                        ..DashboardLcmCanonicalStatsV1::default()
+                    },
+                    has_more: true,
+                    next_cursor,
+                })
+            })
+        }
+    }
+
     struct DashboardStateFixture {
         state: DashboardState,
         layout: StoreLayout,
@@ -1740,6 +1790,7 @@ mod authority_tests {
                 lcm_db: None,
                 lcm_db_path: layout.sessions_db_path.display().to_string(),
                 lcm_scope: "unavailable".to_owned(),
+                lcm_read_authority: None,
                 savings_db: None,
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),
@@ -1945,7 +1996,6 @@ mod authority_tests {
         let fixture = DashboardStateFixture::open("project.dashboard-session-unavailable").await;
         let selected = resolve_lcm_store_for_layout(&fixture.layout, None);
 
-        // A display path is not read authority.
         assert!(selected.lcm_db.is_none());
         assert_eq!(selected.scope, "unavailable");
         assert_eq!(
@@ -1988,11 +2038,7 @@ mod authority_tests {
         let application = ActiveProjectApplicationRoutes {
             http_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::NO_CONTENT }))
-                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT }))
-                .route(
-                    "/work/attempt/start",
-                    post(|| async { StatusCode::ACCEPTED }),
-                ),
+                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT })),
             dashboard_configuration_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
             dashboard_feedback_router: Router::new()
@@ -2052,20 +2098,6 @@ mod authority_tests {
             .await
             .expect("dashboard Work response");
         assert_eq!(work.status(), StatusCode::NO_CONTENT);
-
-        let attempt = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/work/attempt/start")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .expect("dashboard Work attempt request"),
-            )
-            .await
-            .expect("dashboard Work attempt response");
-        assert_eq!(attempt.status(), StatusCode::METHOD_NOT_ALLOWED);
 
         let selected = app
             .oneshot(
@@ -2228,15 +2260,20 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn lcm_browse_reads_are_typed_unavailable_until_temporal_hydration_mounts() {
-        let fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
+    async fn lcm_search_and_session_use_canonical_daemon_authority_and_opaque_cursors() {
+        let mut fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
+        fixture.state.lcm_read_authority = Some(Arc::new(FakeDashboardLcmRead));
         let app = router_with_active_application(fixture.state, None, Router::new());
 
-        for uri in [
-            "/api/plugins/hermes-lcm/overview",
-            "/api/plugins/hermes-lcm/search?q=needle",
-            "/api/plugins/hermes-lcm/session/session-missing",
-            "/api/plugins/hermes-lcm/timeline",
+        for (uri, cursor) in [
+            (
+                "/api/plugins/hermes-lcm/search?q=needle",
+                "opaque-search-cursor",
+            ),
+            (
+                "/api/plugins/hermes-lcm/session/session.dashboard",
+                "opaque-session-cursor",
+            ),
         ] {
             let response = app
                 .clone()
@@ -2255,13 +2292,50 @@ mod authority_tests {
             let value: Value = serde_json::from_slice(&body).expect("LCM browse json");
 
             assert_eq!(value["schema_revision"], 1, "{uri}");
-            assert_eq!(value["domain_state"], "unknown", "{uri}");
-            assert!(value["payload"].is_null(), "{uri}");
+            assert_eq!(value["domain_state"], "ready", "{uri}");
             assert_eq!(
-                value["coverage"]["omission_reasons"],
-                serde_json::json!(["lcm_temporal_retrieval_not_mounted"]),
+                value["payload"]["messages"]
+                    .as_array()
+                    .or_else(|| value["payload"]["matches"]["messages"].as_array())
+                    .and_then(|messages| messages.first())
+                    .and_then(|message| message["content"].as_str()),
+                Some("canonically hydrated"),
                 "{uri}",
             );
+            assert_eq!(value["payload"]["next_cursor"], cursor, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lcm_aggregate_reads_use_the_mounted_daemon_authority() {
+        let mut fixture = DashboardStateFixture::open("project.dashboard-lcm-aggregate").await;
+        fixture.state.lcm_read_authority = Some(Arc::new(FakeDashboardLcmRead));
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/hermes-lcm/overview",
+            "/api/plugins/hermes-lcm/timeline",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("LCM aggregate request"),
+                )
+                .await
+                .expect("LCM aggregate response");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("LCM aggregate body");
+            let value: Value = serde_json::from_slice(&body).expect("LCM aggregate json");
+
+            assert_eq!(value["domain_state"], "ready", "{uri}");
+            assert_eq!(value["coverage"]["completeness"], "complete", "{uri}");
+            assert_eq!(value["coverage"]["eligible"], 1, "{uri}");
+            assert_eq!(value["coverage"]["examined"], 1, "{uri}");
+            assert_eq!(value["payload"]["exists"], true, "{uri}");
         }
     }
 
@@ -2371,8 +2445,8 @@ mod authority_tests {
             assert_eq!(selected_project_application_read(&Method::GET, tail), None);
         }
 
-        // Every Work command, and every attempt operation, stays refused: a
-        // selected project is read-only through this gateway.
+        // Every Work command stays refused: a selected project is read-only
+        // through this gateway.
         for operation in WorkOperation::ALL {
             if operation.is_read_only() {
                 continue;

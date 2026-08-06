@@ -1,6 +1,6 @@
 //! Pure, one-shot advisory feedback-cycle contracts.
 //!
-//! PR11 owns saved-content post-edit diagnostics and impact contracts here.
+//! The post-edit feedback core owns saved-content post-edit diagnostics and impact contracts here.
 //! These values never schedule an agent, apply an edit, emit a transport
 //! payload, or make dirty-overlay evidence durable.
 
@@ -188,7 +188,7 @@ impl FeedbackBudgetV1 {
     }
 }
 
-/// Concrete PR11 request for one post-edit advisory cycle. The request is
+/// Concrete post-edit feedback request for one post-edit advisory cycle. The request is
 /// structurally advisory-only, preventing it from becoming an edit, task, or
 /// workflow command through an adapter-local field.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -935,7 +935,7 @@ pub enum FeedbackDiagnosticProducerV1 {
     Proximity,
 }
 
-/// Reference-only PR11 finding. The safe preview is bounded display framing,
+/// Reference-only post-edit feedback finding. The safe preview is bounded display framing,
 /// never a source-text copy or a second diagnostic store.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1281,7 +1281,7 @@ fn derive_result_id(
     FeedbackResultId::new(format!("feedback.result.v1.{encoded}"))
 }
 
-/// Privacy-safe PR11 feedback-cycle observation categories. They are separate
+/// Privacy-safe post-edit feedback-cycle observation categories. They are separate
 /// from the feedback result because telemetry must never copy paths, source,
 /// diagnostic messages, or overlay content.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1306,7 +1306,7 @@ pub enum FeedbackEvaluationStageV1 {
     Total,
 }
 
-/// One durable Plan-26 PR11 observation. Session-only overlay cycles cannot
+/// One durable Plan-26 post-edit observation. Session-only overlay cycles cannot
 /// construct this value and therefore cannot enter telemetry or any other
 /// durable observation path.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

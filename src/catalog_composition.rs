@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn raised_default_budget_routes_pr14_dashboard_operations_for_an_eager_client() {
+    fn raised_default_budget_routes_dashboard_operations_for_an_eager_client() {
         let snapshot = build_application_catalog_snapshot().expect("application catalog");
         let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
         let profile = snapshot.profile(&profile_id).expect("default profile");

@@ -1,4 +1,4 @@
-//! One-shot PR13 concurrent-work proximity provider.
+//! One-shot concurrent-work proximity provider.
 //!
 //! The provider consumes canonical observation/graph evidence, resolves the
 //! effective Plan 20 threshold, and projects one Plan 09 contribution batch.
@@ -38,9 +38,10 @@ pub use authority::{
     ProductionProximityEvidenceAuthorityV1, SharedCanonicalProximityEvidenceAuthorityV1,
 };
 
-const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str = "tracedecay.pr13.proximity.contribution-id.v1";
+const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str =
+    "tracedecay.advisory.proximity.contribution-id.v1";
 const PROXIMITY_CONFIGURATION_REVISION_DOMAIN_V1: &str =
-    "tracedecay.pr13.proximity.configuration-revision.v1";
+    "tracedecay.advisory.proximity.configuration-revision.v1";
 
 /// Exact Plan 20 threshold input for one evaluation. Revision and effective
 /// behavior digest are pinned together before provider evidence is read.
@@ -176,8 +177,8 @@ impl CanonicalProximityEvidenceBatchV1 {
     }
 }
 
-/// Stable provider seam retained for PR14 dashboard reads, PR15 independently
-/// authorized roots, PR16 workspace-local computation, and PR17 task evidence.
+/// Stable provider seam retained for dashboard reads, independently
+/// authorized roots, workspace-local computation, and task evidence.
 /// Implementations reuse canonical observation and graph/query authorities.
 pub trait CanonicalProximityEvidenceAuthorityV1 {
     fn current_evidence<'a>(
@@ -203,12 +204,12 @@ where
 /// Synchronous Plan 09 publication contribution produced by the one async
 /// provider evaluation.
 #[derive(Clone, Debug)]
-pub struct Pr13ProximityFindingContributorV1 {
+pub struct ProximityFindingContributorV1 {
     provider_state: ProviderEvaluationStateV1,
     contributions: Vec<ProximityContributionV1>,
 }
 
-impl Pr13ProximityFindingContributorV1 {
+impl ProximityFindingContributorV1 {
     fn new(
         contributions: Vec<ProximityContributionV1>,
         coverage: ProximityCoverageV1,
@@ -236,7 +237,7 @@ impl Pr13ProximityFindingContributorV1 {
     }
 }
 
-impl AdvisoryFindingContributorV1 for Pr13ProximityFindingContributorV1 {
+impl AdvisoryFindingContributorV1 for ProximityFindingContributorV1 {
     fn advisory_findings(
         &self,
         window: AdvisoryFindingValidityWindowV1,
@@ -294,8 +295,8 @@ fn proximity_provider_state(
 }
 
 #[derive(Clone, Debug)]
-pub enum Pr13ProximityRuntimeOutcomeV1 {
-    Completed(Pr13ProximityFindingContributorV1),
+pub enum ProximityRuntimeOutcomeV1 {
+    Completed(ProximityFindingContributorV1),
     Denied,
     Cancelled,
     TimedOut,
@@ -304,13 +305,13 @@ pub enum Pr13ProximityRuntimeOutcomeV1 {
 
 /// One exact-scope evaluation owner. The outer feedback cycle owns completed
 /// publication and dedupe, so this owner retains no local ledger or proof.
-pub struct Pr13ProximityRuntimeOwnerV1<A, C> {
+pub struct ProximityRuntimeOwnerV1<A, C> {
     scope: FeedbackScopeV1,
     evidence: A,
     configuration: C,
 }
 
-impl<A, C> Pr13ProximityRuntimeOwnerV1<A, C> {
+impl<A, C> ProximityRuntimeOwnerV1<A, C> {
     pub fn new(scope: FeedbackScopeV1, evidence: A, configuration: C) -> Option<Self> {
         scope.validate().ok()?;
         Some(Self {
@@ -325,7 +326,7 @@ impl<A, C> Pr13ProximityRuntimeOwnerV1<A, C> {
     }
 }
 
-impl<A, C> Pr13ProximityRuntimeOwnerV1<A, C>
+impl<A, C> ProximityRuntimeOwnerV1<A, C>
 where
     A: CanonicalProximityEvidenceAuthorityV1 + Sync,
 {
@@ -337,15 +338,15 @@ where
         context: &RequestContext,
         request: &ProximityEvaluationRequestV1,
         threshold: &ProximityThresholdPinV1,
-    ) -> Pr13ProximityRuntimeOutcomeV1 {
+    ) -> ProximityRuntimeOutcomeV1 {
         if context.cancellation().is_cancelled() {
-            return Pr13ProximityRuntimeOutcomeV1::Cancelled;
+            return ProximityRuntimeOutcomeV1::Cancelled;
         }
         if context.deadline().is_elapsed_at(now_micros()) {
-            return Pr13ProximityRuntimeOutcomeV1::TimedOut;
+            return ProximityRuntimeOutcomeV1::TimedOut;
         }
         if request.validate().is_err() || request.scope != self.scope {
-            return Pr13ProximityRuntimeOutcomeV1::Denied;
+            return ProximityRuntimeOutcomeV1::Denied;
         }
         if !context_allows_feedback_operation(
             context,
@@ -353,13 +354,13 @@ where
             PROXIMITY_CAPABILITY_ID_V1,
             PROXIMITY_USE_CASE_ID_V1,
         ) {
-            return Pr13ProximityRuntimeOutcomeV1::Denied;
+            return ProximityRuntimeOutcomeV1::Denied;
         }
         if !threshold.validate() {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            return ProximityRuntimeOutcomeV1::Unavailable;
         }
         let Some(batch) = self.evidence.current_evidence(context, request).await else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            return ProximityRuntimeOutcomeV1::Unavailable;
         };
         if let Some(interruption) = interrupted(context) {
             return interruption;
@@ -367,20 +368,19 @@ where
         let mut contributions = Vec::with_capacity(batch.evidence.len());
         for item in batch.evidence {
             let Some(contribution) = build_proximity_contribution(request, threshold, item) else {
-                return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+                return ProximityRuntimeOutcomeV1::Unavailable;
             };
             contributions.push(contribution);
         }
-        let Some(contributor) =
-            Pr13ProximityFindingContributorV1::new(contributions, batch.coverage)
+        let Some(contributor) = ProximityFindingContributorV1::new(contributions, batch.coverage)
         else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            return ProximityRuntimeOutcomeV1::Unavailable;
         };
-        Pr13ProximityRuntimeOutcomeV1::Completed(contributor)
+        ProximityRuntimeOutcomeV1::Completed(contributor)
     }
 }
 
-impl<A, C> Pr13ProximityRuntimeOwnerV1<A, C>
+impl<A, C> ProximityRuntimeOwnerV1<A, C>
 where
     A: CanonicalProximityEvidenceAuthorityV1 + Sync,
     C: ConfigurationControlStore,
@@ -393,15 +393,15 @@ where
         context: &RequestContext,
         request: &ProximityEvaluationRequestV1,
         expected_configuration_digest: &ManifestDigest,
-    ) -> Pr13ProximityRuntimeOutcomeV1 {
+    ) -> ProximityRuntimeOutcomeV1 {
         if context.cancellation().is_cancelled() {
-            return Pr13ProximityRuntimeOutcomeV1::Cancelled;
+            return ProximityRuntimeOutcomeV1::Cancelled;
         }
         if context.deadline().is_elapsed_at(now_micros()) {
-            return Pr13ProximityRuntimeOutcomeV1::TimedOut;
+            return ProximityRuntimeOutcomeV1::TimedOut;
         }
         if request.validate().is_err() || request.scope != self.scope {
-            return Pr13ProximityRuntimeOutcomeV1::Denied;
+            return ProximityRuntimeOutcomeV1::Denied;
         }
         if !context_allows_feedback_operation(
             context,
@@ -409,20 +409,20 @@ where
             PROXIMITY_CAPABILITY_ID_V1,
             PROXIMITY_USE_CASE_ID_V1,
         ) {
-            return Pr13ProximityRuntimeOutcomeV1::Denied;
+            return ProximityRuntimeOutcomeV1::Denied;
         }
         let Ok(configuration) = self.configuration.current().await else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            return ProximityRuntimeOutcomeV1::Unavailable;
         };
         if let Some(interruption) = interrupted(context) {
             return interruption;
         }
         let Some(threshold) = ProximityThresholdPinV1::from_current_configuration(&configuration)
         else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            return ProximityRuntimeOutcomeV1::Unavailable;
         };
         if threshold.configuration_digest != *expected_configuration_digest {
-            return Pr13ProximityRuntimeOutcomeV1::Denied;
+            return ProximityRuntimeOutcomeV1::Denied;
         }
         self.evaluate_with_threshold_pin(context, request, &threshold)
             .await
@@ -432,15 +432,15 @@ where
         &self,
         context: &RequestContext,
         request: &ProximityEvaluationRequestV1,
-    ) -> Pr13ProximityRuntimeOutcomeV1 {
+    ) -> ProximityRuntimeOutcomeV1 {
         if context.cancellation().is_cancelled() {
-            return Pr13ProximityRuntimeOutcomeV1::Cancelled;
+            return ProximityRuntimeOutcomeV1::Cancelled;
         }
         if context.deadline().is_elapsed_at(now_micros()) {
-            return Pr13ProximityRuntimeOutcomeV1::TimedOut;
+            return ProximityRuntimeOutcomeV1::TimedOut;
         }
         if request.validate().is_err() || request.scope != self.scope {
-            return Pr13ProximityRuntimeOutcomeV1::Denied;
+            return ProximityRuntimeOutcomeV1::Denied;
         }
         if !context_allows_feedback_operation(
             context,
@@ -448,28 +448,28 @@ where
             PROXIMITY_CAPABILITY_ID_V1,
             PROXIMITY_USE_CASE_ID_V1,
         ) {
-            return Pr13ProximityRuntimeOutcomeV1::Denied;
+            return ProximityRuntimeOutcomeV1::Denied;
         }
         let Ok(configuration) = self.configuration.current().await else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            return ProximityRuntimeOutcomeV1::Unavailable;
         };
         if let Some(interruption) = interrupted(context) {
             return interruption;
         }
         let Some(threshold) = ProximityThresholdPinV1::from_current_configuration(&configuration)
         else {
-            return Pr13ProximityRuntimeOutcomeV1::Unavailable;
+            return ProximityRuntimeOutcomeV1::Unavailable;
         };
         self.evaluate_with_threshold_pin(context, request, &threshold)
             .await
     }
 }
 
-fn interrupted(context: &RequestContext) -> Option<Pr13ProximityRuntimeOutcomeV1> {
+fn interrupted(context: &RequestContext) -> Option<ProximityRuntimeOutcomeV1> {
     if context.cancellation().is_cancelled() {
-        Some(Pr13ProximityRuntimeOutcomeV1::Cancelled)
+        Some(ProximityRuntimeOutcomeV1::Cancelled)
     } else if context.deadline().is_elapsed_at(now_micros()) {
-        Some(Pr13ProximityRuntimeOutcomeV1::TimedOut)
+        Some(ProximityRuntimeOutcomeV1::TimedOut)
     } else {
         None
     }
@@ -575,16 +575,16 @@ fn build_proximity_contribution(
     Some(contribution)
 }
 
-pub type ConcretePr13ProximityRuntimeOwnerV1<A, C> = Pr13ProximityRuntimeOwnerV1<A, C>;
+pub type ConcreteProximityRuntimeOwnerV1<A, C> = ProximityRuntimeOwnerV1<A, C>;
 
 /// Concrete registration factory retaining only provider and configuration
 /// extension seams. Shared Plan 09 publication owns durable dedupe.
-pub fn open_pr13_proximity_runtime<A, C>(
+pub fn open_proximity_runtime<A, C>(
     scope: FeedbackScopeV1,
     evidence: A,
     configuration: C,
-) -> Option<ConcretePr13ProximityRuntimeOwnerV1<A, C>> {
-    Pr13ProximityRuntimeOwnerV1::new(scope, evidence, configuration)
+) -> Option<ConcreteProximityRuntimeOwnerV1<A, C>> {
+    ProximityRuntimeOwnerV1::new(scope, evidence, configuration)
 }
 
 #[cfg(test)]
@@ -718,7 +718,7 @@ mod tests {
         );
         let current_configuration = Arc::new(Mutex::new(authorized.clone()));
         let calls = Arc::new(AtomicUsize::new(0));
-        let owner = open_pr13_proximity_runtime(
+        let owner = open_proximity_runtime(
             scope.clone(),
             MutatingEvidence {
                 current_configuration: Arc::clone(&current_configuration),
@@ -737,7 +737,7 @@ mod tests {
             owner
                 .evaluate_with_threshold_pin(&context, &request, &authorized_pin)
                 .await,
-            Pr13ProximityRuntimeOutcomeV1::Completed(_)
+            ProximityRuntimeOutcomeV1::Completed(_)
         ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -752,7 +752,7 @@ mod tests {
             owner
                 .evaluate_with_threshold_pin(&context, &request, &drifted_pin)
                 .await,
-            Pr13ProximityRuntimeOutcomeV1::Completed(_)
+            ProximityRuntimeOutcomeV1::Completed(_)
         ));
         assert_eq!(
             calls.load(Ordering::SeqCst),

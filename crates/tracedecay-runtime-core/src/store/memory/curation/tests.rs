@@ -43,7 +43,7 @@ async fn curated_correction_provenance_is_exact_owner_scoped_and_replay_safe() {
     .await
     .unwrap();
     let owner = FactOwnerV1::Project {
-        project_id: ProjectId::new("pr7.curated-correction".to_owned()).unwrap(),
+        project_id: ProjectId::new("curation.curated-correction".to_owned()).unwrap(),
     };
     let source = FactId::new("fact.curated.source").unwrap();
     let evidence_a = FactId::new("fact.curated.evidence-a").unwrap();
@@ -203,7 +203,7 @@ async fn curated_correction_provenance_rejects_cross_owner_evidence() {
     .unwrap();
     let source_owner = FactOwnerV1::Profile;
     let evidence_owner = FactOwnerV1::Project {
-        project_id: ProjectId::new("pr7.foreign-evidence".to_owned()).unwrap(),
+        project_id: ProjectId::new("curation.foreign-evidence".to_owned()).unwrap(),
     };
     let source = FactId::new("fact.curated.owner-source").unwrap();
     let evidence = FactId::new("fact.curated.foreign-evidence").unwrap();

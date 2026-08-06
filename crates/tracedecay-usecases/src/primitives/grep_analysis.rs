@@ -1,4 +1,4 @@
-//! PR12 production adapters for the existing single-root grep and analysis
+//! Production adapters for the existing single-root grep and analysis
 //! authorities.
 //!
 //! Lexical grep and redundancy remain injected because their current owners

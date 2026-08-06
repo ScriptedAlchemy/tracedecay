@@ -1,4 +1,4 @@
-//! PR14 dashboard projection over the canonical feedback and Plan-26 owners.
+//! dashboard projection over the canonical feedback and Plan-26 owners.
 
 use std::future::Future;
 use std::path::PathBuf;

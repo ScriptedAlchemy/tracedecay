@@ -26,6 +26,7 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 pub mod watermark;
+pub mod work;
 pub mod workflow;
 mod writer;
 

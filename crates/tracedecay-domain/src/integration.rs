@@ -23,8 +23,8 @@ pub const HOST_INTEGRATION_CATALOG_SCHEMA_VERSION_V1: u16 = 1;
 const OBSERVATION_CAPTURE_CAPABILITY_ID: &str = "capability.integration.observation.capture";
 
 /// Canonical stock host surfaces shared by catalog, packaging, delivery, and
-/// conformance consumers. A host surface is not itself evidence that the PR6
-/// observation-capture capability is fixture-backed.
+/// conformance consumers. A host surface is not itself evidence that the
+/// native observation-capture capability is fixture-backed.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
@@ -60,7 +60,7 @@ impl HostKindV1 {
         Self::OpenCode,
     ];
 
-    /// Project a stock host surface into the bounded PR6 observation catalog
+    /// Project a stock host surface into the bounded host observation catalog
     /// only when a checked-in native event fixture proves that integration.
     pub const fn fixture_backed_observation_integration_id(self) -> Option<HostIntegrationIdV1> {
         match self {

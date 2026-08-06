@@ -8,7 +8,7 @@ pub(super) async fn execute_primitive(
     project_root: Option<&Path>,
     wire_request_id: String,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-    request: Pr12PrimitiveRequest,
+    request: PrimitiveRequest,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -18,7 +18,7 @@ pub(super) async fn execute_primitive(
     };
     let dispatch = service
         .project_runtimes
-        .read(project_root, Pr12PrimitiveProjectRuntime::dispatch)
+        .read(project_root, PrimitiveProjectRuntime::dispatch)
         .await;
     let Some(dispatch) = dispatch else {
         return concealed_application_problem(wire_request_id);
@@ -71,7 +71,7 @@ pub(super) async fn execute_primitive(
     };
     let mut result = dispatch
         .dispatch(
-            Pr12PrimitiveInvocation {
+            PrimitiveInvocation {
                 operation: operation.clone(),
                 request,
             },
@@ -901,8 +901,8 @@ impl DaemonPrimitiveRuntimeRegistrar {
     pub(crate) async fn register(
         &self,
         project_root: PathBuf,
-        project_runtime: Pr12PrimitiveProjectRuntime,
-    ) -> Result<Arc<dyn Pr12PrimitiveDispatch>, DaemonPrimitiveRuntimeRegistrationError> {
+        project_runtime: PrimitiveProjectRuntime,
+    ) -> Result<Arc<dyn PrimitiveDispatch>, DaemonPrimitiveRuntimeRegistrationError> {
         let dispatch = project_runtime.dispatch();
         self.service
             .project_runtimes

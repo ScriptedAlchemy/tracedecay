@@ -543,7 +543,7 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
         at: UtcMicros(1_000_000),
     };
     let commit_intent = GitIndexCommitIntentV1::new(
-        "PR12 transport parity\n".to_owned(),
+        "application transport parity\n".to_owned(),
         identity.clone(),
         identity,
         GitIndexSigningPolicyV1::UnsignedPermitted,

@@ -47,7 +47,7 @@ pub use capacity::StoreRuntimeRegistryConfig;
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
-pub use graph::CanonicalGraphStoreLeaseV1;
+pub use graph::{CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1};
 pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
     StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,

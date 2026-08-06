@@ -34,7 +34,9 @@ use crate::{
     },
     code_index::{
         chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
-        graph_projection::CodeGraphEvidenceReader,
+        graph_projection::{
+            CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionStore,
+        },
         languages::{LanguageRegistry, StaticLanguageRegistry},
         production::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -970,6 +972,16 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
     >,
     pub lexical: LexicalLane<CodeLexicalProjectionAdapterV1>,
     pub graph: GraphLane<CodeGraphEvidenceReader>,
+    _graph_authority: CodeGraphServingAuthorityV1,
+}
+
+#[derive(Clone)]
+enum CodeGraphServingAuthorityV1 {
+    Persistent(
+        Arc<tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1>,
+    ),
+    #[cfg(test)]
+    Memory,
 }
 
 impl LatestCompleteCodeIndexV1 {
@@ -1001,6 +1013,7 @@ impl LatestCompleteCodeIndexV1 {
     /// Failures are deliberately discarded: this is a pre-warm, not a gate. Only
     /// success is memoized, so every serving path still runs — and still fails
     /// closed on — the exact same checks.
+    #[cfg(test)]
     pub(in crate::daemon) fn warm_serving_caches(&self) {
         let _ = self.generation.admitted_chunks();
         let _ = self.generation.test_attribution_authority();
@@ -1088,6 +1101,42 @@ impl LatestCompleteCodeIndexV1 {
         if let Some(owners) = self.query_owners.get() {
             return Ok(Arc::clone(owners));
         }
+        #[cfg(not(test))]
+        return Err(RetrievalPortError::Contract(
+            "code graph projection has not completed activation".to_owned(),
+        ));
+        #[cfg(test)]
+        {
+            let generation_id = self.generation.manifest().generation_id.clone();
+            let freshness = self.source_freshness()?;
+            let graph = CodeGraphEvidenceReader::new(
+                generation_id,
+                Some(self.generation.snapshot().repository.clone()),
+                freshness,
+                self.generation.edges(),
+                self.generation.chunks().chunks(),
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            self.install_query_owners(graph, CodeGraphServingAuthorityV1::Memory)
+        }
+    }
+
+    fn source_freshness(&self) -> Result<tracedecay_domain::SourceFreshness, RetrievalPortError> {
+        production_code_index_freshness(
+            self.generation.manifest().seal.sealed_at,
+            ComponentRevision::new("policy.daemon.v1")
+                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        )
+    }
+
+    fn install_query_owners(
+        &self,
+        graph_reader: CodeGraphEvidenceReader,
+        graph_authority: CodeGraphServingAuthorityV1,
+    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+        if let Some(owners) = self.query_owners.get() {
+            return Ok(Arc::clone(owners));
+        }
         // Cold memo: exactly one caller builds; everyone else waits here and
         // reads the memo the winner installed. The build is O(store), so
         // duplicating it per racing query was the outage, not the wait.
@@ -1099,11 +1148,7 @@ impl LatestCompleteCodeIndexV1 {
             return Ok(Arc::clone(owners));
         }
         let generation_id = self.generation.manifest().generation_id.clone();
-        let freshness = production_code_index_freshness(
-            self.generation.manifest().seal.sealed_at,
-            ComponentRevision::new("policy.daemon.v1")
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-        )?;
+        let freshness = self.source_freshness()?;
         let metadata = CodeLexicalProjectionMetadataV1 {
             generation: generation_id.clone(),
             repository_id: Some(self.generation.snapshot().repository.clone()),
@@ -1147,20 +1192,50 @@ impl LatestCompleteCodeIndexV1 {
             lexical_projection.exact_adapter(authority),
         );
         let lexical = LexicalLane::new(lexical_projection);
-        let graph = GraphLane::new(CodeGraphEvidenceReader::new(
-            generation_id,
-            Some(self.generation.snapshot().repository.clone()),
-            freshness,
-            self.generation.edges(),
-            self.generation.chunks().chunks(),
-        )?);
+        if graph_reader.generation() != &generation_id {
+            return Err(RetrievalPortError::Contract(
+                "code graph reader generation does not match sealed generation".to_owned(),
+            ));
+        }
+        let graph = GraphLane::new(graph_reader);
         let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
             exact,
             lexical,
             graph,
+            _graph_authority: graph_authority,
         });
         let _ = self.query_owners.set(Arc::clone(&owners));
         Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
+    }
+
+    fn activate_persistent_graph(
+        &self,
+        store: CodeGraphProjectionStore,
+        authority: Arc<
+            tracedecay_runtime_core::store_runtime::registry::CanonicalCodeGraphStoreLeaseV1,
+        >,
+        cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let generation_id = self.generation.manifest().generation_id.clone();
+        store.publish_code_graph_with_cancellation(
+            &generation_id,
+            self.generation.edges(),
+            self.generation.chunks().chunks(),
+            Arc::clone(&cancellation),
+        )?;
+        let reader = store.evidence_reader_with_cancellation(
+            &generation_id,
+            Some(self.generation.snapshot().repository.clone()),
+            self.source_freshness()
+                .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?,
+            cancellation,
+        )?;
+        self.install_query_owners(reader, CodeGraphServingAuthorityV1::Persistent(authority))
+            .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
+        let _ = self.generation.admitted_chunks();
+        let _ = self.generation.test_attribution_authority();
+        let _ = self.record_index();
+        Ok(())
     }
 }
 
@@ -1178,6 +1253,10 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     ProductionOpen(String),
     #[error("code-index privacy sanitizer failed: {0}")]
     Privacy(String),
+    #[error("code-index graph projection failed: {0}")]
+    GraphProjection(#[from] CodeGraphProjectionError),
+    #[error("code-index graph activation failed: {0}")]
+    GraphActivation(String),
 }
 
 struct AtomicFlagReset(Arc<AtomicBool>);
@@ -1953,6 +2032,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     ///
     /// Best-effort by construction: nothing here is a gate, and every failure
     /// simply leaves the work for the serving path, which still fails closed.
+    #[cfg(test)]
     fn prime_serving_caches(&self) {
         if let Some(latest) = self.latest_complete() {
             latest.warm_serving_caches();

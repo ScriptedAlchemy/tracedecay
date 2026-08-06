@@ -1,4 +1,4 @@
-//! PR6 hook-boundary failure matrix at the daemon host-admission spool.
+//! hook-boundary failure matrix at the daemon host-admission spool.
 //!
 //! Each row proves typed failure dispositions do not corrupt the durable
 //! writer frontier (pending watermark / replay backlog) and do not invent a

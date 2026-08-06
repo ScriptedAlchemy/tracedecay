@@ -954,7 +954,7 @@ async fn store_blob_zeroblob_is_skipped_without_full_table_select() {
 }
 
 #[test]
-fn configured_composer_sqlite_bounds_match_shared_pr6_ceilings() {
+fn configured_composer_sqlite_bounds_match_shared_host_ceilings() {
     assert_eq!(max_composer_record_bytes(), 1_048_576);
     assert_eq!(MAX_COMPOSER_ENVELOPE_BYTES, 16 * 1024 * 1024);
     assert_eq!(DEFAULT_COMPOSER_SWEEP_BYTES, 16 * 1024 * 1024 + 1);

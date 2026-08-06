@@ -9,7 +9,7 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 pub mod ci;
 pub mod ci_runtime;
-/// Checked-in provider source captures for the PR13 composite acceptance
+/// Checked-in provider source captures for the composite advisory acceptance
 /// scenario. Integration tests are a separate crate and can only reach `pub`
 /// items, so the opt-in `test-transport` feature keeps these captures out of
 /// the default production surface without weakening them.
@@ -79,37 +79,35 @@ pub use github_runtime::{
     unregister_profile_github_read_only_credential_authority_v1,
 };
 pub use host_delivery::{
-    Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryDaemonStartupErrorV1,
-    Pr13AdvisoryDaemonStartupRegistrationV1, Pr13AdvisoryHookDeliveryPortV1,
-    Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
-    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryHostDeliveryErrorV1, Pr13AdvisoryHostDeliveryPathV1,
-    Pr13AdvisoryHostDeliveryRegistrationV1, Pr13AdvisoryHostDeliveryRouteV1,
-    Pr13AdvisoryRunErrorV1, Pr13AdvisoryRunResultV1, mount_pr13_advisory_host_delivery,
-    new_pr13_advisory_hook_delivery_port, register_pr13_advisory_daemon_startup,
+    AdvisoryCompletedDeliveryV1, AdvisoryDaemonStartupErrorV1, AdvisoryDaemonStartupRegistrationV1,
+    AdvisoryHookDeliveryPortV1, AdvisoryHookDeliveryV1, AdvisoryHookLookupNoticeV1,
+    AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryHostDeliveryErrorV1,
+    AdvisoryHostDeliveryPathV1, AdvisoryHostDeliveryRegistrationV1, AdvisoryHostDeliveryRouteV1,
+    AdvisoryRunErrorV1, AdvisoryRunResultV1, mount_advisory_host_delivery,
+    new_advisory_hook_delivery_port, register_advisory_daemon_startup,
 };
 pub use host_delivery::{
-    acknowledge_pr13_advisory_hook_notice, peek_pr13_advisory_hook_notice,
-    register_pr13_advisory_hook_notice_queue,
+    acknowledge_advisory_hook_notice, peek_advisory_hook_notice,
+    register_advisory_hook_notice_queue,
 };
 pub use production::{
-    Pr13AdvisoryProductionAuthoritiesV1, Pr13AdvisoryProductionHookDeliveryPortV1,
-    Pr13AdvisoryProductionOpenErrorV1, Pr13AdvisoryProductionOpenV1,
-    Pr13AdvisoryProductionProviderAuthoritiesV1, Pr13AdvisoryProductionStartupRegistrationV1,
-    open_pr13_advisory_production_authorities,
+    AdvisoryProductionAuthoritiesV1, AdvisoryProductionHookDeliveryPortV1,
+    AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionProviderAuthoritiesV1, AdvisoryProductionStartupRegistrationV1,
+    open_advisory_production_authorities,
 };
 pub use proximity_runtime::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
-    CanonicalProximityEvidenceV1, ConcretePr13ProximityRuntimeOwnerV1,
-    Pr13ProximityFindingContributorV1, Pr13ProximityRuntimeOutcomeV1, Pr13ProximityRuntimeOwnerV1,
-    ProductionProximityEvidenceAuthorityV1, ProximityThresholdPinV1,
-    SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
+    CanonicalProximityEvidenceV1, ConcreteProximityRuntimeOwnerV1,
+    ProductionProximityEvidenceAuthorityV1, ProximityFindingContributorV1,
+    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
+    SharedCanonicalProximityEvidenceAuthorityV1, open_proximity_runtime,
 };
 pub use runtime::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, Pr13AdvisoryContributionsV1,
-    Pr13AdvisoryDaemonRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
-    Pr13AdvisoryProviderStateV1, Pr13AdvisoryProviderV1, Pr13AdvisoryRuntime,
-    Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
-    open_pr13_advisory_daemon_registration,
+    AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
+    AdvisoryDaemonRegistrationV1, AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1,
+    AdvisoryProviderV1, AdvisoryRuntime, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
+    open_advisory_daemon_registration,
 };
 
 /// Every adapter preserves the already-admitted project/repository/worktree/

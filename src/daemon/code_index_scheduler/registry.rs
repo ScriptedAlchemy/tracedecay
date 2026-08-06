@@ -30,6 +30,23 @@ use super::{
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
+#[derive(Clone)]
+enum CodeGraphActivationAuthorityV1 {
+    Persistent(Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>),
+    #[cfg(test)]
+    Memory,
+}
+
+struct SchedulerGraphCancellationV1 {
+    shutting_down: Arc<AtomicBool>,
+}
+
+impl tracedecay_graph_db::GraphCancellation for SchedulerGraphCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+}
+
 mod resident_memory;
 
 /// Bounded daemon-wide concurrency for expensive background reconciles and
@@ -559,6 +576,29 @@ impl CodeIndexSchedulerRegistryV1 {
         }
     }
 
+    pub(in crate::daemon) async fn mount_worktree_with_graph_runtime(
+        &self,
+        project_id: ProjectId,
+        project_root: &Path,
+        store_root: PathBuf,
+        semantic_schedule: Option<
+            crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+        >,
+        graph_runtime: Arc<
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+        >,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        self.mount_worktree_inner(
+            project_id,
+            project_root,
+            store_root,
+            semantic_schedule,
+            CodeGraphActivationAuthorityV1::Persistent(graph_runtime),
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub(in crate::daemon) async fn mount_worktree(
         &self,
         project_id: ProjectId,
@@ -567,6 +607,26 @@ impl CodeIndexSchedulerRegistryV1 {
         semantic_schedule: Option<
             crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
         >,
+    ) -> Result<bool, CodeIndexSchedulerErrorV1> {
+        self.mount_worktree_inner(
+            project_id,
+            project_root,
+            store_root,
+            semantic_schedule,
+            CodeGraphActivationAuthorityV1::Memory,
+        )
+        .await
+    }
+
+    async fn mount_worktree_inner(
+        &self,
+        project_id: ProjectId,
+        project_root: &Path,
+        store_root: PathBuf,
+        semantic_schedule: Option<
+            crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1,
+        >,
+        graph_activation: CodeGraphActivationAuthorityV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
         let mounted = self.mounted.lock().await;
@@ -665,6 +725,10 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::clone(&self.background_reconcile_admission);
         let worker_generation_publications = self.generation_publications.clone();
         let worker_project_root = project_root.clone();
+        let worker_project_id = project_id;
+        let worker_repository_id = repository_id.clone();
+        let worker_worktree_id = worktree_id.clone();
+        let worker_graph_activation = graph_activation;
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -692,7 +756,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worker_pending_wake_trigger,
                     CodeIndexCadenceTriggerV1::Mount,
                 );
-                let result = tokio::task::spawn_blocking(move || {
+                let mut result = tokio::task::spawn_blocking(move || {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -704,15 +768,69 @@ impl CodeIndexSchedulerRegistryV1 {
                         .as_ref()
                         .ok()
                         .and_then(|_| scheduler.latest_complete());
-                    // Reconcile completion is an activation point: build this
-                    // generation's serving derivations here, on the blocking
-                    // pool, so the first query against it stays O(result).
-                    if let Some(latest) = latest.as_ref() {
-                        latest.warm_serving_caches();
-                    }
                     (result, latest)
                 })
                 .await;
+                if let Ok((Ok(_), Some(latest))) = &result {
+                    let activation = match &worker_graph_activation {
+                        CodeGraphActivationAuthorityV1::Persistent(runtime) => {
+                            let generation_id =
+                                latest.generation().manifest().generation_id.clone();
+                            let retained = runtime
+                                .retain_code_graph_runtime(
+                                    worker_project_id.clone(),
+                                    worker_repository_id.clone(),
+                                    worker_worktree_id.clone(),
+                                    latest.generation().snapshot().reference.clone(),
+                                    generation_id.clone(),
+                                    Arc::clone(&worker_shutting_down),
+                                )
+                                .await;
+                            match retained {
+                                Ok(retained) => {
+                                    let namespace = retained.authority.namespace().clone();
+                                    let store =
+                                        tracedecay_code_index::graph_projection::CodeGraphProjectionStore::from_graph_db(
+                                            retained.database,
+                                            namespace,
+                                            generation_id,
+                                        );
+                                    let latest = latest.clone();
+                                    let cancellation: Arc<
+                                        dyn tracedecay_graph_db::GraphCancellation,
+                                    > = Arc::new(SchedulerGraphCancellationV1 {
+                                        shutting_down: Arc::clone(&worker_shutting_down),
+                                    });
+                                    tokio::task::spawn_blocking(move || {
+                                        latest.activate_persistent_graph(
+                                            store,
+                                            retained.authority,
+                                            cancellation,
+                                        )
+                                    })
+                                    .await
+                                    .map_err(|error| {
+                                        CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                                            "code graph activation task failed: {error}"
+                                        ))
+                                    })
+                                    .and_then(|outcome| outcome)
+                                }
+                                Err(error) => Err(CodeIndexSchedulerErrorV1::GraphActivation(
+                                    error.to_string(),
+                                )),
+                            }
+                        }
+                        #[cfg(test)]
+                        CodeGraphActivationAuthorityV1::Memory => {
+                            latest.warm_serving_caches();
+                            Ok(())
+                        }
+                    };
+                    if let Err(error) = activation {
+                        result = Ok((Err(error), None));
+                    }
+                }
                 if let Ok((Ok(_), Some(latest))) = &result {
                     *worker_serving_generation
                         .write()

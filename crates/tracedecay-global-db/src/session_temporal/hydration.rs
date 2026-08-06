@@ -3,7 +3,6 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tracedecay_application::now_micros;
 use tracedecay_domain::{
@@ -23,7 +22,6 @@ use tracedecay_query::temporal::ports::{
     ExecutionControl, TemporalExecutionSnapshot, TemporalRetrievalScope, TemporalSourceAccess,
 };
 use tracedecay_runtime_core::db::engine;
-use tracedecay_sessions::lcm::contracts::validate_payload_ref;
 use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content;
 use tracedecay_sessions::runtime::lcm::{LcmStorageKind, raw};
 
@@ -31,6 +29,10 @@ use super::operations::CanonicalPublicationManifest;
 use super::sql::TemporalSqlRead;
 
 type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HydrationError>> + Send + 'a>>;
+
+mod external;
+use external::resolve_external_manifest;
+pub(super) use external::resolve_external_target;
 
 #[derive(Clone)]
 pub enum HydrationResolution {
@@ -40,9 +42,9 @@ pub enum HydrationResolution {
 
 #[derive(Clone)]
 pub struct PayloadDescriptor {
-    source: PayloadSource,
-    byte_count: usize,
-    content_hash: String,
+    pub(super) source: PayloadSource,
+    pub(super) byte_count: usize,
+    pub(super) content_hash: String,
 }
 
 impl fmt::Debug for PayloadDescriptor {
@@ -57,7 +59,7 @@ impl fmt::Debug for PayloadDescriptor {
 }
 
 #[derive(Clone)]
-enum PayloadSource {
+pub(super) enum PayloadSource {
     Occurrence {
         provider: String,
         session_id: String,
@@ -1029,100 +1031,6 @@ async fn summary_has_provider_evidence(
         .map_err(|_| ())?;
     let row = rows.next().await.map_err(|_| ())?.ok_or(())?;
     row.get::<i64>(0).map(|value| value == 1).map_err(|_| ())
-}
-
-#[derive(Deserialize)]
-struct ExternalManifest {
-    provider: String,
-    session_id: String,
-    message_id: String,
-    byte_count: i64,
-    char_count: i64,
-}
-
-async fn resolve_external_manifest(
-    conn: &TemporalSqlRead<'_>,
-    provider: &str,
-    session_id: &str,
-    message_id: &str,
-    payload_ref: &str,
-    content_hash: &str,
-) -> Result<HydrationResolution, ()> {
-    if validate_payload_ref(payload_ref).is_err() {
-        return Ok(HydrationResolution::Unavailable(
-            HydrationStateV1::UnverifiableLegacy,
-        ));
-    }
-    let mut rows = conn
-        .query(
-            "SELECT external.content_hash, external.byte_count, external.char_count,
-                    manifest.payload_digest, manifest.manifest_json
-             FROM lcm_external_payloads external
-             JOIN session_external_payload_manifests manifest
-               ON manifest.payload_ref = external.payload_ref
-              AND manifest.session_id = external.session_id
-             JOIN session_summary_nodes summary
-               ON summary.session_id = manifest.session_id
-             JOIN json_each(summary.publication_json, '$.payloads') payload
-               ON json_extract(payload.value, '$.payload_ref') = manifest.payload_ref
-              AND json_extract(payload.value, '$.digest') = manifest.payload_digest
-              AND json_extract(payload.value, '$.manifest_json') = manifest.manifest_json
-             JOIN sanitization_receipts receipt
-               ON receipt.receipt_id = manifest.receipt_id
-              AND receipt.receipt_id = json_extract(summary.publication_json, '$.receipt_id')
-             WHERE external.payload_ref = ?1
-               AND external.provider = ?2
-               AND external.session_id = ?3
-               AND external.message_id = ?4
-             LIMIT 2",
-            params![payload_ref, provider, session_id, message_id],
-        )
-        .await
-        .map_err(|_| ())?;
-    let Some(row) = rows.next().await.map_err(|_| ())? else {
-        return Ok(HydrationResolution::Unavailable(HydrationStateV1::Deleted));
-    };
-    // Copy the selected values before advancing for the uniqueness probe.
-    let stored_hash: String = row.get(0).map_err(|_| ())?;
-    let byte_count = nonnegative_usize(row.get::<Option<i64>>(1).map_err(|_| ())?)?;
-    let char_count = nonnegative_usize(row.get::<Option<i64>>(2).map_err(|_| ())?)?;
-    let manifest_digest: String = row.get(3).map_err(|_| ())?;
-    let manifest_json: String = row.get(4).map_err(|_| ())?;
-    if rows.next().await.map_err(|_| ())?.is_some() {
-        return Ok(HydrationResolution::Unavailable(
-            HydrationStateV1::RetainedButUnavailable,
-        ));
-    }
-    let manifest: ExternalManifest = match serde_json::from_str(&manifest_json) {
-        Ok(manifest) => manifest,
-        Err(_) => {
-            return Ok(HydrationResolution::Unavailable(
-                HydrationStateV1::UnverifiableLegacy,
-            ));
-        }
-    };
-    if stored_hash != content_hash
-        || manifest_digest != content_hash
-        || manifest.provider != provider
-        || manifest.session_id != session_id
-        || manifest.message_id != message_id
-        || manifest.byte_count != i64::try_from(byte_count).map_err(|_| ())?
-        || manifest.char_count != i64::try_from(char_count).map_err(|_| ())?
-    {
-        return Ok(HydrationResolution::Unavailable(
-            HydrationStateV1::UnverifiableLegacy,
-        ));
-    }
-    Ok(HydrationResolution::Available(PayloadDescriptor {
-        source: PayloadSource::External {
-            provider: provider.to_string(),
-            session_id: session_id.to_string(),
-            payload_ref: payload_ref.to_string(),
-            char_count,
-        },
-        byte_count,
-        content_hash: stored_hash,
-    }))
 }
 
 fn authorized_root_owner(snapshot: &TemporalExecutionSnapshot) -> Option<ObservationScopeV1> {

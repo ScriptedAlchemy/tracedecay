@@ -1,6 +1,6 @@
 use super::*;
 
-pub struct Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC> {
+pub struct AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC> {
     pub github_remapper: GR,
     pub github_anchors: GA,
     pub ci_source: CS,
@@ -12,30 +12,30 @@ pub struct Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC> {
     pub configuration: PC,
 }
 
-pub struct Pr13AdvisoryRuntimeOpenV1 {
-    /// Clone of the project database used to open the PR12 feedback runtime.
+pub struct AdvisoryRuntimeOpenV1 {
+    /// Clone of the project database used to open the feedback runtime.
     pub database: Database,
     pub project_root: PathBuf,
     pub resolved_scope: ResolvedScope,
     pub feedback_scope: FeedbackScopeV1,
     pub github: Option<GitHubReviewRuntimeOwnerConfigV1>,
-    /// The already-open PR12 Plan 09 owner. PR13 uses its exact authorization,
+    /// The already-open feedback Plan 09 owner. The advisory runtime uses its exact authorization,
     /// diagnostics/impact ports, publication store, and durable dedupe path.
-    pub feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
+    pub feedback_cycle: Arc<FeedbackCycleRuntime>,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub enum Pr13AdvisoryRuntimeOpenErrorV1 {
+pub enum AdvisoryRuntimeOpenErrorV1 {
     #[error("advisory scope does not match the shared feedback runtime")]
     ScopeMismatch,
-    #[error("PR13 GitHub runtime is unavailable")]
+    #[error("GitHub advisory runtime is unavailable")]
     GitHubRuntimeUnavailable,
-    #[error("PR13 proximity runtime is unavailable")]
+    #[error("proximity advisory runtime is unavailable")]
     ProximityRuntimeUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Pr13AdvisoryProviderV1 {
+pub enum AdvisoryProviderV1 {
     GitHub,
     Ci,
     Proximity,
@@ -44,13 +44,13 @@ pub enum Pr13AdvisoryProviderV1 {
 /// No adapter-local lifecycle axes: source records retain their exact
 /// lifecycle/provenance/coverage and composition carries only Plan 09 state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13AdvisoryProviderStateV1 {
-    pub provider: Pr13AdvisoryProviderV1,
+pub struct AdvisoryProviderStateV1 {
+    pub provider: AdvisoryProviderV1,
     pub state: ProviderEvaluationStateV1,
 }
 
-impl Pr13AdvisoryProviderStateV1 {
-    fn absent(provider: Pr13AdvisoryProviderV1) -> Self {
+impl AdvisoryProviderStateV1 {
+    fn absent(provider: AdvisoryProviderV1) -> Self {
         Self {
             provider,
             state: ProviderEvaluationStateV1::Absent,
@@ -59,18 +59,18 @@ impl Pr13AdvisoryProviderStateV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13AdvisoryContributionsV1 {
-    pub providers: Vec<Pr13AdvisoryProviderStateV1>,
+pub struct AdvisoryContributionsV1 {
+    pub providers: Vec<AdvisoryProviderStateV1>,
     pub findings: Vec<FeedbackFindingV1>,
 }
 
-impl Pr13AdvisoryContributionsV1 {
+impl AdvisoryContributionsV1 {
     pub fn absent() -> Self {
         Self {
             providers: vec![
-                Pr13AdvisoryProviderStateV1::absent(Pr13AdvisoryProviderV1::GitHub),
-                Pr13AdvisoryProviderStateV1::absent(Pr13AdvisoryProviderV1::Ci),
-                Pr13AdvisoryProviderStateV1::absent(Pr13AdvisoryProviderV1::Proximity),
+                AdvisoryProviderStateV1::absent(AdvisoryProviderV1::GitHub),
+                AdvisoryProviderStateV1::absent(AdvisoryProviderV1::Ci),
+                AdvisoryProviderStateV1::absent(AdvisoryProviderV1::Proximity),
             ],
             findings: Vec::new(),
         }
@@ -92,7 +92,7 @@ impl Pr13AdvisoryContributionsV1 {
 
     pub(super) fn capture(
         &mut self,
-        provider: Pr13AdvisoryProviderV1,
+        provider: AdvisoryProviderV1,
         batch: Result<AdvisoryFindingContributionBatchV1, ApplicationContractError>,
     ) {
         match batch {
@@ -106,7 +106,7 @@ impl Pr13AdvisoryContributionsV1 {
 
     pub(super) fn set_state(
         &mut self,
-        provider: Pr13AdvisoryProviderV1,
+        provider: AdvisoryProviderV1,
         state: ProviderEvaluationStateV1,
     ) {
         if let Some(current) = self
@@ -128,9 +128,9 @@ impl Pr13AdvisoryContributionsV1 {
 
     pub(super) fn validate(&self) -> Result<(), ApplicationContractError> {
         let expected = [
-            Pr13AdvisoryProviderV1::GitHub,
-            Pr13AdvisoryProviderV1::Ci,
-            Pr13AdvisoryProviderV1::Proximity,
+            AdvisoryProviderV1::GitHub,
+            AdvisoryProviderV1::Ci,
+            AdvisoryProviderV1::Proximity,
         ];
         if self.providers.len() != expected.len()
             || self
@@ -147,7 +147,7 @@ impl Pr13AdvisoryContributionsV1 {
             })
         {
             return Err(ApplicationContractError::Inconsistent {
-                field: "pr13 advisory contribution",
+                field: "advisory contribution",
             });
         }
         if self.findings.iter().enumerate().any(|(index, finding)| {
@@ -156,7 +156,7 @@ impl Pr13AdvisoryContributionsV1 {
                 .any(|other| other.finding_id == finding.finding_id)
         }) {
             return Err(ApplicationContractError::Duplicate {
-                field: "pr13 advisory finding",
+                field: "advisory finding",
             });
         }
         Ok(())
@@ -192,7 +192,7 @@ impl AdvisoryCycleRequest {
                 .is_some_and(|request| request.validate().is_err() || request.scope != *scope)
         {
             return Err(ApplicationContractError::Inconsistent {
-                field: "pr13 advisory cycle scope",
+                field: "advisory cycle scope",
             });
         }
         Ok(())
@@ -212,15 +212,15 @@ pub struct AdvisoryCycleControl {
 #[allow(clippy::large_enum_variant)]
 pub enum AdvisoryCycleOutcome {
     Completed {
-        cycle: Pr12CanonicalFeedbackResultV1,
-        contributions: Pr13AdvisoryContributionsV1,
+        cycle: CanonicalFeedbackResultV1,
+        contributions: AdvisoryContributionsV1,
         observation_input: tracedecay_domain::feedback::FeedbackEvaluationInputV1,
     },
     Cancelled {
-        contributions: Pr13AdvisoryContributionsV1,
+        contributions: AdvisoryContributionsV1,
     },
     TimedOut {
-        contributions: Pr13AdvisoryContributionsV1,
+        contributions: AdvisoryContributionsV1,
     },
 }
 

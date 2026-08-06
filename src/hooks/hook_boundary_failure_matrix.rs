@@ -1,4 +1,4 @@
-//! PR6 hook-boundary failure matrix for host-hook telemetry dispositions.
+//! hook-boundary failure matrix for host-hook telemetry dispositions.
 //!
 //! Covers sticky failure aggregation, timeout stickiness, daemon-unavailable
 //! transport mapping, cancel/backpressure stickiness, Unknown↔typed order

@@ -327,7 +327,8 @@ export interface ChainStep {
   role: string;
   /** Tool named on this turn, when the store named one. */
   tool: string | null;
-  tokens: number | null;
+  tokenCount: number | null;
+  tokenCountProvenance: 'o200k_approximate' | null;
   /** First line of the turn, trimmed for the rail. */
   excerpt: string;
 }
@@ -342,7 +343,6 @@ export interface ChainSummary {
   /** Total turns the store reports for the session, which may exceed the page
    * of steps returned. */
   messageCount: number;
-  tokenEstimate: number;
   /** True when the store served at least one message timestamp. On the real
    * profile this is false everywhere, which is why the chain is ordinal-
    * ordered and says so. */
@@ -362,9 +362,14 @@ export function summarizeChain(
     ordinal?: number | null | undefined;
     timestamp?: number | null | undefined;
     tool_name?: string | null | undefined;
-    token_estimate?: number | null | undefined;
+    token_count?: number | null | undefined;
+    token_count_provenance?:
+      | 'o200k_approximate'
+      | 'unavailable'
+      | null
+      | undefined;
   }[],
-  counts?: { message_count?: number; token_estimate_total?: number } | undefined,
+  counts?: { message_count?: number } | undefined,
   truncated = false,
 ): ChainSummary {
   const ordered = messages
@@ -394,15 +399,22 @@ export function summarizeChain(
     if (typeof message.timestamp === 'number' && message.timestamp > 0) {
       timestamped = true;
     }
-    const tokens =
-      typeof message.token_estimate === 'number' && message.token_estimate >= 0
-        ? message.token_estimate
+    const validProvenance =
+      message.token_count_provenance === 'o200k_approximate'
+        ? message.token_count_provenance
+        : null;
+    const tokenCount =
+      validProvenance != null &&
+      typeof message.token_count === 'number' &&
+      message.token_count >= 0
+        ? message.token_count
         : null;
     return {
       id: message.message_id,
       role,
       tool,
-      tokens,
+      tokenCount,
+      tokenCountProvenance: tokenCount == null ? null : validProvenance,
       excerpt: excerptOf(message.content),
     };
   });
@@ -415,7 +427,6 @@ export function summarizeChain(
     roles: rank([...roleCounts].map(([role, count]) => ({ role, count }))),
     tools: rank([...toolCounts].map(([tool, count]) => ({ tool, count }))),
     messageCount: counts?.message_count ?? steps.length,
-    tokenEstimate: counts?.token_estimate_total ?? 0,
     timestamped,
     truncated,
   };

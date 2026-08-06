@@ -16,6 +16,7 @@ mod analytics;
 mod application_surface;
 pub mod ast_grep_search;
 pub mod dashboard;
+mod dashboard_lcm;
 mod dependency_hints;
 mod dispatch_groups;
 pub mod edit;
@@ -47,11 +48,12 @@ pub(crate) use project_registry::{
 pub(crate) use session::message_search::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
-    SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
-    SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
+    SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
+    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
+    SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 pub(crate) use session::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
@@ -196,6 +198,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub(crate) dashboard_lcm_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     pub profile_root: Option<&'a Path>,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
@@ -242,6 +245,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             accounting_db: None,
             registered_project_session_db: None,
             registered_savings_db: None,
+            dashboard_lcm_retrieval_service: None,
             profile_root: None,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
@@ -443,117 +447,93 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             return Err(unknown_tool_error(tool_name));
         }
         ensure_mcp_dispatch_available(tool_name)?;
-        // The universal ceiling. Every dispatch group below runs inside this one
-        // bound, so a group added later inherits it without opting in and no
-        // handler can be reached unbounded. Per-group wraps (git, memory) stay:
-        // they report a nicer domain-shaped result and a shorter bound, and this
-        // is only the backstop beneath them.
-        let dispatch_budget =
-            dispatch_groups::tool_dispatch_budget(tool_name, options.application_deadline.as_ref());
-        let Some(dispatch_budget) = dispatch_budget else {
-            // `deadline_remaining` yields `None` only for an already-elapsed
-            // carried deadline, which must be rejected rather than dispatched.
-            return Err(dispatch_groups::tool_dispatch_deadline_error(
-                tool_name,
-                std::time::Duration::ZERO,
-            ));
-        };
-        let dispatched = async {
-            match dispatch_group {
-                Some(McpToolDispatchGroup::Graph) => {
-                    boxed_send(dispatch_graph_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        selected_scope_prefix,
-                        options.code_index_search_executor.as_ref(),
-                        options.code_index_search_authority.as_ref(),
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Info) => {
-                    boxed_send(dispatch_info_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        server_stats,
-                        scope_prefix,
-                        selected_scope_prefix,
-                        active_project_session_db,
-                        options.clone(),
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Admin) => {
-                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await
-                }
-                Some(McpToolDispatchGroup::Analysis) => {
-                    boxed_send(dispatch_analysis_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        active_project_session_db,
-                        options.clone(),
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Git) => {
-                    boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await
-                }
-                Some(McpToolDispatchGroup::Edit) => {
-                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await
-                }
-                Some(McpToolDispatchGroup::Health) => {
-                    boxed_send(dispatch_health_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        active_project_session_db,
-                        options.clone(),
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::RetainedApplication) => {
-                    boxed_send(dispatch_retained_application_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        scope_prefix,
-                        active_project_session_db,
-                        active_lcm_context,
-                        options.clone(),
-                    ))
-                    .await
-                }
-                Some(McpToolDispatchGroup::Memory) => {
-                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await
-                }
-                Some(McpToolDispatchGroup::SessionWorkflow) => {
-                    boxed_send(dispatch_session_workflow_tools(
-                        tool_name,
-                        cg,
-                        args,
-                        options.clone(),
-                    ))
-                    .await
-                }
-                // Application-surface tools already returned above; reaching here means
-                // the name resolves to no reachable dispatch entry.
-                Some(McpToolDispatchGroup::ApplicationSurface) | None => {
-                    Err(unknown_tool_error(tool_name))
-                }
+        match dispatch_group {
+            Some(McpToolDispatchGroup::Graph) => {
+                boxed_send(dispatch_graph_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    selected_scope_prefix,
+                    options.code_index_search_executor.as_ref(),
+                    options.code_index_search_authority.as_ref(),
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                ))
+                .await
             }
-        };
-        match tokio::time::timeout(dispatch_budget, dispatched).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(dispatch_groups::tool_dispatch_deadline_error(
-                tool_name,
-                dispatch_budget,
-            )),
+            Some(McpToolDispatchGroup::Info) => {
+                boxed_send(dispatch_info_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    server_stats,
+                    scope_prefix,
+                    selected_scope_prefix,
+                    active_project_session_db,
+                    options.clone(),
+                ))
+                .await
+            }
+            Some(McpToolDispatchGroup::Admin) => {
+                boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::Analysis) => {
+                boxed_send(dispatch_analysis_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    scope_prefix,
+                    active_project_session_db,
+                    options.clone(),
+                ))
+                .await
+            }
+            Some(McpToolDispatchGroup::Git) => {
+                boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::Edit) => {
+                boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::Health) => {
+                boxed_send(dispatch_health_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    scope_prefix,
+                    active_project_session_db,
+                    options.clone(),
+                ))
+                .await
+            }
+            Some(McpToolDispatchGroup::RetainedApplication) => {
+                boxed_send(dispatch_retained_application_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    scope_prefix,
+                    active_project_session_db,
+                    active_lcm_context,
+                    options.clone(),
+                ))
+                .await
+            }
+            Some(McpToolDispatchGroup::Memory) => {
+                boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await
+            }
+            Some(McpToolDispatchGroup::SessionWorkflow) => {
+                boxed_send(dispatch_session_workflow_tools(
+                    tool_name,
+                    cg,
+                    args,
+                    options.clone(),
+                ))
+                .await
+            }
+            // Application-surface tools already returned above; reaching here means
+            // the name resolves to no reachable dispatch entry.
+            Some(McpToolDispatchGroup::ApplicationSurface) | None => {
+                Err(unknown_tool_error(tool_name))
+            }
         }
     })
 }

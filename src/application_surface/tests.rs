@@ -39,7 +39,7 @@ use crate::application::feedback::observations::{
 use crate::application::operation_stream::{
     OperationEventAuthority, OperationEventError, OperationId, OperationKind, OperationStreamConfig,
 };
-use crate::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
+use crate::application::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 use crate::daemon_client::RequestedOutputFormat;
 
 fn operation_context(project_id: &ProjectId) -> RequestContext {
@@ -350,7 +350,7 @@ fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
     .expect("typed health delta request");
     assert!(matches!(
         parsed,
-        ApplicationSurfaceRequest::Primitive(Pr12PrimitiveRequest::HealthDelta(_))
+        ApplicationSurfaceRequest::Primitive(PrimitiveRequest::HealthDelta(_))
     ));
 }
 
@@ -881,7 +881,7 @@ fn callable_symbol_graph_operations_reuse_primitive_requests() {
     let normalization_revision =
         QueryNormalizationRevision::new("normalization.daemon-owned-test.v1")
             .expect("normalization revision");
-    let Pr12PrimitiveRequest::SymbolSearch(symbol_search) = symbol_search
+    let PrimitiveRequest::SymbolSearch(symbol_search) = symbol_search
         .into_primitive(
             sanitizer_revision.clone(),
             normalization_revision.clone(),
@@ -1063,7 +1063,7 @@ fn callable_code_page_is_transport_owned() {
 
 #[test]
 fn primitive_requests_must_match_the_catalog_operation() {
-    let request = ApplicationSurfaceRequest::Primitive(Pr12PrimitiveRequest::StorageStatus(
+    let request = ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(
         StorageStatusPrimitiveRequest {
             include_details: false,
         },
@@ -1391,7 +1391,7 @@ fn storage_status_empty_request_uses_typed_default() {
     .expect("empty storage-status request");
     assert!(matches!(
         request,
-        ApplicationSurfaceRequest::Primitive(Pr12PrimitiveRequest::StorageStatus(request))
+        ApplicationSurfaceRequest::Primitive(PrimitiveRequest::StorageStatus(request))
             if !request.include_details
     ));
 }

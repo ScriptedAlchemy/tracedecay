@@ -1,6 +1,6 @@
-//! Daemon-serialized PR11 Git index transaction runtime.
+//! Daemon-serialized Git index transaction runtime.
 //!
-//! PR12 mounts the public preview/apply facade through the retained service;
+//! The public preview/apply facade mounts through the retained service;
 //! internal stage/unstage/commit operations remain unreachable by transports.
 
 mod journal;

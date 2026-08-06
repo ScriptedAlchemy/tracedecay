@@ -260,7 +260,7 @@ impl FeedbackReadOperationsV1 {
     }
 }
 
-/// Authorized PR12 feedback read service. It has no storage or transport
+/// Authorized feedback read service. It has no storage or transport
 /// state; all returned data comes from the injected canonical read owner.
 pub struct FeedbackReadService<P, A> {
     port: P,

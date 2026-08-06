@@ -779,7 +779,7 @@ impl NativeGitIntelligence {
     /// or staged diff, against the exact current index/HEAD/worktree state.
     ///
     /// These references are read-only identity evidence: applying them is a
-    /// PR11 daemon mutation path. Commit-range diffs are never mintable.
+    /// daemon Git mutation path. Commit-range diffs are never mintable.
     /// Per-file binary, submodule, symlink, mode-only, rename/copy,
     /// attribute-driven, and unmerged entries remain explicit read-only
     /// capability evidence in [`GitDiffV1`] and are omitted here without

@@ -13,7 +13,7 @@ use super::{
     enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
-use crate::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
+use crate::application::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 use crate::application_surface::{
     ApplicationSurfaceOperation, ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest,
 };
@@ -105,7 +105,7 @@ async fn assert_mounted_invocations(engine: &DaemonEngine, handshake: &DaemonHan
         DaemonInvocationRequest::primitive(
             "request.project-open.primitive",
             ApplicationSurfaceOperation::StorageStatus,
-            Pr12PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+            PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
                 include_details: false,
             }),
             observed_at,

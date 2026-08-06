@@ -1,7 +1,7 @@
 //! Memory store regression suite, split by fact authority.
 //!
 //! - `legacy_store`: legacy fact-store, retrieval, grooming, and status tests.
-//! - `compatibility_authority`: PR7 compatibility fact authority suite.
+//! - `compatibility_authority`: compatibility fact authority suite.
 //!
 //! Shared fixtures live in this parent module; each child pulls them in with `use super::*`.
 
@@ -29,7 +29,7 @@ mod compatibility_authority;
 #[path = "memory_test/legacy_store.rs"]
 mod legacy_store;
 
-// PR20 candidate: seed from the cross-process store template like
+// Future candidate: seed from the cross-process store template like
 // `make_memory_store` below and tests/mcp_suite/fixture.rs do, instead of
 // paying full schema creation per test. Only worth it once that fixture
 // moves to tests/common — seven call sites run in parallel today.
