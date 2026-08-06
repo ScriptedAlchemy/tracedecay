@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use super::{def, def_always_load, project_selector_object};
+use super::{def, def_always_load, def_rw, project_selector_object};
 use crate::mcp::tools::ToolDefinition;
 
 pub(super) fn def_status() -> ToolDefinition {
@@ -125,7 +125,7 @@ pub(super) fn def_runtime() -> ToolDefinition {
 }
 
 pub(super) fn def_dashboard() -> ToolDefinition {
-    def(
+    def_rw(
         "tracedecay_dashboard",
         "Dashboard",
         "Start (or manage) the tracedecay dashboard server for the current project as a background task inside the MCP server. Returns the listening URL. Idempotent: if already running, returns the existing URL. Pass action:\"stop\" to shut down a running instance. MCP dashboard binds are loopback-only: optional host must be 127.0.0.1, localhost, or ::1. Port is optional.",
