@@ -3,27 +3,27 @@
 ## Status / Role
 
 Normative product plan. Every product PR ships its usable UI slice with its
-backend behavior. By current **plan authority**, PR14 completes exactly the
+backend behavior. By current **plan authority**, the core dashboard delivery completes exactly the
 shared shell and Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge,
-Delivery, Automations, Observatory, Costs, and Settings, while PR17 adds the
+Delivery, Automations, Observatory, Costs, and Settings, while the Work delivery adds the
 first-class Work workspace and task-graph projections owned semantically by
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md).
-PR17 also adds the execution-topology lens specified below: independent
+The Work delivery also adds the execution-topology lens specified below: independent
 execution-placement, branch-topology, review-topology, and integration-strategy
 lanes, dependency-commit and merge-order rails,
 conflict/proximity evidence, integration proposals and receipts, test/CI state,
 and temporal replay over the same canonical Work selection.
 
 The user did not enumerate those twelve workspaces and did not accept the
-PR17 timing in recorded speech after asking "ahat about kanban/task graph etc"
+Work-delivery timing in recorded speech after asking "ahat about kanban/task graph etc"
 on 2026-07-25. He did explicitly require a first-class TraceDecay task
-graph/Kanban inspired by Hermes but more powerful. The twelve-workspace/PR17
+graph/Kanban inspired by Hermes but more powerful. The twelve-workspace/Work
 allocation remains binding plan authority pending an owner scheduling decision;
 it must not be attributed to the user.
 
 Earlier component names, route inventories, fixture matrices, packet names,
 script lists, and frontend gate layouts are historical implementation evidence,
-not prerequisites or artifacts that PR14 or PR17 must recreate. Only actually
+not prerequisites or artifacts that either delivery must recreate. Only actually
 independently released public URLs/deep links may retain protocol compatibility;
 persisted navigation uses the fresh-store rule. All other retention is judged
 by the user journeys, behavior, accessibility,
@@ -44,7 +44,7 @@ not be described as the product bundle. Nothing from the deleted apps is a
 dependency; retained API handlers remain compatibility surfaces for the
 current implementation.
 
-The current PR14 checkpoint is implemented but not accepted. Real Settings
+The current core-dashboard checkpoint is implemented but not accepted. Real Settings
 capability and authority-failure state (all seven prior "unsupported" claims
 were stale), storage budget findings and unreadable roles, truthful
 partial/unverified graph state, discriminated registry outcomes, scoped
@@ -69,7 +69,7 @@ truthful rather than being replaced with fabricated values.
   withdrawal sections below). HTTP fault coverage and renderer semantic
   separation remain delivered behavior.
 - **Plan 11 owner:** Code still lacks diagnostics, affected tests, code
-  health, and branch-aware freshness; Agents lacks its PR14 subagent/handoff
+  health, and branch-aware freshness; Agents lacks its planned subagent/handoff
   context; Sessions lacks raw-message drill-down, compaction boundaries, and
   replay; Knowledge lacks contradictions, supersession, and curation;
   Observatory lacks hook hints, event flow, and latency; Automations lacks its
@@ -78,10 +78,10 @@ truthful rather than being replaced with fabricated values.
 - **Plan 11 owner:** `redacted` and `locked` are defined in `StateChip`
   but no workspace currently exercises them with supplied backend state.
 - **Plan 16 owner:** Explorer's multi-project/repository/worktree pivots
-  remain future multi-root work; PR14 still owns the single-root time pivot.
+  remain future multi-root work; the core delivery still owns the single-root time pivot.
 - **Owners: Plans 24 and 32; Plan 17 for public handoff:**
   `RequestCancel` and `RequestExternalHandoff` authority-negative coverage
-  belongs to the executable Work/handoff journey and does not block the PR14
+  belongs to the executable Work/handoff journey and does not block the
   twelve-workspace checkpoint.
 
 **Accessibility and route coverage closed (2026-07-27).** Direct browser
@@ -119,7 +119,7 @@ statement that all five structure routes are consumed stands.
 Also not yet executed: the real-Chrome visual review, manual NVDA/VoiceOver
 completion, and the 12-participant usability study.
 
-**Reachability correction (2026-07-26).** All twelve PR14 workspaces are
+**Reachability correction (2026-07-26).** All twelve core workspaces are
 registered as lazy routes in `dashboard/src/app/routes.tsx`, and `build.rs`
 implements the source-stamp, packaged-asset, and `include_bytes!` embed
 contract. An audit score of zero "implemented and reachable" was a labelling
@@ -127,7 +127,7 @@ artifact, not evidence that the dashboard or embed path is absent. The
 specific unverified and unreachable sub-surfaces named in this plan remain
 open; the twelve workspace routes and embed mechanism must not be replanned.
 
-**PR14 surface alignment (2026-07-26).** The five Plan 11b graph-structure
+**Surface alignment (2026-07-26).** The five Plan 11b graph-structure
 routes now have generated contracts and Code-workspace consumers. Explorer's
 duplicate query-run/source schemas were removed in favor of the generated
 barrel; only the two routes that still lack Rust wire types retain explicitly
@@ -142,7 +142,7 @@ corrections, not acceptance of the still-unverified checkpoint above.
   application and React tree, not a federated composition.
 - **Vite and an ADR about the bundler are rejected.** The user's exact
   instruction is "use rsbuild. no adr. just pick rsbuild."
-- **The pre-PR14 dashboard is rejected as a frontend base.** "Gut the existing
+- **The pre-V2 dashboard is rejected as a frontend base.** "Gut the existing
   dashboard" means retained API compatibility cannot restore its multi-app
   composition or visual language.
 - **Foundation lanes do not style, structure, or select frontend
@@ -196,7 +196,7 @@ comprehension and function rather than novelty.
 The detailed contracts below remain binding and are delivered through two real
 product journeys rather than as contract, fixture, or route milestones.
 
-**PR14 finding → evidence → read-only Doctor diagnosis:** a user enters
+**Core finding → evidence → read-only Doctor diagnosis:** a user enters
 from Brain, Explorer, Loom, or Code with exact scope; follows a canonical
 finding into citations, provenance, coverage, and source progress; opens the
 one Doctor application diagnosis; and receives typed evidence and recovery
@@ -210,7 +210,7 @@ validated CAS changes. Observatory and Costs render the same Plan 26
 production observations with denominator, horizon, coverage, censoring,
 evidence class, and unavailable reason intact.
 
-**PR17 work item → admitted execution → observed outcome → reviewed
+**Work item → admitted execution → observed outcome → reviewed
 replanning:** a user creates or selects one Plan 24 work item; moves through
 Kanban, DAG, timeline, causal, workload, repository, delegation, attempt, and
 execution-topology projections without losing TaskId, scope, graph version, or
@@ -254,7 +254,7 @@ deferred by this framing.
   [Plan 14](14-historical-failure-regression-matrix.md) is the direct
   regression contract for that kernel, not a runtime source of findings.
 - An independent Kanban database, developer plan parser/executor, browser-side
-  task scheduler, generic orchestration lab, or edit-bundle editor. PR17's
+  task scheduler, generic orchestration lab, or edit-bundle editor. The Work delivery's
   Kanban/DAG/timeline/causal/workload views are projections over Plan 24
   application state and Plan 32 runtime receipts.
 - Git status, worktree, branch-stack, merge, rebase, cherry-pick, ref, index,
@@ -342,7 +342,7 @@ Visualization:
 - Renderer-neutral semantics from the generated dashboard contract are the
   only semantic source for graph/timeline views. The historical
   `ProjectionView`/`ProjectionManifest` frontend type design is abandoned; no
-  such Rust or TypeScript types exist, and they are not missing PR14 work.
+  such Rust or TypeScript types exist, and they are not missing dashboard work.
   Sigma.js + Graphology (MIT, WebGL, offline) is the default connected-graph
   renderer adapter — it is the only permissive renderer that honors the
   representative/large graph tiers below;
@@ -363,17 +363,17 @@ Legacy-surface dispositions (from the 2026-07-23 inventory):
 - Reachable legacy API families (graph, code-diagnostics, settings,
   holographic/memory, automation, lcm, savings, analytics diagnostics)
   remain the compatibility surface the new workspaces bind to.
-- Orphan handlers are deleted with their PR14 replacement, not carried:
+- Orphan handlers are deleted with their workspace replacement, not carried:
   the duplicate holographic fact-proposal family, `fact_trust_history`,
   the unreferenced `automation_jobs_api` family, and the three uncalled
   analytics endpoints. Each deletion lands only when its workspace slice
   ships or the surface is confirmed dead.
-- Known backend gaps feeding PR14 are separate completion work, not frontend
+- Known backend gaps feeding the core dashboard are separate completion work, not frontend
   scope: the Doctor finding family has no HTTP surface binding yet. The
   dashboard exposes per-store size/free ratio and whole-store history, but
   Plan 38's per-table `dbstat` samples remain daemon tracing rather than a
   Doctor finding, dashboard payload, or CLI Doctor result. Code-index
-  freshness/coverage read models also have no exposure; the PR14 journeys
+  freshness/coverage read models also have no exposure; the core journeys
   require those bindings to exist server-side.
 
 ## Frontend ownership and compatibility
@@ -626,7 +626,7 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   (`measurement | association | calibrated_prediction`). It computes no
   dashboard-local health grade.
 - Knowledge: facts, memories, evidence, contradictions, supersession, curation, and cross-project relationships.
-- Delivery: changes, commits, branches, worktrees, pull requests, CI, releases, and typed PR17 workflow runs tied to product delivery.
+- Delivery: changes, commits, branches, worktrees, pull requests, CI, releases, and typed workflow runs tied to product delivery.
 - Automations: schedules, run history, artifacts, approvals, generated skills, memory curation, session reflection, and bounded controls.
 - Observatory: hook hints, event flow, latency, failures, daemon health, storage health, queues, and product diagnostics, including canonical analyzer/gateway state, conflicts, coverage, and freshness.
 - Costs: provider/model usage, tokens, latency, estimated cost, cache effects, and time/project/session breakdowns.
@@ -634,13 +634,13 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   patch preview/validation/CAS operations, provider integration, privacy
   controls, retention, and feature controls; it never constructs an
   unvalidated free-form configuration mutation.
-- Work (PR17): initiative and work-item views, Kanban, dependency DAG and
+- Work (Work delivery): initiative and work-item views, Kanban, dependency DAG and
   critical path, timeline/history, causal, workload/executor/model, and
   repository/delivery projections over one canonical Plan 24 selection. Every
   card and inspector preserves exact scope/version/evidence, links Plan 32
   lease/attempt/effect history, and renders only application-provided legal
   actions. A lane move never sets readiness directly.
-- Work execution topology (PR17): optionally groups that same selection into
+- Work execution topology (Work delivery): optionally groups that same selection into
   worktree and stacked-branch lanes while preserving task lanes; shows exact
   dependency commits, proposed versus observed merge order, dirty/worktree/
   lease truth, mechanical conflict and semantic proximity side by side,
@@ -655,7 +655,7 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   stale preview, changed head/base/merge base, dirty target, conflicting
   lease, denied scope, unknown effect, partial checks, and cancelled operation
   are first-class outcomes. The browser never calls Git or CI directly.
-- Work task-intelligence views (PR17): task-shape dimensions and calibrated
+- Work task-intelligence views (Work delivery): task-shape dimensions and calibrated
   ranges; parent/child decomposition comparison and review; ranked eligible
   routes with exclusions, confidence/coverage, requested/actual identity, and
   deterministic fallback; independent-review/outcome evidence; estimate-versus-
@@ -672,7 +672,7 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   changed estimates/edges/scope, evidence anchors, expected runtime impact, and
   required separate Plan 32 control. The browser neither recomputes a grade nor
   applies a graph/runtime mutation optimistically.
-- Auxiliary-attempt inspectors (PR17) separate the Plan 24 request from the
+- Auxiliary-attempt inspectors (Work delivery) separate the Plan 24 request from the
   Plan 32 lease/attempt. They show requested and actual
   provider/backend/executable/protocol/model/reasoning identity, negotiated
   capabilities and explicit fallback reason, exact worktree/parent lineage,
@@ -686,7 +686,7 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   route identifies native Claude Code; a Codex route distinguishes app-server
   from an explicitly approved CLI fallback.
 - Work and Doctor views render the one
-  canonical PR14 Doctor application finding family whose mandatory regression
+  canonical Doctor application finding family whose mandatory regression
   coverage is specified by
   [Plan 14](14-historical-failure-regression-matrix.md):
   Plan 20 desired/effective configuration, Plan 27 observed discovery/
@@ -729,8 +729,8 @@ effect-unknown, failed, or recovered receipt state without redispatch.
   states without color-only cues.
 - Large results use server pagination or bounded virtualization; the client never loads an unbounded corpus.
 - SSE updates invalidate or patch typed cached data without duplicating server business logic.
-- Each product PR includes the UI, tests, and navigation needed to use its behavior; PR14 closes shared-shell and cross-workspace gaps.
-- PR17 workflow UI uses typed forms and product operations for concrete workflows; it is not a general JS IDE or plan executor.
+- Each product PR includes the UI, tests, and navigation needed to use its behavior; the core delivery closes shared-shell and cross-workspace gaps.
+- Workflow UI uses typed forms and product operations for concrete workflows; it is not a general JS IDE or plan executor.
 
 ## Renderer-neutral interaction and fallback contract
 
@@ -848,7 +848,7 @@ graph-equivalent task; median Single Ease Question is ≥6/7 and SUS is ≥80.
 
 ## Journey implementation and test assets
 
-PR14 implements the finding-to-confirmed-remediation journey as reviewable
+The core delivery implements the finding-to-confirmed-remediation journey as reviewable
 slices that remain usable together: generated DTO decoding and exhaustive
 state rendering; scope-preserving responsive shell, deep links, inspectors,
 and monotone HTTP/SSE state; Brain/Explorer/Loom investigation with planner
@@ -860,7 +860,7 @@ cross-workspace evidence links; and responsive, accessibility,
 assistive-technology, virtualization, renderer parity/fallback, and usability
 hardening on that same journey.
 
-PR17 extends the running product with one executable Work loop: one Plan 24
+The Work delivery extends the running product with one executable Work loop: one Plan 24
 selection across Kanban, DAG, timeline, causal, workload, repository,
 delegation, and attempt lenses; proposal diffs, route/exclusion evidence,
 requested/actual provider identity, attempts, receipts, and recovery; the
@@ -912,11 +912,11 @@ not mandatory recreation.
 - Every page is both beautiful and functional, survives critical real-Chrome
   review, and has no generic/clinical/simple or non-magnificent shipped state.
 - The original twelve plan-named workspaces are complete, navigable, and
-  accessible by PR14; pending the open responsive decision, they keep all
-  functionality below `lg`. Work meets the same bar under the current PR17
+  accessible in the core delivery; pending the open responsive decision, they keep all
+  functionality below `lg`. Work meets the same bar under the current
   allocation.
-- Cross-links preserve scope and provenance across all twelve PR14 workspaces
-  and PR17 Work.
+- Cross-links preserve scope and provenance across all twelve core workspaces
+  and Work.
 - Unit, DOM, accessibility, and smoke tests cover critical journeys and all state classes.
 - Performance and payload acceptance criteria are withdrawn (owner decision,
   2026-07-31).
@@ -931,16 +931,16 @@ not mandatory recreation.
   finding to exact evidence, resuming a handoff, understanding uncertainty,
   applying and overriding only legal actions, and distinguishing dispatch from
   verified recovery.
-- PR17 DOM/accessibility/parity tests cover decomposition review, routing
+- Work DOM/accessibility/parity tests cover decomposition review, routing
   explanation, fallback/abstention, independent-review status, calibration,
   exact model-version drift, censored/unknown outcomes, stale live proposals,
   and explicit human override without browser-local scoring.
-- PR17 auxiliary-attempt tests cover provider negotiation, request versus
+- Auxiliary-attempt tests cover provider negotiation, request versus
   attempt lineage, progress/stream truncation, explicit fallback,
   cancellation escalation, restart/resume, artifacts, and all terminal states
   without browser-local process execution, output parsing, provider selection,
   or graph/runtime mutation.
-- PR17 execution-topology tests cover no-Git tasks, optional/unsupported
+- Execution-topology tests cover no-Git tasks, optional/unsupported
   worktree and local-stack lanes, all four independent dimensions,
   local-stack-without-PR and PR-stack-without-worktree, all four GitHub stack
   capability states plus generic fallback, exact dependency commits, proposed
@@ -961,7 +961,7 @@ not mandatory recreation.
   clicks return one receipt, stale previews cannot apply, cancellation never
   rewrites a committed receipt, and an ineligible/unsupported native
   integration, rebase, or force operation never gains an apply control.
-- PR17 dashboard tests render each canonical auxiliary-provider finding and
+- Work dashboard tests render each canonical auxiliary-provider finding and
   cross-owner disagreement from Plan 14, preserve Plan 20 desired/observed
   revisions and Plan 27/32/26 provenance, and invoke only the supplied typed
   remediation reference. No component-local health formula, implicit config
