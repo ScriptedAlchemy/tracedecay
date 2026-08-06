@@ -541,6 +541,12 @@ fn generated_native_callback_queue_applies_explicit_backpressure() {
         r#"
 import threading as real_threading
 
+# `plugin.threading` is the same module object as this import, so grab the
+# real primitives before the dormant patch below replaces `Thread` for the
+# plugin's worker spawn.
+RealThread = real_threading.Thread
+RealEvent = real_threading.Event
+
 class DormantThread:
     def __init__(self, *args, **kwargs):
         pass
@@ -553,45 +559,51 @@ plugin.threading.Thread = DormantThread
 plugin._HOST_RECEIPT_QUEUE.clear()
 plugin._HOST_RECEIPT_WORKER = None
 
-for sequence in range(plugin._HOST_RECEIPT_QUEUE_LIMIT):
-    plugin._notify_host_receipt({"sequence": sequence}, "test-native-hook")
+# The plugin's atexit join spins until the worker slot clears, and the
+# dormant worker never clears it; guarantee cleanup even on assertion
+# failure so a failing run reports instead of hanging at interpreter exit.
+try:
+    for sequence in range(plugin._HOST_RECEIPT_QUEUE_LIMIT):
+        plugin._notify_host_receipt({"sequence": sequence}, "test-native-hook")
 
-assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
-assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
-    range(plugin._HOST_RECEIPT_QUEUE_LIMIT)
-)
-
-# A producer that hits the full queue must block on the condition instead of
-# dropping the event or evicting admitted events.
-overflow_admitted = real_threading.Event()
-
-def overflow_producer():
-    plugin._notify_host_receipt(
-        {"sequence": plugin._HOST_RECEIPT_QUEUE_LIMIT}, "test-native-hook"
+    assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+    assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
+        range(plugin._HOST_RECEIPT_QUEUE_LIMIT)
     )
-    overflow_admitted.set()
 
-producer = real_threading.Thread(target=overflow_producer, daemon=True)
-producer.start()
-assert not overflow_admitted.wait(0.5)
-assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+    # A producer that hits the full queue must block on the condition instead
+    # of dropping the event or evicting admitted events.
+    overflow_admitted = RealEvent()
 
-# Draining one admitted event (the worker's pop + notify step) releases the
-# blocked producer; admitted events keep their order and nothing is evicted.
-with plugin._HOST_RECEIPT_QUEUE_CONDITION:
-    drained = plugin._HOST_RECEIPT_QUEUE.popleft()
-    plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
-assert drained["sequence"] == 0
-assert overflow_admitted.wait(10.0)
-producer.join(10.0)
-assert not producer.is_alive()
-assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
-    range(1, plugin._HOST_RECEIPT_QUEUE_LIMIT + 1)
-)
+    def overflow_producer():
+        plugin._notify_host_receipt(
+            {"sequence": plugin._HOST_RECEIPT_QUEUE_LIMIT}, "test-native-hook"
+        )
+        overflow_admitted.set()
 
-# Leave no queued work behind so the plugin's atexit join returns immediately.
-plugin._HOST_RECEIPT_QUEUE.clear()
-plugin._HOST_RECEIPT_WORKER = None
+    producer = RealThread(target=overflow_producer, daemon=True)
+    producer.start()
+    assert not overflow_admitted.wait(0.5)
+    assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+
+    # Draining one admitted event (the worker's pop + notify step) releases
+    # the blocked producer; admitted events keep their order and nothing is
+    # evicted.
+    with plugin._HOST_RECEIPT_QUEUE_CONDITION:
+        drained = plugin._HOST_RECEIPT_QUEUE.popleft()
+        plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+    assert drained["sequence"] == 0
+    assert overflow_admitted.wait(10.0)
+    producer.join(10.0)
+    assert not producer.is_alive()
+    assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
+        range(1, plugin._HOST_RECEIPT_QUEUE_LIMIT + 1)
+    )
+finally:
+    with plugin._HOST_RECEIPT_QUEUE_CONDITION:
+        plugin._HOST_RECEIPT_QUEUE.clear()
+        plugin._HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+    plugin._HOST_RECEIPT_WORKER = None
 "#,
         "generated Hermes callback queue must block producers at the bound without evicting admitted events",
     );
