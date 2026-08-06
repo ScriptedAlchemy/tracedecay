@@ -13,10 +13,11 @@ import { AutomationsPage } from './AutomationsPage.tsx';
  * HTTP fault injection for the Automations workspace (plan 11, "MSW covers
  * HTTP/SSE faults").
  *
- * Automations is the subject for read isolation because it renders four
- * independent reads side by side, and because three of its four panels have an
+ * Automations is the subject for read isolation because it renders five
+ * independent reads side by side, and because four of its five panels have an
  * empty state written in plain English — "no automation jobs defined", "no
- * managed skills", "no pending fact proposals". Those sentences are the exact
+ * managed skills", "no pending fact proposals", "no automation runs are
+ * recorded". Those sentences are the exact
  * fabrication this project forbids: a queue nobody could read must never
  * present as a queue that was read and found empty. Every case below asserts
  * they are absent, not merely that some error appeared.
@@ -31,6 +32,7 @@ const EMPTY_COPY = [
   /no automation jobs defined/i,
   /no managed skills/i,
   /no pending fact proposals/i,
+  /no automation runs are recorded/i,
 ] as const;
 
 const FAULTS: ReadonlyArray<{ fault: HttpFault; kind: string; detail: string | null }> = [
@@ -47,14 +49,14 @@ const FAULTS: ReadonlyArray<{ fault: HttpFault; kind: string; detail: string | n
 
 describe('AutomationsPage under HTTP transport faults', () => {
   it.each(FAULTS)(
-    'reports $fault on every panel instead of four empty queues',
+    'reports $fault on every panel instead of five empty queues',
     async ({ fault, kind, detail }) => {
       server.use(allRoutesFail(fault));
       const { container } = renderAutomations();
 
-      // All four reads fail the same way, so all four panels say so.
+      // All five reads fail the same way, so all five panels say so.
       const chips = await settledChips(container);
-      expect(chips).toHaveLength(4);
+      expect(chips).toHaveLength(5);
       for (const chip of chips) {
         expect(chip.getAttribute('data-state')).toBe(kind);
         if (detail) expect(chip.textContent).toContain(detail);

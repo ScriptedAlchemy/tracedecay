@@ -1259,6 +1259,19 @@ const HINT_CATEGORIES = [
   'subagent_start_context',
 ] as const;
 
+/** GET /api/plugins/analytics/agents (analytics_api::agents). */
+function analyticsAgentsPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    source: 'sessions',
+    by_agent: [
+      { agent: 'Codex', sessions: 42 },
+      { agent: 'Claude', sessions: 31 },
+      { agent: 'Cursor', sessions: 7 },
+    ],
+  };
+}
+
 function analyticsHintsPayload(): Record<string, unknown> {
   return {
     available: true,
@@ -1339,6 +1352,47 @@ function jobsPayload(): Record<string, unknown> {
     updated_at: nowSecs - 2 * DAY,
   }));
   return { jobs, count: jobs.length };
+}
+
+/** `automation_run_api::run_list` — the run-history ledger tail, projected by
+ * `run_history_row`. Two terminal states so the audit shoots both the applied
+ * row and the failed row with its error sentence. */
+function automationRunsPayload(): Record<string, unknown> {
+  const runs = [
+    {
+      run_id: 'run-20260805-193042-memory-curator',
+      task: 'memory_curator',
+      trigger: 'scheduler',
+      backend: 'claude',
+      model: 'claude-sonnet-5',
+      status: 'succeeded',
+      reviewed_count: 6,
+      accepted_count: 4,
+      rejected_count: 2,
+      skipped_count: 0,
+      error: null,
+      started_at: String(nowSecs - 2 * DAY),
+      completed_at: String(nowSecs - 2 * DAY + 240),
+      artifact_kinds: ['traces', 'feedback', 'validation_gate'],
+    },
+    {
+      run_id: 'run-20260804-071133-skill-writing',
+      task: 'skill_writing',
+      trigger: 'manual_cli',
+      backend: 'codex',
+      model: null,
+      status: 'failed',
+      reviewed_count: 0,
+      accepted_count: 0,
+      rejected_count: 0,
+      skipped_count: 0,
+      error: 'the backend refused the run: model quota exhausted',
+      started_at: String(nowSecs - 3 * DAY),
+      completed_at: String(nowSecs - 3 * DAY + 31),
+      artifact_kinds: [],
+    },
+  ];
+  return { runs, count: runs.length, limit: 50, error: '' };
 }
 
 const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
@@ -1472,6 +1526,15 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'complete',
       'effective configuration diverges from the desired revision on two protected keys',
       ['configuration:revision:r-317', 'configuration:revision:r-318'],
+    ),
+    // A second storage finding: the same family can report more than one
+    // observation, and `stale` needs a badge on screen like the other seven.
+    entry(
+      'storage',
+      'stale',
+      'complete',
+      'the session-store size observation was taken at watermark wm-38, three syncs behind the current wm-41',
+      ['store:sessions:size-observation:wm-38'],
     ),
     entry(
       'semantic_index',
@@ -2299,6 +2362,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // the backend schema floor; fixtures keep the same outer wire authority now.
   '/api/plugins/analytics/overview': envelope(analyticsOverviewPayload()),
   '/api/plugins/analytics/usage': envelope(analyticsUsagePayload()),
+  '/api/plugins/analytics/agents': envelope(analyticsAgentsPayload()),
   '/api/plugins/analytics/hints': envelope(analyticsHintsPayload()),
   '/api/plugins/analytics/underused': envelope(analyticsUnderusedPayload()),
   '/api/plugins/analytics/diagnostics': envelope(analyticsDiagnosticsPayload()),
@@ -2307,6 +2371,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/automation/jobs': jobsPayload(),
   '/api/automation/skills': skillsPayload(),
   '/api/automation/fact-proposals': factProposalsPayload(),
+  '/api/automation/runs': automationRunsPayload(),
   // Plan 26 canonical read models. These are the projections the CLI and MCP
   // also serve, so their fixtures carry the mixed available/unavailable metric
   // set the real projector emits rather than a fully-populated one.

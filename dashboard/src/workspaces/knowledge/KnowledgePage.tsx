@@ -22,6 +22,7 @@ import {
   MemoryOverviewPayloadV1Schema,
   MemoryStatusPayloadV1Schema,
 } from '../../contracts/generated.ts';
+import { KnowledgeCuration } from './KnowledgeCuration.tsx';
 import {
   composeTrustDistribution,
   factsBelow,
@@ -83,6 +84,7 @@ export function KnowledgePage() {
         </div>
       }
       filters={
+        <>
         <ReadSection
           title="Memory"
           state={envelopeReadState(overview.isPending, overview.data, {
@@ -178,6 +180,8 @@ export function KnowledgePage() {
             );
           }}
         </ReadSection>
+        <KnowledgeCuration />
+        </>
       }
       list={
         <ReadSection

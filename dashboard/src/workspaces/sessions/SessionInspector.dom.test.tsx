@@ -34,6 +34,42 @@ describe('Session transcript drill-down', () => {
     expect(screen.queryByText(/raw messages/)).toBeNull();
   });
 
+  /** The two governed refusals the LCM read routes actually serve
+   * (`DashboardLcmReadStateV1::Locked` / `::Redacted` → the envelope's own
+   * `domain_state` with a null payload). The workspace must render each as its
+   * own chip with the daemon's reason — never as an empty transcript, and
+   * never collapsed into a generic error. */
+  it.each([
+    { state: 'locked', label: 'Locked', reason: 'session_store_sync_lease_held' },
+    { state: 'redacted', label: 'Redacted', reason: 'session_content_redacted_by_policy' },
+  ])('renders a $state read as its governed chip, not an empty transcript', async ({
+    state,
+    label,
+    reason,
+  }) => {
+    const response = fixtureEnvelope(null, state);
+    response.coverage = {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: 'records',
+      omission_reasons: [reason],
+    };
+    renderInspector(response);
+
+    expect(await screen.findByText(label)).toBeTruthy();
+    expect(screen.getByText(new RegExp(reason))).toBeTruthy();
+    const chip = document.querySelector(`[data-state="${state}"]`);
+    expect(chip).not.toBeNull();
+    expect(screen.queryByText(/raw messages/)).toBeNull();
+    expect(screen.queryByText(/no transcript/i)).toBeNull();
+  });
+
   it('names unavailable whole-session token metrics without inventing zeroes', async () => {
     renderInspector(
       fixtureEnvelope(

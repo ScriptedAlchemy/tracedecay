@@ -253,6 +253,91 @@ export function useAutomationProposals() {
   );
 }
 
+/** `automation_run_api::run_list` (`/api/automation/runs`): the newest ledger
+ * records, projected by `run_history_row`. Every key below is unconditional in
+ * that `json!` literal; `model` and `error` are `Option` fields serialized as
+ * `null` when absent, so they are `nullable()` rather than `optional()` — a
+ * body missing the key did not come from this handler. */
+const RunsPayloadSchema = z
+  .object({
+    runs: z.array(
+      z
+        .object({
+          run_id: z.string(),
+          task: z.string(),
+          trigger: z.string(),
+          backend: z.string(),
+          model: z.string().nullable(),
+          status: z.string(),
+          reviewed_count: z.number(),
+          accepted_count: z.number(),
+          rejected_count: z.number(),
+          skipped_count: z.number(),
+          error: z.string().nullable(),
+          started_at: z.string(),
+          completed_at: z.string(),
+          artifact_kinds: z.array(z.string()),
+        })
+        .passthrough(),
+    ),
+    count: z.number(),
+    limit: z.number(),
+    error: z.string(),
+  })
+  .passthrough();
+
+/** `automation_run_api::artifact_list` (`/api/automation/runs/{id}/artifacts`):
+ * the run's recorded artifacts plus the handler's own chain summary, which
+ * carries the integrity verdict — verified, mismatched, unavailable, or failed
+ * — computed server-side against the published chain. */
+const RunArtifactsPayloadSchema = z
+  .object({
+    run_id: z.string(),
+    artifacts: z.array(
+      z
+        .object({
+          kind: z.string(),
+          path: z.string(),
+          sha256: z.string(),
+          summary: z.string().optional(),
+          created_at: z.string(),
+        })
+        .passthrough(),
+    ),
+    artifact_chain: z
+      .object({
+        expected_kinds: z.array(z.string()),
+        present_kinds: z.array(z.string()),
+        metadata_complete: z.boolean(),
+        complete: z.boolean(),
+        integrity_status: z.string(),
+      })
+      .passthrough(),
+    count: z.number(),
+    error: z.string(),
+  })
+  .passthrough();
+
+export type RunRow = z.infer<typeof RunsPayloadSchema>['runs'][number];
+export type RunArtifactsPayload = z.infer<typeof RunArtifactsPayloadSchema>;
+export type RunArtifactRow = RunArtifactsPayload['artifacts'][number];
+
+export function useAutomationRuns() {
+  return useLegacy(['automation', 'runs'], '/api/automation/runs', RunsPayloadSchema);
+}
+
+/** The artifact list for one run, fetched only once its disclosure opens:
+ * most visits read the history without opening any run, and fifty eager
+ * artifact reads per page view would be fifty ledger scans nobody looks at. */
+export function useAutomationRunArtifacts(runId: string, enabled: boolean) {
+  return useLegacy(
+    ['automation', 'run-artifacts', runId],
+    `/api/automation/runs/${encodeURIComponent(runId)}/artifacts`,
+    RunArtifactsPayloadSchema,
+    { enabled },
+  );
+}
+
 /** Rows, plus whether they are the whole collection the handler named. */
 export type ListReading<Row> =
   | { complete: true; rows: readonly Row[] }

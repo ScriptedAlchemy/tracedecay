@@ -29,6 +29,7 @@ import { z, type ZodType } from 'zod';
 import { FIXTURES, FIXTURE_PREFIXES, resolveFixture } from './data.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
+  AnalyticsAgentsPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   AutomationSchedulerStatusV1Schema,
   CodeIndexFreshnessPayloadV1Schema,
@@ -99,6 +100,7 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/plugins/savings/sessions': SavingsSessionsPayloadV1Schema,
   '/api/plugins/analytics/overview': DashboardEnvelopeV1Schema(AnalyticsOverviewPayloadV1Schema),
   '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
+  '/api/plugins/analytics/agents': DashboardEnvelopeV1Schema(AnalyticsAgentsPayloadV1Schema),
   '/api/automation/scheduler/status': AutomationSchedulerStatusV1Schema,
   '/api/observatory': DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema),
   '/api/costs': DashboardEnvelopeV1Schema(CostsReadModelV1Schema),
@@ -145,6 +147,7 @@ const UNCONTRACTED: Readonly<Record<string, string>> = {
   '/api/automation/skills': 'automation_skills_api::list answers with a bare Value',
   '/api/automation/fact-proposals':
     'automation_fact_proposals_api::list answers with a bare Value',
+  '/api/automation/runs': 'automation_run_api::run_list answers with a bare Value',
 };
 
 /**

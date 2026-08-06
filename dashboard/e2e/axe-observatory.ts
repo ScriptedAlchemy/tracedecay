@@ -341,10 +341,31 @@ export const OBSERVATORY_SCENARIOS: readonly Scenario[] = [
             .join(', ')}`,
         );
       }
-      // The sentence is worthless if the control it explains is still live.
-      if (notes.every((note) => note.disabledControls === 0)) {
+      // The shipped Doctor route is read-only BY DESIGN: corrective actions
+      // stay with the owning daemon, so there is no remediation control here
+      // to disable. What must hold instead is that the surface offers no
+      // write control at all beside the read-only sentence — a live mutation
+      // button next to it would invite the exact write the gateway refuses.
+      // The envelope refresh is exempt: it re-runs the GET this page is made
+      // of, carries the server's own legal-action reference in
+      // `data-operation`, and works under a read-only scope.
+      const doctorControls = (await page.evaluate(() =>
+        Array.from(
+          document.querySelectorAll('[aria-label="Doctor diagnosis"] button'),
+        ).map((button) => ({
+          label: (button.textContent ?? '').trim(),
+          operation: button.getAttribute('data-operation'),
+          disabled: (button as HTMLButtonElement).disabled,
+        })),
+      )) as { label: string; operation: string | null; disabled: boolean }[];
+      const writes = doctorControls.filter(
+        (control) => !control.disabled && control.operation === null,
+      );
+      if (writes.length > 0) {
         throw new Error(
-          'FALSIFIED: the page states the scope is read-only while offering every remediation control, so it invites a write the gateway will refuse',
+          `FALSIFIED: the page states the scope is read-only while offering live controls with no server-issued operation: ${writes
+            .map((control) => control.label)
+            .join(', ')}`,
         );
       }
 
