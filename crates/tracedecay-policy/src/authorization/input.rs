@@ -9,7 +9,7 @@ use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros, canonical
 ///
 /// It represents immutable references only; it is never a path, display
 /// label, provider account, branch name, or native object identifier.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct PolicyIdentifierV1(String);
 
