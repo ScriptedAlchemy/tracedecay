@@ -14,6 +14,7 @@ mod codex;
 mod cursor;
 mod cursor_compact;
 mod daemon_ports;
+mod dispatch;
 pub mod hint_outcomes;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -24,13 +25,13 @@ mod post_tool_use;
 mod steering;
 mod store_layout;
 pub mod tool_hints;
-mod v2;
-pub(crate) use v2::HOOK_V2_BOUND_HOSTS;
-pub(crate) use v2::NativeContextScoutLifecycleV1;
-pub(crate) use v2::project_and_worktree_locators_for_scope as hook_v2_scope_locators;
-pub(crate) use v2::project_id_for_layout as hook_v2_project_id_for_layout;
-pub(crate) use v2::protected_session_id_for_native as hook_v2_protected_session_id_for_native;
-pub(crate) use v2::publish_daemon_bindings as publish_hook_v2_bindings;
+pub(crate) use dispatch::NATIVE_HOOK_HOSTS;
+pub(crate) use dispatch::NativeContextScoutLifecycleV1;
+pub use dispatch::native_capture_material;
+pub(crate) use dispatch::project_and_worktree_locators_for_scope as hook_scope_locators;
+pub(crate) use dispatch::project_id_for_layout as hook_project_id_for_layout;
+pub(crate) use dispatch::protected_session_id_for_native as protected_native_session_id;
+pub(crate) use dispatch::publish_daemon_bindings as publish_hook_bindings;
 
 pub use claude::{
     evaluate_hook_decision, hook_claude_post_tool_use, hook_claude_session_start,
@@ -108,9 +109,9 @@ pub(crate) fn install_dashboard_hook_readiness_projection() -> crate::errors::Re
 }
 use tool_hints::{HintAgent, ToolHint};
 
-pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "kimiV2Event", event_json);
-    v2::dispatch(
+pub async fn dispatch_kimi_event(event_json: &str, project_root: &Path) -> Option<String> {
+    let telemetry = record_other_hook_invoked(Some(project_root), "kimi_event", event_json);
+    dispatch::dispatch(
         tracedecay_hooks::HookHostV1::KimiCode,
         event_json,
         project_root,
@@ -121,12 +122,12 @@ pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<Strin
     .flatten()
 }
 
-pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Option<String> {
-    let telemetry = record_other_hook_invoked(Some(project_root), "openCodeV2Event", event_json);
+pub async fn dispatch_opencode_event(event_json: &str, project_root: &Path) -> Option<String> {
+    let telemetry = record_other_hook_invoked(Some(project_root), "opencode_event", event_json);
     let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
-        v2::dispatch_opencode_lsp_updated(event_json, project_root, Some(&telemetry)).await
+        dispatch::dispatch_opencode_lsp_updated(event_json, project_root, Some(&telemetry)).await
     } else {
-        v2::dispatch(
+        dispatch::dispatch(
             tracedecay_hooks::HookHostV1::OpenCode,
             event_json,
             project_root,
@@ -137,10 +138,10 @@ pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Op
     dispatch.into_recorded_guidance(&telemetry).flatten()
 }
 
-pub async fn hook_opencode_v2_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
+pub async fn dispatch_opencode_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry =
-        record_other_hook_invoked(Some(project_root), "openCodeV2ToolAfter", event_json);
-    v2::dispatch_opencode_tool_after(event_json, project_root, Some(&telemetry))
+        record_other_hook_invoked(Some(project_root), "opencode_tool_after", event_json);
+    dispatch::dispatch_opencode_tool_after(event_json, project_root, Some(&telemetry))
         .await
         .into_recorded_guidance(&telemetry)
         .flatten()
@@ -171,7 +172,7 @@ pub async fn hook_kimi_event() -> i32 {
     let Some(root) = native_event_project_root(&event).await else {
         return 0;
     };
-    if let Some(guidance) = hook_kimi_v2(&event, &root).await {
+    if let Some(guidance) = dispatch_kimi_event(&event, &root).await {
         println!("{guidance}");
     }
     0
@@ -182,7 +183,7 @@ pub async fn hook_opencode_event() -> i32 {
     let Some(root) = native_event_project_root(&event).await else {
         return 0;
     };
-    if let Some(guidance) = hook_opencode_v2_event(&event, &root).await {
+    if let Some(guidance) = dispatch_opencode_event(&event, &root).await {
         println!("{guidance}");
     }
     0
@@ -193,7 +194,7 @@ pub async fn hook_opencode_tool_after() -> i32 {
     let Some(root) = native_event_project_root(&event).await else {
         return 0;
     };
-    if let Some(guidance) = hook_opencode_v2_tool_after(&event, &root).await {
+    if let Some(guidance) = dispatch_opencode_tool_after(&event, &root).await {
         println!("{guidance}");
     }
     0
@@ -398,7 +399,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         hook_name,
         &event_json,
     );
-    if let Some(guidance) = v2::dispatch_for_scope(
+    if let Some(guidance) = dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         project_root.as_deref(),

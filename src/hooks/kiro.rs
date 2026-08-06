@@ -139,8 +139,8 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
     let root = event_project_root_from_json(&event);
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
-    let v2_guidance = if let Some(root) = root.as_deref() {
-        super::v2::dispatch(
+    let dispatch_guidance = if let Some(root) = root.as_deref() {
+        super::dispatch::dispatch(
             tracedecay_hooks::HookHostV1::Kiro,
             &event,
             root,
@@ -165,7 +165,7 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
         // instead of falsely attributing the batch to the prompt's session id.
         super::schedule_user_session_review("kiro", None).await;
     }
-    if let Some(guidance) = v2_guidance {
+    if let Some(guidance) = dispatch_guidance {
         if let Some(guidance) = guidance {
             println!("{guidance}");
         }

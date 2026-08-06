@@ -325,7 +325,7 @@ where
 }
 
 async fn drain_all_hosts(graph: &crate::tracedecay::TraceDecay, data_root: &Path) {
-    for host in crate::hooks::HOOK_V2_BOUND_HOSTS {
+    for host in crate::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
         for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
             let _ = admit_replayed_envelope_with_authoritative_session(
@@ -830,7 +830,7 @@ mod tests {
         publish_binding(root.path(), &binding, now);
         let mut edit = envelope(9, &binding);
         edit.protected_session_id =
-            crate::hooks::hook_v2_protected_session_id_for_native("session.native.replay");
+            crate::hooks::protected_native_session_id("session.native.replay");
         edit.event = HookEventV2::SavedEdit {
             file_id: [8; 16],
             changed_range_count: 1,
@@ -851,9 +851,7 @@ mod tests {
                         assert_eq!(worktree_id, [3; 16]);
                         assert_eq!(
                             protected_session_id,
-                            crate::hooks::hook_v2_protected_session_id_for_native(
-                                "session.native.replay"
-                            )
+                            crate::hooks::protected_native_session_id("session.native.replay")
                         );
                         Some(SessionId::new("session.native.replay".to_owned()).unwrap())
                     },
@@ -914,8 +912,7 @@ mod tests {
             .collect();
             let mut replayed = envelope(sequence as u8, &host_binding);
             replayed.producer = host;
-            replayed.protected_session_id =
-                crate::hooks::hook_v2_protected_session_id_for_native(session);
+            replayed.protected_session_id = crate::hooks::protected_native_session_id(session);
             replayed.ordering = HookOrderingV1::ProviderSequence(sequence);
             replayed.event = HookEventV2::SavedEdit {
                 file_id: [sequence as u8; 16],
@@ -930,7 +927,7 @@ mod tests {
                     assert_eq!(worktree_id, [3; 16]);
                     assert_eq!(
                         protected_session_id,
-                        crate::hooks::hook_v2_protected_session_id_for_native(session)
+                        crate::hooks::protected_native_session_id(session)
                     );
                     Some(SessionId::new(session.to_owned()).unwrap())
                 },

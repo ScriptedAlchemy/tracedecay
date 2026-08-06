@@ -58,7 +58,7 @@ pub async fn hook_codex_session_start() -> i32 {
         &parsed,
     );
     let guidance = if let Some(root) = root.as_deref() {
-        super::v2::dispatch(
+        super::dispatch::dispatch(
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             root,
@@ -188,7 +188,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
         &parsed,
     );
     if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+        && let Some(guidance) = super::dispatch::dispatch(
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             root,
@@ -307,7 +307,7 @@ pub async fn hook_codex_stop() -> i32 {
         record_hook_invoked_parsed(root.as_deref(), HintAgent::Codex, "Stop", &event, &parsed);
     let session_id = event_session_id(&parsed);
     if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+        && let Some(guidance) = super::dispatch::dispatch(
             tracedecay_hooks::HookHostV1::Codex,
             &event,
             root,
@@ -351,7 +351,7 @@ async fn finalize_codex_user_session(
     ingest_user_codex_session(session_id, telemetry).await
 }
 
-/// A V2-admitted project Stop still captures the provider's historical
+/// A daemon-admitted project Stop still captures the provider's historical
 /// session through the profile daemon. The capture kernel correlates it back
 /// to registered projects; it is not a diagnostics substitute.
 async fn ingest_codex_stop_transcript(
@@ -978,7 +978,7 @@ mod tests {
         );
         assert!(
             ingest_codex_stop_transcript(Some("final-turn".to_string()), None).await,
-            "a V2-admitted project Stop must still request canonical historical capture"
+            "a daemon-admitted project Stop must still request canonical historical capture"
         );
 
         let calls = daemon.calls();
@@ -994,7 +994,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_v2_stop_capture_timeout_is_fail_open() {
+    async fn codex_stop_capture_timeout_is_fail_open() {
         assert_eq!(CODEX_STOP_INGEST_BUDGET, Duration::from_secs(3));
         assert!(
             !capture_codex_stop_with_budget(std::future::pending(), Duration::ZERO, None).await,

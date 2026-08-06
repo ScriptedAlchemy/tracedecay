@@ -29,12 +29,12 @@ use super::daemon_ports::{
     DaemonOpenCodeLspUpdatePort, now_utc,
 };
 
-pub(crate) enum HookV2Dispatch {
+pub(crate) enum HookDispatch {
     NotApplicable,
-    /// Hook V2 recognised the event but could not take ownership of it — no
+    /// The native dispatcher recognised the event but could not take ownership of it — no
     /// published binding, an unreadable store layout, or an envelope it could
     /// not decode. The disposition is still worth recording, but the event has
-    /// not been admitted anywhere, so callers must fall back to their pre-V2
+    /// not been admitted anywhere, so callers must fall back to their ordinary
     /// daemon notification rather than treat the event as delivered.
     Unavailable(HookTransportDispositionV1),
     Handled {
@@ -43,7 +43,7 @@ pub(crate) enum HookV2Dispatch {
     },
 }
 
-impl HookV2Dispatch {
+impl HookDispatch {
     pub(crate) fn into_recorded_guidance(
         self,
         telemetry: &HookTimingSpan,
@@ -51,21 +51,21 @@ impl HookV2Dispatch {
         match self {
             Self::NotApplicable => None,
             Self::Unavailable(disposition) => {
-                telemetry.note_hook_v2_disposition(disposition);
+                telemetry.note_native_dispatch_disposition(disposition);
                 None
             }
             Self::Handled {
                 guidance,
                 disposition,
             } => {
-                telemetry.note_hook_v2_disposition(disposition);
+                telemetry.note_native_dispatch_disposition(disposition);
                 Some(guidance)
             }
         }
     }
 }
 
-pub(crate) const HOOK_V2_BOUND_HOSTS: &[HookHostV1] = &[
+pub(crate) const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
     HookHostV1::ClaudeCode,
     HookHostV1::Codex,
     HookHostV1::CursorDesktop,
@@ -89,12 +89,12 @@ pub(crate) fn publish_daemon_bindings(
 ) -> crate::errors::Result<()> {
     let project_key = layout.identity.project_id.as_deref().ok_or_else(|| {
         crate::errors::TraceDecayError::Config {
-            message: "cannot publish Hook V2 binding without typed project identity".to_owned(),
+            message: "cannot publish Hook binding without typed project identity".to_owned(),
         }
     })?;
     let typed_project_id = ProjectId::new(project_key.to_owned()).map_err(|error| {
         crate::errors::TraceDecayError::Config {
-            message: format!("cannot validate Hook V2 project identity: {error}"),
+            message: format!("cannot validate Hook project identity: {error}"),
         }
     })?;
     let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
@@ -102,13 +102,13 @@ pub(crate) fn publish_daemon_bindings(
         &typed_project_id,
     )
     .map_err(|error| crate::errors::TraceDecayError::Config {
-        message: format!("cannot resolve Hook V2 repository/worktree scope: {error}"),
+        message: format!("cannot resolve Hook repository/worktree scope: {error}"),
     })?;
     let now = now_utc();
     let revision = now.0.max(1) as u64;
     let (project_id, repository_id, worktree_id, worktree_epoch) =
         binding_identity_from_scope(&scope, revision);
-    for host in HOOK_V2_BOUND_HOSTS {
+    for host in NATIVE_HOOK_HOSTS {
         let capabilities = [
             tracedecay_hooks::HookEventFamily::SessionBoundary,
             tracedecay_hooks::HookEventFamily::PromptBoundary,
@@ -144,7 +144,7 @@ pub(crate) fn publish_daemon_bindings(
             .publish(snapshot)
             .map_err(|error| crate::errors::TraceDecayError::Config {
                 message: format!(
-                    "failed to publish {} Hook V2 binding: {error}",
+                    "failed to publish {} Hook binding: {error}",
                     host.hook_key()
                 ),
             })?;
@@ -411,7 +411,7 @@ pub(crate) async fn dispatch(
     event_json: &str,
     project_root: &Path,
     telemetry: Option<&HookTimingSpan>,
-) -> HookV2Dispatch {
+) -> HookDispatch {
     let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_native_hook_event(host, event_json.as_bytes()) {
         Ok(decoded) => decoded,
@@ -419,7 +419,7 @@ pub(crate) async fn dispatch(
             NativeHookDecodeError::UnsupportedNativeEvent
             | NativeHookDecodeError::UnsupportedNativeFamily,
         ) => {
-            return HookV2Dispatch::NotApplicable;
+            return HookDispatch::NotApplicable;
         }
         Err(_) => return unavailable(),
     };
@@ -440,13 +440,13 @@ pub(crate) async fn dispatch(
 
 /// Dispatches a native event through its exact project binding when one is
 /// known, or through the authenticated daemon profile when the host has no
-/// project identity. Both paths send only the closed V2 event material.
+/// project identity. Both paths send only the closed event material.
 pub(crate) async fn dispatch_for_scope(
     host: HookHostV1,
     event_json: &str,
     project_root: Option<&Path>,
     telemetry: Option<&HookTimingSpan>,
-) -> HookV2Dispatch {
+) -> HookDispatch {
     match project_root {
         Some(project_root) => dispatch(host, event_json, project_root, telemetry).await,
         None => dispatch_profile_scoped(host, event_json, telemetry).await,
@@ -457,17 +457,19 @@ async fn dispatch_profile_scoped(
     host: HookHostV1,
     event_json: &str,
     telemetry: Option<&HookTimingSpan>,
-) -> HookV2Dispatch {
+) -> HookDispatch {
     let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_native_hook_event(host, event_json.as_bytes()) {
         Ok(decoded) => decoded,
         Err(
             NativeHookDecodeError::UnsupportedNativeEvent
             | NativeHookDecodeError::UnsupportedNativeFamily,
-        ) => return HookV2Dispatch::NotApplicable,
+        ) => return HookDispatch::NotApplicable,
         Err(_) => return unavailable(),
     };
-    let fields = serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
+    let Ok(fields) = serde_json::from_str::<NativeIdentityFields>(event_json) else {
+        return unavailable();
+    };
     let Some(material) =
         native_material(&fields, decoded.family(), event_json.as_bytes(), now_utc())
     else {
@@ -505,7 +507,7 @@ async fn dispatch_profile_scoped(
             .and_then(serde_json::Value::as_str)
             == Some("accepted");
     if accepted {
-        HookV2Dispatch::Handled {
+        HookDispatch::Handled {
             guidance: None,
             disposition: HookTransportDispositionV1::Accepted,
         }
@@ -518,7 +520,7 @@ pub(crate) async fn dispatch_opencode_tool_after(
     event_json: &str,
     project_root: &Path,
     telemetry: Option<&HookTimingSpan>,
-) -> HookV2Dispatch {
+) -> HookDispatch {
     let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_opencode_plugin_event(
         tracedecay_hooks::OpenCodePluginSurfaceV1::ToolExecuteAfter,
@@ -529,7 +531,7 @@ pub(crate) async fn dispatch_opencode_tool_after(
             NativeHookDecodeError::UnsupportedNativeEvent
             | NativeHookDecodeError::UnsupportedNativeFamily,
         ) => {
-            return HookV2Dispatch::NotApplicable;
+            return HookDispatch::NotApplicable;
         }
         Err(_) => return unavailable(),
     };
@@ -554,7 +556,7 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
     event_json: &str,
     project_root: &Path,
     telemetry: Option<&HookTimingSpan>,
-) -> HookV2Dispatch {
+) -> HookDispatch {
     if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_err() {
         return unavailable();
     }
@@ -563,7 +565,7 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
     };
     let port = DaemonOpenCodeLspUpdatePort::new(project_root, telemetry);
     if port.submit_updated_event(&event).await {
-        HookV2Dispatch::Handled {
+        HookDispatch::Handled {
             guidance: None,
             disposition: HookTransportDispositionV1::Accepted,
         }
@@ -597,8 +599,7 @@ fn prepare_bound_hook(
         return None;
     };
     let binding = &snapshot.binding;
-    let native_fields =
-        serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
+    let native_fields = serde_json::from_str::<NativeIdentityFields>(event_json).ok()?;
     let native_session_id = native_fields.session_id().map(str::to_owned);
     let material = native_material(&native_fields, decoded.family(), event_json.as_bytes(), now)?;
     let native_lifecycle = native_context_scout_lifecycle(host, &native_fields, material.event_id);
@@ -628,7 +629,7 @@ async fn dispatch_decoded(
     delivery: &impl AsyncHookFeedbackDeliveryPortV1<
         crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1,
     >,
-) -> HookV2Dispatch {
+) -> HookDispatch {
     let PreparedBoundHook {
         host,
         layout,
@@ -727,7 +728,7 @@ async fn dispatch_decoded(
                 feedback: None,
                 outcome: None,
             });
-            HookV2Dispatch::Handled {
+            HookDispatch::Handled {
                 guidance: render_host_delivery(
                     result.rendered_guidance,
                     delivered.feedback.as_ref(),
@@ -850,6 +851,28 @@ fn replay_envelope_if_pending(
     }
 }
 
+pub fn native_capture_material(
+    source: tracedecay_hooks::NativeHookCaptureSourceV1,
+    payload: &[u8],
+    observed_at: UtcMicros,
+) -> Result<NativeEnvelopeMaterialV1, NativeHookDecodeError> {
+    let decoded = match source {
+        tracedecay_hooks::NativeHookCaptureSourceV1::Host(host) => {
+            tracedecay_hooks::decode_native_hook_event(host, payload)?
+        }
+        tracedecay_hooks::NativeHookCaptureSourceV1::OpenCodeToolExecuteAfter => {
+            tracedecay_hooks::decode_opencode_plugin_event(
+                tracedecay_hooks::OpenCodePluginSurfaceV1::ToolExecuteAfter,
+                payload,
+            )?
+        }
+    };
+    let fields = serde_json::from_slice::<NativeIdentityFields>(payload)
+        .map_err(|_| NativeHookDecodeError::MalformedPayload)?;
+    native_material(&fields, decoded.family(), payload, observed_at)
+        .ok_or(NativeHookDecodeError::MissingOpaqueMaterial)
+}
+
 /// Builds the envelope material from the identity fields the caller already
 /// decoded. `prepare_bound_hook` decodes them once for the native session id and
 /// the context-scout lifecycle; re-decoding the same payload here was a second
@@ -953,8 +976,8 @@ fn domain_hash32(value: &str, domain: &str) -> [u8; 32] {
     hash32(format!("{domain}:{value}").as_bytes())
 }
 
-fn unavailable() -> HookV2Dispatch {
-    HookV2Dispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
+fn unavailable() -> HookDispatch {
+    HookDispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
 }
 
 #[cfg(test)]

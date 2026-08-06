@@ -6,13 +6,13 @@
 
 use std::path::Path;
 
-use tracedecay_domain::{UtcMicros, framed_log::checksum};
+use tracedecay_domain::UtcMicros;
 
 use crate::{
-    DecodedNativeHookEventV1, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
-    HookConfigurationSubscriberV1, HookEventFamily, HookHostV1, HookSpoolConfigV1, HookSpoolError,
-    HookSpoolV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, OpenCodePluginSurfaceV1,
-    decode_native_hook_event, decode_opencode_plugin_event, hook_configuration_path,
+    HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
+    HookHostV1, HookSpoolConfigV1, HookSpoolError, HookSpoolV1, NativeEnvelopeMaterialV1,
+    NativeHookDecodeError, OpenCodePluginSurfaceV1, decode_native_hook_event,
+    decode_opencode_plugin_event, hook_configuration_path,
 };
 
 /// The real host surface that supplied native hook bytes.
@@ -49,6 +49,7 @@ pub fn capture_native_event_for_replay(
     data_root: &Path,
     source: NativeHookCaptureSourceV1,
     payload: &[u8],
+    material: NativeEnvelopeMaterialV1,
     now: UtcMicros,
 ) -> NativeHookCaptureOutcomeV1 {
     let host = source.host();
@@ -72,9 +73,6 @@ pub fn capture_native_event_for_replay(
     let HookConfigurationReadOutcomeV1::Bound(snapshot) = subscriber.load_current(host, now) else {
         return NativeHookCaptureOutcomeV1::Unbound;
     };
-    let Some(material) = native_material(&decoded, now) else {
-        return NativeHookCaptureOutcomeV1::Rejected;
-    };
     let envelope = match decoded.into_envelope(&snapshot.binding, material) {
         Ok(envelope) => envelope,
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
@@ -83,7 +81,7 @@ pub fn capture_native_event_for_replay(
     let mut spool = match HookSpoolV1::open(spool_root, HookSpoolConfigV1::stock(host), now) {
         Ok((spool, _)) => spool,
         Err(HookSpoolError::SpoolFull) => return NativeHookCaptureOutcomeV1::Full,
-        Err(HookSpoolError::ResetRequired) => {
+        Err(HookSpoolError::ResetRequired { .. }) => {
             return NativeHookCaptureOutcomeV1::ResetRequired;
         }
         Err(_) => return NativeHookCaptureOutcomeV1::Unavailable,
@@ -91,41 +89,7 @@ pub fn capture_native_event_for_replay(
     match spool.append(envelope, &snapshot.binding, now) {
         Ok(_) => NativeHookCaptureOutcomeV1::Captured,
         Err(HookSpoolError::SpoolFull) => NativeHookCaptureOutcomeV1::Full,
-        Err(HookSpoolError::ResetRequired) => NativeHookCaptureOutcomeV1::ResetRequired,
+        Err(HookSpoolError::ResetRequired { .. }) => NativeHookCaptureOutcomeV1::ResetRequired,
         Err(_) => NativeHookCaptureOutcomeV1::Unavailable,
     }
-}
-
-fn native_material(
-    decoded: &DecodedNativeHookEventV1,
-    observed_at: UtcMicros,
-) -> Option<NativeEnvelopeMaterialV1> {
-    let session = decoded.native_session_id()?;
-    let family = decoded.family();
-    let event_id = hash16(decoded.native_event_key()?.as_bytes());
-    let file_id = (family == HookEventFamily::SavedEdit)
-        .then(|| {
-            decoded
-                .native_file_path()
-                .map(|path| hash16(path.as_bytes()))
-        })
-        .flatten();
-    Some(NativeEnvelopeMaterialV1 {
-        event_id,
-        protected_session_id: checksum(session.as_bytes()),
-        observed_at,
-        tool_id: (family == HookEventFamily::ToolLifecycle).then_some(event_id),
-        effect_receipt_id: decoded
-            .native_call_id()
-            .map(|value| hash16(value.as_bytes())),
-        file_id,
-        changed_range_count: decoded.changed_range_count(),
-    })
-}
-
-fn hash16(bytes: &[u8]) -> [u8; 16] {
-    let digest = checksum(bytes);
-    let mut output = [0; 16];
-    output.copy_from_slice(&digest[..16]);
-    output
 }

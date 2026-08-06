@@ -26,8 +26,8 @@ fn native_material(
 
 fn scope(worktree: &str) -> ResolvedScope {
     ResolvedScope::new(
-        ProjectId::new("project.hook-v2-test").unwrap(),
-        RepositoryId::new("repository.hook-v2-test").unwrap(),
+        ProjectId::new("project.hook-dispatch-test").unwrap(),
+        RepositoryId::new("repository.hook-dispatch-test").unwrap(),
         WorktreeId::new(worktree).unwrap(),
         None,
     )
@@ -74,7 +74,7 @@ fn every_host_with_a_native_pr13_event_receives_a_daemon_binding() {
             tracedecay_hooks::stock_event_support(host, family)
                 == tracedecay_hooks::HookEventSupportV1::Native
         });
-        assert_eq!(HOOK_V2_BOUND_HOSTS.contains(&host), has_native, "{host:?}");
+        assert_eq!(NATIVE_HOOK_HOSTS.contains(&host), has_native, "{host:?}");
     }
 }
 
@@ -142,15 +142,15 @@ fn daemon_admission_response_rejects_open_or_incoherent_actions() {
 fn daemon_feedback_notice_survives_into_host_delivery() {
     let notice = crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
-            project_id: ProjectId::new("project.hook-v2-test").unwrap(),
-            repository_id: RepositoryId::new("repository.hook-v2-test").unwrap(),
-            worktree_id: WorktreeId::new("worktree.hook-v2-test").unwrap(),
+            project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
+            repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
+            worktree_id: WorktreeId::new("worktree.hook-dispatch-test").unwrap(),
             branch_ref: "refs/heads/feature".to_owned(),
             head_commit_id: CommitId::new("a".repeat(40)).unwrap(),
         },
-        result_id: FeedbackResultId::new("result.hook-v2-test").unwrap(),
-        cycle_id: FeedbackCycleId::new("cycle.hook-v2-test").unwrap(),
-        generation_id: CodeGenerationId::new("generation.hook-v2-test").unwrap(),
+        result_id: FeedbackResultId::new("result.hook-dispatch-test").unwrap(),
+        cycle_id: FeedbackCycleId::new("cycle.hook-dispatch-test").unwrap(),
+        generation_id: CodeGenerationId::new("generation.hook-dispatch-test").unwrap(),
         generation_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         returned_findings: 2,
         omitted_findings: 1,
@@ -239,15 +239,15 @@ impl AsyncHookFeedbackDeliveryPortV1<crate::application::advisory::Pr13AdvisoryH
 fn sample_notice() -> crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
     crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
         scope: FeedbackScopeV1 {
-            project_id: ProjectId::new("project.hook-v2-test").unwrap(),
-            repository_id: RepositoryId::new("repository.hook-v2-test").unwrap(),
-            worktree_id: WorktreeId::new("worktree.hook-v2-test").unwrap(),
+            project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
+            repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
+            worktree_id: WorktreeId::new("worktree.hook-dispatch-test").unwrap(),
             branch_ref: "refs/heads/feature".to_owned(),
             head_commit_id: CommitId::new("a".repeat(40)).unwrap(),
         },
-        result_id: FeedbackResultId::new("result.hook-v2-test").unwrap(),
-        cycle_id: FeedbackCycleId::new("cycle.hook-v2-test").unwrap(),
-        generation_id: CodeGenerationId::new("generation.hook-v2-test").unwrap(),
+        result_id: FeedbackResultId::new("result.hook-dispatch-test").unwrap(),
+        cycle_id: FeedbackCycleId::new("cycle.hook-dispatch-test").unwrap(),
+        generation_id: CodeGenerationId::new("generation.hook-dispatch-test").unwrap(),
         generation_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         returned_findings: 2,
         omitted_findings: 1,
@@ -528,7 +528,7 @@ async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
 
     assert!(matches!(
         dispatch,
-        HookV2Dispatch::Handled {
+        HookDispatch::Handled {
             guidance: None,
             disposition: HookTransportDispositionV1::Accepted,
         }
@@ -552,7 +552,7 @@ async fn opencode_lsp_updated_rejects_non_accepted_daemon_status() {
     let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
     assert!(matches!(
         dispatch,
-        HookV2Dispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
+        HookDispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
     ));
 }
 

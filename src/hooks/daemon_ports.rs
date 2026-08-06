@@ -1,6 +1,6 @@
-//! Root adapters for Hook V2 daemon transport.
+//! Root adapters for native Hook daemon transport.
 //!
-//! These ports own the `daemon_hook_action` JSON. The Hook V2 dispatch core
+//! These ports own the `daemon_hook_action` JSON. The native Hook dispatch core
 //! consumes typed ports ([`AsyncHookAdmissionPortV1`],
 //! [`AsyncHookFeedbackDeliveryPortV1`], and the `OpenCode` LSP submit port) and
 //! never issues those action strings itself.
@@ -19,7 +19,7 @@ use tracedecay_hooks::{
 };
 
 use super::analytics::HookTimingSpan;
-use super::v2::NativeContextScoutLifecycleV1;
+use super::dispatch::NativeContextScoutLifecycleV1;
 
 pub(crate) struct DaemonAdmissionPort<'a> {
     project_root: &'a Path,
@@ -28,7 +28,7 @@ pub(crate) struct DaemonAdmissionPort<'a> {
     feedback_notice: Mutex<Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>>,
     /// The caller's hook span, so the admission round trip is attributed like
     /// every other hook/daemon call. Passing `None` here reported hosts that
-    /// route through V2 as having done no daemon IPC at all.
+    /// route through the native dispatcher as having done no daemon IPC at all.
     telemetry: Option<&'a HookTimingSpan>,
 }
 
@@ -210,7 +210,7 @@ async fn timed_daemon_hook_action(
     delivery_outcome_from_status(response.get("status").and_then(|value| value.as_str()))
 }
 
-/// Daemon-backed Hook V2 feedback-notice delivery. Acknowledgement crosses the
+/// Daemon-backed Hook feedback-notice delivery. Acknowledgement crosses the
 /// local daemon boundary; finding content stays in the PR12 store.
 pub(crate) struct DaemonFeedbackNoticeDeliveryPort<'a> {
     project_root: &'a Path,
@@ -444,15 +444,15 @@ mod tests {
     fn daemon_feedback_notice_survives_admission_decode() {
         let notice = crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1 {
             scope: FeedbackScopeV1 {
-                project_id: ProjectId::new("project.hook-v2-test").unwrap(),
-                repository_id: RepositoryId::new("repository.hook-v2-test").unwrap(),
-                worktree_id: WorktreeId::new("worktree.hook-v2-test").unwrap(),
+                project_id: ProjectId::new("project.hook-dispatch-test").unwrap(),
+                repository_id: RepositoryId::new("repository.hook-dispatch-test").unwrap(),
+                worktree_id: WorktreeId::new("worktree.hook-dispatch-test").unwrap(),
                 branch_ref: "refs/heads/feature".to_owned(),
                 head_commit_id: CommitId::new("a".repeat(40)).unwrap(),
             },
-            result_id: FeedbackResultId::new("result.hook-v2-test").unwrap(),
-            cycle_id: FeedbackCycleId::new("cycle.hook-v2-test").unwrap(),
-            generation_id: CodeGenerationId::new("generation.hook-v2-test").unwrap(),
+            result_id: FeedbackResultId::new("result.hook-dispatch-test").unwrap(),
+            cycle_id: FeedbackCycleId::new("cycle.hook-dispatch-test").unwrap(),
+            generation_id: CodeGenerationId::new("generation.hook-dispatch-test").unwrap(),
             generation_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
             returned_findings: 2,
             omitted_findings: 1,

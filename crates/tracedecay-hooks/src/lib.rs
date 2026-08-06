@@ -79,7 +79,7 @@ pub const MAX_SUGGESTION_BYTES: usize = 4 * 1024;
 /// preventing a second host vocabulary from drifting from the domain catalog.
 pub type HookHostV1 = NativeHostIdentityV1;
 
-/// Event families that a host hook itself may emit in PR13.
+/// Event families that a host hook itself may emit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEventFamily {
@@ -102,7 +102,7 @@ pub enum HookEventSupportV1 {
     Prohibited,
 }
 
-/// Checked-in PR13 host matrix. `Unavailable` is truthful absence and never
+/// Checked-in native host matrix. `Unavailable` is truthful absence and never
 /// permission to infer an event from command text or another host surface.
 pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> HookEventSupportV1 {
     use HookEventFamily::{
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn five_host_matrix_does_not_emulate_kiro_tool_or_edit_events() {
+    fn host_matrix_matches_checked_in_native_capture_authority() {
         assert_eq!(
             stock_event_support(HookHostV1::Kiro, HookEventFamily::ToolLifecycle),
             HookEventSupportV1::Unavailable
@@ -503,8 +503,8 @@ mod tests {
         );
         assert_eq!(
             stock_event_support(HookHostV1::Codex, HookEventFamily::ToolLifecycle),
-            HookEventSupportV1::Unavailable,
-            "Codex has no checked-in authentic PostToolUse capture"
+            HookEventSupportV1::Native,
+            "the checked-in Codex PostToolUse capture proves this native family"
         );
         assert_eq!(
             stock_event_support(HookHostV1::CursorDesktop, HookEventFamily::SavedEdit),
