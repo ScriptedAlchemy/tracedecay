@@ -17,6 +17,14 @@ use crate::operations::TypedOperation;
 
 const MAX_OPAQUE_BYTES: usize = 4_096;
 const MAX_REQUEST_ID_BYTES: usize = 512;
+const DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
+
+/// Per-invocation transport controls accepted by typed operations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationRequestOptions {
+    /// Absolute UTC deadline in microseconds, forwarded to daemon admission.
+    pub deadline_micros: Option<i64>,
+}
 
 /// Selects loopback or remote HTTP policy without changing operation semantics.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,11 +162,25 @@ impl Client {
         Operation::Request: Serialize,
         Operation::Result: DeserializeOwned,
     {
+        self.execute_with_options::<Operation>(request, OperationRequestOptions::default())
+    }
+
+    /// Invoke one typed operation with explicit transport controls.
+    pub fn execute_with_options<Operation>(
+        &self,
+        request: &Operation::Request,
+        options: OperationRequestOptions,
+    ) -> Result<TypedResponse<Operation::Result>, ClientError>
+    where
+        Operation: TypedOperation,
+        Operation::Request: Serialize,
+        Operation::Result: DeserializeOwned,
+    {
         let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
             status: None,
             message: format!("typed request could not be encoded: {error}"),
         })?;
-        let response = self.request_route(Operation::ROUTE, &request)?;
+        let response = self.request_route(Operation::ROUTE, &request, options)?;
         let binding = response
             .envelope()
             .get("binding_id")
@@ -203,7 +225,10 @@ impl Client {
             .envelope()
             .get("request_id")
             .and_then(Value::as_str)
-            .expect("application response validation requires request_id")
+            .ok_or_else(|| ClientError::Protocol {
+                status: Some(response.status()),
+                message: "daemon omitted the application request ID".into(),
+            })?
             .to_owned();
         Ok(TypedResponse { request_id, result })
     }
@@ -212,6 +237,7 @@ impl Client {
         &self,
         route: &str,
         request: &Value,
+        options: OperationRequestOptions,
     ) -> Result<ApplicationResponse, ClientError> {
         let route = route.strip_prefix("/application").ok_or_else(|| {
             ClientError::InvalidConfiguration(
@@ -220,10 +246,21 @@ impl Client {
         })?;
         let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+        let mut headers = self.headers("application/json");
+        if let Some(deadline_micros) = options.deadline_micros {
+            if deadline_micros <= 0 {
+                return Err(ClientError::InvalidRequest(
+                    "deadline_micros must be positive".into(),
+                ));
+            }
+            let value = HeaderValue::from_str(&deadline_micros.to_string())
+                .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
+            headers.insert(DEADLINE_HEADER, value);
+        }
         let response = self
             .http
             .post(url)
-            .headers(self.headers("application/json"))
+            .headers(headers)
             .json(request)
             .send()
             .map_err(ClientError::transport)?;

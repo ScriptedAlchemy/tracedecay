@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
+use crate::executable::ExecutableSchemaAuthority;
 use crate::id::{
     BindingId, CapabilityId, CatalogDigest, ContributionId, FeatureId, ProfileId, SchemaId,
     UseCaseId,
@@ -78,6 +79,7 @@ pub struct CatalogContributionV1 {
     capabilities: Vec<CapabilityManifestV1>,
     retrieval_primitives: Vec<RetrievalPrimitiveManifestV1>,
     bindings: Vec<SurfaceBindingV1>,
+    executable_schemas: Vec<ExecutableSchemaAuthority>,
 }
 
 impl CatalogContributionV1 {
@@ -101,7 +103,47 @@ impl CatalogContributionV1 {
             capabilities,
             retrieval_primitives,
             bindings,
+            executable_schemas: Vec::new(),
         })
+    }
+
+    /// Attach SDK-grade schema bodies supplied by the same application module
+    /// that owns the capability manifest and wire types.
+    pub fn with_executable_schemas(
+        mut self,
+        mut executable_schemas: Vec<ExecutableSchemaAuthority>,
+    ) -> Result<Self, CatalogValidationError> {
+        executable_schemas.sort_by(|left, right| left.capability_id().cmp(right.capability_id()));
+        for pair in executable_schemas.windows(2) {
+            if pair[0].capability_id() == pair[1].capability_id() {
+                return Err(CatalogValidationError::DuplicateValue {
+                    field: "contribution executable schema capability IDs",
+                });
+            }
+        }
+        for authority in &executable_schemas {
+            let manifest = self
+                .capabilities
+                .binary_search_by(|manifest| {
+                    manifest.capability_id().cmp(authority.capability_id())
+                })
+                .ok()
+                .map(|index| &self.capabilities[index])
+                .ok_or_else(|| CatalogValidationError::InvalidCapability {
+                    capability_id: authority.capability_id().clone(),
+                    reason: "executable schema authority has no owning manifest",
+                })?;
+            if authority.request_schema().schema_ref() != manifest.request_schema()
+                || authority.result_schema().schema_ref() != manifest.result_schema()
+            {
+                return Err(CatalogValidationError::InvalidCapability {
+                    capability_id: authority.capability_id().clone(),
+                    reason: "executable schema authority does not match the manifest",
+                });
+            }
+        }
+        self.executable_schemas = executable_schemas;
+        Ok(self)
     }
 
     pub fn contribution_id(&self) -> &ContributionId {
@@ -122,6 +164,20 @@ impl CatalogContributionV1 {
 
     pub fn bindings(&self) -> &[SurfaceBindingV1] {
         &self.bindings
+    }
+
+    pub fn executable_schemas(&self) -> &[ExecutableSchemaAuthority] {
+        &self.executable_schemas
+    }
+
+    pub fn executable_schema(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Option<&ExecutableSchemaAuthority> {
+        self.executable_schemas
+            .binary_search_by(|authority| authority.capability_id().cmp(capability_id))
+            .ok()
+            .map(|index| &self.executable_schemas[index])
     }
 }
 
@@ -159,6 +215,7 @@ impl CatalogSnapshotBuilderV1 {
         let mut capabilities = BTreeMap::new();
         let mut retrieval_primitives = BTreeMap::new();
         let mut bindings = BTreeMap::new();
+        let mut executable_schemas = BTreeMap::new();
         for contribution in &self.contributions {
             for capability in contribution.capabilities() {
                 capabilities.insert(capability.capability_id().clone(), capability.clone());
@@ -168,6 +225,9 @@ impl CatalogSnapshotBuilderV1 {
             }
             for binding in contribution.bindings() {
                 bindings.insert(binding.binding_id().clone(), binding.clone());
+            }
+            for authority in contribution.executable_schemas() {
+                executable_schemas.insert(authority.capability_id().clone(), authority.clone());
             }
         }
 
@@ -191,6 +251,7 @@ impl CatalogSnapshotBuilderV1 {
             &capabilities,
             &retrieval_primitives,
             &bindings,
+            &executable_schemas,
             &profiles,
         );
 
@@ -199,6 +260,7 @@ impl CatalogSnapshotBuilderV1 {
             capabilities,
             retrieval_primitives,
             bindings,
+            executable_schemas,
             profiles,
             schema_index,
             binding_lookup,
@@ -214,6 +276,7 @@ pub struct CatalogSnapshotV1 {
     capabilities: BTreeMap<CapabilityId, CapabilityManifestV1>,
     retrieval_primitives: BTreeMap<CapabilityId, RetrievalPrimitiveManifestV1>,
     bindings: BTreeMap<BindingId, SurfaceBindingV1>,
+    executable_schemas: BTreeMap<CapabilityId, ExecutableSchemaAuthority>,
     profiles: BTreeMap<ProfileId, ProfileDefinition>,
     schema_index: BTreeMap<(SchemaId, u32), SchemaRef>,
     binding_lookup: BTreeMap<(BindingSurface, SurfaceOperationName), BindingId>,
@@ -237,6 +300,13 @@ impl CatalogSnapshotV1 {
 
     pub fn binding(&self, binding_id: &BindingId) -> Option<&SurfaceBindingV1> {
         self.bindings.get(binding_id)
+    }
+
+    pub fn executable_schema(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Option<&ExecutableSchemaAuthority> {
+        self.executable_schemas.get(capability_id)
     }
 
     pub fn profile(&self, profile_id: &ProfileId) -> Option<&ProfileDefinition> {
@@ -393,6 +463,7 @@ fn calculate_digest(
     capabilities: &BTreeMap<CapabilityId, CapabilityManifestV1>,
     retrieval_primitives: &BTreeMap<CapabilityId, RetrievalPrimitiveManifestV1>,
     bindings: &BTreeMap<BindingId, SurfaceBindingV1>,
+    executable_schemas: &BTreeMap<CapabilityId, ExecutableSchemaAuthority>,
     profiles: &BTreeMap<ProfileId, ProfileDefinition>,
 ) -> CatalogDigest {
     let mut contributions: Vec<_> = contributions.iter().collect();
@@ -410,6 +481,7 @@ fn calculate_digest(
         capabilities: capabilities.values().cloned().collect(),
         retrieval_primitives: retrieval_primitives.values().cloned().collect(),
         bindings: bindings.values().cloned().collect(),
+        executable_schemas: executable_schemas.values().cloned().collect(),
         profiles: profiles.values().cloned().collect(),
     };
     let document =
@@ -426,6 +498,7 @@ struct SnapshotDigestDocument {
     capabilities: Vec<CapabilityManifestV1>,
     retrieval_primitives: Vec<RetrievalPrimitiveManifestV1>,
     bindings: Vec<SurfaceBindingV1>,
+    executable_schemas: Vec<ExecutableSchemaAuthority>,
     profiles: Vec<ProfileDefinition>,
 }
 

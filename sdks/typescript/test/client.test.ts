@@ -280,6 +280,7 @@ describe("TraceDecayClient generated operation bindings", () => {
   it("preserves remote base paths and origin policy", async () => {
     let requestedUrl = "";
     let requestedOrigin = "";
+    let requestedDeadline = "";
     const client = createClient({
       baseUrl: "https://remote.example/api/v1/",
       projectId: "project.sdk",
@@ -287,7 +288,10 @@ describe("TraceDecayClient generated operation bindings", () => {
       origin: "https://consumer.example",
       fetch: async (input, init) => {
         requestedUrl = String(input);
-        requestedOrigin = new Headers(init?.headers).get("origin") ?? "";
+        const headers = new Headers(init?.headers);
+        requestedOrigin = headers.get("origin") ?? "";
+        requestedDeadline =
+          headers.get("x-tracedecay-deadline-micros") ?? "";
         return new Response(JSON.stringify(successEnvelope({ status: "ok" })), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -296,13 +300,17 @@ describe("TraceDecayClient generated operation bindings", () => {
     });
 
     await expect(
-      client.operations.work_snapshot({ page_size: 25 }),
+      client.operations.work_snapshot(
+        { page_size: 25 },
+        { deadlineMicros: 1_800_000_000_000_003 },
+      ),
     ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
 
     expect(requestedUrl).toBe(
       "https://remote.example/api/v1/projects/project.sdk/application/work/snapshot",
     );
     expect(requestedOrigin).toBe("https://consumer.example");
+    expect(requestedDeadline).toBe("1800000000000003");
   });
 
   it("fails closed on malformed typed Work requests before transport", async () => {
@@ -409,6 +417,10 @@ describe("TraceDecayClient generated operation bindings", () => {
       schemaId: "schema.work.attempt_finish.result",
       revision: 1,
     });
+    expect(descriptor?.deadline).toEqual({
+      maximum_millis: 30_000,
+      behavior: "return_effect_receipt",
+    });
   });
 });
 
@@ -433,6 +445,12 @@ describe("TraceDecayClient transport envelopes", () => {
     ).rejects.toBeInstanceOf(TraceDecayProtocolError);
     await expect(
       requestThroughTransport(client, { page: { cursor: " cursor " } }),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    await expect(
+      requestThroughTransport(client, { deadlineMicros: 0 }),
+    ).rejects.toBeInstanceOf(TraceDecayProtocolError);
+    await expect(
+      requestThroughTransport(client, { deadlineMicros: 1.5 }),
     ).rejects.toBeInstanceOf(TraceDecayProtocolError);
     expect(fetchCalls).toBe(0);
   });
