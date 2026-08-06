@@ -16,7 +16,7 @@ use tracedecay_tool_catalog::SchemaId;
 use crate::remote::auth::OpaqueRemoteCredential;
 use crate::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
-    LegalAction, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    CancellationSignal, LegalAction, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
 
 pub const REMOTE_PROTOCOL_VERSION_V1: u16 = 1;
@@ -61,6 +61,21 @@ pub trait RemoteProtocolPortV1<Request> {
         request: RemoteProtocolRequestV1<Request>,
         credential: OpaqueRemoteCredential,
     ) -> RemoteProtocolResponseV1<Self::Output>;
+
+    fn execute_controlled(
+        &self,
+        request: RemoteProtocolRequestV1<Request>,
+        credential: OpaqueRemoteCredential,
+        _control: RemoteProtocolExecutionControlV1,
+    ) -> RemoteProtocolResponseV1<Self::Output> {
+        self.execute(request, credential)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteProtocolExecutionControlV1 {
+    pub deadline: UtcMicros,
+    pub cancellation: CancellationSignal,
 }
 
 /// Enrollment requires both the one-time grant credential and the replacement
@@ -100,6 +115,23 @@ impl<Port> RemoteProtocolServiceV1<Port> {
             .body
             .validate_remote_protocol_body(request.sent_at)?;
         Ok(self.port.execute(request, credential))
+    }
+
+    pub fn execute_controlled<Request>(
+        &self,
+        request: RemoteProtocolRequestV1<Request>,
+        credential: OpaqueRemoteCredential,
+        control: RemoteProtocolExecutionControlV1,
+    ) -> Result<RemoteProtocolResponseV1<Port::Output>, ApplicationContractError>
+    where
+        Port: RemoteProtocolPortV1<Request>,
+        Request: RemoteProtocolBodyV1,
+    {
+        request.validate_metadata()?;
+        request
+            .body
+            .validate_remote_protocol_body(request.sent_at)?;
+        Ok(self.port.execute_controlled(request, credential, control))
     }
 
     pub fn execute_enrollment(

@@ -263,6 +263,28 @@ pub async fn ensure_observation_schema(
             committed_cursor_json TEXT NOT NULL,
             FOREIGN KEY(receipt_id) REFERENCES sanitization_receipts(receipt_id)
         );
+        CREATE TABLE IF NOT EXISTS remote_writer_fences (
+            authority_key TEXT PRIMARY KEY,
+            writer_fence_json TEXT NOT NULL CHECK(json_valid(writer_fence_json)),
+            frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
+            updated_at INTEGER NOT NULL
+        ) STRICT;
+        CREATE TABLE IF NOT EXISTS remote_observation_events (
+            event_id TEXT PRIMARY KEY,
+            frame_digest TEXT NOT NULL,
+            enrollment_id TEXT NOT NULL,
+            enrollment_revision INTEGER NOT NULL CHECK(enrollment_revision > 0),
+            node_id TEXT NOT NULL,
+            policy_revision INTEGER NOT NULL CHECK(policy_revision > 0),
+            capture_sequence INTEGER NOT NULL CHECK(capture_sequence > 0),
+            previous_event_id TEXT REFERENCES remote_observation_events(event_id),
+            observation_id TEXT NOT NULL UNIQUE REFERENCES observations(observation_id),
+            writer_fence_json TEXT NOT NULL CHECK(json_valid(writer_fence_json)),
+            captured_at INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            command_digest TEXT NOT NULL,
+            UNIQUE(enrollment_id, node_id, capture_sequence)
+        ) STRICT;
         CREATE TABLE IF NOT EXISTS observation_retrieval_anchors (
             observation_id TEXT PRIMARY KEY,
             anchor_id TEXT NOT NULL UNIQUE,

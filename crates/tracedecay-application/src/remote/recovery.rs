@@ -10,15 +10,26 @@ use crate::error::ApplicationContractError;
 
 use super::protocol::RemoteProtocolBodyV1;
 
+mod service;
+
+pub use service::{
+    REMOTE_BACKUP_USE_CASE_ID_V1, REMOTE_PROMOTION_USE_CASE_ID_V1, REMOTE_RESTORE_USE_CASE_ID_V1,
+    RemoteRecoveryCallerV1, RemoteRecoveryCommittedV1, RemoteRecoveryControlPortV1,
+    RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1, RemoteRecoveryOperationPortV1,
+    RemoteRecoveryOperationReceiptV1, RemoteRecoveryProtocolOwnerV1, RemoteRecoveryTerminationV1,
+    remote_backup_result_contract_v1, remote_promotion_result_contract_v1,
+    remote_restore_result_contract_v1,
+};
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryAuthorityExpectationV1 {
     pub brain_id: String,
     pub shard_id: String,
     pub generation_id: String,
+    pub authority_node_id: String,
     pub placement_revision: u64,
     pub authority_epoch: u64,
-    pub frontier_sequence: u64,
 }
 
 impl RecoveryAuthorityExpectationV1 {
@@ -27,6 +38,10 @@ impl RecoveryAuthorityExpectationV1 {
             ("recovery brain id", self.brain_id.as_str()),
             ("recovery shard id", self.shard_id.as_str()),
             ("recovery generation id", self.generation_id.as_str()),
+            (
+                "recovery authority node id",
+                self.authority_node_id.as_str(),
+            ),
         ] {
             validate_identifier(field, value)?;
         }
@@ -39,6 +54,15 @@ impl RecoveryAuthorityExpectationV1 {
             }
         }
         Ok(())
+    }
+
+    pub fn matches_writer(&self, writer: &tracedecay_domain::RemoteWriterFenceV1) -> bool {
+        self.brain_id == writer.brain_id.as_str()
+            && self.shard_id == writer.shard_id.as_str()
+            && self.generation_id == writer.generation_id.as_str()
+            && self.authority_node_id == writer.authority_node_id.as_str()
+            && self.placement_revision == writer.placement_revision.get()
+            && self.authority_epoch == writer.authority_epoch.0
     }
 }
 
@@ -124,17 +148,23 @@ impl StagedRestorePreviewV1 {
 #[serde(deny_unknown_fields)]
 pub struct StagedRestoreConfirmationV1 {
     pub preview_id: String,
+    pub backup_id: String,
     pub manifest_digest: [u8; 32],
     pub expected_authority_epoch: u64,
+    pub expected_placement_revision: u64,
     pub expected_policy_digest: [u8; 32],
+    pub expires_at_micros: i64,
 }
 
 impl StagedRestoreConfirmationV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         validate_identifier("restore preview id", &self.preview_id)?;
+        validate_identifier("restore backup id", &self.backup_id)?;
         if self.manifest_digest == [0; 32]
             || self.expected_authority_epoch == 0
+            || self.expected_placement_revision == 0
             || self.expected_policy_digest == [0; 32]
+            || now_micros >= self.expires_at_micros
         {
             return Err(ApplicationContractError::Inconsistent {
                 field: "restore confirmation",
@@ -147,9 +177,9 @@ impl StagedRestoreConfirmationV1 {
 impl RemoteProtocolBodyV1 for StagedRestoreConfirmationV1 {
     fn validate_remote_protocol_body(
         &self,
-        _sent_at: UtcMicros,
+        sent_at: UtcMicros,
     ) -> Result<(), ApplicationContractError> {
-        self.validate()
+        self.validate(sent_at.0)
     }
 }
 
@@ -220,13 +250,16 @@ pub struct PromotionConfirmationV1 {
     pub preview_id: String,
     pub expected_authority_epoch: u64,
     pub expected_placement_revision: u64,
-    pub expected_frontier_sequence: u64,
+    pub expires_at_micros: i64,
 }
 
 impl PromotionConfirmationV1 {
-    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
         validate_identifier("promotion preview id", &self.preview_id)?;
-        if self.expected_authority_epoch == 0 || self.expected_placement_revision == 0 {
+        if self.expected_authority_epoch == 0
+            || self.expected_placement_revision == 0
+            || now_micros >= self.expires_at_micros
+        {
             return Err(ApplicationContractError::Inconsistent {
                 field: "promotion confirmation",
             });
@@ -238,9 +271,9 @@ impl PromotionConfirmationV1 {
 impl RemoteProtocolBodyV1 for PromotionConfirmationV1 {
     fn validate_remote_protocol_body(
         &self,
-        _sent_at: UtcMicros,
+        sent_at: UtcMicros,
     ) -> Result<(), ApplicationContractError> {
-        self.validate()
+        self.validate(sent_at.0)
     }
 }
 
@@ -267,7 +300,6 @@ impl PromotionCasReceiptV1 {
             || self.previous_epoch != preview.expected.authority_epoch
             || self.installed_epoch != preview.replacement_epoch
             || self.installed_placement_revision != preview.replacement_placement_revision
-            || self.published_frontier_sequence < preview.expected.frontier_sequence
             || !self.old_authority_fenced
         {
             return Err(ApplicationContractError::Inconsistent {
@@ -332,9 +364,9 @@ mod tests {
             brain_id: "brain.remote".into(),
             shard_id: "shard.profile".into(),
             generation_id: "generation.7".into(),
+            authority_node_id: "node.authority".into(),
             placement_revision: 4,
             authority_epoch: 8,
-            frontier_sequence: 19,
         }
     }
 
@@ -381,22 +413,27 @@ mod tests {
     fn restore_and_promotion_confirmations_require_exact_expectations() {
         let mut restore = StagedRestoreConfirmationV1 {
             preview_id: "restore.1".into(),
+            backup_id: "backup.1".into(),
             manifest_digest: [1; 32],
             expected_authority_epoch: 8,
+            expected_placement_revision: 4,
             expected_policy_digest: [2; 32],
+            expires_at_micros: 20,
         };
-        assert!(restore.validate().is_ok());
+        assert!(restore.validate(10).is_ok());
+        assert!(restore.validate(20).is_err());
         restore.expected_authority_epoch = 0;
-        assert!(restore.validate().is_err());
+        assert!(restore.validate(10).is_err());
 
         let mut promotion = PromotionConfirmationV1 {
             preview_id: "promotion.1".into(),
             expected_authority_epoch: 8,
             expected_placement_revision: 4,
-            expected_frontier_sequence: 19,
+            expires_at_micros: 20,
         };
-        assert!(promotion.validate().is_ok());
+        assert!(promotion.validate(10).is_ok());
+        assert!(promotion.validate(20).is_err());
         promotion.expected_placement_revision = 0;
-        assert!(promotion.validate().is_err());
+        assert!(promotion.validate(10).is_err());
     }
 }

@@ -2046,22 +2046,21 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     );
     drop(runtime);
 
-    // A second serve session over the same project in the same process.
-    // The write-path boundary call is the one that would re-run migrations
-    // if the per-process ensured cache failed; the status reads must also
-    // keep working.
+    // A second serve session over the same project in the same process. The
+    // LCM mutation tools are daemon-internal now, so the status reads are the
+    // remaining serve-mode calls that would re-run migrations if the
+    // per-process ensured cache failed.
     let server = server_with_session_authority(dir.path()).await;
     let responses = run_server_with_messages(
         server,
         vec![
             jsonrpc_request(json!(1), "initialize", json!({})),
-            lcm_boundary_call(4),
             lcm_status_call(2),
             lcm_status_call(3),
         ],
     )
     .await;
-    for id in [4_i64, 2, 3] {
+    for id in [2_i64, 3] {
         let resp = responses
             .iter()
             .map(|r| parse_response(r))

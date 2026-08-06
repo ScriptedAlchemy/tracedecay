@@ -380,6 +380,22 @@ impl DatabaseAuthority {
         owner_io::replace_file_atomically(temporary, destination, record_name)
     }
 
+    pub fn replace_sqlite_with_rollback_atomically(
+        staging: &Path,
+        destination: &Path,
+        rollback: &Path,
+        expected_destination_identity: u64,
+        expected_staging_identity: u64,
+    ) -> Result<()> {
+        owner_io::replace_sqlite_with_rollback_atomically(
+            staging,
+            destination,
+            rollback,
+            expected_destination_identity,
+            expected_staging_identity,
+        )
+    }
+
     #[cfg(test)]
     fn acquire(db_path: &Path, role: DatabaseAuthorityRole, intent: &str) -> Result<Self> {
         Self::acquire_identity(DatabaseIdentity::for_path(db_path)?, role, intent)

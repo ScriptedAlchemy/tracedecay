@@ -359,6 +359,30 @@ impl StoreRuntimeHandle {
         Ok(receipt)
     }
 
+    pub async fn snapshot_to_interruptible(
+        &self,
+        destination: PathBuf,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
+        authority: crate::db::DatabaseAuthority,
+    ) -> Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure> {
+        let opened_file_identity = self.validate_database_write_authority(
+            &authority,
+            "authorize registered interruptible online backup",
+        )?;
+        let authority = Arc::new(RuntimeDatabaseWriteAuthority {
+            canonical_path: authority.canonical_database_path().to_path_buf(),
+            authority,
+            opened_file_identity,
+        });
+        let receipt = self
+            .inner
+            .attachment
+            .snapshot_to_interruptible(destination, probe, authority)
+            .await?;
+        self.validate_opened_file_identity("complete registered interruptible online backup")?;
+        Ok(receipt)
+    }
+
     fn exact_sql_handle_unchecked(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, StoreRuntimeRegistryFailure>

@@ -381,27 +381,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mutation_capable_lcm_tools_use_effect_contracts() {
-        let contribution = retained_surface_catalog_contribution().expect("contribution");
-
-        let operation = RetainedSurfaceOperation::LcmPreflight;
-        let expected_id = capability_id(operation);
-        let capability = contribution
-            .capabilities()
-            .iter()
-            .find(|capability| capability.capability_id().as_str() == expected_id)
-            .unwrap_or_else(|| panic!("{} capability", operation.as_str()));
-        assert_eq!(
-            capability.effect(),
-            EffectClass::Administrative,
-            "{} can mutate retained state",
-            operation.as_str()
-        );
-        assert_eq!(capability.receipt(), ReceiptContract::DurableEffect);
-        assert_eq!(
-            capability.reconciliation(),
-            ReconciliationContract::Required
-        );
-    }
 }

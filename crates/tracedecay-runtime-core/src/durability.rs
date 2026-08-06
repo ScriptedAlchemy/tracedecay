@@ -66,6 +66,8 @@ pub enum StoreShardKind {
     ProfileMemory,
     /// The profile-level sessions/transcript/observation-authority store.
     ProfileSessions,
+    /// A Remote Brain node's enrollment, authority, and encrypted replay state.
+    RemoteNode,
     /// A project's graph database: code graph (derived) plus that project's
     /// curated `memory_*` tables (durable) in one physical file.
     Project,
@@ -81,6 +83,7 @@ impl From<&StoreShardScopeV1> for StoreShardKind {
             StoreShardScopeV1::Profile => Self::Profile,
             StoreShardScopeV1::ProfileMemory => Self::ProfileMemory,
             StoreShardScopeV1::ProfileSessions => Self::ProfileSessions,
+            StoreShardScopeV1::RemoteNode { .. } => Self::RemoteNode,
             StoreShardScopeV1::Project { .. } => Self::Project,
             StoreShardScopeV1::ProjectSessions { .. } => Self::ProjectSessions,
             StoreShardScopeV1::Code { .. } => Self::Code,
@@ -122,9 +125,10 @@ impl From<&StoreShardScopeV1> for StoreShardKind {
 /// mixed store regardless of its escalation class.
 pub const fn shard_kind_durability_class(kind: StoreShardKind) -> StoreDurabilityClass {
     match kind {
-        StoreShardKind::Profile | StoreShardKind::ProfileMemory | StoreShardKind::Project => {
-            StoreDurabilityClass::Durable
-        }
+        StoreShardKind::Profile
+        | StoreShardKind::ProfileMemory
+        | StoreShardKind::RemoteNode
+        | StoreShardKind::Project => StoreDurabilityClass::Durable,
         StoreShardKind::ProfileSessions | StoreShardKind::ProjectSessions => {
             StoreDurabilityClass::Recoverable
         }
@@ -148,7 +152,7 @@ impl StoreShardKind {
             // creates in every sessions store.
             | Self::ProfileSessions
             | Self::ProjectSessions => true,
-            Self::Profile | Self::ProfileMemory | Self::Code => false,
+            Self::Profile | Self::ProfileMemory | Self::RemoteNode | Self::Code => false,
         }
     }
 }
@@ -229,7 +233,7 @@ pub fn session_authority_table_class(table: &str) -> StoreDurabilityClass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+    use tracedecay_domain::{BrainNodeId, ProjectId, RepositoryId, WorktreeId};
     use tracedecay_store::CodeShardScopeV1;
 
     fn id<T>(value: &str) -> T
@@ -241,13 +245,17 @@ mod tests {
     }
 
     #[test]
-    fn profile_and_profile_memory_and_project_are_durable() {
+    fn profile_and_profile_memory_remote_node_and_project_are_durable() {
         assert_eq!(
             shard_kind_durability_class(StoreShardKind::Profile),
             StoreDurabilityClass::Durable
         );
         assert_eq!(
             shard_kind_durability_class(StoreShardKind::ProfileMemory),
+            StoreDurabilityClass::Durable
+        );
+        assert_eq!(
+            shard_kind_durability_class(StoreShardKind::RemoteNode),
             StoreDurabilityClass::Durable
         );
         assert_eq!(
@@ -293,6 +301,12 @@ mod tests {
         assert_eq!(
             StoreShardKind::from(&StoreShardScopeV1::ProfileSessions),
             StoreShardKind::ProfileSessions
+        );
+        assert_eq!(
+            StoreShardKind::from(&StoreShardScopeV1::RemoteNode {
+                node_id: id::<BrainNodeId>("node.durability-test"),
+            }),
+            StoreShardKind::RemoteNode
         );
         assert_eq!(
             StoreShardKind::from(&StoreShardScopeV1::Project {
@@ -352,6 +366,7 @@ mod tests {
         for kind in [
             StoreShardKind::Profile,
             StoreShardKind::ProfileMemory,
+            StoreShardKind::RemoteNode,
             StoreShardKind::Project,
             StoreShardKind::ProfileSessions,
             StoreShardKind::ProjectSessions,

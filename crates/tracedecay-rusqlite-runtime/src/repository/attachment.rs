@@ -518,6 +518,28 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
+    pub async fn snapshot_to_interruptible(
+        &self,
+        destination: PathBuf,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn RuntimeWriteAuthority>,
+    ) -> Result<OnlineBackupReceipt, RepositoryDispatchError> {
+        let writer = {
+            let state = self.lock_state();
+            if !state.admission_open || state.closed {
+                return Err(RepositoryDispatchError::Closed);
+            }
+            state
+                .writer
+                .clone()
+                .ok_or(RepositoryDispatchError::Closed)?
+        };
+        writer
+            .snapshot_to_interruptible(destination, probe, authority)
+            .await
+            .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
+    }
+
     pub fn dispatch_read(
         &self,
         request: RuntimeReadRequestV1,
