@@ -7,11 +7,12 @@ Completion and activity status is owned solely by
 retained delivery requirements and does not infer milestone status from branch
 artifacts.
 
-PR9 provides the required canonical branch/commit snapshot and read-only
-diff/hunk contract. PR11 requires Plan 09's transport-neutral one-shot feedback
-request/result. PR12 requires post-edit diagnostics and impact through
+Read-only Git intelligence provides the required canonical branch/commit
+snapshot and read-only
+diff/hunk contract. The feedback foundation requires Plan 09's transport-neutral one-shot feedback
+request/result. The baseline reader delivery requires post-edit diagnostics and impact through
 LSP/MCP/CLI/HTTP, including the negotiated TraceDecay LSP context extension.
-PR13 requires all four advisory pillars together through real host surfaces:
+The advisory feedback delivery requires all four advisory pillars together through real host surfaces:
 
 1. branch-aware post-edit diagnostics and impact;
 2. CI-failure localization;
@@ -28,7 +29,7 @@ contract without establishing milestone status. Historical packet/type names,
 exact source layouts, schema registries, and fixture matrices are evidence only
 unless separately declared public or persisted API.
 
-The PR12 feedback-read and TraceDecay LSP extension payloads have no
+The baseline feedback-read and TraceDecay LSP extension payloads have no
 predecessor on `origin/master` or in a published package/release. Branch-local
 V2 payloads and durable feedback findings, review snapshots, cursors, journals,
 checkpoints, and receipts change in place. Persisted feedback accepts only its
@@ -37,16 +38,17 @@ typed `ResetRequired` and requires explicit reset or recreation. No storage
 reader, migration, backfill, dual write, or census path exists; branch history,
 an experimental version tag, or a fixture alone is not release evidence.
 
-## PR12 baseline reader and LSP context contract
+## Baseline reader and LSP context contract
 
-PR12 must make canonical diagnostics, impact, affected-test, test-result,
+The baseline delivery must make canonical diagnostics, impact, affected-test, test-result,
 feedback get/list, and exact-expansion reads callable; no placeholder or
-advertised-unavailable handler satisfies that milestone. CLI, MCP, and HTTP
-share the same reader semantics. Dashboard binding starts in PR14.
+advertised-unavailable handler satisfies that requirement. CLI, MCP, and HTTP
+share the same reader semantics. Dashboard binding starts with the dashboard
+delivery.
 
 Plan 35 owns the versioned TraceDecay LSP context extension and carries it over
 standard LSP/JSON-RPC framing after explicit experimental capability
-negotiation. PR12 must project current diagnostics, impact, affected tests, and
+negotiation. The baseline delivery must project current diagnostics, impact, affected tests, and
 test results in compact envelopes that retain exact authorized scope,
 content/graph generation, producer state, coverage, omissions, and opaque
 expansion handles. Handles reauthorize into Plan 21's canonical reads and are
@@ -54,18 +56,18 @@ neither durable evidence identity nor LSP-owned data. The extension accepts no
 arbitrary method or payload forwarding.
 
 Its typed provider contribution point admits only a callable cataloged
-producer. PR13 registers GitHub review, CI localization, and proximity
+producer. Advisory feedback registers GitHub review, CI localization, and proximity
 contributions through that point without changing reader transport, framing,
 or ownership; unavailable producers remain typed unavailable contributions.
 
-**PR12 direct acceptance.** A real negotiated client receives diagnostics,
+**Baseline reader direct acceptance.** A real negotiated client receives diagnostics,
 impact, affected-test, and test-result projections, expands an omitted item,
 and proves scope/generation/coverage fidelity, cancellation, stale suppression,
 authorization recheck, and rejection of unnegotiated versions, arbitrary
 methods/payloads, and cross-scope handle reuse. CLI/MCP/HTTP calls return the
 same canonical diagnostics/impact semantics, with no dashboard dependency.
 
-## PR13 user outcome
+## Advisory feedback user outcome
 
 After a saved edit or agent stop boundary, a user receives current
 diagnostics, affected callers/files/tests, relevant existing PR review
@@ -189,9 +191,9 @@ The four pillars share one Plan 09 result across:
 
 - hooks at edit/stop boundaries;
 - the explicit MCP operation;
-- the HTTP feedback read operations required in PR12;
+- the required baseline HTTP feedback read operations;
 - LSP Problems or Cursor native diagnostics where a current range exists;
-- dashboard/Doctor consumption in PR14; and
+- dashboard/Doctor consumption in the dashboard delivery; and
 - the CLI operation shared with MCP.
 
 No IDE must be open for hook, MCP, CLI, or dashboard access. LSP is an
@@ -217,7 +219,7 @@ authorization/policy revision. Display, click, acknowledgement, expansion,
 deferral, override, task completion, or comment resolution remains interaction
 evidence only and never becomes a correctness label.
 
-## PR13 implementation slices
+## Advisory feedback implementation slices
 
 ### Concrete GitHub and CI defaults
 
@@ -252,8 +254,8 @@ evidence only and never becomes a correctness label.
   session content.
 - Produce a reference-only proximity contribution with warning/risk/threshold
   provenance. Task linking and proximity fusion-rank influence remain disabled
-  until their callable PR17 journeys ship. Expertise is never part of this
-  retrieval/ranking path; PR17 may separately pass authorized anchored inputs
+  until their callable task-evidence journeys ship. Expertise is never part of this
+  retrieval/ranking path; the task-evidence extension may separately pass authorized anchored inputs
   to Plan 24's ephemeral expertise operation.
 
 ### Keep evidence lossless and projections bounded
@@ -281,7 +283,7 @@ feedback requires exact saved-content or clean-generation identity.
 - Remove duplicate owner matrices, repeated authority prose, exact source-file
   and schema inventories, standalone milestone gates, giant lifecycle ×
   provider fixture matrices, and placeholder benchmark packets.
-- Remove reserved PR15/PR17 fields from PR13 schemas. Later callable
+- Remove reserved multi-root and task-evidence fields from advisory schemas. Later callable
   operations add inputs to the current writer shape. An actually independently
   released public protocol may negotiate its documented revision at the
   transport boundary; persisted feedback never gains a prior-shape reader and
@@ -291,7 +293,7 @@ feedback requires exact saved-content or clean-generation identity.
 - Do not remove or reduce any pillar, surface, lifecycle/provider state,
   evidence/expansion behavior, safety boundary, or compatibility obligation.
 
-## PR13 direct acceptance
+## Advisory feedback direct acceptance
 
 - One real branch/PR scenario exercises a saved edit and stop boundary and
   simultaneously returns post-edit diagnostics/impact, a localized CI
@@ -323,15 +325,15 @@ feedback requires exact saved-content or clean-generation identity.
 
 ## Later callable extensions
 
-### PR14: dashboard, Doctor, and observability
+### Dashboard, Doctor, and observability
 
 Dashboard and Doctor call the same shipped feedback list/get/expand/status
 operations. Plan 26 records system-quality metrics—coverage, relevance,
 diversity, latency, omissions, denial, stale rate, revocation propagation, and
-stack transitions—never worker-performance metrics. PR14 does not become first
-availability of any PR13 pillar.
+stack transitions—never worker-performance metrics. The dashboard delivery does not become first
+availability of any advisory pillar.
 
-### PR15: multi-root feedback and stack signals
+### Multi-root feedback and stack signals
 
 Plan 16 extends every pillar to independently authorized roots. Results retain
 per-root coverage before merge and never reveal denied root identity or count.
@@ -379,7 +381,7 @@ reports degraded/partial coverage. A bounded half-open probe may close it
 after current scope, authorization, stack revision, and native state are
 revalidated. Adapters cannot reset or bypass it.
 
-**PR15 direct acceptance.** Burst tests exceed each debounce window,
+**Multi-root direct acceptance.** Burst tests exceed each debounce window,
 repository/daemon preflight limit, recipient/signal batch limit, and queue
 capacity. They prove 250 ms and 1,000 ms classes coalesce independently;
 actual conflict/revocation/needs-inspection transitions bypass debounce; no
@@ -412,7 +414,7 @@ provider execution authority and never weakens Plan 36's prohibition on
 automatic rebase or force-push.
 Standard Git and other forges remain supported when the preview is absent.
 
-### PR16: remote authority
+### Remote authority
 
 Unsaved overlays and proximity computation remain on the node that owns the
 live workspace. Durable feedback, GitHub, CI, stack, and delivery state passes
@@ -420,7 +422,7 @@ through Plan 28's fenced shard authority. Authority loss returns
 partial/unavailable and cannot create a local writer, replicate overlay
 content, or present stale cache as current.
 
-### PR17: task evidence and workflow composition
+### Task evidence and workflow composition
 
 Plan 24 may call one feedback-cycle evidence retriever rooted at exact
 `TaskId` and immutable work-item version. A link affordance remains inert
@@ -450,7 +452,7 @@ top ten; diversity shortfall is explicit. The bounded 0.10 proximity
 contribution requires non-regressing held-out nDCG@10, at least five percentage
 points of proximity-positive recall@10 gain, under 1% stale selected evidence,
 and no more than 10%/25 ms p95 latency regression. Failure disables rank
-influence without removing base retrieval or PR13 proximity findings.
+influence without removing base retrieval or advisory proximity findings.
 
 Plan 32 may compose the already callable read operation as an explicitly
 admitted workflow step and return its normal evidence envelope. It cannot
@@ -479,7 +481,7 @@ expertise operation, cross-project cohorts, and stack fanout activate only
 after their direct product behavior and rollback path work. Wrong-project
 results, attempted GitHub writes, dropped stack transitions, prohibited
 purpose, unexplained results, or semantic auto-resolution disable only the
-affected extension without disabling base PR13 feedback or canonical
+affected extension without disabling base advisory feedback or canonical
 read-only evidence.
 
 ## Safety constraints retained
