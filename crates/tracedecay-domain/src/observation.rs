@@ -1684,32 +1684,9 @@ pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
     sensitivity: SensitivityV1,
     raw_digest: [u8; 32],
     sanitized_payload_digest: Option<PayloadDigestV1>,
-    legacy_evidence: Option<Vec<u8>>,
 }
 
 impl CanonicalClaudeSanitizationReceiptMaterialV1 {
-    #[deprecated(note = "use for_durable_payload or for_non_durable so receipt evidence is typed")]
-    pub fn new(
-        identity: &ClaudeObservationIdentityMaterialV1,
-        sanitizer_version: ComponentVersion,
-        disposition: SanitizerDispositionV1,
-        evidence: impl AsRef<[u8]>,
-    ) -> Result<Self, ObservationContractError> {
-        let evidence = evidence.as_ref().to_vec();
-        let observation_id = CanonicalObservationIdV1::derive(identity)?;
-        let raw_digest = Sha256::digest(&evidence).into();
-        Ok(Self {
-            receipt_domain: ReceiptDomainV1::for_identity(identity),
-            sanitizer_version,
-            observation_id,
-            disposition,
-            sensitivity: SensitivityV1::Unclassified,
-            raw_digest,
-            sanitized_payload_digest: None,
-            legacy_evidence: Some(evidence),
-        })
-    }
-
     pub fn for_durable_payload(
         identity: &ClaudeObservationIdentityMaterialV1,
         sanitizer_version: ComponentVersion,
@@ -1755,7 +1732,6 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
             sensitivity,
             raw_digest: *raw_digest,
             sanitized_payload_digest: Some(sanitized_payload.digest().clone()),
-            legacy_evidence: None,
         })
     }
 
@@ -1794,27 +1770,11 @@ impl CanonicalClaudeSanitizationReceiptMaterialV1 {
             sensitivity,
             raw_digest: *raw_digest,
             sanitized_payload_digest: None,
-            legacy_evidence: None,
         })
     }
 
     pub fn derive_receipt_ref(&self) -> Result<SanitizationReceiptRefV1, ObservationContractError> {
         let mut hasher = Sha256::new();
-        if let Some(evidence) = &self.legacy_evidence {
-            hasher.update(self.receipt_domain.digest_domain());
-            hasher.update(self.sanitizer_version.as_str().as_bytes());
-            hasher.update(self.observation_id.as_str().as_bytes());
-            hasher.update(self.disposition.as_str().as_bytes());
-            hasher.update(evidence);
-            let receipt_id = SanitizationReceiptId::new(format!(
-                "{}{}",
-                self.receipt_domain.id_prefix(),
-                crate::canonical_text::encode_lowercase_hex(&hasher.finalize())
-            ))
-            .map_err(|_| ObservationContractError::InvalidReceiptReference)?;
-            return SanitizationReceiptRefV1::new(receipt_id, self.sanitizer_version.clone())
-                .map_err(|_| ObservationContractError::InvalidReceiptReference);
-        }
         update_hash_frame(&mut hasher, self.receipt_domain.digest_domain());
         update_hash_frame(&mut hasher, self.sanitizer_version.as_str().as_bytes());
         update_hash_frame(&mut hasher, self.observation_id.as_str().as_bytes());
