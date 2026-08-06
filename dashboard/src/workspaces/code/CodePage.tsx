@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
+import { CodeDiagnostics } from './CodeDiagnostics.tsx';
 import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
 import type { TraceFocus } from './TraceView.tsx';
@@ -200,6 +201,10 @@ export function CodePage() {
            * were computed from, and that generation was sealed against one
            * exact source reference. This states which. */}
           <IndexFreshness />
+          {/* What the analyzer engines currently hold against the same tree
+           * the index was sealed from: compile-grade truth beside the
+           * structural readings above. */}
+          <CodeDiagnostics />
         </div>
       }
       list={
