@@ -18,7 +18,7 @@ use crate::{
 use self::identity::{
     binding, entry_binding, require_binding, require_closing, validate_registration,
 };
-use self::path::{prepare_graph_store_directory, validate_durable_graph_store_directory};
+use self::path::{inspect_graph_database_file, validate_graph_database_file};
 
 #[path = "registry/identity.rs"]
 mod identity;
@@ -28,8 +28,8 @@ mod path;
 const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
 
 /// Existing Grafeo stores receive daemon-lifecycle and request cancellation
-/// while opening. A newly created directory formats before cancellation can
-/// reject its registry publication, so retries never inherit an empty store.
+/// while opening. A newly created database file formats before cancellation
+/// can reject its registry publication, so retries never inherit an empty store.
 struct RegisteredGraphOpenCancellation {
     request: Arc<dyn GraphCancellation>,
     lifecycle: Arc<dyn GraphCancellation>,
@@ -44,9 +44,9 @@ impl GraphCancellation for RegisteredGraphOpenCancellation {
 #[derive(Clone)]
 /// A graph-index open approved by the outer daemon store authority.
 ///
-/// This registry serializes handles only within one process. Grafeo WAL
-/// directories do not provide an inter-process lock, so callers must retain
-/// the daemon profile/store authority that excludes a competing process
+/// This registry serializes handles within one process. Grafeo also holds an
+/// exclusive lock on an open single-file database. Callers retain the daemon
+/// profile/store authority so a prospective file has one authorized creator
 /// before constructing this derived-index registration.
 pub struct GraphDbRegistration {
     pub authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
@@ -185,7 +185,7 @@ impl GraphDbRegistry {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
         let path = registration.canonical_path().to_path_buf();
-        validate_durable_graph_store_directory(&path)?;
+        validate_graph_database_file(&path)?;
         let expected_format = GraphFormatVersion::current();
         let binding = registration.binding().clone();
         let verified_locator = registration.verified_locator().clone();
@@ -370,7 +370,7 @@ impl GraphDbRegistry {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
         let path = registration.canonical_path().to_path_buf();
-        validate_durable_graph_store_directory(&path)?;
+        validate_graph_database_file(&path)?;
         let expected_format = GraphFormatVersion::current();
         if let CloseReservation::Closing(reservation) = self.reserve_close(
             registration.binding(),
@@ -405,7 +405,7 @@ impl GraphDbRegistry {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(registration)?;
         let path = registration.canonical_path().to_path_buf();
-        validate_durable_graph_store_directory(&path)?;
+        validate_graph_database_file(&path)?;
         let reservation = match self.reserve_close(
             registration.binding(),
             registration.verified_locator(),
@@ -528,7 +528,7 @@ impl GraphDbRegistry {
         registration: &GraphDbRegistration,
     ) -> Result<Option<GraphDbRegistryStatus>, GraphDbError> {
         validate_registration(registration)?;
-        validate_durable_graph_store_directory(registration.canonical_path())?;
+        validate_graph_database_file(registration.canonical_path())?;
         let state = self.state_lock()?;
         let Some(entry) = state.entries.get(&registration.binding().shard_id) else {
             return Ok(None);
@@ -895,9 +895,9 @@ fn open_registered_graph(
         registration.deadline,
     )?;
     check_request(registration.cancellation.as_ref(), registration.deadline)?;
-    let persistent_store_state = prepare_graph_store_directory(path)?;
+    let persistent_store_state = inspect_graph_database_file(path)?;
     let cancellation: Arc<dyn GraphCancellation> = match persistent_store_state {
-        PersistentGraphStoreState::Created => Arc::new(NeverCancelled),
+        PersistentGraphStoreState::Prospective => Arc::new(NeverCancelled),
         PersistentGraphStoreState::Existing => Arc::new(RegisteredGraphOpenCancellation {
             request: Arc::clone(&registration.cancellation),
             lifecycle: Arc::clone(&registration.lifecycle_cancellation),
@@ -912,7 +912,7 @@ fn open_registered_graph(
         },
         persistent_store_state,
     )?;
-    if persistent_store_state == PersistentGraphStoreState::Created
+    if persistent_store_state == PersistentGraphStoreState::Prospective
         && let Err(error) = check_request(
             registration.lifecycle_cancellation.as_ref(),
             registration.deadline,

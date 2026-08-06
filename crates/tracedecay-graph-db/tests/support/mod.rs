@@ -7,9 +7,9 @@ use tracedecay_graph_db::{
     NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, DURABLE_GRAPH_STORE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
-    StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    BrainId, ProjectId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
 #[derive(Debug)]
@@ -66,11 +66,10 @@ impl RegisteredGraph {
 }
 
 pub fn graph_path(root: &Path) -> PathBuf {
-    root.join(DURABLE_GRAPH_STORE_DIRECTORY).join("graph")
+    root.join("graph.grafeo")
 }
 
 pub fn registration(binding: StoreRuntimeBindingV1, root: &Path) -> GraphDbRegistration {
-    create_durable_graph_store_root(root);
     let canonical_path = graph_path(root);
     let verified_locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
@@ -86,14 +85,6 @@ pub fn registration(binding: StoreRuntimeBindingV1, root: &Path) -> GraphDbRegis
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(30),
-    }
-}
-
-fn create_durable_graph_store_root(root: &Path) {
-    match std::fs::create_dir(root.join(DURABLE_GRAPH_STORE_DIRECTORY)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create durable graph-store root: {error}"),
     }
 }
 

@@ -21,11 +21,11 @@ cargo-nextest.
   transport, or separately managed database process.
 - Open Grafeo through its public path/configuration API using
   `StorageFormat::SingleFile`. The daemon registry assigns one ordinary
-  `.grafeo` database-file path from canonical project/profile identity; Grafeo
-  may manage its documented `.grafeo.wal` sidecar while the file is open and
-  checkpoints it into the database file on close. Do not inject an already-open
-  file, replace Grafeo's storage engine, or add a private/secure filesystem
-  adapter.
+  `<canonical-store-root>/<relational-store-stem>.grafeo` database-file path
+  from canonical project/profile identity; Grafeo may manage its documented
+  `.grafeo.wal` sidecar while the file is open and checkpoints it into the
+  database file on close. Do not inject an already-open file, replace Grafeo's
+  storage engine, or add a private/secure filesystem adapter.
 - Depend on the exact published `=0.5.42` release. Do not pin an unpublished Git
   revision, maintain a TraceDecay fork, vendor Grafeo, or reimplement its
   storage, WAL, checkpoint, or recovery machinery.
@@ -252,8 +252,9 @@ Expected: fail because the crate and interfaces do not exist.
 
 Use the exact published Grafeo `=0.5.42` crates in the new crate. Add
 `tracedecay-graph-db` to `[workspace].members` and centralize those exact
-versions in `[workspace.dependencies]`. No other workspace crate directly
-depends on Grafeo, and no Grafeo dependency uses a Git source.
+versions in `[workspace.dependencies]`. Enable Grafeo's public `grafeo-file`
+feature together with `wal`. No other workspace crate directly depends on
+Grafeo, and no Grafeo dependency uses a Git source.
 
 - [ ] **Step 3: Implement typed open, snapshot, batch, traversal, and vector adapters**
 
