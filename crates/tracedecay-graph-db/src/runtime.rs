@@ -5,12 +5,11 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::ErrorCode;
 use grafeo_engine::GrafeoDB;
-use grafeo_storage::file::GrafeoFileManager;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLock, RwLock as ParkingRwLock};
 
 use crate::error::rollback_failure;
-use crate::location::ValidatedOpen;
+use crate::location::{PersistentGraphStoreState, ValidatedOpen};
 use crate::schema::{
     FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, SCHEMA_PROPERTY,
     SEQUENCE_PROPERTY,
@@ -34,11 +33,6 @@ pub struct GraphDb {
 
 pub struct GraphDbOwner {
     database: Arc<GraphDb>,
-}
-
-pub(crate) enum GraphDbFileState {
-    Existing,
-    Created,
 }
 
 pub(crate) struct Inner {
@@ -103,12 +97,12 @@ impl GraphDbOwner {
         GraphDb::open(options).map(|database| Self { database })
     }
 
-    pub(crate) fn open_with_file(
+    pub(crate) fn open_registered(
         options: GraphDbOpenOptions,
-        file: std::fs::File,
-        state: GraphDbFileState,
+        persistent_store_state: PersistentGraphStoreState,
     ) -> Result<Self, GraphDbError> {
-        GraphDb::open_with_file(options, file, state).map(|database| Self { database })
+        GraphDb::open_with_store_state(options, Some(persistent_store_state))
+            .map(|database| Self { database })
     }
 
     #[must_use]
@@ -136,38 +130,16 @@ impl GraphDbOwner {
 
 impl GraphDb {
     fn open(options: GraphDbOpenOptions) -> Result<Arc<Self>, GraphDbError> {
-        Self::open_inner(options, None)
+        Self::open_with_store_state(options, None)
     }
 
-    fn open_with_file(
+    fn open_with_store_state(
         options: GraphDbOpenOptions,
-        file: std::fs::File,
-        state: GraphDbFileState,
+        persistent_store_state: Option<PersistentGraphStoreState>,
     ) -> Result<Arc<Self>, GraphDbError> {
-        Self::open_inner(options, Some((file, state)))
-    }
-
-    fn open_inner(
-        options: GraphDbOpenOptions,
-        supplied_file: Option<(std::fs::File, GraphDbFileState)>,
-    ) -> Result<Arc<Self>, GraphDbError> {
-        let mut validated = options.validate()?;
-        let database = if let Some((file, state)) = supplied_file {
-            validated.preexisting_file = matches!(state, GraphDbFileState::Existing);
-            let path = validated.config.path.as_ref().ok_or_else(|| {
-                GraphDbError::invalid("an authoritative graph file requires persistent storage")
-            })?;
-            let file_manager = match state {
-                GraphDbFileState::Existing => GrafeoFileManager::open_with_file(path, file),
-                GraphDbFileState::Created => GrafeoFileManager::create_with_file(path, file),
-            }
-            .map_err(|error| map_open_error(error, validated.preexisting_file))?;
-            GrafeoDB::with_config_and_file_manager(validated.config.clone(), file_manager)
-                .map_err(|error| map_open_error(error, validated.preexisting_file))?
-        } else {
-            GrafeoDB::with_config(validated.config.clone())
-                .map_err(|error| map_open_error(error, validated.preexisting_file))?
-        };
+        let validated = options.validate(persistent_store_state)?;
+        let database = GrafeoDB::with_config(validated.config.clone())
+            .map_err(|error| map_open_error(error, validated.preexisting_store))?;
         validate_or_initialize_format(&database, &validated)?;
         let state = FormatState::load(&database)?;
         Ok(Arc::new(Self {
@@ -204,7 +176,14 @@ impl GraphDb {
         })
     }
 
-    pub fn apply(&self, mut batch: GraphWriteBatch) -> Result<GraphCommit, GraphDbError> {
+    /// Applies a mutation batch to the disposable derived graph index.
+    ///
+    /// The result identifies this handle's native state only; callers keep
+    /// canonical projection inputs independently and can rebuild the index.
+    pub fn apply_unverified(
+        &self,
+        mut batch: GraphWriteBatch,
+    ) -> Result<GraphCommit, GraphDbError> {
         let digest = batch.validate_and_digest()?;
         let _snapshot_gate = self.inner.snapshot_gate.write();
         let guard = self.write_guard()?;
@@ -216,7 +195,10 @@ impl GraphDb {
         self.apply_locked(database, &mut state, batch, digest, None)
     }
 
-    pub fn replace_projection(
+    /// Rebuilds one disposable derived projection from its complete input.
+    ///
+    /// This replaces index materialization, never a canonical source record.
+    pub fn replace_projection_unverified(
         &self,
         replacement: ProjectionReplacement,
     ) -> Result<GraphCommit, GraphDbError> {
@@ -275,7 +257,11 @@ impl GraphDb {
         self.apply_locked(database, &mut state, batch, digest, None)
     }
 
-    pub fn publish(
+    /// Records an idempotent derived-index publication.
+    ///
+    /// This is local replay metadata for a rebuildable graph projection, not
+    /// publication to a durable source-of-truth authority.
+    pub fn publish_unverified(
         &self,
         mut publication_request: GraphPublication,
     ) -> Result<GraphCommit, GraphDbError> {
@@ -581,13 +567,11 @@ impl GraphDb {
                 database.set_node_property(stored.node, &property, value);
             }
         }
-        if self.inner.durability == GraphDurability::Sync
-            && let Err(error) = database.wal_checkpoint()
+        if self.inner.durability == GraphDurability::WalSync
+            && let Err(error) = sync_wal(database)
         {
             self.inner.poisoned.store(true, Ordering::Release);
-            return Err(GraphDbError::DurabilityUncertain {
-                message: error.to_string(),
-            });
+            return Err(error);
         }
         Ok(commit)
     }
@@ -706,7 +690,7 @@ fn validate_or_initialize_format(
     let store = database.graph_store();
     let markers = store.nodes_by_label(FORMAT_LABEL);
     if markers.is_empty() {
-        if store.node_count() != 0 || validated.preexisting_file {
+        if store.node_count() != 0 || validated.preexisting_store {
             return Err(GraphDbError::ResetRequired {
                 message: "existing Grafeo store has no TraceDecay format marker".to_owned(),
             });
@@ -739,12 +723,10 @@ fn validate_or_initialize_format(
         for property in INDEXED_PROPERTIES {
             database.create_property_index(property);
         }
-        if validated.durability == GraphDurability::Sync
-            && let Err(error) = database.wal_checkpoint()
+        if validated.durability == GraphDurability::WalSync
+            && let Err(error) = sync_wal(database)
         {
-            return Err(GraphDbError::DurabilityUncertain {
-                message: error.to_string(),
-            });
+            return Err(error);
         }
         return Ok(());
     }
@@ -800,18 +782,38 @@ fn require_committed_vector_scalar(
 
 fn durability_uncertain() -> GraphDbError {
     GraphDbError::DurabilityUncertain {
-        message: "the handle was poisoned after a post-commit durability failure".to_owned(),
+        message: "the handle was poisoned after an observed post-commit persistence failure"
+            .to_owned(),
     }
+}
+
+/// Flushes the public Grafeo WAL handle without touching internal checkpoint
+/// metadata. A successful sync observes only the current WAL state: Grafeo's
+/// session commit API can suppress an earlier WAL append error, so it cannot
+/// establish a stronger durable-commit guarantee.
+fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
+    database
+        .wal()
+        .ok_or_else(|| GraphDbError::DurabilityUncertain {
+            message: "persistent Grafeo database has no WAL after commit; durable outcome cannot be established"
+                .to_owned(),
+        })?
+        .sync()
+        .map_err(|error| GraphDbError::DurabilityUncertain {
+            message: format!(
+                "Grafeo WAL synchronization failed after commit; durable outcome cannot be established: {error}"
+            ),
+        })
 }
 
 fn map_open_error(
     error: grafeo_common::utils::error::Error,
-    preexisting_file: bool,
+    preexisting_store: bool,
 ) -> GraphDbError {
     let malformed_io = matches!(
         &error,
         grafeo_common::utils::error::Error::Io(io)
-            if preexisting_file
+            if preexisting_store
                 && matches!(
                     io.kind(),
                     std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
@@ -825,7 +827,7 @@ fn map_open_error(
         ErrorCode::StorageCorrupted
         | ErrorCode::StorageRecoveryFailed
         | ErrorCode::SerializationError
-            if preexisting_file =>
+            if preexisting_store =>
         {
             GraphDbError::Corrupt { message }
         }

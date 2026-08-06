@@ -11,7 +11,7 @@ use tracedecay_graph_db::{
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
 };
 use tracedecay_store::{
-    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
+    BrainId, DURABLE_GRAPH_STORE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
     UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
@@ -40,10 +40,8 @@ impl RetainedGraphStoreLeaseV1 for BenchmarkGraphLease {
 }
 
 fn registration(root: &std::path::Path) -> GraphDbRegistration {
-    create_private_graph_directory(root);
-    let canonical_path = root
-        .join(GRAPH_STORE_PRIVATE_DIRECTORY)
-        .join("graph.grafeo");
+    create_durable_graph_store_root(root);
+    let canonical_path = root.join(DURABLE_GRAPH_STORE_DIRECTORY).join("graph");
     let binding = StoreRuntimeBindingV1::new(
         StoreShardIdV1::project(
             BrainId::try_from("brain.benchmark".to_owned()).expect("valid brain"),
@@ -69,12 +67,11 @@ fn registration(root: &std::path::Path) -> GraphDbRegistration {
     }
 }
 
-fn create_private_graph_directory(root: &std::path::Path) {
-    match tracedecay_private_fs::create_private_directory(&root.join(GRAPH_STORE_PRIVATE_DIRECTORY))
-    {
+fn create_durable_graph_store_root(root: &std::path::Path) {
+    match std::fs::create_dir(root.join(DURABLE_GRAPH_STORE_DIRECTORY)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create private graph directory: {error}"),
+        Err(error) => panic!("create durable graph-store root: {error}"),
     }
 }
 
@@ -109,7 +106,8 @@ fn populate(registry: &GraphDbRegistry, request: &GraphDbRegistration, entity_co
         Arc::new(NeverCancelled),
     )
     .expect("benchmark batch is valid");
-    db.apply(batch).expect("native-node batch commits");
+    db.apply_unverified(batch)
+        .expect("native-node batch commits");
     drop(db);
     registry.close(request).expect("benchmark store closes");
 }
@@ -172,7 +170,7 @@ fn native_state_100k(criterion: &mut Criterion) {
     criterion.bench_function("native_state/small_update_100k", |bencher| {
         bencher.iter(|| {
             let sequence = sequence.fetch_add(1, Ordering::Relaxed);
-            db.apply(small_update(ENTITY_COUNT, sequence))
+            db.apply_unverified(small_update(ENTITY_COUNT, sequence))
                 .expect("small indexed update succeeds")
         });
     });
@@ -180,7 +178,7 @@ fn native_state_100k(criterion: &mut Criterion) {
     registry.close(&request).expect("100k store closes");
 
     let ten_x_temp = TempDir::new().expect("10x benchmark temporary directory exists");
-    let ten_x_registry = registry();
+    let ten_x_registry = self::registry();
     let ten_x_request = registration(ten_x_temp.path());
     let ten_x_entity_count = ENTITY_COUNT * 10;
     populate(&ten_x_registry, &ten_x_request, ten_x_entity_count);
@@ -192,7 +190,7 @@ fn native_state_100k(criterion: &mut Criterion) {
         bencher.iter(|| {
             let sequence = ten_x_sequence.fetch_add(1, Ordering::Relaxed);
             ten_x_db
-                .apply(small_update(ten_x_entity_count, sequence))
+                .apply_unverified(small_update(ten_x_entity_count, sequence))
                 .expect("10x small indexed update succeeds")
         });
     });

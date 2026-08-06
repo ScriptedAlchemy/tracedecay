@@ -335,6 +335,10 @@ fn normalize_mutations(mutations: &mut Vec<GraphMutation>) -> Result<(), GraphDb
 }
 
 #[derive(Clone)]
+/// A complete replacement input for one disposable derived projection.
+///
+/// Callers retain canonical source data elsewhere; this value only describes
+/// the graph-index materialization to rebuild.
 pub struct ProjectionReplacement {
     pub namespace: GraphNamespace,
     pub projection: GraphProjectionId,
@@ -360,6 +364,11 @@ impl fmt::Debug for ProjectionReplacement {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Metadata reported by one derived-index mutation.
+///
+/// It identifies the native graph state observed by this handle. It is not a
+/// durable source-of-truth receipt and must not authorize loss of the
+/// canonical projection input.
 pub struct GraphCommit {
     pub sequence: u64,
     pub source_generation: SourceGeneration,

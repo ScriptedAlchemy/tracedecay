@@ -186,7 +186,7 @@ fn opaque_identity_deserialization_reuses_constructor_validation() {
 fn opens_memory_and_accepts_exact_format() {
     let db = memory_db();
     let commit = db
-        .apply(batch(
+        .apply_unverified(batch(
             "code",
             "g1",
             "w1",
@@ -214,9 +214,12 @@ fn apply_honors_cancellation_without_advancing_sequence() {
         Arc::new(Cancelled),
     )
     .unwrap();
-    assert_eq!(db.apply(cancelled).unwrap_err(), GraphDbError::Cancelled);
+    assert_eq!(
+        db.apply_unverified(cancelled).unwrap_err(),
+        GraphDbError::Cancelled
+    );
     let commit = db
-        .apply(batch(
+        .apply_unverified(batch(
             "code",
             "g2",
             "w2",
@@ -238,9 +241,12 @@ fn apply_rechecks_cancellation_after_lock_for_empty_batch() {
         Arc::new(CancelOnPoll::new(2)),
     )
     .unwrap();
-    assert_eq!(db.apply(cancelled).unwrap_err(), GraphDbError::Cancelled);
     assert_eq!(
-        db.apply(batch(
+        db.apply_unverified(cancelled).unwrap_err(),
+        GraphDbError::Cancelled
+    );
+    assert_eq!(
+        db.apply_unverified(batch(
             "code",
             "g2",
             "w2",
@@ -264,13 +270,16 @@ fn apply_rechecks_cancellation_immediately_before_commit() {
         Arc::new(CancelOnPoll::new(4)),
     )
     .unwrap();
-    assert_eq!(db.apply(cancelled).unwrap_err(), GraphDbError::Cancelled);
+    assert_eq!(
+        db.apply_unverified(cancelled).unwrap_err(),
+        GraphDbError::Cancelled
+    );
     assert!(matches!(
         db.traverse(traversal("cancelled")),
         Err(GraphDbError::InvalidRequest { .. })
     ));
     assert_eq!(
-        db.apply(batch(
+        db.apply_unverified(batch(
             "code",
             "g2",
             "w2",
@@ -283,11 +292,11 @@ fn apply_rechecks_cancellation_immediately_before_commit() {
 }
 
 #[test]
-fn native_created_identity_commits_rolls_back_and_survives_reopen() {
+fn derived_identity_apply_rolls_back_and_survives_reopen() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     assert_eq!(
-        db.apply(batch(
+        db.apply_unverified(batch(
             "code",
             "g1",
             "w1",
@@ -306,7 +315,7 @@ fn native_created_identity_commits_rolls_back_and_survives_reopen() {
         Arc::new(CancelOnPoll::new(4)),
     )
     .unwrap();
-    assert_eq!(db.apply(cancelled), Err(GraphDbError::Cancelled));
+    assert_eq!(db.apply_unverified(cancelled), Err(GraphDbError::Cancelled));
     assert_eq!(
         db.entity(&namespace(), &entity_id("rolled-back"), live())
             .unwrap(),
@@ -324,7 +333,7 @@ fn native_created_identity_commits_rolls_back_and_survives_reopen() {
     );
     assert_eq!(
         reopened
-            .apply(batch(
+            .apply_unverified(batch(
                 "code",
                 "g3",
                 "w3",
@@ -340,7 +349,7 @@ fn native_created_identity_commits_rolls_back_and_survives_reopen() {
 fn invalid_late_mutation_rolls_back_whole_batch_and_sequence() {
     let db = memory_db();
     let error = db
-        .apply(batch(
+        .apply_unverified(batch(
             "code",
             "g1",
             "w1",
@@ -355,7 +364,7 @@ fn invalid_late_mutation_rolls_back_whole_batch_and_sequence() {
     let result = db.traverse(traversal("a")).unwrap_err();
     assert!(matches!(result, GraphDbError::InvalidRequest { .. }));
     let commit = db
-        .apply(batch(
+        .apply_unverified(batch(
             "code",
             "g2",
             "w2",
@@ -368,7 +377,7 @@ fn invalid_late_mutation_rolls_back_whole_batch_and_sequence() {
 #[test]
 fn snapshot_is_immutable_after_live_write() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -383,7 +392,7 @@ fn snapshot_is_immutable_after_live_write() {
     let writer_db = db.clone();
     let (sent, received) = std::sync::mpsc::channel();
     let writer = std::thread::spawn(move || {
-        let result = writer_db.apply(batch(
+        let result = writer_db.apply_unverified(batch(
             "code",
             "g2",
             "w2",
@@ -422,7 +431,8 @@ fn traversal_is_deterministic_across_mutation_order() {
                 "calls",
             )));
         }
-        db.apply(batch("code", "g1", "w1", mutations)).unwrap();
+        db.apply_unverified(batch("code", "g1", "w1", mutations))
+            .unwrap();
         db
     }
     let first = populated(["b", "c"]).traverse(traversal("a")).unwrap();
@@ -441,7 +451,7 @@ fn traversal_is_deterministic_across_mutation_order() {
 #[test]
 fn traversal_filters_before_discovery_and_honors_depth() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -467,7 +477,7 @@ fn traversal_filters_before_discovery_and_honors_depth() {
 #[test]
 fn traversal_supports_incoming_and_bidirectional_neighbors() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -511,7 +521,7 @@ fn traversal_supports_incoming_and_bidirectional_neighbors() {
 #[test]
 fn traversal_budget_exhaustion_is_typed() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -540,7 +550,8 @@ fn traversal_visit_budget_stops_before_scanning_a_wide_frontier() {
             "calls",
         )));
     }
-    db.apply(batch("code", "g1", "w1", mutations)).unwrap();
+    db.apply_unverified(batch("code", "g1", "w1", mutations))
+        .unwrap();
 
     let mut request = traversal("root");
     request.max_visits = 1;
@@ -554,7 +565,7 @@ fn traversal_visit_budget_stops_before_scanning_a_wide_frontier() {
 #[test]
 fn traversal_result_budget_truncates_deterministically() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -591,7 +602,7 @@ fn traversal_honors_cancellation() {
 #[test]
 fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -636,7 +647,7 @@ fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
 #[test]
 fn multi_source_reachability_uses_overlay_and_global_budget() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -696,7 +707,7 @@ fn multi_source_reachability_uses_overlay_and_global_budget() {
 #[test]
 fn reachability_excludes_relations_owned_by_another_projection() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "code-g1",
         "code-w1",
@@ -708,7 +719,7 @@ fn reachability_excludes_relations_owned_by_another_projection() {
         ],
     ))
     .unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "facts",
         "facts-g1",
         "facts-w1",
@@ -803,7 +814,7 @@ fn vector_metric_rejects_unsupported_values() {
 #[test]
 fn vector_search_uses_metric_and_stable_identity_ties() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "vectors",
         "g1",
         "w1",
@@ -836,7 +847,7 @@ fn vector_search_uses_metric_and_stable_identity_ties() {
 fn vector_search_supports_dot_product_and_euclidean() {
     for metric in [VectorMetric::DotProduct, VectorMetric::Euclidean] {
         let db = memory_db();
-        db.apply(batch(
+        db.apply_unverified(batch(
             "vectors",
             "g1",
             "w1",
@@ -856,7 +867,7 @@ fn vector_search_supports_dot_product_and_euclidean() {
 #[test]
 fn vector_search_isolates_dimension_metric_and_namespace_before_distance() {
     let db = memory_db();
-    db.apply(batch_in(
+    db.apply_unverified(batch_in(
         "project",
         "vectors",
         "g1",
@@ -883,7 +894,7 @@ fn vector_search_isolates_dimension_metric_and_namespace_before_distance() {
         ],
     ))
     .unwrap();
-    db.apply(batch_in(
+    db.apply_unverified(batch_in(
         "another-project",
         "vectors",
         "g2",
@@ -907,7 +918,7 @@ fn vector_search_isolates_dimension_metric_and_namespace_before_distance() {
 #[test]
 fn vector_upsert_clears_prior_dimension_and_metric_keys() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "vectors",
         "g1",
         "w1",
@@ -919,7 +930,7 @@ fn vector_upsert_clears_prior_dimension_and_metric_keys() {
         ))],
     ))
     .unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "vectors",
         "g2",
         "w2",
@@ -984,7 +995,8 @@ fn repeated_scale_traversal_and_followup_write_remain_exact() {
             )));
         }
     }
-    db.apply(batch("scale", "g1", "w1", mutations)).unwrap();
+    db.apply_unverified(batch("scale", "g1", "w1", mutations))
+        .unwrap();
     let started = std::time::Instant::now();
     for _ in 0..32 {
         let mut request = traversal("n000");
@@ -994,7 +1006,7 @@ fn repeated_scale_traversal_and_followup_write_remain_exact() {
         assert_eq!(db.traverse(request).unwrap().visits.len(), 256);
     }
     let elapsed = started.elapsed();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "scale",
         "g2",
         "w2",
@@ -1015,14 +1027,14 @@ fn repeated_scale_traversal_and_followup_write_remain_exact() {
 #[test]
 fn projection_replacement_preserves_cross_projection_target() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "facts",
         "g1",
         "w1",
         vec![GraphMutation::UpsertEntity(entity("shared"))],
     ))
     .unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g2",
         "w2",
@@ -1032,7 +1044,7 @@ fn projection_replacement_preserves_cross_projection_target() {
         ],
     ))
     .unwrap();
-    db.replace_projection(ProjectionReplacement {
+    db.replace_projection_unverified(ProjectionReplacement {
         namespace: namespace(),
         projection: projection("code"),
         source_generation: generation("g3"),
@@ -1077,7 +1089,7 @@ fn publication(key: &str, expected: Option<&str>) -> GraphPublication {
 #[test]
 fn invalid_projection_replacement_preserves_prior_graph() {
     let db = memory_db();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "g1",
         "w1",
@@ -1085,7 +1097,7 @@ fn invalid_projection_replacement_preserves_prior_graph() {
     ))
     .unwrap();
     let error = db
-        .replace_projection(ProjectionReplacement {
+        .replace_projection_unverified(ProjectionReplacement {
             namespace: namespace(),
             projection: projection("code"),
             source_generation: generation("g2"),
@@ -1103,7 +1115,7 @@ fn invalid_projection_replacement_preserves_prior_graph() {
         "old"
     );
     let commit = db
-        .apply(batch(
+        .apply_unverified(batch(
             "code",
             "g3",
             "w3",
@@ -1116,7 +1128,7 @@ fn invalid_projection_replacement_preserves_prior_graph() {
 #[test]
 fn publication_replay_returns_original_commit() {
     let db = memory_db();
-    let first = db.publish(publication("event-1", None)).unwrap();
+    let first = db.publish_unverified(publication("event-1", None)).unwrap();
     let receipt = db
         .publication_receipt(
             &namespace(),
@@ -1131,7 +1143,7 @@ fn publication_replay_returns_original_commit() {
         receipt.input_digest.as_str(),
         format!("sha256:{}", "a".repeat(64))
     );
-    let second = db.publish(publication("event-1", None)).unwrap();
+    let second = db.publish_unverified(publication("event-1", None)).unwrap();
     assert_eq!(first, second);
     assert!(
         db.publication_receipt(
@@ -1156,13 +1168,16 @@ fn publication_replay_returns_original_commit() {
 #[test]
 fn publication_changed_input_and_stale_watermark_conflict() {
     let db = memory_db();
-    db.publish(publication("event-1", None)).unwrap();
+    db.publish_unverified(publication("event-1", None)).unwrap();
     let mut changed = publication("event-1", None);
     changed.next_watermark = watermark("w2");
     changed.batch.next_watermark = watermark("w2");
-    assert_eq!(db.publish(changed).unwrap_err(), GraphDbError::Conflict);
     assert_eq!(
-        db.publish(publication("event-2", Some("stale")))
+        db.publish_unverified(changed).unwrap_err(),
+        GraphDbError::Conflict
+    );
+    assert_eq!(
+        db.publish_unverified(publication("event-2", Some("stale")))
             .unwrap_err(),
         GraphDbError::Conflict
     );
@@ -1172,7 +1187,7 @@ fn publication_changed_input_and_stale_watermark_conflict() {
 fn persistent_close_and_reopen_preserves_graph_and_vector() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "vectors",
         "g1",
         "w1",
@@ -1228,7 +1243,8 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
             ))
         })
         .collect();
-    db.apply(batch("vectors", "g1", "w1", vectors)).unwrap();
+    db.apply_unverified(batch("vectors", "g1", "w1", vectors))
+        .unwrap();
     drop(db);
     registered.close().unwrap();
 
@@ -1259,7 +1275,7 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
 fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "vectors",
         "g1",
         "w1",
@@ -1287,7 +1303,7 @@ fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
         GraphVectorIndexStatus::Missing
     );
     reopened
-        .apply(batch(
+        .apply_unverified(batch(
             "vectors",
             "g2",
             "w2",
@@ -1322,12 +1338,14 @@ fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
 fn publication_state_survives_reopen() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
-    let first = db.publish(publication("event-1", None)).unwrap();
+    let first = db.publish_unverified(publication("event-1", None)).unwrap();
     drop(db);
     registered.close().unwrap();
     let reopened = registered.reopen().unwrap();
     assert_eq!(
-        reopened.publish(publication("event-1", None)).unwrap(),
+        reopened
+            .publish_unverified(publication("event-1", None))
+            .unwrap(),
         first
     );
 }
@@ -1335,11 +1353,10 @@ fn publication_state_survives_reopen() {
 #[test]
 fn valid_foreign_grafeo_store_requires_reset() {
     let temp = TempDir::new().unwrap();
-    std::fs::create_dir(temp.path().join("graph")).unwrap();
     let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
     )
     .unwrap();
     raw.session().create_node(&["foreign"]);
@@ -1351,11 +1368,10 @@ fn valid_foreign_grafeo_store_requires_reset() {
 #[test]
 fn wrong_tracedecay_format_requires_reset() {
     let temp = TempDir::new().unwrap();
-    std::fs::create_dir(temp.path().join("graph")).unwrap();
     let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
     )
     .unwrap();
     raw.session()
@@ -1375,7 +1391,8 @@ fn closed_handle_fails_typed() {
     let db = owner.handle();
     owner.close().unwrap();
     assert_eq!(
-        db.apply(batch("code", "g1", "w1", Vec::new())).unwrap_err(),
+        db.apply_unverified(batch("code", "g1", "w1", Vec::new()))
+            .unwrap_err(),
         GraphDbError::Closed
     );
 }

@@ -67,6 +67,10 @@ impl GraphPublicationInputDigest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Idempotency metadata retained inside the disposable graph index.
+///
+/// A receipt may speed a derived-projection replay, but it does not attest to
+/// an external publication or replace the canonical projection authority.
 pub struct GraphPublicationReceipt {
     pub digest: GraphPublicationDigest,
     pub input_digest: GraphPublicationInputDigest,
@@ -74,6 +78,10 @@ pub struct GraphPublicationReceipt {
 }
 
 #[derive(Clone)]
+/// A derived-index publication request.
+///
+/// The publication record is local replay metadata only. Its batch must
+/// remain reproducible from canonical source data.
 pub struct GraphPublication {
     pub namespace: GraphNamespace,
     pub idempotency_key: GraphIdempotencyKey,

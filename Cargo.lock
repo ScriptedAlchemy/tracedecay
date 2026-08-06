@@ -2709,14 +2709,14 @@ dependencies = [
 [[package]]
 name = "grafeo-adapters"
 version = "0.5.42"
-source = "git+https://github.com/GrafeoDB/grafeo?rev=4c448e1c60e53deab5820f1e14d30cc69f4938e9#4c448e1c60e53deab5820f1e14d30cc69f4938e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38cf1373a739aeaa070430588c4026b3c1aa11cd0ad6e6673bda22a390aacda4"
 dependencies = [
  "bincode 2.0.1",
  "grafeo-common",
  "grafeo-core",
  "hashbrown 0.17.1",
  "parking_lot",
- "same-file",
  "serde",
  "smallvec",
  "thiserror",
@@ -2725,7 +2725,8 @@ dependencies = [
 [[package]]
 name = "grafeo-common"
 version = "0.5.42"
-source = "git+https://github.com/GrafeoDB/grafeo?rev=4c448e1c60e53deab5820f1e14d30cc69f4938e9#4c448e1c60e53deab5820f1e14d30cc69f4938e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5f446c25eeedab9cccaabc85060dfa08dac2d1041974244864f36436b81ca5a"
 dependencies = [
  "arcstr",
  "bincode 2.0.1",
@@ -2745,7 +2746,8 @@ dependencies = [
 [[package]]
 name = "grafeo-core"
 version = "0.5.42"
-source = "git+https://github.com/GrafeoDB/grafeo?rev=4c448e1c60e53deab5820f1e14d30cc69f4938e9#4c448e1c60e53deab5820f1e14d30cc69f4938e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e185dd750843637a2d99e56100c08ef4cc34ce4a7b5f9cb9566f873bbf54c90"
 dependencies = [
  "arcstr",
  "bincode 2.0.1",
@@ -2769,12 +2771,12 @@ dependencies = [
 [[package]]
 name = "grafeo-engine"
 version = "0.5.42"
-source = "git+https://github.com/GrafeoDB/grafeo?rev=4c448e1c60e53deab5820f1e14d30cc69f4938e9#4c448e1c60e53deab5820f1e14d30cc69f4938e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ede967e6b0a16396c91752febdf037ab04ca69b851f6fb43565ee5f30586ee0d"
 dependencies = [
  "arcstr",
  "bincode 2.0.1",
  "bytes",
- "crc32fast",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
@@ -2790,14 +2792,14 @@ dependencies = [
 [[package]]
 name = "grafeo-storage"
 version = "0.5.42"
-source = "git+https://github.com/GrafeoDB/grafeo?rev=4c448e1c60e53deab5820f1e14d30cc69f4938e9#4c448e1c60e53deab5820f1e14d30cc69f4938e9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6857029da63e10209ae622ba85a87593ea08646ea17c02d5aa14461c7ff296f7"
 dependencies = [
  "bincode 2.0.1",
  "byteorder",
  "bytes",
  "crc32fast",
  "crossbeam",
- "fs2",
  "grafeo-common",
  "memmap2",
  "parking_lot",
@@ -5964,17 +5966,15 @@ dependencies = [
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
- "grafeo-storage",
  "hex",
  "parking_lot",
- "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "tracedecay-domain",
- "tracedecay-private-fs",
+ "tracedecay-runtime-core",
  "tracedecay-store",
 ]
 
@@ -6090,7 +6090,6 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-private-fs",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "zeroize",

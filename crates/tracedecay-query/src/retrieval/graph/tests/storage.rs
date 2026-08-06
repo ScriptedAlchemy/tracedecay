@@ -6,7 +6,7 @@ use tracedecay_graph_db::{
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
+    BrainId, DURABLE_GRAPH_STORE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
     StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
     UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
@@ -73,10 +73,9 @@ fn graph_projection_reopens_with_identical_ordered_output() {
         StoreIncarnationV1::new(1).expect("valid incarnation"),
         StoreAuthorityEpochV1::new(1).expect("valid epoch"),
     );
-    let private_directory = temp.path().join(GRAPH_STORE_PRIVATE_DIRECTORY);
-    tracedecay_private_fs::create_private_directory(&private_directory)
-        .expect("create private graph directory");
-    let canonical_path = private_directory.join("graph.grafeo");
+    let durable_graph_store_root = temp.path().join(DURABLE_GRAPH_STORE_DIRECTORY);
+    std::fs::create_dir(&durable_graph_store_root).expect("create durable graph-store root");
+    let canonical_path = durable_graph_store_root.join("graph");
     let registration = GraphDbRegistration {
         authority_lease: Arc::new(TestGraphLease {
             verified_locator: VerifiedStoreLocatorV1::new(

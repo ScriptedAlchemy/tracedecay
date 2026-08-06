@@ -9,25 +9,23 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [dependencies]
-grafeo-adapters = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["algos"] }
-grafeo-common = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false }
-grafeo-core = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["lpg", "vector-index"] }
-grafeo-engine = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["lpg", "gql", "algos", "grafeo-file", "vector-index"] }
-grafeo-storage = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["grafeo-file"] }
+grafeo-adapters.workspace = true
+grafeo-common.workspace = true
+grafeo-core.workspace = true
+grafeo-engine.workspace = true
 hex = "0.4"
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-same-file = "1"
 thiserror = "2"
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0" }
 
 [[bench]]
 name = "native_state_100k"

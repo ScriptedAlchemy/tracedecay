@@ -66,7 +66,7 @@ fn open_memory() -> Arc<GraphDb> {
 }
 
 fn publish(db: &GraphDb, generation: &str) {
-    db.apply(
+    db.apply_unverified(
         GraphWriteBatch::new(
             namespace(),
             GraphProjectionId::new("code").unwrap(),
@@ -115,7 +115,7 @@ fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
     );
 
     drop(snapshot);
-    db.apply(
+    db.apply_unverified(
         GraphWriteBatch::new(
             namespace(),
             GraphProjectionId::new("code").unwrap(),
