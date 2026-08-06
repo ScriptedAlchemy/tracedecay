@@ -394,10 +394,10 @@ fn slice_summary_sources(
         .collect()
 }
 
-/// Pages a summary node's immediate source list with hermes-lcm `lcm_expand`
-/// cursor semantics: the offset clamps to the source count, an omitted limit
-/// returns all remaining sources, and `next_source_offset` is the resume
-/// cursor while more sources remain.
+/// Pages a summary node's immediate source list. The internal offset clamps to
+/// the source count and an omitted limit returns all remaining sources; the
+/// temporal service authenticates the internal next boundary before exposing
+/// an opaque cursor.
 fn paginate_summary_sources(
     sources: Vec<LcmExpandedSummarySource>,
     source_offset: usize,

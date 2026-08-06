@@ -126,7 +126,6 @@ async fn expand_maps_raw_alias_and_preserves_bounded_legacy_expansion() {
     assert_eq!(command.grain(), RetrievalGrainV1::Occurrence);
     assert_eq!(command.content_slice().offset, 1);
     assert_eq!(command.content_slice().limit, 2);
-    assert_eq!(command.source_offset(), 0);
     assert_eq!(command.source_limit(), None);
     assert_eq!(command.cursor(), None);
     assert!(matches!(
@@ -139,6 +138,30 @@ async fn expand_maps_raw_alias_and_preserves_bounded_legacy_expansion() {
     assert_eq!(response["state"], "available");
     assert_eq!(response["next_cursor"], "opaque-next");
     assert_eq!(response["source_coverage"][0]["source_id"], "claude");
+}
+
+#[tokio::test]
+async fn expand_rejects_numeric_source_continuations() {
+    let error = handle_lcm_expand(
+        LcmHandlerContext::user(Path::new("/missing"), None, None),
+        json!({
+            "provider": "claude",
+            "session_id": "session-exact",
+            "target": {"kind": "summary_node", "node_id": "summary-1"},
+            "source_offset": 2,
+            "source_limit": 10,
+            "format": "json"
+        }),
+    )
+    .await
+    .expect_err("numeric source continuation must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("source_offset was replaced by the authenticated cursor"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

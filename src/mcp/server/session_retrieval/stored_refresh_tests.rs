@@ -115,7 +115,6 @@ async fn expand_hydrates_projected_content_when_refresh_worker_is_unavailable() 
                 offset: 0,
                 limit: 1_024,
             },
-            0,
             None,
             None,
             SessionRetrievalStoreScope::Project,
