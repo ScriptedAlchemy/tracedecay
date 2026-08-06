@@ -7,19 +7,19 @@
     },
     {
       "path": "src/sessions/session_temporal_benchmark.rs",
-      "sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72"
+      "sha256": "c4b319dcc940d14e5d1ab23f62a9192f6d332e38aee1bd7d2cb47c72f99bedf9"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "c1d1febf3dbf95c8b382d58a83da035fc71c1a19e5d0c40416c81fbed00f8e63"
+      "sha256": "b490d61af4beb4b6c8f975a49c501381edf70d4d17882695ffe91752cd6ce994"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "70c09b1e2e6350d471c1a659faf68c345118007501d8915e416711cfdcac4f3f"
+      "sha256": "ccfed1e4657c56badf62a8f1231a309bb7f140caa59d8189b54058c0fc44785d"
     },
     {
       "path": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
-      "sha256": "ff2d0c421a136c80ca8a9ab30932a1f2e0becda5534433cc7132b29471bd13b0"
+      "sha256": "74dddbdfcbfe172385db71b7139c5eba93300603ffb7128f1f577c827020dfae"
     },
     {
       "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
@@ -31,11 +31,11 @@
     },
     {
       "path": "tests/fixtures/provider_normalization/codex/README.md",
-      "sha256": "3c161c364acdc482b46e7c3c1de14a8981bc7169d4d10e8501b644e93306f213"
+      "sha256": "848cc877145a60c95a093cac1d19f51fc54ba68ce00bdcca60c3649699446b80"
     },
     {
       "path": "benchmarks/pr8-temporal/README.md",
-      "sha256": "63fbf56ccbcbcee268606e532be5c25ae2d6e6a61cadbd0494569f3dee6b423a"
+      "sha256": "63b02c448477bee4737a0ec9d7f91f6d43966d0574bf47872e6ab8bbccb86ca3"
     }
   ],
   "fixture_evidence": {
@@ -58,7 +58,7 @@
   },
   "implementation": {
     "path": "src/sessions/session_temporal_benchmark.rs",
-    "sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72"
+    "sha256": "c4b319dcc940d14e5d1ab23f62a9192f6d332e38aee1bd7d2cb47c72f99bedf9"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -98,7 +98,7 @@
     "debug_assertions": false,
     "incremental": false,
     "manifest_path": "Cargo.toml",
-    "manifest_sha256": "c1d1febf3dbf95c8b382d58a83da035fc71c1a19e5d0c40416c81fbed00f8e63",
+    "manifest_sha256": "b490d61af4beb4b6c8f975a49c501381edf70d4d17882695ffe91752cd6ce994",
     "opt_level": 3,
     "overflow_checks": false
   },
@@ -107,13 +107,9 @@
     "measured_repetitions": 30,
     "record_count": 1,
     "records_per_repetition": 1,
-    "source_commit": "1a03fcdff61ac76e94e8cbbc0d49f51b023876e9",
+    "source_commit": "eb06d361823ad99c6ea6358f9191a7c4545f5d2f",
     "source_mode": "clean_git_worktree_v1",
     "warmup_repetitions": 3
-  },
-  "runner": {
-    "path": "scripts/run-pr8-temporal-benchmark.sh",
-    "sha256": "d1d321db6c3e4d372017a50245da8bd69df0b108f755696539bce21fe0a80306"
   },
   "schema_version": 2,
   "statistics": {
