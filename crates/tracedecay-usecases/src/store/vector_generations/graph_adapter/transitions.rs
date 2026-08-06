@@ -246,6 +246,105 @@ impl GraphVectorGenerationStoreV1 {
         Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
     }
 
+    pub(super) fn activate_generation_records(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        expected_active: Option<&VectorGenerationIdV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        for _ in 0..MAX_STATE_CAS_RETRIES {
+            check_cancelled(cancellation.as_ref())?;
+            let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+            let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
+            let mut generations = Vec::new();
+            push_optional_generation(
+                &mut generations,
+                &snapshot,
+                generation_id,
+                Arc::clone(&cancellation),
+            )?;
+            push_required_generation(
+                &mut generations,
+                &snapshot,
+                metadata.active_generation.as_ref(),
+                Arc::clone(&cancellation),
+            )?;
+            let before = transition_state(
+                None,
+                generations.iter(),
+                metadata.active_generation.clone(),
+            )?;
+            let mut after = before.clone();
+            let publication = after.activate_generation(generation_id, expected_active)?;
+            let source_generation = generations
+                .iter()
+                .find(|records| records.generation.generation_id() == generation_id)
+                .map(|records| records.generation.source_generation().to_string())
+                .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+            drop(snapshot);
+            match self.publish_transition(
+                &before,
+                &after,
+                metadata.revision,
+                metadata.watermark,
+                source_generation,
+                Arc::clone(&cancellation),
+            ) {
+                Ok(_) => return Ok(publication),
+                Err(VectorGenerationStoreErrorV1::ConcurrentMutation) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
+    }
+
+    pub(super) fn deactivate_generation_records(
+        &self,
+        expected_active: Option<&VectorGenerationIdV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        for _ in 0..MAX_STATE_CAS_RETRIES {
+            check_cancelled(cancellation.as_ref())?;
+            let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+            let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
+            let mut generations = Vec::new();
+            push_required_generation(
+                &mut generations,
+                &snapshot,
+                metadata.active_generation.as_ref(),
+                Arc::clone(&cancellation),
+            )?;
+            let before = transition_state(
+                None,
+                generations.iter(),
+                metadata.active_generation.clone(),
+            )?;
+            let mut after = before.clone();
+            after.deactivate_generation(expected_active)?;
+            let source_generation = generations
+                .iter()
+                .find(|records| {
+                    Some(records.generation.generation_id()) == metadata.active_generation.as_ref()
+                })
+                .map(|records| records.generation.source_generation().to_string())
+                .unwrap_or_else(|| "semantic-vector-unpublished".to_owned());
+            drop(snapshot);
+            match self.publish_transition(
+                &before,
+                &after,
+                metadata.revision,
+                metadata.watermark,
+                source_generation,
+                Arc::clone(&cancellation),
+            ) {
+                Ok(_) => return Ok(()),
+                Err(VectorGenerationStoreErrorV1::ConcurrentMutation) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
+    }
+
     fn publish_transition(
         &self,
         before: &VectorGenerationStateMachineV1,
