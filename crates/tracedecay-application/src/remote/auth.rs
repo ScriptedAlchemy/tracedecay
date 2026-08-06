@@ -6,6 +6,7 @@ use std::hint::black_box;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_domain::canonical_text::canonical_framed_sha256_bytes;
 use tracedecay_domain::{
     ActorId, BrainId, BrainNodeId, CredentialRevocationReceiptV1, CredentialRotationReceiptV1,
     CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1,
@@ -26,6 +27,8 @@ use super::protocol::{
     RemoteProtocolFailureV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
     remote_enrollment_result_contract_v1, remote_protocol_problem,
 };
+
+const SPOOL_KEY_DERIVATION_DOMAIN: &str = "tracedecay.remote-spool-key.v1";
 
 /// Opaque credential accepted only at an application boundary.
 ///
@@ -57,6 +60,24 @@ impl OpaqueRemoteCredential {
     ) -> Result<RemoteCredentialFingerprintV1, RemoteAuthenticationError> {
         RemoteCredentialFingerprintV1::from_secret(self.expose_for_authentication())
             .map_err(|_| RemoteAuthenticationError::InvalidCredential)
+    }
+
+    /// Derives the at-rest spool key material bound to this credential.
+    ///
+    /// The domain separator keeps the derivation disjoint from the routing
+    /// fingerprint, so spool key bytes never equal any persisted identity.
+    /// Frames encrypted under one enrollment credential become typed
+    /// `AtRestEncryptionUnavailable` after rotation instead of silently
+    /// readable by a foreign key.
+    pub fn derive_spool_key_bytes(&self) -> Result<Vec<u8>, RemoteAuthenticationError> {
+        if validate_remote_secret_length(self.expose_for_authentication()).is_err() {
+            return Err(RemoteAuthenticationError::InvalidCredential);
+        }
+        Ok(canonical_framed_sha256_bytes(
+            SPOOL_KEY_DERIVATION_DOMAIN.as_bytes(),
+            &[self.expose_for_authentication()],
+        )
+        .to_vec())
     }
 }
 
@@ -602,15 +623,16 @@ where
                 enrollment_protocol_failure(error),
             )),
         };
-        RemoteProtocolResponseV1::new(
+        RemoteProtocolResponseV1::new_or_unavailable(
             request_id,
             CurrentRemoteAuthorityStateV1::Unavailable {
                 reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
                 observed_at,
             },
             result,
+            remote_enrollment_result_contract_v1(),
+            observed_at,
         )
-        .expect("validated enrollment response identities are preserved")
     }
 }
 

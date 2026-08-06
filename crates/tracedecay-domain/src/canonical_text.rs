@@ -101,6 +101,20 @@ pub fn canonical_framed_sha256(domain: &[u8], parts: &[&[u8]]) -> String {
     encode_lowercase_hex(&hasher.finalize())
 }
 
+/// [`canonical_framed_sha256`] returning the raw 32 digest bytes for callers
+/// that derive fixed-length key material instead of a textual identity.
+#[must_use]
+pub fn canonical_framed_sha256_bytes(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update((domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    for part in parts {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
 /// Canonical bounded string that reports an empty value distinctly from a
 /// non-canonical one.
 ///

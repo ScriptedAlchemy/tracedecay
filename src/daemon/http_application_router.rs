@@ -77,8 +77,10 @@ pub(super) async fn install_remote_http_application_router(
 ) -> Result<()> {
     let runtime = store_administration.registered_runtime_registry().await?;
     let credentials = runtime.remote_credential_authority();
-    let router =
-        super::remote_protocol::build_daemon_remote_protocol_router(Arc::clone(&credentials))?;
+    let router = super::remote_protocol::build_daemon_remote_protocol_router(
+        Arc::clone(&credentials),
+        runtime.remote_replay_transaction(),
+    )?;
     registry.install_remote(router, credentials, Some(runtime))
 }
 

@@ -75,11 +75,10 @@ impl StoreRuntimeResolver for InitializingFileResolver {
             LocatorDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
         );
         Box::pin(async move {
-            let authority = database_authority.ok_or_else(|| {
-                StoreRuntimeRegistryFailure::ResolverFailed {
+            let authority =
+                database_authority.ok_or_else(|| StoreRuntimeRegistryFailure::ResolverFailed {
                     message: "initialization requires database authority".to_owned(),
-                }
-            })?;
+                })?;
             if authority.canonical_database_path() != path {
                 return Err(StoreRuntimeRegistryFailure::ResolverFailed {
                     message: "database authority does not match prospective path".to_owned(),
@@ -281,8 +280,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
     let resolver = Arc::new(InitializingFileResolver::default());
     resolver.push(profile_path.clone());
     resolver.push(remote_path.clone());
-    let registry =
-        StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+    let registry = StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
 
     let profile_authority =
         crate::db::DatabaseAuthority::acquire_test(&profile_path, "initialize profile").unwrap();

@@ -1,4 +1,5 @@
 use tracedecay_application::ResolvedScope;
+use tracedecay_application::remote::capture_protocol::RemoteCapturePolicyEvidencePortV1;
 use tracedecay_application::remote::query::{
     RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationEvidenceV1,
     RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
@@ -164,6 +165,17 @@ impl RemoteReplayPolicyEvidencePortV1 for RemoteSqliteStorageV1 {
     ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
         let evidence = self.load_replay_policy(&frame.capture.writer.scope)?;
         evidence.validate_for(frame)?;
+        Ok(evidence)
+    }
+}
+
+impl RemoteCapturePolicyEvidencePortV1 for RemoteSqliteStorageV1 {
+    fn capture_policy_evidence(
+        &self,
+        scope: &RemoteRepositoryScopeV1,
+    ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
+        let evidence = self.load_replay_policy(scope)?;
+        evidence.validate()?;
         Ok(evidence)
     }
 }

@@ -436,9 +436,7 @@ pub(super) fn load_authority_in(
     Ok(Some((authority, frontier)))
 }
 
-pub(super) fn map_store_error(
-    error: RemoteSqliteStorageErrorV1,
-) -> RemoteRecoveryOperationErrorV1 {
+pub(super) fn map_store_error(error: RemoteSqliteStorageErrorV1) -> RemoteRecoveryOperationErrorV1 {
     match error {
         RemoteSqliteStorageErrorV1::Corruption => RemoteRecoveryOperationErrorV1::Corruption,
         _ => RemoteRecoveryOperationErrorV1::Unavailable,

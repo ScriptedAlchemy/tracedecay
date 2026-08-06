@@ -449,8 +449,9 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     pub(crate) fn remote_replay_transaction(
         &self,
-    ) -> Arc<dyn tracedecay_application::remote::replay::RemoteReplayTransactionPortV1> {
-        self.remote_replay_transaction.clone()
+    ) -> Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>
+    {
+        Arc::clone(&self.remote_replay_transaction)
     }
 
     pub(crate) async fn remote_recovery_authority(
