@@ -24,8 +24,10 @@
 //! * A single daemon-wide [`Semaphore`] (`max_concurrent_syncs`) gates every
 //!   sync. Per-store single-flight is already provided by the existing sync
 //!   lock; `SyncLock` errors are treated as success (a peer synced).
-//! * The [`backstop`] timer covers projects whose watcher heartbeat is
-//!   stale/absent, and runs branch-store GC on a daily cadence.
+//! * The [`backstop`] timer covers every project whose store has drifted a
+//!   full interval — a live heartbeat proves only watcher-task liveness, and
+//!   the watcher reacts to git metadata alone, so liveness never vetoes
+//!   coverage. It also runs branch-store GC on a daily cadence.
 
 #![cfg(unix)]
 
@@ -861,10 +863,31 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Backstop scheduler (design D5): a single daemon timer covering projects whose
-/// watcher heartbeat is stale/absent, plus daily branch-store GC.
+/// Backstop scheduler (design D5): a single daemon timer that is the freshness
+/// floor for every registered project, plus daily branch-store GC.
 mod backstop {
     use super::*;
+
+    /// The backstop's per-project coverage decision.
+    ///
+    /// Returns the log label for the sync this tick must run, or `None` when
+    /// the store is fresh enough. Store staleness alone drives coverage: the
+    /// heartbeat proves only that the watcher task is alive, and a live
+    /// watcher reacts to git metadata alone — never to working-tree edits or
+    /// missed hook deliveries — so a fresh heartbeat must not veto the sync.
+    /// Gating on a stale heartbeat left healthy-watcher projects with no
+    /// freshness floor at all; live profiles were observed hours stale while
+    /// every mechanism reported healthy.
+    pub(super) fn coverage_action(
+        heartbeat_stale: bool,
+        store_stale: bool,
+    ) -> Option<&'static str> {
+        match (store_stale, heartbeat_stale) {
+            (false, _) => None,
+            (true, true) => Some("backstop_watcher_stale"),
+            (true, false) => Some("backstop_store_stale"),
+        }
+    }
 
     pub(super) async fn run(
         watcher: GitWatcher,
@@ -894,9 +917,8 @@ mod backstop {
             .config
             .backstop_interval_mins
             .saturating_mul(60);
-        // Snapshot registered projects; cover those the watcher isn't keeping
-        // fresh (stale/absent heartbeat) AND whose store is older than one
-        // interval.
+        // Snapshot registered projects; cover every project whose store is
+        // older than one interval (see [`coverage_action`]).
         let entries: Vec<(PathBuf, Arc<WatchState>)> = {
             let projects = watcher.inner.projects.lock().await;
             projects
@@ -915,7 +937,7 @@ mod backstop {
                 Some(graph) => store_is_stale(graph, interval_secs).await,
                 None => false,
             };
-            if snap.heartbeat_stale() && store_stale {
+            if let Some(action) = coverage_action(snap.heartbeat_stale(), store_stale) {
                 let _permit = watcher.inner.sync_semaphore.acquire().await;
                 if let Some(cg) = retained_graph.as_ref()
                     && super::store_maintenance::sync_project(
@@ -930,7 +952,7 @@ mod backstop {
                         "git_watch_synced",
                         &[
                             ("project", root.display().to_string()),
-                            ("action", "backstop".to_string()),
+                            ("action", action.to_string()),
                         ],
                     );
                 }

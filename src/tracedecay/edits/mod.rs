@@ -50,12 +50,21 @@
 //!         .await;
 //! }
 //! ```
+//! ```compile_fail
+//! async fn direct_rename_symbol_is_not_public(
+//!     graph: &tracedecay::tracedecay::TraceDecay,
+//!     binding: &tracedecay_application::RenameSymbolBindingV1,
+//! ) {
+//!     let _ = graph.rename_symbol(binding, "new_name", true).await;
+//! }
+//! ```
 
 mod ast_grep;
 mod file_authority;
 mod plan;
 mod preview;
 mod primitives;
+mod rename;
 mod symbols;
 
 #[cfg(test)]

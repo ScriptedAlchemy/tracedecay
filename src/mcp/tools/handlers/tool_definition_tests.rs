@@ -145,6 +145,7 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_replace_symbol"));
     assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
     assert!(tool_names.contains(&"tracedecay_move_symbol"));
+    assert!(tool_names.contains(&"tracedecay_rename_symbol"));
     assert!(tool_names.contains(&"tracedecay_source_edit_reconcile"));
     assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
 }
@@ -252,6 +253,7 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_replace_symbol",
         "tracedecay_insert_at_symbol",
         "tracedecay_move_symbol",
+        "tracedecay_rename_symbol",
         "tracedecay_ast_grep_rewrite",
         "tracedecay_source_edit_reconcile",
         "tracedecay_git_apply",
@@ -304,8 +306,7 @@ fn test_tool_definitions_have_annotations() {
 
 #[test]
 fn advertised_read_only_matches_canonical_execution_effect() {
-    let catalog =
-        crate::mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
+    let catalog = crate::mcp::tools::binding::mcp_dispatch_catalog().expect("MCP dispatch catalog");
     for tool in get_tool_definitions() {
         if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool.name.as_str()) {
             continue;

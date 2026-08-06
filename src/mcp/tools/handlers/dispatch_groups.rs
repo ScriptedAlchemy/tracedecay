@@ -442,6 +442,9 @@ pub(super) async fn dispatch_edit_tools(
             edit::handle_insert_at_symbol(cg, args, invocation.clone()).await
         }
         "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args, invocation.clone()).await,
+        "tracedecay_rename_symbol" => {
+            edit::handle_rename_symbol(cg, args, invocation.clone()).await
+        }
         "tracedecay_source_edit_reconcile" => {
             edit::handle_source_edit_reconcile(cg, args, invocation).await
         }

@@ -175,6 +175,50 @@ pub struct MoveResult {
     pub message: String,
 }
 
+/// One file a rename touched (or would touch), with how many bound
+/// whole-identifier occurrences were rewritten in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameFileEditV1 {
+    pub file: String,
+    pub replaced_count: usize,
+}
+
+/// Literal identifier occurrences of the old name in a touched file that are
+/// NOT backed by graph evidence. A rename never rewrites these; they are
+/// reported for manual review, exactly like the read-only preview does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenameTextOnlyMatchV1 {
+    pub file: String,
+    pub text_only_count: usize,
+}
+
+/// Result of an apply-grade symbol rename (or its dry run).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RenameResult {
+    pub success: bool,
+    /// Qualified name of the renamed symbol at plan time.
+    pub symbol: String,
+    pub old_name: String,
+    pub new_name: String,
+    /// Every file the rename touched (or would touch), with per-file counts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<RenameFileEditV1>,
+    /// Graph reference sites bound into the rename (excluding the declaration).
+    pub reference_count: usize,
+    /// Old-name occurrences left untouched because no graph edge attests them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_only_matches: Vec<RenameTextOnlyMatchV1>,
+    /// True when this was a dry run: sites were bound and the resulting
+    /// content computed, but nothing was written to disk.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dry_run: bool,
+    /// Bounded preview diff across every touched file. Populated only on a
+    /// successful dry run; `None` for real edits and for failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    pub message: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceEditKind {
@@ -185,6 +229,7 @@ pub enum SourceEditKind {
     ReplaceSymbol,
     InsertAtSymbol,
     MoveSymbol,
+    RenameSymbol,
 }
 
 impl SourceEditKind {
@@ -197,8 +242,22 @@ impl SourceEditKind {
             Self::ReplaceSymbol => "replace_symbol",
             Self::InsertAtSymbol => "insert_at_symbol",
             Self::MoveSymbol => "move_symbol",
+            Self::RenameSymbol => "rename_symbol",
         }
     }
+}
+
+/// Exact symbol identity a rename apply is bound to. A bare spelling is never
+/// sufficient: the apply revalidates every field against the live graph and
+/// refuses when any of them drifted since the preview was computed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameSymbolBindingV1 {
+    pub node_id: String,
+    pub qualified_name: String,
+    pub kind: String,
+    pub file: String,
+    pub old_name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -251,6 +310,12 @@ pub enum SourceEditRequest {
         dry_run: bool,
         update_references: bool,
     },
+    RenameSymbol {
+        binding: RenameSymbolBindingV1,
+        new_name: String,
+        dry_run: bool,
+        verify: bool,
+    },
 }
 
 impl SourceEditRequest {
@@ -263,6 +328,7 @@ impl SourceEditRequest {
             Self::ReplaceSymbol { .. } => SourceEditKind::ReplaceSymbol,
             Self::InsertAtSymbol { .. } => SourceEditKind::InsertAtSymbol,
             Self::MoveSymbol { .. } => SourceEditKind::MoveSymbol,
+            Self::RenameSymbol { .. } => SourceEditKind::RenameSymbol,
         }
     }
 
@@ -274,7 +340,8 @@ impl SourceEditRequest {
             | Self::AstGrepRewrite { dry_run, .. }
             | Self::ReplaceSymbol { dry_run, .. }
             | Self::InsertAtSymbol { dry_run, .. }
-            | Self::MoveSymbol { dry_run, .. } => *dry_run,
+            | Self::MoveSymbol { dry_run, .. }
+            | Self::RenameSymbol { dry_run, .. } => *dry_run,
         }
     }
 
@@ -285,7 +352,8 @@ impl SourceEditRequest {
             | Self::InsertAt { verify, .. }
             | Self::AstGrepRewrite { verify, .. }
             | Self::ReplaceSymbol { verify, .. }
-            | Self::InsertAtSymbol { verify, .. } => *verify,
+            | Self::InsertAtSymbol { verify, .. }
+            | Self::RenameSymbol { verify, .. } => *verify,
             Self::MoveSymbol { .. } => false,
         }
     }
@@ -298,7 +366,8 @@ impl SourceEditRequest {
             | Self::AstGrepRewrite { dry_run: value, .. }
             | Self::ReplaceSymbol { dry_run: value, .. }
             | Self::InsertAtSymbol { dry_run: value, .. }
-            | Self::MoveSymbol { dry_run: value, .. } => *value = dry_run,
+            | Self::MoveSymbol { dry_run: value, .. }
+            | Self::RenameSymbol { dry_run: value, .. } => *value = dry_run,
         }
         self
     }
@@ -578,7 +647,7 @@ pub struct SourceEditVerificationV1 {
     pub message: Option<String>,
 }
 
-const SOURCE_EDIT_KINDS: [SourceEditKind; 7] = [
+const SOURCE_EDIT_KINDS: [SourceEditKind; 8] = [
     SourceEditKind::StrReplace,
     SourceEditKind::MultiStrReplace,
     SourceEditKind::InsertAt,
@@ -586,6 +655,7 @@ const SOURCE_EDIT_KINDS: [SourceEditKind; 7] = [
     SourceEditKind::ReplaceSymbol,
     SourceEditKind::InsertAtSymbol,
     SourceEditKind::MoveSymbol,
+    SourceEditKind::RenameSymbol,
 ];
 
 const SOURCE_EDIT_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
