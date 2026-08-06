@@ -377,18 +377,28 @@ impl DashboardTestRuntimeV1 {
         let database = self
             .database(scope)
             .map_err(|error| tracedecay::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let transaction = database
-            .begin_write_transaction()
+        let summary_hash =
+            tracedecay_sessions::compatibility::projected_content_hash(&draft.summary_text);
+        let summary_id = tracedecay::sessions::lcm::dag::summary_node_id(
+            &draft.provider,
+            &draft.session_id,
+            draft.depth,
+            &draft.source_refs,
+            &summary_hash,
+        );
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        database
+            .lcm_publish_immutable_summary_guarded(
+                tracedecay::sessions::lcm::types::LcmImmutableSummaryPublication {
+                    summary_id,
+                    predecessor_summary_id: None,
+                    draft,
+                },
+                &control,
+                || Ok(()),
+            )
             .await
-            .map_err(|error| tracedecay::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let publisher =
-            tracedecay_global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
-                &transaction,
-            );
-        let summary =
-            tracedecay::sessions::lcm::dag::insert_summary_node(&publisher, draft).await?;
-        transaction.commit().await?;
-        Ok(summary)
+            .map(|receipt| receipt.summary)
     }
 
     pub(crate) async fn lcm_status_deep_for_test(
