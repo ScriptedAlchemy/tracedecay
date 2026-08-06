@@ -430,12 +430,16 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
     (root / "Cargo.toml").write_text(
         "[package]\nname = \"tool-sweep-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
     )
+    # sweep_anchor stays last behind a blank line so the move_symbol journey's
+    # move-out/move-back rollback restores this file byte-exactly (removal
+    # collapses the separator; the return append recreates it).
     (root / "src/lib.rs").write_text(
         "pub trait SweepTrait { fn marker(&self) -> i32; }\n"
         "pub struct SweepType { pub value: i32 }\n"
         "impl SweepTrait for SweepType { fn marker(&self) -> i32 { self.value } }\n"
-        "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
         "pub fn sweep_peer() -> i32 { sweep_anchor().marker() }\n"
+        "\n"
+        "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
     )
     (root / "src/relocated.rs").write_text("pub fn relocation_marker() -> i32 { 0 }\n")
     (root / "docs/large.md").write_text("catalog sweep handle source\n" * 8_192)
