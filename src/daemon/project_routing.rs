@@ -118,6 +118,64 @@ pub(super) async fn project_open_tasks(
     gates.lock().await.tasks.clone()
 }
 
+pub(super) async fn resolved_project_server_key(
+    store_administration: &StoreAdministration,
+    canonical_project_path: &Path,
+    handshake: &DaemonHandshake,
+) -> Result<Option<ProjectServerKey>> {
+    if !durable_enrollment_resolves_existing_store(store_administration, canonical_project_path) {
+        return Ok(None);
+    }
+    let registry_database = store_administration.registered_profile_database().await?;
+    let Ok(layout) = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+        canonical_project_path,
+        &handshake.open_options(),
+        registry_database.as_ref(),
+        false,
+    )
+    .await
+    else {
+        // The canonical open remains responsible for typed identity errors and
+        // any permitted repair; this is only a mounted-runtime reuse path.
+        return Ok(None);
+    };
+    let graph_scope = crate::branch::current_branch(canonical_project_path)
+        .or_else(|| crate::worktree::detached_worktree_graph_scope(canonical_project_path));
+    let (graph_db_path, _, fallback_warning) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
+        canonical_project_path,
+        &layout.data_root,
+        graph_scope.as_deref(),
+    );
+    if fallback_warning.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(ProjectServerKey {
+        owner: StoreOwnerKey::from_paths(
+            &handshake.client_identity.profile_root,
+            &handshake.client_identity.global_db_path,
+            layout.identity.project_id,
+            &layout.data_root,
+            &graph_db_path,
+        )?,
+        scope_prefix: handshake.scope_prefix.clone(),
+    }))
+}
+
+pub(super) async fn cached_or_bind_ready_project_server(
+    store_administration: &StoreAdministration,
+    route: &ProjectRouteKey,
+    resolved_key: Option<&ProjectServerKey>,
+    requirement: ProjectServerRequirement,
+) -> Option<(ProjectServerKey, Arc<crate::mcp::McpServer>)> {
+    let mut servers = store_administration.project_servers().lock().await;
+    if let Some((key, server)) = servers.get_route_and_touch_for(route, requirement) {
+        return Some((key.clone(), Arc::clone(server)));
+    }
+    let key = resolved_key?;
+    let server = servers.bind_ready_route(route.clone(), key.clone(), requirement)?;
+    Some((key.clone(), Arc::clone(server)))
+}
+
 #[cfg(unix)]
 pub(super) async fn maintenance_transition_gate(
     gates: &tokio::sync::Mutex<MaintenanceTransitionGates>,

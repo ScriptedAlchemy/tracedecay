@@ -412,6 +412,92 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let profile_root = root.join("profile");
+    std::fs::create_dir_all(&primary).expect("create primary repository");
+    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(primary.join("README.md"), "shared authority\n").expect("fixture");
+    run_git(&primary, &["add", "."]);
+    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "--force",
+            linked.to_str().expect("utf-8 linked path"),
+            "main",
+        ],
+    );
+
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let linked_handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+
+    let primary_server = engine
+        .project_server(&primary_handshake)
+        .await
+        .expect("primary project must open");
+
+    let blocker_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        blocker_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release shadow writer");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let linked_server = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.project_server(&linked_handshake),
+    )
+    .await
+    .expect("linked worktree must not wait on shadow writer administration")
+    .expect("linked worktree must reuse the primary authority without shadow admission");
+    release_writer.send(()).expect("release shadow writer");
+    blocker.await.expect("shadow writer blocker joins");
+
+    assert!(
+        Arc::ptr_eq(&primary_server, &linked_server),
+        "both routes must resolve one retained project server"
+    );
+    let servers = engine.store_administration.project_servers().lock().await;
+    assert_eq!(servers.servers.len(), 1, "one physical project server key");
+    assert_eq!(servers.aliases.len(), 2, "primary and linked route aliases");
+    drop(servers);
+    assert!(
+        crate::storage::read_enrollment_marker(&linked)
+            .expect("read linked marker")
+            .is_none(),
+        "linked route must not acquire a second enrollment marker"
+    );
+    engine.shutdown_all().await;
+}
+
 #[tokio::test]
 async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() {
     let tasks = super::super::ProjectOpenTasks::default();
