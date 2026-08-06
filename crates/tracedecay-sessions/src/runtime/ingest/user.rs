@@ -58,6 +58,26 @@ pub async fn try_ingest_user_codex_sessions_with_db_and_admission(
     .map(|outcome| outcome.stats)
 }
 
+pub async fn try_ingest_user_codex_sessions_capped_with_admission(
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+    admission: &dyn HostAdmission,
+    max_total_new_bytes: u64,
+    cancellation: &ObservationCancellation,
+) -> source::TranscriptIngestResult<(TranscriptIngestStats, bool)> {
+    try_ingest_user_codex_sessions_with_db_bounded(
+        profile_root,
+        session_id,
+        registered_roots,
+        admission,
+        Some(max_total_new_bytes),
+        cancellation,
+    )
+    .await
+    .map(|outcome| (outcome.stats, outcome.deferred_by_byte_cap))
+}
+
 pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
     profile_root: &Path,
     session_id: Option<String>,

@@ -72,6 +72,38 @@ const REGISTRY_SCHEMA: &str = "
         FOREIGN KEY(session_id, generation)
             REFERENCES session_relation_receipts(session_id, generation) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS session_lcm_effect_journal (
+        effect_id TEXT PRIMARY KEY,
+        event_digest TEXT NOT NULL,
+        provider TEXT NOT NULL CHECK(provider IN ('claude', 'codex', 'cursor')),
+        session_id TEXT NOT NULL,
+        scope_kind TEXT NOT NULL CHECK(scope_kind IN ('project', 'profile')),
+        scope_id TEXT NOT NULL,
+        compact_summary_digest TEXT,
+        current_tokens INTEGER,
+        context_length INTEGER,
+        max_source_messages INTEGER CHECK(max_source_messages IS NULL OR max_source_messages >= 0),
+        fresh_tail_count INTEGER CHECK(fresh_tail_count IS NULL OR fresh_tail_count >= 0),
+        created_at INTEGER NOT NULL,
+        UNIQUE(event_digest, scope_kind, scope_id)
+    );
+    CREATE TABLE IF NOT EXISTS session_lcm_effect_receipts (
+        effect_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK(state IN (
+            'awaiting_source', 'pending', 'completed',
+            'needs_authoritative_summary', 'failed'
+        )),
+        reason TEXT,
+        summary_node_ids_json TEXT NOT NULL CHECK(json_valid(summary_node_ids_json)),
+        completed_at INTEGER,
+        CHECK(
+            (state IN ('awaiting_source', 'pending')
+                AND reason IS NULL AND completed_at IS NULL)
+            OR (state NOT IN ('awaiting_source', 'pending')
+                AND reason IS NOT NULL AND completed_at IS NOT NULL)
+        ),
+        FOREIGN KEY(effect_id) REFERENCES session_lcm_effect_journal(effect_id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS store_instances (
         store_id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -112,6 +144,10 @@ const REGISTRY_SCHEMA: &str = "
         ON session_relation_receipts(state, created_at, session_id, generation);
     CREATE INDEX IF NOT EXISTS idx_session_relation_effect_journal_created
         ON session_relation_effect_journal(created_at, session_id, generation);
+    CREATE INDEX IF NOT EXISTS idx_session_lcm_effect_journal_created
+        ON session_lcm_effect_journal(created_at, effect_id);
+    CREATE INDEX IF NOT EXISTS idx_session_lcm_effect_receipts_pending
+        ON session_lcm_effect_receipts(state, effect_id);
     CREATE INDEX IF NOT EXISTS idx_store_instances_project_id
         ON store_instances(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_scopes_project_store

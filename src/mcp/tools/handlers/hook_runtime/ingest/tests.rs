@@ -4,40 +4,6 @@ use crate::application::host_admission::HostAdmissionTestRuntimeV1;
 use super::*;
 
 #[test]
-fn cursor_compaction_response_matches_hook_contract() {
-    let value = cursor_compact_skipped("no messages to compact");
-    let outcome: crate::hooks::CursorPreCompactOutcome = serde_json::from_value(value).unwrap();
-    assert_eq!(outcome.status, "skipped");
-    assert_eq!(outcome.reason, "no messages to compact");
-    assert_eq!(outcome.summary_nodes_created, 0);
-    assert!(outcome.summary_node_ids.is_empty());
-    assert_eq!(
-        outcome.relation_projection_status,
-        crate::sessions::lcm::LcmRelationProjectionStatus::NotApplicable
-    );
-}
-
-#[test]
-fn codex_and_cursor_compaction_requests_delegate_summarization_to_the_daemon() {
-    for provider in ["codex", "cursor"] {
-        let request = host_lcm_request(
-            provider,
-            "session-1",
-            Some(1_000),
-            Some(200_000),
-            None,
-            None,
-            "compaction",
-            None,
-        );
-        assert_eq!(
-            request.summarizer,
-            crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary
-        );
-    }
-}
-
-#[test]
 fn claude_compact_requires_exact_native_event_evidence() {
     let event_json = r#"{"hook_event_name":"PostCompact","session_id":"claude-1","compact_summary":"  exact native summary\n","context_tokens":900}"#;
     let parsed = parse_claude_compact_event(&json!({

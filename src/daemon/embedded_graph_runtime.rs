@@ -19,6 +19,7 @@ const RELATION_EFFECT_PAGE_SIZE: usize = 64;
 const RELATION_EFFECT_MAX_PAGES_PER_WAKE: usize = 8;
 const RELATION_EFFECT_MAX_RUN_TIME: Duration = Duration::from_millis(500);
 const RELATION_EFFECT_IDLE_RETRY: Duration = Duration::from_secs(1);
+const LCM_HOST_EFFECT_MAX_ITEMS_PER_WAKE: usize = 4;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub(crate) enum EmbeddedGraphRuntimeError {
@@ -63,6 +64,7 @@ struct SessionRelationEffectScheduler {
     wake: Arc<tokio::sync::Notify>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
+    lcm_cancellation: tracedecay_application::CancellationSignal,
     join: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -159,15 +161,22 @@ impl EmbeddedGraphRuntimeRegistry {
             .map_err(|error| EmbeddedGraphRuntimeError::Unavailable(error.to_string()))?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let lcm_cancellation = tracedecay_application::CancellationSignal::active(format!(
+            "session-effects-{}",
+            scope.identity()
+        ))
+        .map_err(|error| EmbeddedGraphRuntimeError::Unavailable(error.to_string()))?;
         let worker_wake = Arc::clone(&wake);
         let worker_shutdown = Arc::clone(&shutdown);
         let worker_shutdown_notify = Arc::clone(&shutdown_notify);
+        let worker_lcm_cancellation = lcm_cancellation.clone();
         let join = tokio::spawn(async move {
             run_relation_effect_scheduler(
                 database,
                 worker_wake,
                 worker_shutdown,
                 worker_shutdown_notify,
+                worker_lcm_cancellation,
             )
             .await;
         });
@@ -177,6 +186,7 @@ impl EmbeddedGraphRuntimeRegistry {
                 wake,
                 shutdown,
                 shutdown_notify,
+                lcm_cancellation,
                 join: Mutex::new(Some(join)),
             }),
         );
@@ -196,6 +206,13 @@ impl EmbeddedGraphRuntimeRegistry {
         };
         for scheduler in &schedulers {
             scheduler.shutdown.store(true, Ordering::Release);
+            if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                && let Ok(micros) = i64::try_from(duration.as_micros())
+            {
+                scheduler
+                    .lcm_cancellation
+                    .cancel(tracedecay_domain::UtcMicros(micros));
+            }
             scheduler.shutdown_notify.notify_waiters();
             scheduler.wake.notify_waiters();
         }
@@ -242,6 +259,7 @@ async fn run_relation_effect_scheduler(
     wake: Arc<tokio::sync::Notify>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<tokio::sync::Notify>,
+    lcm_cancellation: tracedecay_application::CancellationSignal,
 ) {
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -279,6 +297,31 @@ async fn run_relation_effect_scheduler(
                 }
             }
         }
+        for _ in 0..LCM_HOST_EFFECT_MAX_ITEMS_PER_WAKE {
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            match super::lcm_host_effects::process_one_pending_lcm_host_effect(
+                Arc::clone(&database),
+                &lcm_cancellation,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => {
+                    crate::daemon::log_daemon_event(
+                        "lcm_host_effect_scheduler",
+                        &[
+                            ("outcome", "degraded".to_owned()),
+                            ("database", database.db_path().display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    break;
+                }
+            }
+        }
         if shutdown.load(Ordering::Acquire) {
             break;
         }
@@ -288,40 +331,6 @@ async fn run_relation_effect_scheduler(
             () = tokio::time::sleep(RELATION_EFFECT_IDLE_RETRY) => {}
         }
     }
-}
-
-/// Starts bounded, best-effort convergence only after the exact session graph
-/// has been mounted. Admission and ordinary non-relation reads never wait for
-/// a pending SQLite-to-graph effect.
-pub(super) fn recover_pending_session_relation_effects(
-    database: Arc<tracedecay_global_db::RegisteredGlobalDb>,
-) {
-    tokio::spawn(async move {
-        match database
-            .recover_pending_session_relation_projections(
-                RELATION_EFFECT_RECOVERY_LIMIT,
-                Arc::new(tracedecay_graph_db::NeverCancelled),
-            )
-            .await
-        {
-            Ok(recovered) => crate::daemon::log_daemon_event(
-                "session_relation_effect_recovery",
-                &[
-                    ("outcome", "complete".to_owned()),
-                    ("database", database.db_path().display().to_string()),
-                    ("recovered", recovered.to_string()),
-                ],
-            ),
-            Err(error) => crate::daemon::log_daemon_event(
-                "session_relation_effect_recovery",
-                &[
-                    ("outcome", "degraded".to_owned()),
-                    ("database", database.db_path().display().to_string()),
-                    ("error", error.to_string()),
-                ],
-            ),
-        }
-    });
 }
 
 #[cfg(test)]

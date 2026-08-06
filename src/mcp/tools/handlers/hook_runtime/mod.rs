@@ -39,6 +39,7 @@ use errors::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
 use ingest::{
     accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
+    profile_host_compact,
 };
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
@@ -154,6 +155,16 @@ pub(crate) async fn handle_projectless_hook_runtime(
             )
             .await?
         }
+        "claude_compact" | "codex_compact" | "cursor_compact" => {
+            profile_host_compact(
+                &args,
+                profile_root,
+                global_db,
+                session_authorities,
+                action,
+            )
+            .await?
+        }
         "user_review" => user_review(&args, profile_root, &session_runtime_registry).await?,
         "hermes_receipt" => {
             let host_admission_broker =
@@ -174,6 +185,10 @@ pub(crate) async fn handle_projectless_hook_runtime(
 
 fn projectless_action_allowed(action: &str, args: &Value) -> bool {
     matches!(action, "user_review" | "hermes_receipt")
+        || (matches!(
+            action,
+            "claude_compact" | "codex_compact" | "cursor_compact"
+        ) && args.get("user_scope").and_then(Value::as_bool) == Some(true))
         || (action == "ingest_transcript"
             && args.get("user_scope").and_then(Value::as_bool) == Some(true))
 }

@@ -805,6 +805,40 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
+        "session_lcm_effect_journal",
+        [
+            column("effect_id", "TEXT", false, None, 1),
+            column("event_digest", "TEXT", true, None, 0),
+            column("provider", "TEXT", true, None, 0),
+            column("session_id", "TEXT", true, None, 0),
+            column("scope_kind", "TEXT", true, None, 0),
+            column("scope_id", "TEXT", true, None, 0),
+            column("compact_summary_digest", "TEXT", false, None, 0),
+            column("current_tokens", "INTEGER", false, None, 0),
+            column("context_length", "INTEGER", false, None, 0),
+            column("max_source_messages", "INTEGER", false, None, 0),
+            column("fresh_tail_count", "INTEGER", false, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "session_lcm_effect_receipts",
+        [
+            column("effect_id", "TEXT", false, None, 1),
+            column("state", "TEXT", true, None, 0),
+            column("reason", "TEXT", false, None, 0),
+            column("summary_node_ids_json", "TEXT", true, None, 0),
+            column("completed_at", "INTEGER", false, None, 0),
+        ],
+        [foreign_key(
+            "effect_id",
+            "session_lcm_effect_journal",
+            "effect_id",
+            "CASCADE"
+        )]
+    ),
+    table!(
         "session_external_payload_manifests",
         [
             column("payload_ref", "TEXT", false, None, 1),
@@ -1859,6 +1893,27 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["state", "created_at", "session_id", "generation"],
+    },
+    Index {
+        table: "session_lcm_effect_journal",
+        name: Some("idx_session_lcm_effect_journal_created"),
+        unique: false,
+        origin: "c",
+        columns: &["created_at", "effect_id"],
+    },
+    Index {
+        table: "session_lcm_effect_journal",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["event_digest", "scope_kind", "scope_id"],
+    },
+    Index {
+        table: "session_lcm_effect_receipts",
+        name: Some("idx_session_lcm_effect_receipts_pending"),
+        unique: false,
+        origin: "c",
+        columns: &["state", "effect_id"],
     },
     Index {
         table: "session_query_cursor_keys",

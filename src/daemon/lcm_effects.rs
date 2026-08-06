@@ -101,6 +101,23 @@ impl DaemonLcmEffectService {
 
     pub(crate) async fn compress(
         &self,
+        request: LcmCompressionRequest,
+    ) -> Result<LcmCompressionResponse, LcmError> {
+        self.compress_with_host_receipt(None, request).await
+    }
+
+    pub(crate) async fn compress_host_effect(
+        &self,
+        effect_id: &str,
+        request: LcmCompressionRequest,
+    ) -> Result<LcmCompressionResponse, LcmError> {
+        self.compress_with_host_receipt(Some(effect_id), request)
+            .await
+    }
+
+    async fn compress_with_host_receipt(
+        &self,
+        effect_id: Option<&str>,
         mut request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
         if matches!(
@@ -108,11 +125,13 @@ impl DaemonLcmEffectService {
             LcmSummarizerMode::Provided { summary_text, .. } if !summary_text.trim().is_empty()
         ) || matches!(&request.summarizer, LcmSummarizerMode::Fake { .. })
         {
-            return self.commit_compression(request).await;
+            return self.commit_compression(request, effect_id).await;
         }
 
         request.summarizer = LcmSummarizerMode::HermesAuxiliary;
-        let pending = self.commit_compression(request.clone()).await?;
+        let pending = self
+            .commit_compression(request.clone(), effect_id)
+            .await?;
         if pending.status != "needs_summary" {
             return Ok(pending);
         }
@@ -142,22 +161,38 @@ impl DaemonLcmEffectService {
             summary_text: summary.text,
             route: Some(summary.route),
         };
-        self.commit_compression(request).await
+        self.commit_compression(request, effect_id).await
     }
 
     async fn commit_compression(
         &self,
         request: LcmCompressionRequest,
+        effect_id: Option<&str>,
     ) -> Result<LcmCompressionResponse, LcmError> {
         let execution = self.control.execution_control();
         let before_commit = self.control.clone();
-        self.control
-            .execute(
-                &execution,
-                self.db
-                    .lcm_compress_guarded(request, &execution, move || before_commit.checkpoint()),
-            )
-            .await
+        let mutation = async {
+            match effect_id {
+                Some(effect_id) => {
+                    self.db
+                        .lcm_compress_host_effect_guarded(
+                            effect_id,
+                            request,
+                            &execution,
+                            move || before_commit.checkpoint(),
+                        )
+                        .await
+                }
+                None => {
+                    self.db
+                        .lcm_compress_guarded(request, &execution, move || {
+                            before_commit.checkpoint()
+                        })
+                        .await
+                }
+            }
+        };
+        self.control.execute(&execution, mutation).await
     }
 
     pub(crate) async fn session_boundary(

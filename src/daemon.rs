@@ -312,6 +312,7 @@ use project_server_lifecycle::{
     shutdown_project_servers,
 };
 pub(crate) mod lcm_effects;
+pub(crate) mod lcm_host_effects;
 mod lcm_summarization;
 mod query_mcp_admission;
 #[cfg(unix)]

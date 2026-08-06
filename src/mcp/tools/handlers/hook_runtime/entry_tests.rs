@@ -17,6 +17,10 @@ fn projectless_runtime_rejects_project_database_actions() {
         "claude_compact",
         &json!({ "provider": "claude" }),
     ));
+    assert!(projectless_action_allowed(
+        "claude_compact",
+        &json!({ "provider": "claude", "user_scope": true }),
+    ));
     assert!(!projectless_action_allowed(
         "ingest_transcript",
         &json!({ "user_scope": false }),

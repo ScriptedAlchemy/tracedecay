@@ -10,7 +10,6 @@ use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
 use std::path::Path;
-use std::sync::Arc;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use super::super::SessionAuthorities;
@@ -21,6 +20,8 @@ use super::required_str;
 mod kernels;
 
 use kernels::{TranscriptCaptureContext, TranscriptCaptureOutcome, transcript_capture_kernel};
+
+const HOST_COMPACTION_ADMISSION_MAX_BYTES: u64 = 1024 * 1024;
 
 fn host_admission_facade<'a>(
     cg: Option<&TraceDecay>,
@@ -187,10 +188,27 @@ pub(super) async fn claude_compact(
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
+    require_project_compaction_scope(args, "claude")?;
     let event = parse_claude_compact_event(args)?;
     let db = session_authorities
         .project
         .ok_or_else(|| config_error("daemon project session database is unavailable"))?;
+    let event_json = required_str(args, "event_json")?;
+    crate::daemon::lcm_host_effects::enqueue_lcm_host_effect(
+        db,
+        crate::daemon::lcm_host_effects::LcmHostEffectAdmission {
+            provider: "claude",
+            session_id: &event.session_id,
+            event_json,
+            compact_summary: Some(&event.compact_summary),
+            current_tokens: event.current_tokens,
+            context_length: event.context_length,
+            max_source_messages: None,
+            fresh_tail_count: None,
+            source_ready: false,
+        },
+    )
+    .await?;
     let project_id = project_observation_id(cg)?;
     let scope = ObservationScopeV1::Project {
         project_id: project_id.clone(),
@@ -206,55 +224,41 @@ pub(super) async fn claude_compact(
             cg.project_root(),
             scope,
             &admission,
-            Some(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
+            Some(HOST_COMPACTION_ADMISSION_MAX_BYTES),
             cancellation,
         )
         .await
         .map_err(|error| map_claude_observation_ingest_error(&error))?;
-    let authoritative =
-        crate::daemon::lcm_summarization::native_summary_evidence(db, "claude", &event.session_id)
-            .await
-            .map_err(|error| {
-                config_error(format!("read Claude compaction evidence failed: {error}"))
-            })?
-            .ok_or_else(|| {
-                config_error("canonical Claude compact summary evidence is unavailable")
-            })?;
-    if authoritative.text != event.compact_summary {
-        return Err(config_error(
-            "canonical Claude compact summary does not exactly match the native event",
-        ));
-    }
+    let source_ready = ingest.deferred_sources == 0;
 
-    let effects =
-        crate::daemon::lcm_effects::DaemonLcmEffectService::new(Arc::clone(db), None, None);
-    let mut request = host_lcm_request(
-        "claude",
-        &event.session_id,
-        event.current_tokens,
-        event.context_length,
-        None,
-        None,
-        "Claude context compaction",
-        None,
-    );
-    request.summarizer = crate::sessions::lcm::LcmSummarizerMode::Provided {
-        summary_text: event.compact_summary,
-        route: Some(authoritative.route),
-    };
-    let result = effects
-        .compress(request)
-        .await
-        .map_err(|error| config_error(format!("store Claude compaction failed: {error}")))?;
+    let receipt = crate::daemon::lcm_host_effects::enqueue_lcm_host_effect(
+        db,
+        crate::daemon::lcm_host_effects::LcmHostEffectAdmission {
+            provider: "claude",
+            session_id: &event.session_id,
+            event_json,
+            compact_summary: Some(&event.compact_summary),
+            current_tokens: event.current_tokens,
+            context_length: event.context_length,
+            max_source_messages: None,
+            fresh_tail_count: None,
+            source_ready,
+        },
+    )
+    .await?;
     Ok(json!({
         "action": "claude_compact",
-        "status": result.status,
-        "reason": result.reason,
-        "summary_nodes_created": result.summary_nodes_created,
-        "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
-        "relation_projection_status": result.relation_projection_status,
+        "provider": "claude",
+        "event_id": receipt.event_id,
+        "event_digest": receipt.event_digest,
+        "status": receipt.status,
+        "reason": receipt.reason,
+        "retryable": receipt.retryable,
+        "summary_node_ids": receipt.summary_node_ids,
+        "relation_projection_status": "pending",
         "messages_upserted": ingest.transcript.messages_upserted,
         "observations_committed": ingest.observations_committed,
+        "source_deferred": !source_ready,
     }))
 }
 
@@ -263,18 +267,36 @@ pub(super) async fn codex_compact(
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
+    require_project_compaction_scope(args, "codex")?;
     let event_json = required_str(args, "event_json")?;
     let db = session_authorities
         .project
         .ok_or_else(|| config_error("daemon project session database is unavailable"))?;
-    let effects =
-        crate::daemon::lcm_effects::DaemonLcmEffectService::new(Arc::clone(db), None, None);
     let parsed: Value = serde_json::from_str(event_json)?;
     let session_id = ["session_id", "conversation_id", "thread_id"]
         .iter()
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Codex compact event omitted session id"))?;
+    let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
+    let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
+    crate::daemon::lcm_host_effects::enqueue_lcm_host_effect(
+        db,
+        crate::daemon::lcm_host_effects::LcmHostEffectAdmission {
+            provider: "codex",
+            session_id,
+            event_json,
+            compact_summary: None,
+            current_tokens,
+            context_length,
+            max_source_messages: None,
+            fresh_tail_count: None,
+            source_ready: false,
+        },
+    )
+    .await?;
+    let mut messages_upserted = 0_u64;
+    let mut source_ready = false;
     if let Some(source) = crate::sessions::codex::CodexSource::new() {
         let project_id = project_observation_id(cg)?;
         let scope = ObservationScopeV1::Project {
@@ -282,42 +304,47 @@ pub(super) async fn codex_compact(
         };
         let admission =
             host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
-        for path in source.transcript_paths(cg.project_root()) {
-            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project_with_admission(
-                &path,
-                cg.project_root(),
-                project_id.clone(),
-                &admission,
-                None,
-            )
-            .await
-            .map_err(|error| map_transcript_ingest_error(&error))?;
-        }
         let cancellation = ObservationCancellation::default();
-        drain_host_observation_projections(&admission, &scope, &cancellation).await?;
+        let source_deferred = admit_codex_project_rollouts(
+            &admission,
+            &source,
+            cg.project_root(),
+            project_id,
+            Some(HOST_COMPACTION_ADMISSION_MAX_BYTES),
+            &cancellation,
+        )
+        .await?;
+        source_ready = !source_deferred;
+        messages_upserted =
+            drain_host_observation_projections(&admission, &scope, &cancellation).await?;
     }
-    let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
-    let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
-    let result = effects
-        .compress(host_lcm_request(
-            "codex",
+    let receipt = crate::daemon::lcm_host_effects::enqueue_lcm_host_effect(
+        db,
+        crate::daemon::lcm_host_effects::LcmHostEffectAdmission {
+            provider: "codex",
             session_id,
+            event_json,
+            compact_summary: None,
             current_tokens,
             context_length,
-            None,
-            None,
-            "Codex context compaction",
-            None,
-        ))
-        .await
-        .map_err(|error| config_error(format!("store Codex compaction failed: {error}")))?;
+            max_source_messages: None,
+            fresh_tail_count: None,
+            source_ready,
+        },
+    )
+    .await?;
     Ok(json!({
         "action": "codex_compact",
-        "status": result.status,
-        "reason": result.reason,
-        "summary_nodes_created": result.summary_nodes_created,
-        "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
-        "relation_projection_status": result.relation_projection_status,
+        "provider": "codex",
+        "event_id": receipt.event_id,
+        "event_digest": receipt.event_digest,
+        "status": receipt.status,
+        "reason": receipt.reason,
+        "retryable": receipt.retryable,
+        "summary_node_ids": receipt.summary_node_ids,
+        "relation_projection_status": "pending",
+        "messages_upserted": messages_upserted,
+        "source_deferred": !source_ready,
     }))
 }
 
@@ -326,12 +353,11 @@ pub(super) async fn cursor_compact(
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
+    require_project_compaction_scope(args, "cursor")?;
     let event_json = required_str(args, "event_json")?;
     let db = session_authorities
         .project
         .ok_or_else(|| config_error("daemon project session database is unavailable"))?;
-    let effects =
-        crate::daemon::lcm_effects::DaemonLcmEffectService::new(Arc::clone(db), None, None);
     let project_id = project_observation_id(cg)?;
     let admission =
         host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
@@ -341,52 +367,186 @@ pub(super) async fn cursor_compact(
         .find_map(|key| parsed.get(*key).and_then(Value::as_str))
         .filter(|value| !value.is_empty())
         .ok_or_else(|| config_error("Cursor preCompact event omitted session id"))?;
-    let ingest = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
-        event_json, project_id, &admission, None,
-    )
-    .await
-    .map_err(|error| map_transcript_ingest_error(&error))?;
     let messages_to_compact = event_usize(&parsed, &["messages_to_compact", "compact_count"]);
-    if messages_to_compact == Some(0) {
-        return Ok(cursor_compact_skipped("no messages to compact"));
-    }
     let message_count = event_usize(&parsed, &["message_count", "messages_count"]);
     let fresh_tail_count = message_count
         .zip(messages_to_compact)
         .map(|(count, compact)| count.saturating_sub(compact));
     let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
     let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
-    let result = effects
-        .compress(host_lcm_request(
-            "cursor",
+    crate::daemon::lcm_host_effects::enqueue_lcm_host_effect(
+        db,
+        crate::daemon::lcm_host_effects::LcmHostEffectAdmission {
+            provider: "cursor",
             session_id,
+            event_json,
+            compact_summary: None,
             current_tokens,
             context_length,
-            messages_to_compact,
+            max_source_messages: messages_to_compact,
             fresh_tail_count,
-            "Cursor context compaction",
-            None,
-        ))
-        .await
-        .map_err(|error| config_error(format!("store Cursor compaction failed: {error}")))?;
+            source_ready: false,
+        },
+    )
+    .await?;
+    let ingest = crate::sessions::cursor::try_ingest_cursor_transcript_event_capped_with_admission(
+        event_json,
+        project_id,
+        &admission,
+        Some(HOST_COMPACTION_ADMISSION_MAX_BYTES),
+    )
+    .await
+    .map_err(|error| map_transcript_ingest_error(&error))?;
+    let receipt = crate::daemon::lcm_host_effects::enqueue_lcm_host_effect(
+        db,
+        crate::daemon::lcm_host_effects::LcmHostEffectAdmission {
+            provider: "cursor",
+            session_id,
+            event_json,
+            compact_summary: None,
+            current_tokens,
+            context_length,
+            max_source_messages: messages_to_compact,
+            fresh_tail_count,
+            source_ready: !ingest.source_deferred,
+        },
+    )
+    .await?;
     Ok(json!({
-        "status": result.status,
-        "reason": result.reason,
-        "summary_nodes_created": result.summary_nodes_created,
-        "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
-        "relation_projection_status": result.relation_projection_status,
+        "action": "cursor_compact",
+        "provider": "cursor",
+        "event_id": receipt.event_id,
+        "event_digest": receipt.event_digest,
+        "status": receipt.status,
+        "reason": receipt.reason,
+        "retryable": receipt.retryable,
+        "summary_node_ids": receipt.summary_node_ids,
+        "relation_projection_status": "pending",
         "messages_upserted": ingest.messages_upserted,
+        "source_deferred": ingest.source_deferred,
     }))
 }
 
-fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
-    json!({
-        "status": "skipped",
-        "reason": reason.into(),
-        "summary_nodes_created": 0,
-        "summary_node_ids": [],
-        "relation_projection_status": "not_applicable",
-    })
+fn require_project_compaction_scope(args: &Value, provider: &str) -> Result<()> {
+    if required_str(args, "provider")? != provider {
+        return Err(config_error(
+            "project host compaction action does not match provider",
+        ));
+    }
+    if args.get("user_scope").and_then(Value::as_bool) == Some(true) {
+        return Err(config_error(
+            "project host compaction cannot use profile scope",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) async fn profile_host_compact(
+    args: &Value,
+    profile_root: &Path,
+    global_db: &RegisteredGlobalDb,
+    session_authorities: SessionAuthorities<'_>,
+    action: &str,
+) -> Result<Value> {
+    if args.get("user_scope").and_then(Value::as_bool) != Some(true) {
+        return Err(config_error(
+            "profile host compaction requires user_scope `true`",
+        ));
+    }
+    let provider = required_str(args, "provider")?;
+    let expected_provider = action
+        .strip_suffix("_compact")
+        .ok_or_else(|| config_error("invalid profile host compaction action"))?;
+    if provider != expected_provider {
+        return Err(config_error(
+            "profile host compaction action does not match provider",
+        ));
+    }
+    let event_json = required_str(args, "event_json")?;
+    let parsed: Value = serde_json::from_str(event_json)
+        .map_err(|_| config_error("profile host compaction event is not valid JSON"))?;
+    let session_id = required_str(args, "session_id")?;
+    let native_session_id = ["session_id", "conversation_id", "thread_id", "chat_id"]
+        .iter()
+        .find_map(|key| parsed.get(*key).and_then(Value::as_str));
+    if native_session_id.is_some_and(|native| native != session_id) {
+        return Err(config_error(
+            "profile host compaction session does not match the native event",
+        ));
+    }
+    let compact_summary = if provider == "claude" {
+        let parsed_claude = parse_claude_compact_event(args)?;
+        if parsed_claude.session_id != session_id {
+            return Err(config_error(
+                "profile Claude compaction session does not match the native event",
+            ));
+        }
+        Some(parsed_claude.compact_summary)
+    } else {
+        None
+    };
+    let mut bounded_args = args.clone();
+    bounded_args["max_new_bytes"] = json!(HOST_COMPACTION_ADMISSION_MAX_BYTES);
+    let ingest = ingest_transcript(
+        None,
+        &bounded_args,
+        Some(profile_root),
+        Some(global_db),
+        session_authorities,
+    )
+    .await?;
+    let messages_upserted = ingest
+        .get("messages_upserted")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| config_error("profile transcript admission omitted its message count"))?;
+    let source_ready = ingest.get("completed").and_then(Value::as_bool).ok_or_else(|| {
+        config_error("profile transcript admission omitted its completion state")
+    })?;
+    let messages_to_compact = (provider == "cursor")
+        .then(|| event_usize(&parsed, &["messages_to_compact", "compact_count"]))
+        .flatten();
+    let message_count = event_usize(&parsed, &["message_count", "messages_count"]);
+    let fresh_tail_count = message_count
+        .zip(messages_to_compact)
+        .map(|(count, compact)| count.saturating_sub(compact));
+    let user_db = session_authorities
+        .user
+        .ok_or_else(|| config_error("daemon user session database is unavailable"))?;
+    let receipt = crate::daemon::lcm_host_effects::enqueue_lcm_host_effect(
+        user_db,
+        crate::daemon::lcm_host_effects::LcmHostEffectAdmission {
+            provider,
+            session_id,
+            event_json,
+            compact_summary: compact_summary.as_deref(),
+            current_tokens: event_i64(
+                &parsed,
+                &["context_tokens", "current_tokens", "tokens"],
+            ),
+            context_length: event_i64(
+                &parsed,
+                &["context_window_size", "context_length"],
+            ),
+            max_source_messages: messages_to_compact,
+            fresh_tail_count,
+            source_ready,
+        },
+    )
+    .await?;
+    Ok(json!({
+        "action": action,
+        "provider": provider,
+        "user_scope": true,
+        "event_id": receipt.event_id,
+        "event_digest": receipt.event_digest,
+        "status": receipt.status,
+        "reason": receipt.reason,
+        "retryable": receipt.retryable,
+        "summary_node_ids": receipt.summary_node_ids,
+        "relation_projection_status": "pending",
+        "messages_upserted": messages_upserted,
+        "source_deferred": !source_ready,
+    }))
 }
 
 fn event_i64(value: &Value, keys: &[&str]) -> Option<i64> {
@@ -401,41 +561,6 @@ fn event_i64(value: &Value, keys: &[&str]) -> Option<i64> {
 
 fn event_usize(value: &Value, keys: &[&str]) -> Option<usize> {
     event_i64(value, keys).and_then(|value| usize::try_from(value).ok())
-}
-
-fn host_lcm_request(
-    provider: &str,
-    session_id: &str,
-    current_tokens: Option<i64>,
-    context_length: Option<i64>,
-    max_source_messages: Option<usize>,
-    fresh_tail_count: Option<usize>,
-    focus_topic: &str,
-    expected_current_frontier_store_id: Option<i64>,
-) -> crate::sessions::lcm::LcmCompressionRequest {
-    crate::sessions::lcm::LcmCompressionRequest {
-        provider: provider.to_string(),
-        session_id: session_id.to_string(),
-        messages: Vec::new(),
-        current_tokens,
-        focus_topic: Some(focus_topic.to_string()),
-        ignore_session_patterns: Vec::new(),
-        stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
-        expected_current_frontier_store_id,
-        threshold_tokens: None,
-        max_assembly_tokens: None,
-        leaf_chunk_tokens: None,
-        max_source_messages,
-        summary_fan_in: None,
-        incremental_max_depth: None,
-        fresh_tail_count,
-        dynamic_leaf_chunk_enabled: None,
-        dynamic_leaf_chunk_max: None,
-        context_length,
-        reserve_tokens_floor: None,
-        summarizer: crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
-    }
 }
 
 pub(super) async fn accounting_receipt(

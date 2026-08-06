@@ -374,7 +374,7 @@ impl RegisteredGlobalDb {
         })
     }
 
-    pub(crate) fn notify_session_relation_effect_appended(&self) {
+    pub fn notify_session_relation_effect_appended(&self) {
         if let Some(wake) = self.session_relation_effect_wake.get() {
             wake.notify_one();
         }

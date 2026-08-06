@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tracedecay_domain::SessionId;
-use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows, params};
 use tracedecay_sessions::runtime::{
     SessionMessageRecord,
     lcm::{
@@ -37,6 +37,35 @@ fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
         )),
         other => LcmError::Db(format!("LCM relation execution control failed: {other}")),
     })
+}
+
+async fn complete_lcm_host_effect_receipt(
+    conn: &impl Executor,
+    effect_id: &str,
+    response: &LcmCompressionResponse,
+) -> Result<(), LcmError> {
+    let summary_node_ids = response
+        .summary_nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect::<Vec<_>>();
+    let encoded_ids = serde_json::to_string(&summary_node_ids)
+        .map_err(|error| LcmError::Db(format!("encode host compaction receipt: {error}")))?;
+    let changed = conn
+        .execute(
+            "UPDATE session_lcm_effect_receipts
+             SET state = 'completed', reason = ?2, summary_node_ids_json = ?3,
+                 completed_at = unixepoch()
+             WHERE effect_id = ?1 AND state = 'pending'",
+            params![effect_id, response.reason.as_str(), encoded_ids],
+        )
+        .await?;
+    if changed != 1 {
+        return Err(LcmError::Db(
+            "host compaction receipt changed before the atomic LCM commit".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 impl QueryExecutor for RegisteredGlobalDbWriterConnection<'_> {
@@ -285,6 +314,34 @@ impl RegisteredGlobalDb {
     where
         F: FnOnce() -> Result<(), LcmError>,
     {
+        self.lcm_compress_guarded_inner(None, request, control, before_commit)
+            .await
+    }
+
+    pub async fn lcm_compress_host_effect_guarded<F>(
+        &self,
+        effect_id: &str,
+        request: LcmCompressionRequest,
+        control: &ExecutionControl,
+        before_commit: F,
+    ) -> Result<LcmCompressionResponse, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
+        self.lcm_compress_guarded_inner(Some(effect_id), request, control, before_commit)
+            .await
+    }
+
+    async fn lcm_compress_guarded_inner<F>(
+        &self,
+        effect_id: Option<&str>,
+        request: LcmCompressionRequest,
+        control: &ExecutionControl,
+        before_commit: F,
+    ) -> Result<LcmCompressionResponse, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
         check_execution(control)?;
         let storage_root = self.lcm_storage_root()?;
         let session_id = SessionId::new(request.session_id.clone()).map_err(|error| {
@@ -321,6 +378,11 @@ impl RegisteredGlobalDb {
         )
         .await?;
         check_execution(control)?;
+        if let Some(effect_id) = effect_id
+            && response.status != "needs_summary"
+        {
+            complete_lcm_host_effect_receipt(&transaction, effect_id, &response).await?;
+        }
         before_commit()?;
         transaction.commit().await?;
         payload_rollback.disarm();

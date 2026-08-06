@@ -174,16 +174,21 @@ async fn capture_codex_profile(
     let global_db = ctx.global_db()?;
     let session_id = required_str(ctx.args, "session_id")?.to_string();
     let roots = registered_project_roots(global_db).await?;
-    let stats = crate::sessions::try_ingest_user_codex_sessions_with_db_and_admission(
+    let (stats, source_deferred) =
+        crate::sessions::try_ingest_user_codex_sessions_capped_with_admission(
         profile_root,
         Some(session_id),
         roots,
         ctx.facade,
+        ctx.max_new_bytes
+            .unwrap_or(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
+        ctx.cancellation,
     )
     .await
     .map_err(|error| map_transcript_ingest_error(&error))?;
     Ok(TranscriptCaptureOutcome {
         messages_upserted: stats.messages_upserted,
+        source_deferred,
         ..TranscriptCaptureOutcome::default()
     })
 }
