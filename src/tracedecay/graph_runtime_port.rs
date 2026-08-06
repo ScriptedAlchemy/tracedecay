@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 use tracedecay_application::retrieval::HealthDeltaResult;
 use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, RedundancyResultV1};
 use tracedecay_application::source_edit::{
-    AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
+    AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
+    RenameSymbolBindingV1,
 };
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::DependencyImportUse;
@@ -394,6 +395,15 @@ impl GraphRuntimePort for TraceDecay {
             dry_run,
             update_references,
         ))
+    }
+
+    fn rename_symbol<'a>(
+        &'a self,
+        binding: &'a RenameSymbolBindingV1,
+        new_name: &'a str,
+        dry_run: bool,
+    ) -> GraphFuture<'a, RenameResult> {
+        Box::pin(TraceDecay::rename_symbol(self, binding, new_name, dry_run))
     }
 
     fn recover_source_edit_preimages<'a>(

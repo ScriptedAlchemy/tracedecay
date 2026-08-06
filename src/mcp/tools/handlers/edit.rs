@@ -422,6 +422,38 @@ pub(super) async fn handle_move_symbol(
     .await
 }
 
+pub(super) async fn handle_rename_symbol(
+    cg: &TraceDecay,
+    args: Value,
+    invocation: SourceEditInvocationContext,
+) -> Result<ToolResult> {
+    let binding = tracedecay_application::RenameSymbolBindingV1 {
+        node_id: required_str(&args, "node_id")?.to_owned(),
+        qualified_name: required_str(&args, "qualified_name")?.to_owned(),
+        kind: required_str(&args, "kind")?.to_owned(),
+        file: required_str(&args, "file")?.to_owned(),
+        old_name: required_str(&args, "old_name")?.to_owned(),
+    };
+    let new_name = required_str(&args, "new_name")?;
+    // The bound plan and expected_state digest are the product; applying is
+    // opt-in, exactly like move_symbol.
+    let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
+    let verify = verify_arg(&args);
+
+    source_edit_tool_result(
+        cg,
+        &args,
+        SourceEditRequest::RenameSymbol {
+            binding,
+            new_name: new_name.to_owned(),
+            dry_run,
+            verify,
+        },
+        invocation,
+    )
+    .await
+}
+
 /// Human-readable markdown for a move result: the outcome line, applied
 /// imports, the impact report (the centerpiece), and the preview diff.
 fn move_result_md(result: &crate::types::MoveResult) -> String {
@@ -672,7 +704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seven_source_edit_handlers_forward_exact_variants_defaults_and_controls() {
+    async fn source_edit_handlers_forward_exact_variants_defaults_and_controls() {
         let project = tempdir().unwrap();
         let (graph, _database_scope) = fixture_graph(project.path()).await;
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -723,6 +755,20 @@ mod tests {
         handle_move_symbol(
             &graph,
             json!({"symbol":"old","dest_file":"src/new.rs"}),
+            invocation_context(Some(Arc::clone(&executor))),
+        )
+        .await
+        .unwrap();
+        handle_rename_symbol(
+            &graph,
+            json!({
+                "node_id": "node.fixture",
+                "qualified_name": "old",
+                "kind": "function",
+                "file": "src/lib.rs",
+                "old_name": "old",
+                "new_name": "renamed"
+            }),
             invocation_context(Some(executor)),
         )
         .await
@@ -741,6 +787,7 @@ mod tests {
                 SourceEditKind::ReplaceSymbol,
                 SourceEditKind::InsertAtSymbol,
                 SourceEditKind::MoveSymbol,
+                SourceEditKind::RenameSymbol,
             ]
         );
         assert!(seen.iter().all(|invocation| invocation.edit.dry_run()));
@@ -764,6 +811,14 @@ mod tests {
             &seen[6].edit,
             SourceEditRequest::MoveSymbol {
                 update_references: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &seen[7].edit,
+            SourceEditRequest::RenameSymbol {
+                dry_run: true,
+                verify: false,
                 ..
             }
         ));
