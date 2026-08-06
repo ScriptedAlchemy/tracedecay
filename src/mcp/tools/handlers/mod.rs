@@ -16,6 +16,7 @@ mod analytics;
 mod application_surface;
 pub mod ast_grep_search;
 pub mod dashboard;
+mod dashboard_lcm;
 mod dependency_hints;
 mod dispatch_groups;
 pub mod edit;
@@ -47,11 +48,12 @@ pub(crate) use project_registry::{
 pub(crate) use session::message_search::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
-    SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
-    SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
+    SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
+    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
+    SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 pub(crate) use session::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
@@ -196,6 +198,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    pub(crate) dashboard_lcm_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     pub profile_root: Option<&'a Path>,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
@@ -242,6 +245,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             accounting_db: None,
             registered_project_session_db: None,
             registered_savings_db: None,
+            dashboard_lcm_retrieval_service: None,
             profile_root: None,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
