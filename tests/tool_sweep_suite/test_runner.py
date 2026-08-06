@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -214,6 +215,93 @@ class NegotiatedSurfaceTests(unittest.TestCase):
         )
 
 
+class DispatchMetadataTests(unittest.TestCase):
+    @staticmethod
+    def definition(*, availability=None, terminal_states=None):
+        return {
+            "name": "tracedecay_fixture_read",
+            "annotations": {"readOnlyHint": True},
+            "_meta": {
+                "tracedecay/dispatch": {
+                    "version": 1,
+                    "fingerprint": "sha256:fixture",
+                    "availability": availability or {"state": "available"},
+                    "effect": "read",
+                    "read_only": True,
+                    "deadline": {"maximum_millis": 1_000},
+                    "idempotency": "not_provided",
+                    "inverse": {"mode": "not_applicable"},
+                    "cancellation": {"mode": "cooperative", "points": ["during_read"]},
+                    "terminal_states": terminal_states
+                    or [
+                        "completed",
+                        "cancelled",
+                        "deadline_exceeded",
+                        "denied",
+                        "failed",
+                        "unavailable",
+                    ],
+                }
+            },
+        }
+
+    def test_policy_consumes_the_complete_canonical_dispatch_contract(self) -> None:
+        runner = load_runner()
+
+        policy = runner.tool_policy(self.definition())
+
+        self.assertEqual(policy.deadline_ms, 1_000)
+        self.assertEqual(policy.fingerprint, "sha256:fixture")
+
+    def test_policy_rejects_cancellation_terminal_drift(self) -> None:
+        runner = load_runner()
+        definition = self.definition(
+            terminal_states=[
+                "completed",
+                "deadline_exceeded",
+                "denied",
+                "failed",
+                "unavailable",
+            ]
+        )
+
+        with self.assertRaises(runner.SweepError):
+            runner.tool_policy(definition)
+
+    def test_unavailable_policy_requires_the_canonical_nonretryable_reason(self) -> None:
+        runner = load_runner()
+        definition = self.definition(
+            availability={
+                "state": "unavailable",
+                "reason": "effect_journey_unverified",
+                "retryable": False,
+            }
+        )
+
+        policy = runner.tool_policy(definition)
+
+        self.assertEqual(policy.availability_reason, "effect_journey_unverified")
+
+
+class DeadlineTests(unittest.TestCase):
+    def test_post_deadline_settlement_cannot_become_a_passing_response(self) -> None:
+        runner = load_runner()
+        client = object.__new__(runner.McpClient)
+        waits = iter([None, {"result": {"content": []}}])
+        sent = []
+        client._new_id = lambda: 1
+        client._send = sent.append
+        client._wait = lambda _request_id, _deadline_ms: next(waits)
+
+        with self.assertRaises(runner.CallDeadlineExceeded) as raised:
+            client.request("tools/call", {"name": "tracedecay_read"}, 10, cancel_on_timeout=True)
+
+        self.assertTrue(raised.exception.cancellation_settled)
+        self.assertEqual(sent[-1]["method"], "notifications/cancelled")
+        row = runner._call_failure_row("tool", "tracedecay_read", 10, raised.exception)
+        self.assertEqual(row["problem_code"], "tool_sweep.call_deadline_exceeded")
+
+
 class MutationJourneyTests(unittest.TestCase):
     def test_unrecognised_negotiated_mutation_is_a_failure_not_a_skip(self) -> None:
         """A new mutable catalog entry needs a real rollback recipe before it can pass."""
@@ -226,6 +314,71 @@ class MutationJourneyTests(unittest.TestCase):
 
         self.assertEqual(row["verdict"], "FAIL")
         self.assertEqual(row["problem_code"], "tool_sweep.effect_journey_unavailable")
+
+    def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "src").mkdir()
+            source = root / "src/lib.rs"
+            source.write_text("pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n")
+            (root / "src/relocated.rs").write_text("pub fn relocation_marker() -> i32 { 0 }\n")
+            fixture = {
+                "root": str(root),
+                "file": "src/lib.rs",
+                "qualified_name": "sweep_anchor",
+            }
+            calls = []
+
+            def call(tool, arguments, _deadline_ms):
+                calls.append((tool, dict(arguments)))
+                if arguments.get("dry_run") is True:
+                    return {
+                        "result": {
+                            "content": [{
+                                "type": "text",
+                                "text": '{"expected_state":"sha256:' + "a" * 64 + '"}',
+                            }]
+                        }
+                    }
+                if arguments.get("old_str") == "value: 8":
+                    source.write_text(
+                        "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
+                    )
+                    return {"result": {"content": [{"type": "text", "text": '{"success":true}'}]}}
+                return {
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": '{"success":true,"replayed":true,"effect_id":"effect.fixture"}',
+                        }]
+                    }
+                }
+
+            prepared = runner.prepare_journey(
+                "tracedecay_str_replace",
+                object(),
+                fixture,
+                lambda _tool: 1_000,
+                call,
+            )
+            self.assertIsNotNone(prepared)
+            source.write_text(
+                "pub fn sweep_anchor() -> SweepType { SweepType { value: 8 } }\n"
+            )
+            note = prepared.cleanup(
+                {
+                    "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": '{"success":true,"effect_id":"effect.fixture"}',
+                        }]
+                    }
+                }
+            )
+
+        self.assertEqual(note, "preview/apply/consumer/rollback verified")
+        self.assertTrue(all(arguments["format"] == "json" for _, arguments in calls))
 
 
 if __name__ == "__main__":
