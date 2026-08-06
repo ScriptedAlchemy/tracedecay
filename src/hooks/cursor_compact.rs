@@ -2,8 +2,8 @@
 //!
 //! Cursor's compaction event exposes pressure metadata but not Cursor's own
 //! generated summary text. The hook delegates pressure admission to the daemon,
-//! which ingests the current transcript tail and reports native summary content
-//! as unavailable. It never substitutes `cursor-agent` output.
+//! which reports native summary content as unavailable without ingesting the
+//! transcript. It never substitutes `cursor-agent` output.
 
 use std::time::Duration;
 

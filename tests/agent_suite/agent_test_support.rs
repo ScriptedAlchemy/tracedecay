@@ -773,7 +773,7 @@ pub fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
     );
     assert!(
         codex_event_has_handler(hooks, "PostCompact", "hook-codex-post-compact"),
-        "Codex PostCompact hook should generate app-server LCM summaries: {hooks}"
+        "Codex PostCompact hook should report native payload availability through the daemon: {hooks}"
     );
     assert!(
         codex_event_has_handler(hooks, "Stop", "hook-codex-stop"),
