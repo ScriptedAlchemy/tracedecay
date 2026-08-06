@@ -9,11 +9,11 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [dependencies]
-grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
-grafeo-common = { version = "=0.5.42", default-features = false }
-grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
-grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "grafeo-file", "vector-index"] }
-grafeo-storage = { version = "=0.5.42", default-features = false, features = ["grafeo-file"] }
+grafeo-adapters = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["algos"] }
+grafeo-common = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false }
+grafeo-core = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["lpg", "vector-index"] }
+grafeo-engine = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["lpg", "gql", "algos", "grafeo-file", "vector-index"] }
+grafeo-storage = { git = "https://github.com/GrafeoDB/grafeo", rev = "4c448e1c60e53deab5820f1e14d30cc69f4938e9", default-features = false, features = ["grafeo-file"] }
 hex = "0.4"
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 serde = { version = "1", features = ["derive"] }
