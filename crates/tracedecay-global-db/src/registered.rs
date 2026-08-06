@@ -1206,6 +1206,30 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // `Initialize` publishes with schema migration already recorded, which
+        // skips attach-time validation. The refusal journey only exists when a
+        // later process reopens the incompatible store, so republish the same
+        // path as an existing store.
+        drop(database);
+        drop(authority);
+        let authority = DatabaseAuthority::acquire_test(
+            &database_path,
+            "reopen incompatible configuration store",
+        )
+        .unwrap();
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Existing,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: tracedecay_domain::ProjectId::new(
+                    "project.configuration-reset".to_owned(),
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
         let runtime = database.retained_runtime().clone();
         let expected_binding = runtime.binding().clone();
         let expected_locator = runtime.locator().verified().clone();
