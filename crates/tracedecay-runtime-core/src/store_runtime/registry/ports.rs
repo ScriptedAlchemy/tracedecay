@@ -364,6 +364,15 @@ async fn migrate_before_publication(
                     message: error.to_string(),
                 })?;
         }
+        StoreShardScopeV1::RemoteNode { .. } => {
+            connection
+                .execute_batch(tracedecay_rusqlite_runtime::remote::REMOTE_NODE_LOCAL_SCHEMA)
+                .await
+                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "create initialized remote-node schema",
+                    message: error.to_string(),
+                })?;
+        }
     }
     Ok(true)
 }
@@ -480,6 +489,30 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
                     operation: "snapshot repository database",
                     message: error.to_string(),
                 })
+        })
+    }
+
+    fn snapshot_to_interruptible(
+        &self,
+        destination: PathBuf,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
+    ) -> StoreRuntimeRegistryFuture<
+        '_,
+        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure>,
+    > {
+        Box::pin(async move {
+            RepositoryRuntimePhysicalAttachment::snapshot_to_interruptible(
+                self,
+                destination,
+                probe,
+                authority,
+            )
+            .await
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "snapshot repository database",
+                message: error.to_string(),
+            })
         })
     }
 

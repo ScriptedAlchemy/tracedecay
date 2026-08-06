@@ -5,8 +5,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::is_canonical_text;
 pub use tracedecay_domain::{
-    AuthorityEpoch, BrainId, LocatorDigest, ProjectId, RefId, RepositoryId, UserProfileId,
-    WorktreeId,
+    AuthorityEpoch, BrainId, BrainNodeId, LocatorDigest, ProjectId, RefId, RepositoryId,
+    UserProfileId, WorktreeId,
 };
 
 use super::StorageRuntimeContractErrorV1;
@@ -143,6 +143,9 @@ pub enum StoreShardScopeV1 {
     Profile,
     ProfileMemory,
     ProfileSessions,
+    RemoteNode {
+        node_id: BrainNodeId,
+    },
     Project {
         project_id: ProjectId,
     },
@@ -159,7 +162,10 @@ pub enum StoreShardScopeV1 {
 impl StoreShardScopeV1 {
     pub fn project_id(&self) -> Option<&ProjectId> {
         match self {
-            Self::Profile | Self::ProfileMemory | Self::ProfileSessions => None,
+            Self::Profile
+            | Self::ProfileMemory
+            | Self::ProfileSessions
+            | Self::RemoteNode { .. } => None,
             Self::Project { project_id }
             | Self::ProjectSessions { project_id }
             | Self::Code { project_id, .. } => Some(project_id),
@@ -171,6 +177,7 @@ impl StoreShardScopeV1 {
             Self::Profile
             | Self::ProfileMemory
             | Self::ProfileSessions
+            | Self::RemoteNode { .. }
             | Self::Project { .. }
             | Self::ProjectSessions { .. } => true,
             Self::Code {
@@ -216,6 +223,14 @@ impl StoreShardIdV1 {
 
     pub fn profile_sessions(brain_id: BrainId, profile_id: UserProfileId) -> Self {
         Self::new(brain_id, profile_id, StoreShardScopeV1::ProfileSessions)
+    }
+
+    pub fn remote_node(brain_id: BrainId, profile_id: UserProfileId, node_id: BrainNodeId) -> Self {
+        Self::new(
+            brain_id,
+            profile_id,
+            StoreShardScopeV1::RemoteNode { node_id },
+        )
     }
 
     pub fn project(brain_id: BrainId, profile_id: UserProfileId, project_id: ProjectId) -> Self {
@@ -493,6 +508,25 @@ mod tests {
 
         let encoded = serde_json::to_value(&shard).expect("serialize profile-memory shard");
         assert_eq!(encoded["scope"]["kind"], "profile_memory");
+        assert_eq!(
+            serde_json::from_value::<StoreShardIdV1>(encoded).expect("deserialize shard"),
+            shard
+        );
+    }
+
+    #[test]
+    fn remote_node_has_a_distinct_mutable_wire_identity() {
+        let shard = StoreShardIdV1::remote_node(
+            id::<BrainId>("brain.identity"),
+            id::<UserProfileId>("profile.identity"),
+            id::<BrainNodeId>("node.identity"),
+        );
+
+        assert!(shard.is_mutable());
+        assert_eq!(shard.scope.project_id(), None);
+        let encoded = serde_json::to_value(&shard).expect("serialize remote-node shard");
+        assert_eq!(encoded["scope"]["kind"], "remote_node");
+        assert_eq!(encoded["scope"]["node_id"], "node.identity");
         assert_eq!(
             serde_json::from_value::<StoreShardIdV1>(encoded).expect("deserialize shard"),
             shard

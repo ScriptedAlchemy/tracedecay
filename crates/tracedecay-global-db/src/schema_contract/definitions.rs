@@ -196,6 +196,48 @@ pub(super) const TABLES: &[Table] = &[
         )]
     ),
     table!(
+        "remote_writer_fences",
+        [
+            column("authority_key", "TEXT", true, None, 1),
+            column("writer_fence_json", "TEXT", true, None, 0),
+            column("frontier_sequence", "INTEGER", true, None, 0),
+            column("updated_at", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
+        "remote_observation_events",
+        [
+            column("event_id", "TEXT", true, None, 1),
+            column("frame_digest", "TEXT", true, None, 0),
+            column("enrollment_id", "TEXT", true, None, 0),
+            column("enrollment_revision", "INTEGER", true, None, 0),
+            column("node_id", "TEXT", true, None, 0),
+            column("policy_revision", "INTEGER", true, None, 0),
+            column("capture_sequence", "INTEGER", true, None, 0),
+            column("previous_event_id", "TEXT", false, None, 0),
+            column("observation_id", "TEXT", true, None, 0),
+            column("writer_fence_json", "TEXT", true, None, 0),
+            column("captured_at", "INTEGER", true, None, 0),
+            column("idempotency_key", "TEXT", true, None, 0),
+            column("command_digest", "TEXT", true, None, 0),
+        ],
+        [
+            foreign_key(
+                "previous_event_id",
+                "remote_observation_events",
+                "event_id",
+                "NO ACTION"
+            ),
+            foreign_key(
+                "observation_id",
+                "observations",
+                "observation_id",
+                "NO ACTION"
+            ),
+        ]
+    ),
+    table!(
         "retrieval_anchors",
         [
             column("anchor_id", "TEXT", false, None, 1),
@@ -1864,6 +1906,27 @@ pub(super) const INDEXES: &[Index] = &[
     },
     Index {
         table: "observations",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["observation_id"],
+    },
+    Index {
+        table: "remote_observation_events",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["enrollment_id", "node_id", "capture_sequence"],
+    },
+    Index {
+        table: "remote_observation_events",
+        name: None,
+        unique: true,
+        origin: "u",
+        columns: &["idempotency_key"],
+    },
+    Index {
+        table: "remote_observation_events",
         name: None,
         unique: true,
         origin: "u",

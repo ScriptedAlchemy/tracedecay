@@ -97,6 +97,27 @@ impl RemoteReplayFrameV1 {
     }
 }
 
+/// Deterministic identity of one canonical offline capture.
+///
+/// The domain tag is part of the persisted final shape and keeps remote
+/// capture identities distinct from every other canonical digest.
+pub fn canonical_remote_event_id_v1(
+    capture: &AdmittedRemoteCaptureV1,
+) -> Result<String, ApplicationContractError> {
+    let digest = canonical_sha256(&(
+        "tracedecay.remote-capture.v2",
+        &capture.enrollment_id,
+        capture.enrollment_revision,
+        &capture.node_id,
+        &capture.writer,
+        capture.policy_revision,
+        &capture.sequence,
+        &capture.observation,
+        capture.captured_at,
+    ))?;
+    Ok(format!("remote.event.{}", digest.as_str()))
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteReplayPolicyDecisionV1 {
@@ -243,7 +264,8 @@ impl RemoteReplayCommitReceiptV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteReplaySpoolStateV1 {
     pub state: RemoteReplayStateV1,
     pub receipt: Option<RemoteReplayCommitReceiptV1>,

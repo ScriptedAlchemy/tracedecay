@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use tracedecay_agent_hosts::ports::project_runtime::{
     MemoryCurateOptions as AgentMemoryCurateOptions, ProfileRuntime, RuntimeFuture,
 };
+use tracedecay_domain::BrainNodeId;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use super::register_registered_schema_installer;
@@ -31,6 +32,7 @@ mod code_graph;
 mod code_reads;
 mod maintenance;
 mod mounts;
+mod remote_recovery;
 mod retained_hook_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
@@ -75,8 +77,19 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     profile_database: Mutex<Option<Arc<RegisteredGlobalDb>>>,
     profile_memory: Mutex<Option<Arc<Database>>>,
     profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
+    remote_nodes: Mutex<BTreeMap<BrainNodeId, Arc<Database>>>,
+    remote_credential_authority:
+        Arc<crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
+    remote_replay_transaction:
+        Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
+    remote_recovery_authorities: Mutex<
+        BTreeMap<
+            BrainNodeId,
+            Arc<tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1>,
+        >,
+    >,
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
-    project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
+    project_sessions: Arc<Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
     #[cfg(test)]
@@ -181,6 +194,31 @@ async fn open_runtime(
     initialize_if_missing: bool,
     operation: &'static str,
 ) -> Result<StoreRuntimeHandle> {
+    open_runtime_with_presence(
+        registry,
+        resolver,
+        shard_id,
+        incarnation,
+        profile_pin,
+        database_authority,
+        initialize_if_missing,
+        operation,
+    )
+    .await
+    .map(|(runtime, _)| runtime)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_runtime_with_presence(
+    registry: &StoreRuntimeRegistry,
+    resolver: &LocalStoreRuntimeResolverV1,
+    shard_id: StoreShardIdV1,
+    incarnation: StoreIncarnationV1,
+    profile_pin: Option<ProfileAuthorityPin>,
+    database_authority: Option<DatabaseAuthority>,
+    initialize_if_missing: bool,
+    operation: &'static str,
+) -> Result<(StoreRuntimeHandle, bool)> {
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
     let locator = match resolver.resolve_key(&key) {
         LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
@@ -224,7 +262,7 @@ async fn open_runtime(
         StoreRuntimeOpenRequest::new_authorized(shard_id, incarnation, profile_pin, authority)
     };
     match registry.open(request).await {
-        StoreRuntimeOpenResult::Published(runtime) => Ok(runtime),
+        StoreRuntimeOpenResult::Published(runtime) => Ok((runtime, exists)),
         StoreRuntimeOpenResult::Failed(failure) => Err(registry_open_error(
             "open registered session runtime",
             failure,

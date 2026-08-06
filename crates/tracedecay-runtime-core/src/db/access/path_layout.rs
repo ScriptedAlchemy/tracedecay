@@ -23,6 +23,7 @@ pub(super) fn platform_identity_key(path: &Path) -> PathBuf {
 
 pub(super) fn database_profile_root(database_path: &Path, fallback_parent: &Path) -> PathBuf {
     profile_project_root(database_path)
+        .or_else(|| profile_remote_node_root(database_path))
         .unwrap_or_else(|| database_path.parent().unwrap_or(fallback_parent))
         .to_path_buf()
 }
@@ -48,6 +49,29 @@ fn profile_project_root(database_path: &Path) -> Option<&Path> {
     } else {
         None
     }
+}
+
+fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
+    if !database_path
+        .file_name()
+        .is_some_and(|name| name == "remote.db")
+    {
+        return None;
+    }
+    let node_directory = database_path.parent()?;
+    let node_digest = node_directory.file_name()?.to_str()?;
+    if node_digest.len() != 64 || !node_digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let nodes_root = node_directory.parent()?;
+    if !nodes_root.file_name().is_some_and(|name| name == "nodes") {
+        return None;
+    }
+    let remote_root = nodes_root.parent()?;
+    if !remote_root.file_name().is_some_and(|name| name == "remote") {
+        return None;
+    }
+    remote_root.parent()
 }
 
 pub(super) fn is_legacy_repository_database(database_path: &Path) -> bool {

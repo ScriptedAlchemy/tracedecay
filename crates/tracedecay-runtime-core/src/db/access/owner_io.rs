@@ -146,6 +146,272 @@ pub(super) fn replace_file_atomically(
         .map_err(|error| access_io_error(&format!("publish {record_name}"), path, &error))
 }
 
+pub(super) fn replace_sqlite_with_rollback_atomically(
+    staging: &Path,
+    destination: &Path,
+    rollback: &Path,
+    expected_destination_identity: u64,
+    expected_staging_identity: u64,
+) -> Result<()> {
+    let same_parent =
+        staging.parent() == destination.parent() && destination.parent() == rollback.parent();
+    if !same_parent || staging == destination || staging == rollback || destination == rollback {
+        return Err(access_error(
+            "publish restored SQLite database",
+            destination,
+            "staging, destination, and rollback must be distinct siblings",
+        ));
+    }
+    if rollback.exists() {
+        return Err(access_error(
+            "publish restored SQLite database",
+            rollback,
+            "rollback destination already exists",
+        ));
+    }
+    let destination_identity =
+        crate::db::sqlite_generation_identity(destination).map_err(|error| {
+            access_error(
+                "verify restore destination identity",
+                destination,
+                &format!("{error:?}"),
+            )
+        })?;
+    let staging_identity = crate::db::sqlite_generation_identity(staging).map_err(|error| {
+        access_error(
+            "verify restore staging identity",
+            staging,
+            &format!("{error:?}"),
+        )
+    })?;
+    if destination_identity != expected_destination_identity
+        || staging_identity != expected_staging_identity
+    {
+        return Err(access_error(
+            "publish restored SQLite database",
+            destination,
+            "pre-publication SQLite identity changed",
+        ));
+    }
+    platform_replace_with_rollback(staging, destination, rollback)?;
+    let published_identity =
+        crate::db::sqlite_generation_identity(destination).map_err(|error| {
+            access_error(
+                "verify published restore identity",
+                destination,
+                &format!("{error:?}"),
+            )
+        })?;
+    let rollback_identity = crate::db::sqlite_generation_identity(rollback).map_err(|error| {
+        access_error(
+            "verify rollback SQLite identity",
+            rollback,
+            &format!("{error:?}"),
+        )
+    })?;
+    if published_identity == expected_staging_identity
+        && rollback_identity == expected_destination_identity
+    {
+        sync_parent_directory(destination, "restored SQLite database")?;
+        return Ok(());
+    }
+    platform_replace_with_rollback(rollback, destination, staging)?;
+    Err(access_error(
+        "publish restored SQLite database",
+        destination,
+        "atomic publication identity verification failed and was rolled back",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn platform_replace_with_rollback(
+    replacement: &Path,
+    destination: &Path,
+    rollback: &Path,
+) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let replacement_c = CString::new(replacement.as_os_str().as_bytes()).map_err(|_| {
+        access_error(
+            "publish restored SQLite database",
+            replacement,
+            "replacement path contains NUL",
+        )
+    })?;
+    let destination_c = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        access_error(
+            "publish restored SQLite database",
+            destination,
+            "destination path contains NUL",
+        )
+    })?;
+    let exchanged = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            replacement_c.as_ptr(),
+            libc::AT_FDCWD,
+            destination_c.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if exchanged != 0 {
+        return Err(access_io_error(
+            "atomically exchange restored SQLite database",
+            destination,
+            &std::io::Error::last_os_error(),
+        ));
+    }
+    if let Err(error) = std::fs::rename(replacement, rollback) {
+        let rollback_exchange = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                replacement_c.as_ptr(),
+                libc::AT_FDCWD,
+                destination_c.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        };
+        return if rollback_exchange == 0 {
+            Err(access_io_error(
+                "retain replaced SQLite rollback",
+                rollback,
+                &error,
+            ))
+        } else {
+            Err(access_error(
+                "retain replaced SQLite rollback",
+                rollback,
+                "rollback retention failed after exchange and requires forward recovery",
+            ))
+        };
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_replace_with_rollback(
+    replacement: &Path,
+    destination: &Path,
+    rollback: &Path,
+) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const RENAME_SWAP: u32 = 0x00000002;
+    unsafe extern "C" {
+        fn renamex_np(
+            from: *const libc::c_char,
+            to: *const libc::c_char,
+            flags: u32,
+        ) -> libc::c_int;
+    }
+    let replacement_c = CString::new(replacement.as_os_str().as_bytes()).map_err(|_| {
+        access_error(
+            "publish restored SQLite database",
+            replacement,
+            "replacement path contains NUL",
+        )
+    })?;
+    let destination_c = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+        access_error(
+            "publish restored SQLite database",
+            destination,
+            "destination path contains NUL",
+        )
+    })?;
+    let exchanged =
+        unsafe { renamex_np(replacement_c.as_ptr(), destination_c.as_ptr(), RENAME_SWAP) };
+    if exchanged != 0 {
+        return Err(access_io_error(
+            "atomically exchange restored SQLite database",
+            destination,
+            &std::io::Error::last_os_error(),
+        ));
+    }
+    if let Err(error) = std::fs::rename(replacement, rollback) {
+        let rollback_exchange =
+            unsafe { renamex_np(replacement_c.as_ptr(), destination_c.as_ptr(), RENAME_SWAP) };
+        return if rollback_exchange == 0 {
+            Err(access_io_error(
+                "retain replaced SQLite rollback",
+                rollback,
+                &error,
+            ))
+        } else {
+            Err(access_error(
+                "retain replaced SQLite rollback",
+                rollback,
+                "rollback retention failed after exchange and requires forward recovery",
+            ))
+        };
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn platform_replace_with_rollback(
+    replacement: &Path,
+    destination: &Path,
+    rollback: &Path,
+) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const REPLACEFILE_WRITE_THROUGH: u32 = 0x1;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn ReplaceFileW(
+            replaced: *const u16,
+            replacement: *const u16,
+            backup: *const u16,
+            flags: u32,
+            exclude: *mut core::ffi::c_void,
+            reserved: *mut core::ffi::c_void,
+        ) -> i32;
+    }
+    let wide = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let replaced = wide(destination);
+    let replacement = wide(replacement);
+    let backup = wide(rollback);
+    let result = unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            backup.as_ptr(),
+            REPLACEFILE_WRITE_THROUGH,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        Err(access_io_error(
+            "atomically replace restored SQLite database",
+            destination,
+            &std::io::Error::last_os_error(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn platform_replace_with_rollback(
+    _replacement: &Path,
+    destination: &Path,
+    _rollback: &Path,
+) -> Result<()> {
+    Err(access_error(
+        "publish restored SQLite database",
+        destination,
+        "atomic exchange with retained rollback is unsupported on this platform",
+    ))
+}
+
 #[cfg(windows)]
 pub(super) fn replace_file_atomically(
     temporary: &Path,
