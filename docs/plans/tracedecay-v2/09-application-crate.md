@@ -18,8 +18,8 @@ remain. `crates/tracedecay-application/src/context.rs` carries the required
 `ResolvedScope`; the legacy root model in `src/application/context.rs` carries
 session identity and digests but no scope field. That root model therefore
 cannot satisfy this plan's scope contract. Convergence on the scope-carrying
-application context remains PR11/PR12 application work, not a frontend
-`ResolvedScope` invention or a PR14-only gap.
+application context remains application/surface work, not a frontend
+`ResolvedScope` invention or a dashboard-only gap.
 
 **Source-access correction (2026-07-26).** Temporal snapshot composition no
 longer hard-codes a participant as `Authorized`. Authorization is a separate,
@@ -29,15 +29,15 @@ independently produce `Available`, `Locked`, `RetentionWithheld`, `Deleted`,
 `Redacted`, or `Unavailable`; invalid or ambiguous source state denies the
 snapshot instead of becoming a clean unavailable result.
 
-PR11 requires this boundary to be the canonical owner of typed operation
+The application delivery requires this boundary to be the canonical owner of typed operation
 semantics. Root composition and surface adapters may wire those operations but
 do not become alternate use-case owners. Feedback-read, retrieval,
 configuration, edit, and Git handlers visible on a branch and their direct
 parity tests are implementation evidence; their present module, port, or type
-names are not a contract inventory. PR12 delivery requires every required
+names are not a contract inventory. The surface delivery requires every required
 surface to invoke the canonical operation and preserve its result.
 
-PR17 extends that core only through the user-visible work loop shared with
+The work loop extends that core only through the user-visible journey shared with
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md) and
 [Plan 32](32-dynamic-workflow-runtime-and-sdk.md).
 
@@ -96,7 +96,7 @@ mismatch, stuck or unknown runtime state, incomplete telemetry, authorization
 loss, cancellation, and truthful no-change outcomes. They prove Plan 11
 performs no Doctor evaluation and Plan 14 contributes no runtime kernel.
 
-PR17 adds all Plan 24/32 semantic operations to the same layer: graph and
+The work loop adds all Plan 24/32 semantic operations to the same layer: graph and
 history commands; Kanban, DAG, timeline, causal, critical-path, workload,
 executor/model, repository/delivery, evidence, and history projections;
 task-shape, sizing, decomposition, topology, route, independent-review,
@@ -105,7 +105,7 @@ definition/version lifecycle; provider capability/admission/progress/history/
 artifact/control; placement; integration; and runtime recovery. This list is
 capability coverage, not a second operation registry.
 
-## PR17 user outcome
+## Work loop user outcome
 
 An authorized user can create versioned work, retrieve its exact evidence,
 review an explained proposal, explicitly admit one executable step, inspect
@@ -143,7 +143,7 @@ admission, or safety checks.
 
 Contracts, store calls, policy evaluation, configuration snapshot resolution,
 surface binding, and provider admission land as slices of this path, not as
-independent PR17 phases.
+independent contract-only phases.
 
 ## Application responsibilities
 
@@ -224,7 +224,7 @@ ordered. Invalid or stale calibration remains explicit.
 
 Source edits continue through the journaled application edit transaction.
 Git index mutation continues through immutable preview then explicit apply
-with repository/worktree/HEAD/index/content CAS and a durable receipt. PR17
+with repository/worktree/HEAD/index/content CAS and a durable receipt. The work loop
 may request only Plan 36-owned typed native Git effects admitted by Plan 32
 under an accepted work proposal. No application operation exposes arbitrary
 Git, force update, rebase, history rewrite, branch deletion, implicit merge,
@@ -247,7 +247,7 @@ the result as a local timeout or cancellation.
    same legal actions through all selected surfaces.
 5. Keep every workflow definition/run/control, Work projection, provider,
    placement, integration, handoff, experience, outcome/calibration, and
-   SDK-facing semantic operation callable through this same layer; PR18 freezes
+   SDK-facing semantic operation callable through this same layer; the SDK delivery freezes
    compatibility names without adding missing behavior.
 
 Each slice includes its minimal domain/store/query behavior and direct
@@ -259,7 +259,7 @@ contribution does not land without the callable use case that consumes it.
 - Delete any handler-local authorization, task mutation, evidence assembly,
   readiness, route selection, retry, completion, or error path after its
   application operation is live.
-- Remove PR17-only operation registries, speculative handler catalogs,
+- Remove work-loop-only operation registries, speculative handler catalogs,
   standalone contract phases, exact file inventories, and declaration-parity
   fixtures.
 - Do not preserve a shadow task store, scheduler, provider dispatcher, model
@@ -292,10 +292,10 @@ separate acceptance gate. Every problem fixture asserts exactly one of `Never`,
 canonical application boundary and byte/semantic preservation of that
 directive by every exercised adapter, with no adapter-side inference.
 
-## Not in PR17
+## Not in the work loop
 
-- PR18 chooses and stabilizes public API and SDK names.
-- PR20 optimizes the measured loop after production evidence exists.
+- The SDK delivery chooses and stabilizes public API and SDK names.
+- Measured performance optimization covers the loop after production evidence exists.
 - Developer-plan parsing, Markdown execution, JavaScript workflow execution,
   generic provider invocation, and autonomous task or Git mutation remain out
   of scope.
