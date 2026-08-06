@@ -369,6 +369,26 @@ pub(super) async fn ingest_transcript(
     global_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
+    let cancellation = ObservationCancellation::default();
+    ingest_transcript_with_cancellation(
+        cg,
+        args,
+        profile_root,
+        global_db,
+        session_authorities,
+        &cancellation,
+    )
+    .await
+}
+
+pub(crate) async fn ingest_transcript_with_cancellation(
+    cg: Option<&TraceDecay>,
+    args: &Value,
+    profile_root: Option<&Path>,
+    global_db: Option<&RegisteredGlobalDb>,
+    session_authorities: SessionAuthorities<'_>,
+    cancellation: &ObservationCancellation,
+) -> Result<Value> {
     let provider = required_str(args, "provider")?;
     let user_scope = args
         .get("user_scope")
@@ -408,7 +428,6 @@ pub(super) async fn ingest_transcript(
         }
         _ => {}
     }
-    let cancellation = ObservationCancellation::default();
     // Unregistered routes are reported with the same typed `unknown_provider`
     // admission status the probe uses, not a generic configuration error.
     let kernel = transcript_capture_kernel(provider, user_scope).ok_or_else(|| {
@@ -427,7 +446,7 @@ pub(super) async fn ingest_transcript(
             session_authorities,
             facade: &facade,
             max_new_bytes,
-            cancellation: &cancellation,
+            cancellation,
         })
         .await?;
     let TranscriptCaptureOutcome {
