@@ -216,14 +216,18 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
             (Some(stored_request_id), Some(stored_input_digest), Some(payload)) => {
                 let consumption: HandoffOpenConsumptionV1 = decode(payload)?;
                 let _ = transaction.rollback();
-                if stored_request_id == request_id.as_str()
-                    && stored_input_digest == input_digest.as_str()
-                    && consumption.request_id() == request_id
-                    && consumption.input_digest() == input_digest
-                {
-                    return Ok(HandoffOpenConsumeOutcomeV1::Consumed(consumption));
+                if stored_request_id != request_id.as_str() {
+                    return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
                 }
-                return Ok(HandoffOpenConsumeOutcomeV1::Concealed);
+                if stored_input_digest != input_digest.as_str() {
+                    return Err(HandoffOpenAuthorityError::IdempotencyConflict);
+                }
+                if consumption.request_id() != request_id
+                    || consumption.input_digest() != input_digest
+                {
+                    return Err(codec_unavailable());
+                }
+                return Ok(HandoffOpenConsumeOutcomeV1::Consumed(consumption));
             }
             (None, None, None) => {}
             _ => return Err(codec_unavailable()),

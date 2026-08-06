@@ -429,6 +429,7 @@ pub enum HandoffOpenConsumeOutcomeV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HandoffOpenAuthorityError {
     Conflict,
+    IdempotencyConflict,
     Unavailable,
 }
 
@@ -758,6 +759,7 @@ fn admit(
 fn authority_error(error: HandoffOpenAuthorityError) -> HandoffOpenError {
     match error {
         HandoffOpenAuthorityError::Conflict => HandoffOpenError::Conflict,
+        HandoffOpenAuthorityError::IdempotencyConflict => HandoffOpenError::Conflict,
         HandoffOpenAuthorityError::Unavailable => HandoffOpenError::AuthorityUnavailable,
     }
 }
