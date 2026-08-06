@@ -38,7 +38,7 @@ def _completed_session_end(response: dict[str, Any]) -> bool:
 
 
 def _source_apply(call: Call, tool: str, arguments: dict[str, Any], deadline: Deadline) -> dict[str, Any]:
-    preview_arguments = {**arguments, "dry_run": True}
+    preview_arguments = {**arguments, "dry_run": True, "format": "json"}
     preview = call(tool, preview_arguments, deadline(tool))
     observed = expected_state(preview)
     if observed is None:
@@ -56,6 +56,7 @@ def _source_apply(call: Call, tool: str, arguments: dict[str, Any], deadline: De
         "verify": False,
         "idempotency_key": f"tool-sweep-{tool}-{time.monotonic_ns()}",
         "expected_state": observed,
+        "format": "json",
     }
 
 
@@ -158,10 +159,20 @@ def _source_edit(
 
     apply = _source_apply(call, name, forward, deadline)
 
-    def cleanup(_response: dict[str, Any]) -> str:
+    def cleanup(response: dict[str, Any]) -> str:
         current = _source_snapshot(fixture, tuple(original))
         if current == original:
             raise JourneyError(f"{name} apply returned success without changing fixture source")
+        if not has_true(response, "success"):
+            raise JourneyError(f"{name} apply omitted its structured success receipt")
+        effect_id = first_value(response, {"effect_id"})
+        if not isinstance(effect_id, str) or not effect_id:
+            raise JourneyError(f"{name} apply omitted its durable effect identity")
+        replayed = call(name, apply, deadline(name))
+        if not has_true(replayed, "replayed"):
+            raise JourneyError(f"{name} idempotent retry did not replay its durable receipt")
+        if first_value(replayed, {"effect_id"}) != effect_id:
+            raise JourneyError(f"{name} idempotent retry changed its durable effect identity")
         rollback_arguments = inverse
         if name == "tracedecay_move_symbol":
             # Moving changes the owning file, so resolve the post-move identity
@@ -246,9 +257,23 @@ def _api_migration(
         deadline,
     )
 
-    def cleanup(_response: dict[str, Any]) -> str:
+    def cleanup(response: dict[str, Any]) -> str:
         if marker not in (Path(fixture["root"]) / fixture["file"]).read_text():
             raise JourneyError("api-migration apply did not materialize the planned definition")
+        if not has_true(response, "success"):
+            raise JourneyError("api-migration apply omitted its structured success receipt")
+        effect_id = first_value(response, {"effect_id"})
+        if not isinstance(effect_id, str) or not effect_id:
+            raise JourneyError("api-migration apply omitted its durable effect identity")
+        replayed = call(
+            "tracedecay_api_migration_apply",
+            apply,
+            deadline("tracedecay_api_migration_apply"),
+        )
+        if not has_true(replayed, "replayed"):
+            raise JourneyError("api-migration retry did not replay its durable receipt")
+        if first_value(replayed, {"effect_id"}) != effect_id:
+            raise JourneyError("api-migration retry changed its durable effect identity")
         _source_rollback(
             call,
             "tracedecay_str_replace",
@@ -270,50 +295,89 @@ def prepare(
             url = first_value(response, {"url", "dashboard_url"})
             if not isinstance(url, str) or not url.startswith("http://"):
                 raise JourneyError("dashboard start omitted loopback URL")
-            stopped = call(name, {"action": "stop"}, deadline(name))
+            stopped = call(name, {"action": "stop", "format": "json"}, deadline(name))
             if not has_status(stopped, "stopped"):
                 raise JourneyError("dashboard stop did not confirm listener termination")
             return "dashboard start/stop verified"
-        return PreparedJourney({"action": "start", "host": "127.0.0.1", "port": 0}, cleanup)
+        return PreparedJourney(
+            {"action": "start", "host": "127.0.0.1", "port": 0, "format": "json"},
+            cleanup,
+        )
     if name == "tracedecay_fact_store":
         content = "catalog sweep temporary isolated fact"
         def cleanup(response: dict[str, Any]) -> str:
             fact_id = fact_id_with_content(response, content)
             if fact_id is None:
-                raise JourneyError("fact add omitted its Markdown fact identity")
-            fetched = call(name, {"action": "get", "fact_id": fact_id}, deadline(name))
+                raise JourneyError("fact add omitted its structured fact identity")
+            fetched = call(
+                name, {"action": "get", "fact_id": fact_id, "format": "json"}, deadline(name)
+            )
             if fact_id_with_content(fetched, content) != fact_id:
                 raise JourneyError("fact get did not consume the added fact identity")
-            removed = call(name, {"action": "remove", "fact_id": fact_id}, deadline(name))
+            removed = call(
+                name, {"action": "remove", "fact_id": fact_id, "format": "json"}, deadline(name)
+            )
             if not has_true(removed, "removed"):
                 raise JourneyError("fact rollback did not confirm removal")
-            listed = call(name, {"action": "list", "limit": 5}, deadline(name))
+            listed = call(
+                name, {"action": "list", "limit": 5, "format": "json"}, deadline(name)
+            )
             if fact_id_with_content(listed, content) == fact_id:
                 raise JourneyError("fact rollback did not verify absence")
             return "fact add/get/remove/absence verified"
-        return PreparedJourney({"action": "add", "content": content, "category": "tool", "trust": 0.5, "source": "catalog_sweep"}, cleanup)
+        return PreparedJourney(
+            {
+                "action": "add",
+                "content": content,
+                "category": "tool",
+                "trust": 0.5,
+                "source": "catalog_sweep",
+                "format": "json",
+            },
+            cleanup,
+        )
     if name == "tracedecay_session_start":
         def cleanup(response: dict[str, Any]) -> str:
             if not has_status(response, "baseline_saved"):
                 raise JourneyError("session producer did not save its baseline")
-            ended = call("tracedecay_session_end", {}, deadline("tracedecay_session_end"))
+            ended = call(
+                "tracedecay_session_end",
+                {"format": "json"},
+                deadline("tracedecay_session_end"),
+            )
             if not _completed_session_end(ended):
                 raise JourneyError("session end did not consume the saved baseline")
-            absent = call("tracedecay_session_end", {}, deadline("tracedecay_session_end"))
+            absent = call(
+                "tracedecay_session_end",
+                {"format": "json"},
+                deadline("tracedecay_session_end"),
+            )
             if not has_status(absent, "no_baseline"):
                 raise JourneyError("session rollback did not verify baseline absence")
             return "session baseline rollback verified"
-        return PreparedJourney({}, cleanup)
+        return PreparedJourney({"format": "json"}, cleanup)
     if name == "tracedecay_session_end":
-        started = call("tracedecay_session_start", {}, deadline("tracedecay_session_start"))
+        started = call(
+            "tracedecay_session_start",
+            {"format": "json"},
+            deadline("tracedecay_session_start"),
+        )
         if not has_status(started, "baseline_saved"):
             raise JourneyError("session-start producer did not save a baseline")
         def cleanup(response: dict[str, Any]) -> str:
             if not _completed_session_end(response):
-                call("tracedecay_session_end", {}, deadline("tracedecay_session_end"))
-            absent = call("tracedecay_session_end", {}, deadline("tracedecay_session_end"))
+                call(
+                    "tracedecay_session_end",
+                    {"format": "json"},
+                    deadline("tracedecay_session_end"),
+                )
+            absent = call(
+                "tracedecay_session_end",
+                {"format": "json"},
+                deadline("tracedecay_session_end"),
+            )
             if not has_status(absent, "no_baseline"):
                 raise JourneyError("session rollback did not verify baseline absence")
             return "session baseline rollback verified"
-        return PreparedJourney({}, cleanup)
+        return PreparedJourney({"format": "json"}, cleanup)
     return _source_edit(name, fixture, call, deadline)

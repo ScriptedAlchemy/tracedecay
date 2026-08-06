@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -22,6 +21,8 @@ SUITE_DIR = Path(__file__).resolve().parent
 if str(SUITE_DIR) not in sys.path:
     sys.path.insert(0, str(SUITE_DIR))
 
+from dispatch_policy import READ_EFFECTS, ToolPolicy, decode_tool_policy
+from journeys import JourneyError, api_migration_plan_arguments, prepare as prepare_journey
 from outcomes import (
     duration_us,
     expected_state,
@@ -35,7 +36,6 @@ from outcomes import (
     response_handle,
     text_blocks,
 )
-from journeys import JourneyError, api_migration_plan_arguments, prepare as prepare_journey
 
 def response_row(
     kind: str, name: str, response: dict[str, Any], elapsed_ms: int, deadline_ms: int
@@ -91,6 +91,17 @@ def _failure_row(
     }
 
 
+def _call_failure_row(
+    kind: str, name: str, deadline_ms: int, error: Exception
+) -> dict[str, Any]:
+    if isinstance(error, CallDeadlineExceeded):
+        row = _failure_row(kind, name, deadline_ms, "tool_sweep.call_deadline_exceeded", str(error))
+        row["elapsed_ms"] = error.elapsed_ms
+        row["cancellation_settled"] = error.cancellation_settled
+        return row
+    return _failure_row(kind, name, deadline_ms, "tool_sweep.transport_error", str(error))
+
+
 def _prompt_arguments(prompt: dict[str, Any], fixture: dict[str, str]) -> dict[str, str]:
     raw_arguments = prompt.get("arguments", [])
     if not isinstance(raw_arguments, list):
@@ -133,9 +144,7 @@ def exercise_discovered_surfaces(
         try:
             response, elapsed_ms = client.read_resource(uri, deadline_ms)
         except Exception as error:
-            rows.append(
-                _failure_row("resource", uri, deadline_ms, "tool_sweep.transport_error", str(error))
-            )
+            rows.append(_call_failure_row("resource", uri, deadline_ms, error))
             continue
         rows.append(response_row("resource", uri, response, elapsed_ms, deadline_ms))
     for prompt in prompts:
@@ -157,9 +166,7 @@ def exercise_discovered_surfaces(
         try:
             response, elapsed_ms = client.get_prompt(name, arguments, deadline_ms)
         except Exception as error:
-            rows.append(
-                _failure_row("prompt", name, deadline_ms, "tool_sweep.transport_error", str(error))
-            )
+            rows.append(_call_failure_row("prompt", name, deadline_ms, error))
             continue
         rows.append(response_row("prompt", name, response, elapsed_ms, deadline_ms))
     return rows
@@ -169,39 +176,32 @@ class SweepError(RuntimeError):
     """The release binary could not complete one declared surface journey."""
 
 
-@dataclass(frozen=True)
-class ToolPolicy:
-    name: str
-    availability: str
-    effect: str
-    deadline_ms: int
+class CallDeadlineExceeded(SweepError):
+    """One negotiated call did not complete within its catalog deadline."""
+
+    def __init__(self, method: str, deadline_ms: int, elapsed_ms: int, *, cancellation_settled: bool) -> None:
+        super().__init__(f"{method} exceeded its {deadline_ms}ms deadline")
+        self.method = method
+        self.deadline_ms = deadline_ms
+        self.elapsed_ms = elapsed_ms
+        self.cancellation_settled = cancellation_settled
 
 
 def tool_policy(definition: dict[str, Any]) -> ToolPolicy:
     """Read the public dispatch contract emitted by this exact release binary."""
-    name = definition.get("name")
-    metadata = definition.get("_meta")
-    if not isinstance(name, str) or not name or not isinstance(metadata, dict):
-        raise SweepError("tool definition has no dispatch identity")
-    dispatch = metadata.get("tracedecay/dispatch")
-    if not isinstance(dispatch, dict) or dispatch.get("version") != 1:
-        raise SweepError(f"{name}: dispatch metadata is missing or unsupported")
-    availability = dispatch.get("availability")
-    effect = dispatch.get("effect")
-    deadline = dispatch.get("deadline")
-    state = availability.get("state") if isinstance(availability, dict) else None
-    maximum = deadline.get("maximum_millis") if isinstance(deadline, dict) else None
-    if state not in {"available", "unavailable"} or not isinstance(effect, str):
-        raise SweepError(f"{name}: dispatch availability or effect is invalid")
-    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum <= 0:
-        raise SweepError(f"{name}: dispatch deadline is invalid")
-    return ToolPolicy(name, state, effect, maximum)
+    try:
+        return decode_tool_policy(definition)
+    except ValueError as error:
+        raise SweepError(str(error)) from error
 
 
 def canonical_manifest(
     tools: list[dict[str, Any]], resources: list[dict[str, Any]], prompts: list[dict[str, Any]]
 ) -> dict[str, Any]:
     """Persist the negotiated public surface so isolated effect phases cannot drift."""
+    fingerprints = {tool_policy(tool).fingerprint for tool in tools}
+    if len(fingerprints) != 1:
+        raise SweepError("negotiated tools do not share one canonical dispatch fingerprint")
     surfaces = {
         "tools": sorted(tools, key=lambda value: str(value.get("name", ""))),
         "resources": sorted(resources, key=lambda value: str(value.get("uri", ""))),
@@ -337,15 +337,24 @@ class McpClient:
         self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         started = time.monotonic()
         response = self._wait(request_id, deadline_ms)
-        elapsed_ms = int((time.monotonic() - started) * 1000)
+        elapsed_seconds = time.monotonic() - started
+        elapsed_ms = int(elapsed_seconds * 1000)
         if response is not None:
+            if elapsed_seconds > deadline_ms / 1000:
+                raise CallDeadlineExceeded(
+                    method, deadline_ms, elapsed_ms, cancellation_settled=False
+                )
             return response, elapsed_ms
+        cancellation_settled = False
         if cancel_on_timeout:
             self._send({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": request_id, "reason": "catalog sweep deadline exceeded"}})
-            settled = self._wait(request_id, min(5_000, deadline_ms))
-            if settled is not None:
-                return settled, int((time.monotonic() - started) * 1000)
-        raise SweepError(f"{method} exceeded its {deadline_ms}ms deadline")
+            cancellation_settled = self._wait(request_id, min(5_000, deadline_ms)) is not None
+        raise CallDeadlineExceeded(
+            method,
+            deadline_ms,
+            elapsed_ms,
+            cancellation_settled=cancellation_settled,
+        )
 
     def _object_list(self, value: Any, method: str) -> list[dict[str, Any]]:
         if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
@@ -661,7 +670,7 @@ def _journey_call(client: McpClient, tool: str, arguments: dict[str, Any], deadl
     row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
     if row["verdict"] != "PASS" and not (
         tool == "tracedecay_session_end"
-        and arguments == {}
+        and not (set(arguments) - {"format"})
         and row["problem_code"] == "tool_sweep.success_framed_not_found"
         and has_status(response, "no_baseline")
     ):
@@ -718,6 +727,7 @@ def _reconcile_effect(
                 "old_str": "reconciliation anchor",
                 "new_str": "reconciled anchor",
                 "dry_run": True,
+                "format": "json",
             },
             policies["tracedecay_str_replace"].deadline_ms,
         )
@@ -737,6 +747,7 @@ def _reconcile_effect(
                 "verify": False,
                 "idempotency_key": f"tool-sweep-reconcile-{time.monotonic_ns()}",
                 "expected_state": observed,
+                "format": "json",
             },
             policies["tracedecay_str_replace"].deadline_ms,
         )
@@ -747,6 +758,8 @@ def _reconcile_effect(
             )
         effect_id, input_digest, idempotency_key = _reconciliation_identity(producer)
     except Exception as error:
+        if isinstance(error, CallDeadlineExceeded):
+            return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_prerequisite_missing", str(error))
     finally:
         locked.chmod(0o755)
@@ -767,6 +780,7 @@ def _reconcile_effect(
                 "input_digest": input_digest,
                 "disposition": "confirm_rolled_back",
                 "confirm": True,
+                "format": "json",
             },
             policy.deadline_ms,
         )
@@ -774,6 +788,8 @@ def _reconcile_effect(
         if row["verdict"] == "PASS" and duration_us(response) is None:
             row.update({"verdict": "FAIL", "problem_code": "tool_sweep.receipt_missing", "note": "reconciliation omitted _meta.duration_us with --timings"})
     except Exception as error:
+        if isinstance(error, CallDeadlineExceeded):
+            return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_failed", str(error))
     finally:
         recovery.close()
@@ -820,22 +836,32 @@ def execute_effect(
             row["rollback_note"] = rollback_note
         return row
     except Exception as error:
+        if isinstance(error, CallDeadlineExceeded):
+            return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.effect_journey_failed", str(error))
 
 
 AUXILIARY_SURFACE_DEADLINE_MS = 30_000
-READ_EFFECTS = frozenset({"read", "preview"})
 
 
 def _unavailable_tool_row(client: McpClient, policy: ToolPolicy) -> dict[str, Any]:
     try:
         response, elapsed_ms = client.call_tool(policy.name, {}, policy.deadline_ms)
     except Exception as error:
-        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.transport_error", str(error))
+        return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
     row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
     problem_kind, code = response_problem_code(response)
     if row["verdict"] == "FAIL" and problem_kind == "unavailable" and isinstance(code, str) and code:
-        row.update({"verdict": "PASS", "note": "declared unavailable state confirmed", "problem_code": code})
+        row.update(
+            {
+                "verdict": "PASS",
+                "note": (
+                    "declared unavailable state confirmed: "
+                    f"{policy.availability_reason or 'unspecified'}"
+                ),
+                "problem_code": code,
+            }
+        )
     else:
         row.update({"verdict": "FAIL", "problem_code": code or "tool_sweep.unavailable_contract_invalid", "note": "declared unavailable tool did not return a typed unavailable result"})
     return row
@@ -849,7 +875,7 @@ def _read_tool_row(client: McpClient, definition: dict[str, Any], policy: ToolPo
     try:
         response, elapsed_ms = client.call_tool(policy.name, arguments, policy.deadline_ms)
     except Exception as error:
-        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.transport_error", str(error))
+        return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
     return response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
 
 
@@ -971,6 +997,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    import sys
-
     raise SystemExit(main(sys.argv[1:]))
