@@ -32,6 +32,7 @@ use tracedecay::mcp::ToolResult;
 use tracedecay::mcp::{McpServer, McpTransport};
 #[cfg(feature = "test-transport")]
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::PrivateStoreIo;
 use tracedecay::tracedecay::TraceDecay;
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
@@ -591,6 +592,15 @@ pub(crate) fn canonicalize_test_db_path(path: &Path) -> PathBuf {
     let parent = path
         .parent()
         .unwrap_or_else(|| panic!("test DB path '{}' has no parent", path.display()));
+    // The DB parent doubles as the profile store root; create it through the
+    // owner-private authority so production fail-closed permission
+    // validation accepts a root the fixture created first (any umask).
+    PrivateStoreIo::create_dir_all(parent).unwrap_or_else(|err| {
+        panic!(
+            "failed to create private test directory '{}': {err}",
+            parent.display()
+        )
+    });
     canonicalize_test_dir(parent).join(
         path.file_name()
             .unwrap_or_else(|| panic!("test DB path '{}' has no file name", path.display())),
