@@ -11,5 +11,5 @@ mod s5_reader;
 mod s6_operations;
 #[path = "../../../tests/storage_runtime_rusqlite_suite/s7_graph_attachment.rs"]
 mod s7_graph_attachment;
-#[path = "../../../tests/storage_runtime_rusqlite_suite/s8_repository_parity.rs"]
-mod s8_repository_parity;
+#[path = "../../../tests/storage_runtime_rusqlite_suite/s8_repository_contract.rs"]
+mod s8_repository_contract;
