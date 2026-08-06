@@ -27,29 +27,6 @@ const VALIDATION_RECEIPT_DOMAIN: &str =
     "tracedecay.semantic.accepted-profile-validation-receipt.v1";
 const VALIDATION_RECEIPT_KEY_BYTES: usize = 32;
 
-// Retained receipts do not carry a fallback signer. Replacing this singleton
-// would invalidate every accepted profile, so its database lifetime is
-// enforced rather than allowing an unjournaled key rotation.
-const SCHEMA: &str = r"
-CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
-    profile_digest TEXT PRIMARY KEY NOT NULL,
-    authority_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_v1 (
-    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
-    key_material BLOB NOT NULL CHECK (length(key_material) = 32)
-);
-CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_update_v1
-BEFORE UPDATE ON configuration_semantic_accepted_profile_receipt_key_v1
-BEGIN
-    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
-END;
-CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_delete_v1
-BEFORE DELETE ON configuration_semantic_accepted_profile_receipt_key_v1
-BEGIN
-    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
-END;";
-
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SemanticAcceptedProfileAuthorityErrorV1 {
     #[error("accepted semantic profile authority is unavailable")]
@@ -93,12 +70,11 @@ pub struct RegisteredSemanticAcceptedProfileAuthorityV1 {
 }
 
 impl RegisteredSemanticAcceptedProfileAuthorityV1 {
-    pub async fn open(
-        database: Arc<RegisteredGlobalDb>,
-    ) -> Result<Self, SemanticAcceptedProfileAuthorityErrorV1> {
-        let authority = Self { database };
-        authority.ensure_schema().await?;
-        Ok(authority)
+    /// The accepted-profile tables are part of the canonical configuration
+    /// schema, provisioned and shape-validated at registered database
+    /// admission, so construction performs no schema work.
+    pub fn new(database: Arc<RegisteredGlobalDb>) -> Self {
+        Self { database }
     }
 
     /// Persists only a profile whose private evaluation value can be
@@ -132,7 +108,6 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
         };
         let payload_json = serde_json::to_string(&stored)
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-        self.ensure_schema().await?;
         let transaction = self
             .database
             .begin_write_transaction()
@@ -168,15 +143,6 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)
     }
 
-    async fn ensure_schema(&self) -> Result<(), SemanticAcceptedProfileAuthorityErrorV1> {
-        self.database
-            .writer_connection()
-            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)?
-            .execute_batch(SCHEMA)
-            .await
-            .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Unavailable)
-    }
-
     async fn resolve_record(
         &self,
         profile_digest: &ManifestDigest,
@@ -185,7 +151,6 @@ impl RegisteredSemanticAcceptedProfileAuthorityV1 {
         profile_digest
             .validate()
             .map_err(|_| SemanticAcceptedProfileAuthorityErrorV1::Rejected)?;
-        self.ensure_schema().await?;
         let snapshot = self
             .database
             .read_snapshot()
@@ -805,9 +770,7 @@ mod tests {
             .await
             .unwrap();
         let database = runtime.profile_database_arc();
-        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::open(Arc::clone(&database))
-            .await
-            .unwrap();
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(Arc::clone(&database));
 
         let transaction = database.begin_write_transaction().await.unwrap();
         let original_key = ensure_validation_receipt_key(&transaction).await.unwrap();
@@ -852,9 +815,7 @@ mod tests {
         assert_eq!(remounted_key.as_slice(), original_key.as_slice());
         drop(snapshot);
 
-        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::open(Arc::clone(&remounted))
-            .await
-            .unwrap();
+        let authority = RegisteredSemanticAcceptedProfileAuthorityV1::new(Arc::clone(&remounted));
         assert_eq!(
             authority.resolve_record(&profile_digest).await,
             Err(SemanticAcceptedProfileAuthorityErrorV1::Rejected)

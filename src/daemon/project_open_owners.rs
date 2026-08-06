@@ -1412,18 +1412,13 @@ async fn register_semantic_activation_owner(
             graph.configuration_runtime().registered_database(),
             scope.clone(),
         )
-        .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("semantic retrieval configuration store unavailable: {error}"),
         })?;
     let accepted_profiles = Arc::new(
-        crate::application::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::open(
+        crate::application::semantic_runtime::RegisteredSemanticAcceptedProfileAuthorityV1::new(
             graph.configuration_runtime().registered_database(),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("semantic accepted-profile authority unavailable: {error}"),
-        })?,
+        ),
     );
     let current_state = configuration_store
         .current_state_if_present()
