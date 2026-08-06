@@ -11,8 +11,14 @@ use tracedecay_graph_db::{
     GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
 };
+use tracedecay_runtime_core::storage;
+use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeKey;
+use tracedecay_runtime_core::store_runtime::resolver::{
+    LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
+    LocalStoreRuntimeResolverV1,
+};
 use tracedecay_store::{
-    BrainId, CodeShardScopeV1, GRAPH_STORE_PRIVATE_DIRECTORY, LocatorDigest, ProjectId,
+    BrainId, CodeShardScopeV1, DURABLE_GRAPH_STORE_DIRECTORY, LocatorDigest, ProjectId,
     RepositoryId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
     StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, WorktreeId,
     canonical_store_locator_digest,
@@ -135,7 +141,7 @@ fn registration(
     binding: StoreRuntimeBindingV1,
     store_root: &std::path::Path,
 ) -> GraphDbRegistration {
-    create_private_graph_directory(store_root);
+    create_durable_graph_store_root(store_root);
     let canonical_path = graph_path(store_root);
     let verified_locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
@@ -156,17 +162,73 @@ fn registration(
 }
 
 fn graph_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join(GRAPH_STORE_PRIVATE_DIRECTORY)
-        .join("graph.grafeo")
+    root.join(DURABLE_GRAPH_STORE_DIRECTORY).join("graph")
 }
 
-fn create_private_graph_directory(root: &std::path::Path) {
-    match tracedecay_private_fs::create_private_directory(&root.join(GRAPH_STORE_PRIVATE_DIRECTORY))
-    {
+fn create_durable_graph_store_root(root: &std::path::Path) {
+    match std::fs::create_dir(root.join(DURABLE_GRAPH_STORE_DIRECTORY)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create private graph directory: {error}"),
+        Err(error) => panic!("create durable graph-store root: {error}"),
     }
+}
+
+#[test]
+fn canonical_runtime_resolver_locator_opens_through_graph_registry() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir(&profile_root).unwrap();
+    std::fs::create_dir(&project_root).unwrap();
+
+    let binding = identity("profile-a", "project-a");
+    storage::write_enrollment_marker(
+        &project_root,
+        &storage::EnrollmentMarker {
+            project_id: "project-a".to_owned(),
+            storage_mode: storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let store_root = storage::profile_sharded_data_root(&profile_root, "project-a");
+    std::fs::create_dir_all(&store_root).unwrap();
+    storage::ensure_durable_graph_store_root(&store_root).unwrap();
+
+    let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+        binding.shard_id.brain_id.clone(),
+        binding.shard_id.profile_id.clone(),
+        profile_root,
+    ));
+    resolver
+        .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+            ProjectId::try_from("project-a".to_owned()).unwrap(),
+            [project_root],
+        ))
+        .unwrap();
+    let key = StoreRuntimeKey::new(binding.shard_id.clone(), binding.incarnation);
+    let resolved = match resolver.resolve_graph_key(&key) {
+        LocalStoreLocatorResolutionV1::Resolved(locator) => locator,
+        LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
+            panic!("expected canonical graph locator: {unavailable:?}")
+        }
+    };
+
+    let registration = GraphDbRegistration {
+        authority_lease: Arc::new(TestGraphLease {
+            binding,
+            verified_locator: resolved.locator().verified().clone(),
+            canonical_path: resolved.locator().path().to_path_buf(),
+            drop_counter: None,
+        }),
+        cancellation: Arc::new(NeverCancelled),
+        lifecycle_cancellation: Arc::new(NeverCancelled),
+        deadline: std::time::Instant::now() + Duration::from_secs(30),
+    };
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+
+    let database = registry.resolve(registration).unwrap();
+    assert!(database.snapshot().is_ok());
 }
 
 fn entity(value: &str) -> GraphEntity {
@@ -213,7 +275,7 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
             .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
-    assert!(graph_path(temp.path()).is_file());
+    assert!(graph_path(temp.path()).is_dir());
 }
 
 #[test]
@@ -444,15 +506,15 @@ fn symlinked_graph_directory_is_rejected_before_open() {
 
 #[cfg(unix)]
 #[test]
-fn symlinked_graph_file_is_rejected_before_open() {
+fn symlinked_graph_store_directory_is_rejected_before_open() {
     use std::os::unix::fs::symlink;
 
     let store = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
-    let target_file = target.path().join("target.grafeo");
-    std::fs::write(&target_file, []).unwrap();
-    create_private_graph_directory(store.path());
-    symlink(&target_file, graph_path(store.path())).unwrap();
+    let target_directory = target.path().join("target-graph-store");
+    std::fs::create_dir(&target_directory).unwrap();
+    create_durable_graph_store_root(store.path());
+    symlink(&target_directory, graph_path(store.path())).unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
@@ -465,14 +527,14 @@ fn symlinked_graph_file_is_rejected_before_open() {
 }
 
 #[test]
-fn wal_disabled_exact_handle_reopens_cross_platform_without_sidecar() {
+fn wal_directory_reopens_with_identical_traversal() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let request = registration(store_identity.clone(), temp.path());
     let database = registry.resolve(request.clone()).unwrap();
     database
-        .apply(batch(
+        .apply_unverified(batch(
             "code",
             "code-1",
             "code-watermark-1",
@@ -480,7 +542,7 @@ fn wal_disabled_exact_handle_reopens_cross_platform_without_sidecar() {
         ))
         .unwrap();
     database
-        .apply(batch(
+        .apply_unverified(batch(
             "work",
             "work-1",
             "work-watermark-1",
@@ -499,12 +561,8 @@ fn wal_disabled_exact_handle_reopens_cross_platform_without_sidecar() {
     drop(database);
 
     assert!(registry.close(&request).unwrap());
-    assert!(
-        !graph_path(temp.path())
-            .with_extension("grafeo.wal")
-            .exists(),
-        "WAL-disabled single-file storage must not create a pathname-owned sidecar"
-    );
+    assert!(graph_path(temp.path()).is_dir());
+    assert!(graph_path(temp.path()).join("wal").is_dir());
     let reopened = registry.reopen(request).unwrap();
     let result = reopened
         .traverse(TraversalRequest {
@@ -639,75 +697,32 @@ fn cancelled_open_does_not_create_or_register_a_store() {
 }
 
 #[test]
-fn lifecycle_cancellation_after_file_creation_converges_ready() {
+fn lifecycle_cancellation_before_directory_creation_is_typed() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let mut request = registration(store_identity.clone(), temp.path());
     let cancellation = Arc::new(CancelOnPoll {
         polls: AtomicUsize::new(0),
-        cancel_on: 3,
+        cancel_on: 1,
     });
     request.lifecycle_cancellation = cancellation.clone();
 
-    let database = registry.resolve(request).unwrap();
+    assert_eq!(
+        registry.resolve(request).unwrap_err(),
+        GraphDbError::Cancelled
+    );
     assert!(
         cancellation.polls.load(Ordering::SeqCst) >= cancellation.cancel_on,
-        "cancellation must become active after file creation while open is still linearizing"
+        "lifecycle cancellation must be sampled before directory creation"
     );
     assert_eq!(
         registry
             .status(&registration(store_identity, temp.path()))
             .unwrap(),
-        Some(GraphDbRegistryStatus::Ready)
+        None
     );
-    assert!(
-        database.snapshot().is_ok(),
-        "creation is the non-cancellable registration linearization point"
-    );
-    assert!(graph_path(temp.path()).is_file());
-}
-
-#[cfg(unix)]
-#[test]
-fn non_private_graph_directory_is_rejected_without_creating_a_file() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = TempDir::new().unwrap();
-    create_private_graph_directory(temp.path());
-    let directory = temp.path().join(GRAPH_STORE_PRIVATE_DIRECTORY);
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
-
-    assert!(matches!(
-        registry.resolve(registration(
-            identity("profile-a", "project-a"),
-            temp.path(),
-        )),
-        Err(GraphDbError::InvalidRequest { .. })
-    ));
     assert!(!graph_path(temp.path()).exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn non_private_existing_graph_file_is_rejected() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = TempDir::new().unwrap();
-    create_private_graph_directory(temp.path());
-    let path = graph_path(temp.path());
-    std::fs::write(&path, b"not a private graph").unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
-
-    assert!(matches!(
-        registry.resolve(registration(
-            identity("profile-a", "project-a"),
-            temp.path(),
-        )),
-        Err(GraphDbError::InvalidRequest { .. })
-    ));
 }
 
 #[test]
@@ -741,19 +756,24 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
 }
 
 #[test]
-fn final_open_cancellation_removes_the_unpublished_store() {
+fn cancellation_after_directory_creation_finishes_format_before_retry() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
     let mut request = registration(store_identity.clone(), temp.path());
-    request.cancellation = Arc::new(CancelOnPoll {
+    let cancellation = Arc::new(CancelOnPoll {
         polls: AtomicUsize::new(0),
-        cancel_on: 3,
+        cancel_on: 4,
     });
+    request.cancellation = cancellation.clone();
 
     assert_eq!(
         registry.resolve(request).unwrap_err(),
         GraphDbError::Cancelled
+    );
+    assert!(
+        cancellation.polls.load(Ordering::SeqCst) >= cancellation.cancel_on,
+        "the request must be observed after the created directory is initialized"
     );
     assert_eq!(
         registry
@@ -761,11 +781,12 @@ fn final_open_cancellation_removes_the_unpublished_store() {
             .unwrap(),
         None
     );
-    assert!(!graph_path(temp.path()).exists());
+    assert!(graph_path(temp.path()).is_dir());
     assert!(
         registry
-            .resolve(registration(store_identity, temp.path()))
-            .is_ok()
+            .resolve(registration(store_identity.clone(), temp.path()))
+            .is_ok(),
+        "retry must open the fully initialized store instead of requiring a reset"
     );
 }
 
@@ -800,15 +821,14 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     use grafeo_engine::config::StorageFormat;
 
     let temp = TempDir::new().unwrap();
-    create_private_graph_directory(temp.path());
+    create_durable_graph_store_root(temp.path());
     let graph_path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
-        Config::persistent(&graph_path).with_storage_format(StorageFormat::SingleFile),
+        Config::persistent(&graph_path).with_storage_format(StorageFormat::WalDirectory),
     )
     .unwrap();
     raw.create_node(&["Foreign"]);
     raw.close().unwrap();
-    make_graph_file_private(&graph_path);
 
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
@@ -824,17 +844,22 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
         Some(GraphDbRegistryStatus::ResetRequired)
     );
 
-    std::fs::remove_file(&graph_path).unwrap();
+    std::fs::remove_dir_all(&graph_path).unwrap();
     let reopened = registry.reopen(request).unwrap();
     assert!(reopened.snapshot().is_ok());
 }
 
-#[cfg(unix)]
-fn make_graph_file_private(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
+#[test]
+fn preexisting_empty_graph_directory_requires_explicit_reset() {
+    let temp = TempDir::new().unwrap();
+    create_durable_graph_store_root(temp.path());
+    std::fs::create_dir(graph_path(temp.path())).unwrap();
 
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let request = registration(identity("profile-a", "project-a"), temp.path());
+
+    assert!(matches!(
+        registry.resolve(request),
+        Err(GraphDbError::ResetRequired { .. })
+    ));
 }
-
-#[cfg(not(unix))]
-fn make_graph_file_private(_path: &std::path::Path) {}

@@ -57,7 +57,7 @@ fn publish(db: &GraphDb, projection: &str, identities: &[&str]) {
             identities[1],
         )));
     }
-    db.apply(
+    db.apply_unverified(
         GraphWriteBatch::new(
             GraphNamespace::new("project").unwrap(),
             GraphProjectionId::new(projection).unwrap(),

@@ -36,5 +36,4 @@ tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", features = ["lite"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["lite"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
-tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

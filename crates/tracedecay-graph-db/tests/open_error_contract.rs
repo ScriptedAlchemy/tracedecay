@@ -8,41 +8,29 @@ mod support;
 use support::{RegisteredGraph, graph_path};
 
 #[test]
-fn malformed_persistent_file_is_corrupt() {
+fn foreign_grafeo_store_without_marker_is_reset_required() {
     let temp = TempDir::new().unwrap();
-    std::fs::create_dir(temp.path().join("graph")).unwrap();
     let path = graph_path(temp.path());
-    std::fs::write(&path, b"not a grafeo database").unwrap();
+    let raw = grafeo_engine::GrafeoDB::with_config(
+        grafeo_engine::Config::persistent(&path)
+            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
+    )
+    .unwrap();
+    raw.close().unwrap();
     let error = RegisteredGraph::open(temp.path()).err().unwrap();
     assert!(
-        matches!(error, GraphDbError::Corrupt { .. }),
+        matches!(error, GraphDbError::ResetRequired { .. }),
         "unexpected error: {error:?}"
     );
 }
 
 #[test]
-fn lock_contention_is_unavailable_not_corrupt() {
-    let temp = TempDir::new().unwrap();
-    std::fs::create_dir(temp.path().join("graph")).unwrap();
-    let path = graph_path(temp.path());
-    let first = grafeo_engine::GrafeoDB::with_config(
-        grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
-    )
-    .unwrap();
-    let error = RegisteredGraph::open(temp.path()).err().unwrap();
-    assert!(matches!(error, GraphDbError::Unavailable { .. }));
-    first.close().unwrap();
-}
-
-#[test]
 fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
     let temp = TempDir::new().unwrap();
-    std::fs::create_dir(temp.path().join("graph")).unwrap();
     let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
+            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
     )
     .unwrap();
     let mut session = raw.session();

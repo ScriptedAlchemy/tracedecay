@@ -109,7 +109,7 @@ impl StoreRuntimeResolver for TestResolver {
             LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
         );
         let path = PathBuf::from(format!(
-            "/verified/graph/{:?}/{}.grafeo",
+            "/verified/graph/{:?}/{}",
             key.shard_id.scope,
             key.incarnation.get()
         ));

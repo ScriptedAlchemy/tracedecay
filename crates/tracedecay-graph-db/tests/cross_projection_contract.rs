@@ -79,14 +79,14 @@ fn visit_identities(
 fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "facts",
         "facts-g1",
         "facts-w1",
         vec![GraphMutation::UpsertEntity(entity("shared"))],
     ))
     .unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "code-g1",
         "code-w1",
@@ -97,7 +97,7 @@ fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
     ))
     .unwrap();
 
-    db.replace_projection(ProjectionReplacement {
+    db.replace_projection_unverified(ProjectionReplacement {
         namespace: GraphNamespace::new("workspace").unwrap(),
         projection: GraphProjectionId::new("facts").unwrap(),
         source_generation: SourceGeneration::new("facts-g2").unwrap(),
@@ -132,14 +132,14 @@ fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
 fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "facts",
         "facts-g1",
         "facts-w1",
         vec![GraphMutation::UpsertEntity(entity("shared"))],
     ))
     .unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "code-g1",
         "code-w1",
@@ -159,7 +159,7 @@ fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     direct_update
         .mutations
         .push(GraphMutation::DeleteEntity(identity("shared")));
-    db.apply(direct_update).unwrap();
+    db.apply_unverified(direct_update).unwrap();
 
     let expected = vec![identity("source"), identity("shared")];
     assert_eq!(
@@ -185,14 +185,14 @@ fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
 fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
     let temp = TempDir::new().unwrap();
     let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "facts",
         "facts-g1",
         "facts-w1",
         vec![GraphMutation::UpsertEntity(entity("shared"))],
     ))
     .unwrap();
-    db.apply(batch(
+    db.apply_unverified(batch(
         "code",
         "code-g1",
         "code-w1",
@@ -212,7 +212,7 @@ fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
         ],
     );
 
-    db.publish(GraphPublication {
+    db.publish_unverified(GraphPublication {
         namespace: GraphNamespace::new("workspace").unwrap(),
         idempotency_key: GraphIdempotencyKey::new("facts-event-g2").unwrap(),
         input_digest: GraphPublicationInputDigest::new(format!("sha256:{}", "a".repeat(64)))

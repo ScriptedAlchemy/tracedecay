@@ -12,7 +12,8 @@ pub use tracedecay_domain::{
 use super::StorageRuntimeContractErrorV1;
 
 const LOCATOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.store-runtime.local-locator.v1\0";
-pub const GRAPH_STORE_PRIVATE_DIRECTORY: &str = ".tracedecay-grafeo";
+/// Daemon-private root holding one durable Grafeo directory per logical store.
+pub const DURABLE_GRAPH_STORE_DIRECTORY: &str = ".tracedecay-graph-store";
 
 macro_rules! canonical_id {
     ($name:ident, $field:literal) => {
@@ -438,8 +439,9 @@ pub fn canonical_store_locator_digest(
 /// Derives the sole persistent Graph locator paired with one relational shard.
 ///
 /// Both inputs have already been selected and canonicalized by daemon store
-/// authority. This pure contract only places the graph file in the daemon's
-/// private graph directory; it never creates or opens filesystem artifacts.
+/// authority. This pure contract only places the graph-store directory beneath
+/// the daemon's durable graph-store root; it never creates or opens filesystem
+/// artifacts. Grafeo owns every file below the resolved directory.
 pub fn graph_store_locator_path(
     canonical_store_root: &Path,
     relational_store_path: &Path,
@@ -460,8 +462,8 @@ pub fn graph_store_locator_path(
             field: "graph store locator path",
         })?;
     Ok(canonical_store_root
-        .join(GRAPH_STORE_PRIVATE_DIRECTORY)
-        .join(format!("{filename}.grafeo")))
+        .join(DURABLE_GRAPH_STORE_DIRECTORY)
+        .join(filename))
 }
 
 #[cfg(test)]
@@ -503,23 +505,22 @@ mod tests {
 
     #[test]
     fn canonical_locator_digest_binds_the_exact_absolute_path() {
-        let first = canonical_store_locator_digest(Path::new("/stores/a/graph.grafeo"))
+        let first = canonical_store_locator_digest(Path::new("/stores/a/graph-store"))
             .expect("absolute locator");
-        let second = canonical_store_locator_digest(Path::new("/stores/b/graph.grafeo"))
+        let second = canonical_store_locator_digest(Path::new("/stores/b/graph-store"))
             .expect("absolute locator");
 
         assert_ne!(first, second);
-        assert!(canonical_store_locator_digest(Path::new("relative/graph.grafeo")).is_err());
+        assert!(canonical_store_locator_digest(Path::new("relative/graph-store")).is_err());
     }
 
     #[test]
-    fn graph_locator_is_private_and_shard_specific() {
+    fn graph_locator_is_a_durable_directory_and_shard_specific() {
         let root = Path::new("/stores/project-a");
         assert_eq!(
             graph_store_locator_path(root, &root.join("sessions.db"))
                 .expect("canonical graph locator"),
-            root.join(GRAPH_STORE_PRIVATE_DIRECTORY)
-                .join("sessions.grafeo")
+            root.join(DURABLE_GRAPH_STORE_DIRECTORY).join("sessions")
         );
         assert!(graph_store_locator_path(root, Path::new("/stores/project-b/project.db")).is_err());
     }

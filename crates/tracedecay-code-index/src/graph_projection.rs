@@ -203,15 +203,16 @@ impl CodeGraphProjectionStore {
         }
         let built = build_projection(generation, edges, chunks, Arc::clone(&cancellation))?;
         let watermark = built.watermark.clone();
-        self.database.replace_projection(ProjectionReplacement {
-            namespace: namespace()?,
-            projection: projection()?,
-            source_generation: source_generation(generation)?,
-            next_watermark: built.watermark,
-            entities: built.entities,
-            relations: built.relations,
-            cancellation,
-        })?;
+        self.database
+            .replace_projection_unverified(ProjectionReplacement {
+                namespace: namespace()?,
+                projection: projection()?,
+                source_generation: source_generation(generation)?,
+                next_watermark: built.watermark,
+                entities: built.entities,
+                relations: built.relations,
+                cancellation,
+            })?;
         Ok(watermark)
     }
 }

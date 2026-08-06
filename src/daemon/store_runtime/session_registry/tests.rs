@@ -7,6 +7,7 @@ use super::{
     LocalProfileIdentityAuthorityV1, ProjectId, StoreShardIdV1, process_runtime_generation,
 };
 use crate::db::engine::{Executor, TestConnection};
+use tracedecay_store::DURABLE_GRAPH_STORE_DIRECTORY;
 
 async fn project_sessions_pending_convergence(
     project_name: &str,
@@ -106,6 +107,10 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
     let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .expect("first session runtime registry");
+    assert!(
+        profile_root.join(DURABLE_GRAPH_STORE_DIRECTORY).is_dir(),
+        "profile-store initialization must create the graph resolver root"
+    );
     let stale = first_registry.profile_runtime.binding().clone();
     assert_eq!(
         stale.incarnation.get(),
@@ -294,6 +299,15 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
         )
     );
     assert_eq!(first.db_path(), sessions_path);
+    assert!(
+        first
+            .db_path()
+            .parent()
+            .expect("project session store parent")
+            .join(DURABLE_GRAPH_STORE_DIRECTORY)
+            .is_dir(),
+        "project-session initialization must create the graph resolver root"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -660,6 +674,14 @@ async fn worktree_graph_mount_does_not_require_git() {
         .expect("non-git graph runtime");
 
     assert_eq!(database.database_path(), database_path);
+    assert!(
+        database_path
+            .parent()
+            .expect("worktree store parent")
+            .join(DURABLE_GRAPH_STORE_DIRECTORY)
+            .is_dir(),
+        "writable code-store initialization must create the graph resolver root"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -126,12 +126,12 @@ fn queued_reader_rechecks_postcommit_poison_after_database_lock() {
 #[test]
 fn snapshot_is_a_zero_copy_read_lease_that_blocks_writes_until_drop() {
     let db = memory_db();
-    db.apply(scalar_batch("before")).unwrap();
+    db.apply_unverified(scalar_batch("before")).unwrap();
     let snapshot = db.snapshot().unwrap();
     let writer_db = db.clone();
     let (sent, received) = mpsc::channel();
     let writer = std::thread::spawn(move || {
-        let result = writer_db.apply(scalar_batch("after"));
+        let result = writer_db.apply_unverified(scalar_batch("after"));
         sent.send(result).unwrap();
     });
 
@@ -164,7 +164,7 @@ fn snapshot_is_a_zero_copy_read_lease_that_blocks_writes_until_drop() {
 #[test]
 fn open_installs_native_locator_indexes_and_entity_scalars() {
     let db = memory_db();
-    db.apply(scalar_batch("native")).unwrap();
+    db.apply_unverified(scalar_batch("native")).unwrap();
     let database_guard = db.inner.database.read().unwrap();
     let database = database_guard.as_ref().unwrap();
     for property in [

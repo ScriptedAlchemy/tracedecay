@@ -5,7 +5,7 @@ use tracedecay_store::{ProjectId, StoreShardIdV1};
 
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, DatabaseAuthority, Result,
-    open_runtime, session_registry_error,
+    initialize_durable_graph_store_root, open_runtime, session_registry_error,
 };
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -101,6 +101,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             ));
         }
         let writable = matches!(&access, DatabaseAccessMode::ReadWrite);
+        if writable {
+            initialize_durable_graph_store_root(&runtime)?;
+        }
         let database = Database::publish_runtime(runtime, access).await?;
         if writable {
             mounted.insert(project_id, Arc::new(database.clone()));
