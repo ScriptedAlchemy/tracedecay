@@ -1,11 +1,11 @@
 # 11b — Structure visualization: anatomy, transit, disagreement
 
-Status: user direction captured and agent concept/mockup exploration complete
-(2026-07-25); the concepts are not themselves user-approved specifications.
-Delivery timing is an **open owner question**. The user raised topography and
-"kinestetic synastisya" while the core dashboard delivery was active and never agreed to defer them
-until after it. The current roadmap sequencing is therefore a plan proposal,
-not a user decision. Historical mockups live on branch
+Status: active in-scope V2 delivery with work underway; the user has directed
+that these visualizations ship in full for V2. Agent concept/mockup
+exploration is complete (2026-07-25); the concepts are not themselves
+user-approved specifications. The user raised topography and
+"kinestetic synastisya" while the core dashboard delivery was active and never
+agreed to defer them until after it; no deferral applies. Historical mockups live on branch
 `worktree-agent-ac56015e63cbf0f86` under `mockups/structure-viz/` (three
 self-contained HTML pages, dark+light shots, per-concept notes).
 

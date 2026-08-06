@@ -2,7 +2,9 @@
 
 ## Status and authority
 
-Measured performance optimization follows V2 convergence. It optimizes demonstrated bottlenecks in shipped
+Measured performance optimization is an active in-scope V2 delivery with work
+underway; it ships in full for V2, not as post-V2 follow-up. It optimizes
+demonstrated bottlenecks in shipped
 product journeys and retains only changes that improve the same journey on the
 same host without changing semantics, safety, or recovery.
 
