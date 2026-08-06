@@ -6,8 +6,9 @@
 //! the durable semantic-vector projection
 //! (docs/plans/tracedecay-v2/39-embedded-grafeo-graph-database.md Task 4).
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::ProjectId;
@@ -22,6 +23,51 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 
 use super::registry::SchedulerGraphCancellationV1;
 use super::{CodeIndexSchedulerRegistryV1, registry::CodeIndexServingScopeV1};
+
+/// Process-local registry so daemon maintenance and Doctor can resolve the
+/// mounted project's vector graph without threading the provider through
+/// every retention call stack. Registered unconditionally at code-index
+/// mount, so retention semantics hold even when the semantic runtime itself
+/// is not configured (vectors published earlier still pin their sources).
+fn project_vector_graph_providers()
+-> &'static Mutex<BTreeMap<PathBuf, Arc<dyn SemanticVectorGraphProviderV1>>> {
+    static PROVIDERS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<dyn SemanticVectorGraphProviderV1>>>> =
+        OnceLock::new();
+    PROVIDERS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn provider_key(project_root: &Path) -> PathBuf {
+    project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf())
+}
+
+pub(crate) fn register_project_semantic_vector_graph_provider(
+    project_root: &Path,
+    provider: Arc<dyn SemanticVectorGraphProviderV1>,
+) {
+    project_vector_graph_providers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(provider_key(project_root), provider);
+}
+
+pub(crate) fn unregister_project_semantic_vector_graph_provider(project_root: &Path) {
+    project_vector_graph_providers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&provider_key(project_root));
+}
+
+pub(crate) fn project_semantic_vector_graph_provider(
+    project_root: &Path,
+) -> Option<Arc<dyn SemanticVectorGraphProviderV1>> {
+    project_vector_graph_providers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&provider_key(project_root))
+        .cloned()
+}
 
 /// Resolve semantic-vector graph runtimes for one mounted project.
 pub(crate) struct DaemonSemanticVectorGraphProviderV1 {

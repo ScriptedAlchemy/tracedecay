@@ -224,6 +224,23 @@ impl DaemonInvocationState {
             &store_root,
             &canonical_project_root,
         );
+        // The vector graph provider is registered unconditionally: retention
+        // and Doctor must resolve published vectors through the mounted code
+        // graph even when the semantic runtime itself is not configured.
+        let vector_graph: Arc<
+            dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1,
+        > = Arc::new(
+            code_index_scheduler::semantic_vector_graph::DaemonSemanticVectorGraphProviderV1::new(
+                project_id.clone(),
+                canonical_project_root.clone(),
+                self.code_index_schedulers.clone(),
+                Arc::clone(&graph_runtime),
+            ),
+        );
+        code_index_scheduler::semantic_vector_graph::register_project_semantic_vector_graph_provider(
+            &canonical_project_root,
+            Arc::clone(&vector_graph),
+        );
         let semantic_schedule = semantic_runtime
             .zip(semantic_database)
             .zip(semantic_lifecycle)
@@ -231,16 +248,7 @@ impl DaemonInvocationState {
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
             .map(
                 |((((handle, database), lifecycle), resources), worktree_id)| {
-                    let graph: Arc<
-                        dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1,
-                    > = Arc::new(
-                        code_index_scheduler::semantic_vector_graph::DaemonSemanticVectorGraphProviderV1::new(
-                            project_id.clone(),
-                            canonical_project_root.clone(),
-                            self.code_index_schedulers.clone(),
-                            Arc::clone(&graph_runtime),
-                        ),
-                    );
+                    let graph = Arc::clone(&vector_graph);
                     crate::application::semantic_runtime::production_saved_generation_schedule_hook(
                         crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
                             project_root: project_root.to_path_buf(),
