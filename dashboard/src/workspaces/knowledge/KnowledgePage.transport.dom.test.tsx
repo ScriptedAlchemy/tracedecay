@@ -42,10 +42,12 @@ describe('KnowledgePage under HTTP transport faults', () => {
       server.use(allRoutesFail(fault));
       const { container } = renderKnowledge();
 
-      // The rail and the list both hang off the memory overview read, so both
-      // report the failure rather than one of them rendering a hollow shell.
+      // The rail and the list both hang off the memory overview read, and the
+      // curation panel's two reads (curator status, curation plan) fail with
+      // them — all four report the failure rather than any rendering a hollow
+      // shell.
       const chips = await settledChips(container);
-      expect(chips).toHaveLength(2);
+      expect(chips).toHaveLength(4);
       for (const chip of chips) {
         expect(chip.getAttribute('data-state')).toBe(kind);
         if (detail) expect(chip.textContent).toContain(detail);
