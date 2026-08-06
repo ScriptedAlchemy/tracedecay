@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod capture;
+pub mod capture_protocol;
 pub mod composition;
 pub mod credential_admission;
 pub mod protocol;

@@ -22,6 +22,7 @@ use crate::{
 pub const REMOTE_PROTOCOL_VERSION_V1: u16 = 1;
 pub const REMOTE_ENROLLMENT_USE_CASE_ID_V1: &str = "use-case.remote.enrollment";
 pub const REMOTE_REPLAY_USE_CASE_ID_V1: &str = "use-case.remote.replay";
+pub const REMOTE_CAPTURE_USE_CASE_ID_V1: &str = "use-case.remote.capture";
 
 pub fn remote_enrollment_result_contract_v1() -> ResultContractRef {
     ResultContractRef::new(
@@ -38,6 +39,15 @@ pub fn remote_replay_result_contract_v1() -> ResultContractRef {
         1,
     )
     .expect("static remote replay result contract is canonical")
+}
+
+pub fn remote_capture_result_contract_v1() -> ResultContractRef {
+    ResultContractRef::new(
+        SchemaId::new("remote.capture.result")
+            .expect("static remote capture result schema id is canonical"),
+        1,
+    )
+    .expect("static remote capture result contract is canonical")
 }
 
 /// Canonical semantic validation required before any authenticated remote
@@ -503,6 +513,8 @@ pub enum RemoteProtocolFailureV1 {
     ScopeMismatch,
     StaleCredentialRevision,
     StaleAuthorityFence,
+    AuthorityReachable,
+    SpoolSaturated,
     AuthorityUnavailable,
 }
 
@@ -542,6 +554,22 @@ pub fn remote_protocol_problem(
             ),
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+        },
+        RemoteProtocolFailureV1::AuthorityReachable => ApplicationProblem::Conflict {
+            diagnostic: safe_diagnostic(
+                "remote.authority_reachable",
+                "Offline capture is rejected while the owning authority is reachable",
+            ),
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        },
+        RemoteProtocolFailureV1::SpoolSaturated => ApplicationProblem::Saturated {
+            diagnostic: safe_diagnostic(
+                "remote.spool_saturated",
+                "The remote offline-capture spool has no remaining capacity",
+            ),
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
         },
         RemoteProtocolFailureV1::AuthorityUnavailable => ApplicationProblem::Unavailable {
             diagnostic: safe_diagnostic(
