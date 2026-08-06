@@ -24,6 +24,7 @@ import {
   type SchedulerControlResult,
   type SkillRow,
 } from '../../data/query/automation.ts';
+import { RunHistory } from './RunHistory.tsx';
 import { scopeWriteSentence, type ScopeWritability } from '../../data/scope/store.ts';
 import {
   AutomationSchedulerStatusV1Schema,
@@ -362,6 +363,9 @@ export function AutomationsPage() {
               );
             }}
           </LegacyBoundary>
+        </OverviewCard>
+        <OverviewCard title="Run history">
+          <RunHistory />
         </OverviewCard>
       </OverviewGrid>
     </div>
