@@ -346,6 +346,161 @@ async fn cancelled_mutation_leaves_the_active_generation_unchanged() {
 }
 
 #[tokio::test]
+async fn activate_generation_rolls_back_atomically_and_retires_the_prior_revision() {
+    let store =
+        GraphVectorGenerationStoreV1::open(memory_graph(), Arc::new(NeverCancelled)).unwrap();
+    let first = publish_one(
+        &store,
+        "code-generation.first",
+        "chunk.first",
+        'a',
+        vec![1.0, 0.0],
+        None,
+    )
+    .await;
+    let second = publish_one(
+        &store,
+        "code-generation.second",
+        "chunk.second",
+        'b',
+        vec![0.0, 1.0],
+        Some(&first),
+    )
+    .await;
+
+    let active = store
+        .active_generation(Arc::new(NeverCancelled))
+        .await
+        .unwrap()
+        .expect("active generation");
+    let snapshot = store
+        .active_generation_snapshot_for(
+            active.embedding_key(),
+            active.source_generation(),
+            active.source_manifest_digest(),
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .unwrap()
+        .expect("active snapshot");
+    assert_eq!(snapshot.generation().generation_id(), &second);
+    assert!(
+        store
+            .active_snapshot_is_current(snapshot.revision(), &second, Arc::new(NeverCancelled))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .active_generation_snapshot_for(
+                active.embedding_key(),
+                &id::<CodeGenerationId>("code-generation.other"),
+                active.source_manifest_digest(),
+                Arc::new(NeverCancelled),
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let stale = store
+        .activate_generation(&first, Some(&first), Arc::new(NeverCancelled))
+        .await
+        .unwrap_err();
+    assert_eq!(stale, VectorGenerationStoreErrorV1::StaleActiveGeneration);
+
+    let unknown = tracedecay_domain::VectorGenerationIdV1::new(manifest_digest('f'));
+    let missing = store
+        .activate_generation(&unknown, Some(&second), Arc::new(NeverCancelled))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        missing,
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration
+    );
+
+    let rolled = store
+        .activate_generation(&first, Some(&second), Arc::new(NeverCancelled))
+        .await
+        .expect("rollback activation");
+    assert_eq!(rolled.generation_id, first);
+    assert_eq!(
+        store
+            .active_generation_id(Arc::new(NeverCancelled))
+            .await
+            .unwrap(),
+        Some(first.clone())
+    );
+    assert!(
+        !store
+            .active_snapshot_is_current(snapshot.revision(), &second, Arc::new(NeverCancelled))
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .generation(&second, Arc::new(NeverCancelled))
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn deactivate_generation_disables_reads_while_retaining_immutable_generations() {
+    let store =
+        GraphVectorGenerationStoreV1::open(memory_graph(), Arc::new(NeverCancelled)).unwrap();
+    let first = publish_one(
+        &store,
+        "code-generation.first",
+        "chunk.first",
+        'a',
+        vec![1.0, 0.0],
+        None,
+    )
+    .await;
+
+    let foreign = tracedecay_domain::VectorGenerationIdV1::new(manifest_digest('9'));
+    let stale = store
+        .deactivate_generation(Some(&foreign), Arc::new(NeverCancelled))
+        .await
+        .unwrap_err();
+    assert_eq!(stale, VectorGenerationStoreErrorV1::StaleActiveGeneration);
+
+    store
+        .deactivate_generation(Some(&first), Arc::new(NeverCancelled))
+        .await
+        .expect("deactivate");
+    assert_eq!(
+        store
+            .active_generation_id(Arc::new(NeverCancelled))
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        store
+            .generation(&first, Arc::new(NeverCancelled))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let reactivated = store
+        .activate_generation(&first, None, Arc::new(NeverCancelled))
+        .await
+        .expect("reactivate");
+    assert_eq!(reactivated.generation_id, first);
+    assert_eq!(
+        store
+            .active_generation_id(Arc::new(NeverCancelled))
+            .await
+            .unwrap(),
+        Some(first)
+    );
+}
+
+#[tokio::test]
 async fn stale_publication_loses_without_displacing_the_cas_winner() {
     let store =
         GraphVectorGenerationStoreV1::open(memory_graph(), Arc::new(NeverCancelled)).unwrap();
