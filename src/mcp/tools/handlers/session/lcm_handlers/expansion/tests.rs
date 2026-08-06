@@ -215,7 +215,7 @@ async fn stale_describe_and_expand_render_typed_freshness_in_json_and_markdown()
         .unwrap(),
     );
     assert!(markdown.contains("**status:** stale"), "{markdown}");
-    assert!(markdown.contains("**generation lag:** 7"), "{markdown}");
+    assert!(markdown.contains("**generation_lag:** 7"), "{markdown}");
     assert!(
         !markdown.contains("temporal_store_unavailable"),
         "{markdown}"

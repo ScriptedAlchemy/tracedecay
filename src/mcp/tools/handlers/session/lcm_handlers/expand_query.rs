@@ -337,10 +337,11 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_expand_query(
                             }),
                             has_more: source.content_truncated,
                         });
+                        // The retrieval service already folds non-available
+                        // summary sources into `retrieval.omitted()`; only the
+                        // visible content joins the context blocks here.
                         if source.state == HydrationStateV1::Available {
                             sources.push((kind, Some(node_id.clone()), source.content));
-                        } else {
-                            source_omitted = source_omitted.saturating_add(1);
                         }
                     }
                     sources.push(("summary_node", Some(node_id.clone()), expansion.content));
