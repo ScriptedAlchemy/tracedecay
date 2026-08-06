@@ -466,10 +466,14 @@ impl FixedGitIndexRunner {
             self.verify_hunk_preconditions(patch.hunk())?;
         }
 
+        let candidate_permissions = std::fs::metadata(&candidate_index)
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?
+            .permissions();
         let candidate_bytes = std::fs::read(&candidate_index)
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
         lock.file
-            .rewind()
+            .set_permissions(candidate_permissions)
+            .and_then(|()| lock.file.rewind())
             .and_then(|()| lock.file.set_len(0))
             .and_then(|()| lock.file.write_all(&candidate_bytes))
             .and_then(|()| lock.file.sync_all())
