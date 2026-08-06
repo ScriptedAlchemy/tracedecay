@@ -70,6 +70,7 @@ impl AgentTaskBackend for EchoBackend {
             output_text: request.prompt.clone(),
             output_json: extract_json_object_prefix(&request.prompt).ok(),
             model: Some("test-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: Some(12),
             output_tokens: Some(34),
         })
@@ -897,6 +898,7 @@ impl AgentTaskBackend for FlakyBackend {
             output_text: "recovered".to_string(),
             output_json: None,
             model: Some("test-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: None,
             output_tokens: None,
         })

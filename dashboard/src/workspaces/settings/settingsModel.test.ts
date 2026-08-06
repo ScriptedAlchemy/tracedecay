@@ -99,17 +99,8 @@ describe('Settings read model', () => {
 
   it('reads environment overrides verbatim, including explicit-vs-default state', () => {
     const model = buildSettingsModel(payload);
-    expect(model.overrides).toHaveLength(3);
-    expect(model.activeOverrides).toBe(1);
-    // In force: set in the daemon's environment, so its literal value is real
-    // provenance for the resolved `pricing_offline: true` in the same group.
-    const offline = model.overrides.find((o) => o.name === 'TRACEDECAY_OFFLINE');
-    expect(offline).toMatchObject({
-      name: 'TRACEDECAY_OFFLINE',
-      active: true,
-      value: '1',
-    });
-    expect(offline?.description).toBe('Skips network pricing fetches.');
+    expect(model.overrides).toHaveLength(2);
+    expect(model.activeOverrides).toBe(0);
     // Unset: no value, so a default applies and none is invented.
     expect(model.overrides.find((o) => o.name === 'TRACEDECAY_DATA_DIR')).toMatchObject({
       active: false,
@@ -268,10 +259,8 @@ describe('Settings filtering', () => {
     expect(filterOverrides(overrides, 'DATA_DIR').map((o) => o.name)).toEqual([
       'TRACEDECAY_DATA_DIR',
     ]);
-    expect(filterOverrides(overrides, 'pricing').map((o) => o.name)).toEqual([
-      'TRACEDECAY_OFFLINE',
-    ]);
-    expect(filterOverrides(overrides, '')).toHaveLength(3);
+    expect(filterOverrides(overrides, 'pricing')).toEqual([]);
+    expect(filterOverrides(overrides, '')).toHaveLength(2);
   });
 });
 

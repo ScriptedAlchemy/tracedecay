@@ -480,8 +480,26 @@ impl DaemonInvocationService {
                     DaemonInvocationProblem::InvalidRequest,
                 )
             }
-            DaemonInvocationPayload::WorkApplication { .. } => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+            DaemonInvocationPayload::WorkApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let Some(registered) = work_runtime else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                execute_work_application(
+                    registered,
+                    request_id,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
             }
             DaemonInvocationPayload::WorkflowApplication {
                 request,
@@ -533,9 +551,6 @@ impl DaemonInvocationService {
                     cancellation,
                 ))
                 .await
-            }
-            DaemonInvocationPayload::WorkAttempt { .. } => {
-                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
             }
             DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
                 self.execute_semantic_evaluation(project_root, request_id, *candidate)

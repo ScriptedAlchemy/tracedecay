@@ -108,7 +108,7 @@ movers (see "Still blocked" below). Trajectory:
 |---|---|---|
 | (mover) | 194 | — |
 | kernel repoint | 69 | `tracedecay-runtime-core` aliased into this crate's root |
-| agents-side ports | 45 | `ports::{context,configuration,mcp_tools,hook_runtime,pricing}`, `TRACEDECAY_GIT_SHA` |
+| agents-side ports | 45 | `ports::{context,configuration,mcp_tools,hook_runtime}`, `TRACEDECAY_GIT_SHA` |
 | analytics + user config | 37 | `analytics` moved down; profile-config seams narrowed |
 | session evidence | 32 | `ports::{session_evidence,codex_app_server}` |
 | profile session store | 28 | `ports::session_store`; hook receipts repointed |
@@ -155,9 +155,15 @@ before command dispatch.
 | `ports::hook_runtime::register_daemon_tool_invoker` | `hooks::daemon_tool_json` | daemon reported unavailable |
 | `ports::hook_runtime::register_memory_injection_gate` | `hooks::memory_inject::memory_injection_enabled` | injection disabled |
 | `ports::hook_runtime::register_cursor_catch_up_ingest_max_bytes` | `hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES` | `u64::MAX` → doctor stays silent |
-| `ports::pricing::register` | `accounting::pricing::cost_of_turn` | `0.0` (same as an unpriced model) |
 | `ports::codex_app_server::register` | adapter over `sessions::codex_app_server::run_prompt_with_codex_app_server` | backend unavailable |
 | `ports::session_store::register_canonical_project_key` | `RegisteredGlobalDb::canonical_project_key` | lossy path string |
+
+Provider usage and pricing are not registered process-global ports. Host adapters
+persist immutable provider-usage observations from exact native evidence; the
+side-effect-free cost read resolves those observations against the deterministic
+bundled all-provider pricing table. Unknown or unavailable evidence remains
+typed rather than becoming a zero-cost inert answer, and no home pricing cache
+or request-triggered pricing refresh is involved.
 
 ### Implemented ports (root `impl`s the trait)
 

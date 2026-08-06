@@ -66,12 +66,8 @@ pub mod observability;
 pub mod observation;
 pub mod operation_stream;
 pub mod primitives;
-pub mod stack_coordinator;
-// The TTL'd remote-JSON cache mechanism shared by the two model-pricing
-// tables (root `accounting::pricing` and the dashboard's `savings_pricing`).
-// Both crates already depend on this one, so it is the shared home that costs
-// no new dependency edge.
-pub mod remote_json_cache;
+pub mod provider_pricing;
+pub mod provider_usage;
 pub mod request_identity;
 pub mod response_handles;
 pub mod retention;
@@ -79,6 +75,7 @@ pub mod semantic_runtime;
 pub mod session;
 pub mod settings_control;
 pub mod source_authorization;
+pub mod stack_coordinator;
 pub mod store;
 pub mod tracedecay;
 pub mod user_config;

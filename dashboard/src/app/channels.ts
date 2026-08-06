@@ -1,5 +1,5 @@
 /**
- * The instrument's channel list: the twelve mounted workspaces in their fixed panel
+ * The instrument's channel list: the thirteen workspaces in their fixed panel
  * order. A workspace's channel number is part of its identity in this design
  * (the nav rail numbers them, every workspace header repeats the number), so
  * the order lives in exactly one place.
@@ -26,6 +26,7 @@ export const CHANNELS: readonly Channel[] = [
   { path: 'observatory', label: 'Observatory' },
   { path: 'costs', label: 'Costs' },
   { path: 'settings', label: 'Settings' },
+  { path: 'work', label: 'Work' },
 ] as const;
 
 /** Zero-padded channel number for a workspace path (`code` → `06`). Unknown

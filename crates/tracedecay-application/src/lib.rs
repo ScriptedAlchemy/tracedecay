@@ -45,8 +45,6 @@ pub mod storage;
 pub mod wire;
 pub mod work;
 pub mod work_catalog;
-pub mod work_dispatch;
-pub mod work_execution;
 pub mod work_read;
 pub mod workflow_catalog;
 pub mod workflow_coordination;
@@ -260,8 +258,6 @@ pub use wire::{
 };
 pub use work::*;
 pub use work_catalog::*;
-pub use work_dispatch::*;
-pub use work_execution::*;
 pub use work_read::*;
 pub use workflow_catalog::*;
 pub use workflow_coordination::*;

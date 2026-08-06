@@ -10,6 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use tracedecay_domain::ObservationScopeV1;
+use tracedecay_store::StoreShardScopeV1;
 
 use crate::global_db::RegisteredGlobalDb;
 
@@ -166,9 +168,27 @@ pub(crate) async fn analytics_diagnostics_with_db(
     .await;
     let observatory = crate::application::observability::observatory_cli_value(&observatory)
         .map_err(cli_error)?;
-    let costs =
-        crate::application::observability::costs_read_model(gdb, project_filter.as_deref(), 0)
-            .await;
+    let provider_scope = if all_projects {
+        None
+    } else {
+        project_sessions.and_then(|sessions| match &sessions.binding().shard_id.scope {
+            StoreShardScopeV1::ProjectSessions { project_id } => {
+                Some(ObservationScopeV1::Project {
+                    project_id: project_id.clone(),
+                })
+            }
+            _ => None,
+        })
+    };
+    let provider_usage_db = if all_projects { None } else { project_sessions };
+    let costs = crate::application::observability::costs_read_model(
+        gdb,
+        provider_usage_db,
+        provider_scope.as_ref(),
+        project_filter.as_deref(),
+        0,
+    )
+    .await;
     let costs = crate::application::observability::costs_cli_value(&costs).map_err(cli_error)?;
     let event_rows: Vec<Value> = events
         .iter()

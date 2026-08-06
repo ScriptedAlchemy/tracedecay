@@ -23,6 +23,7 @@ impl AgentTaskBackend for TransientThenJsonBackend {
             output_text: "{\"ops\":[]}".to_string(),
             output_json: Some(json!({"ops": []})),
             model: Some("retry-test-model".to_string()),
+            provider: Some("fixture".to_string()),
             input_tokens: None,
             output_tokens: None,
         })

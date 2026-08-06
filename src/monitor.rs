@@ -424,10 +424,16 @@ fn monitor_loop(
                 "  Spent: ${:.2} today | ${:.2} 7d    Saved: {}",
                 snapshot.today_cost, snapshot.week_cost, saved_str
             ));
-            cost_panel.push(format!(
-                "  Efficiency: {:.0}%    Top model: {} (${:.2})",
-                snapshot.efficiency_pct, snapshot.top_model, snapshot.top_model_cost
-            ));
+            match (&snapshot.top_model, snapshot.top_model_cost) {
+                (Some(model), Some(cost)) => cost_panel.push(format!(
+                    "  Efficiency: {:.0}%    Top model: {model} (${cost:.2})",
+                    snapshot.efficiency_pct
+                )),
+                _ => cost_panel.push(format!(
+                    "  Efficiency: {:.0}%    Top model: unavailable",
+                    snapshot.efficiency_pct
+                )),
+            }
         }
         match &cost_cache.state {
             CostCacheState::Fresh => {}

@@ -1,5 +1,5 @@
 use tracedecay_sdk::operations::{
-    TypedOperation, UNAVAILABLE_OPERATIONS, WorkflowRegisterDefinition,
+    TypedOperation, UNAVAILABLE_OPERATIONS, WorkCreate, WorkflowRegisterDefinition,
 };
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
@@ -52,13 +52,22 @@ fn remote_outcomes_are_the_canonical_application_types() {
 }
 
 #[test]
-fn rejected_work_family_exposes_no_routes() {
+fn work_create_descriptor_matches_the_mounted_binding() {
     let registry = work::executable_binding_registry().expect("canonical Work registry");
+    let binding = registry
+        .get(&operation::OperationId::new(WorkCreate::OPERATION_ID).unwrap())
+        .and_then(|availability| availability.binding())
+        .expect("mounted Work create binding");
+
+    assert_eq!(WorkCreate::ROUTE, "/application/work/create");
+    assert_eq!(WorkCreate::BINDING_ID, "binding.http.work.create");
+    assert_eq!(WorkCreate::EFFECT, binding.effect());
+    assert_eq!(WorkCreate::IDEMPOTENCY, binding.idempotency());
     assert_eq!(
-        registry.iter().count(),
-        0,
-        "the rejected legacy Work execution family must not remount routes"
+        WorkCreate::MAXIMUM_DEADLINE_MILLIS,
+        binding.deadline().maximum_millis()
     );
+    assert_eq!(WorkCreate::DEADLINE_BEHAVIOR, binding.deadline().behavior());
 }
 
 #[test]

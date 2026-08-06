@@ -14,6 +14,7 @@ use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior, params,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
+use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
     WORKFLOW_TABLE_CONTRACTS_V1,
@@ -86,23 +87,6 @@ const REGISTRY_SCHEMA: &str = "
 ";
 
 const TRANSCRIPT_SCHEMA: &str = "
-    CREATE TABLE IF NOT EXISTS turns (
-        message_id TEXT PRIMARY KEY,
-        project_hash TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        model TEXT NOT NULL,
-        timestamp INTEGER NOT NULL,
-        input_tokens INTEGER NOT NULL,
-        output_tokens INTEGER NOT NULL,
-        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-        cost_usd REAL NOT NULL,
-        category TEXT NOT NULL,
-        tool_names TEXT NOT NULL DEFAULT ''
-    );
-    CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_turns_project ON turns(project_hash);
-    CREATE INDEX IF NOT EXISTS idx_turns_model ON turns(model);
     CREATE TABLE IF NOT EXISTS parse_offsets (
         file_path TEXT PRIMARY KEY,
         byte_offset INTEGER NOT NULL,
@@ -318,6 +302,10 @@ pub async fn ensure_registered_schema_for_admission(
                 .await
                 .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
         }
+        transaction
+            .execute_batch(WORK_SCHEMA_V1)
+            .await
+            .map_err(|error| global_db_operation_error("initialize Work schema", error))?;
         transaction
             .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
             .await

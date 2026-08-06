@@ -436,6 +436,7 @@ impl crate::automation::backend::AgentTaskBackend for FakeSynthesisBackend {
             output_text: self.output.clone(),
             output_json: None,
             model: None,
+            provider: None,
             input_tokens: None,
             output_tokens: None,
         })

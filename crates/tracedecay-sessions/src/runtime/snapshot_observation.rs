@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::Path;
 
@@ -6,7 +7,8 @@ use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
-    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId, SessionId,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
+    ProviderUsageContractDimensionV1, SessionId,
 };
 
 use crate::admission::{
@@ -249,7 +251,7 @@ pub fn canonical_snapshot_envelope(
         });
     }
     if let Some(usage) = native.get("usage").filter(|value| value.is_object()) {
-        facts.push(CanonicalObservationFactV1::Usage {
+        facts.push(CanonicalObservationFactV1::UncorrelatedUsage {
             input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
             output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
             cache_read_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
@@ -257,6 +259,19 @@ pub fn canonical_snapshot_envelope(
                 .get("cache_creation_input_tokens")
                 .and_then(Value::as_u64),
             reasoning_tokens: usage.get("reasoning_tokens").and_then(Value::as_u64),
+            total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+            native_kind: native
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("message")
+                .to_string(),
+            native_field: "usage".to_string(),
+            missing_dimensions: BTreeSet::from([
+                ProviderUsageContractDimensionV1::Model,
+                ProviderUsageContractDimensionV1::Scope,
+                ProviderUsageContractDimensionV1::CounterSemantics,
+                ProviderUsageContractDimensionV1::Correlation,
+            ]),
         });
     }
     append_reasoning_fact(&mut facts, native)?;

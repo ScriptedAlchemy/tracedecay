@@ -103,7 +103,7 @@ pub enum MetricEvidenceClassV1 {
 pub enum MetricSourceV1 {
     ObservabilityEnvelope,
     FeedbackObservations,
-    AccountingTurn,
+    ProviderUsageObservation,
     SavingsLedger,
 }
 
