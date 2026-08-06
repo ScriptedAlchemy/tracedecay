@@ -409,7 +409,7 @@ shadow gate counts as delivery.
 - Remove duplicate workflow databases, task schedulers, clocks, queues, lease
   families, retry loops, provider dispatchers, effect journals, artifact
   stores, and surface-local runtime logic.
-- Remove scaffold-only PR17A–F phases, operation/type/file inventories, giant
+- Remove scaffold-only delivery phases, operation/type/file inventories, giant
   fixture corpora, generated provider/catalog registries, declaration parity,
   and repeated authority prose.
 - Keep every capability above in the production loop. Compatibility aliases

@@ -5,9 +5,12 @@
 PR12 ships the official daemon API. PR17 adds accepted task/work graph and
 workflow-runtime application operations. PR18 stabilizes every supported
 public operation, including the PR12 base and all later accepted additions, and
-publishes working Rust and TypeScript SDKs. No operation family is deferred. The
-originally planned Python SDK was dropped: delivery is TypeScript-first plus a
-retained Rust SDK for native consumers, with no Python package.
+publishes working SDK bindings. No operation family is deferred. The originally
+planned Python SDK was dropped: delivery is Rust-first through GitHub release
+assets. crates.io publication follows only after the crate structure is
+settled. A TypeScript npm SDK publishes later through npm OIDC trusted
+publishing once the Rust release path and wire contracts are stable. No Python
+package ships.
 
 Earlier operation inventories, compatibility matrices, generated declarations,
 package fixtures, and conformance packets are historical evidence, not
@@ -17,20 +20,23 @@ retain protocol compatibility. Persisted cursors and receipts use the V2
 fresh-store rule; all other retention is judged by the direct cross-language,
 lifecycle, platform, and regression behavior below.
 
-PR18's first Rust and TypeScript package shapes are not yet published;
-branch acceptance and generated schemas do not create an older supported SDK
-contract. Branch-local V2 request/response APIs change in place. Persisted
-cursors, idempotency keys, journals, checkpoints, and receipts accept only
-their exact final shape; any other database, store, spool, file, or projection
-returns typed `ResetRequired` and requires explicit reset or recreation. No
-storage reader, migration, backfill, dual write, or census path exists. Public
-package protocol compatibility starts only at an actual independent release.
+PR18's first Rust package shape is not yet published; the TypeScript npm
+package publishes on a separate later gate. Branch acceptance and generated
+schemas do not create an older supported SDK contract. Branch-local V2
+request/response APIs change in place. Persisted cursors, idempotency keys,
+journals, checkpoints, and receipts accept only their exact final shape; any
+other database, store, spool, file, or projection returns typed `ResetRequired`
+and requires explicit reset or recreation. No storage reader, migration,
+backfill, dual write, or census path exists. Public package protocol
+compatibility starts only at an actual independent release.
 
 ## User outcome
 
-An external developer can install any supported SDK, connect to a local daemon
-or a PR16-enrolled remote authority, call every supported public operation with
-behavioral/lifecycle parity, and complete the same accepted PR17 journeys:
+An external developer can install the supported Rust SDK now and the
+TypeScript npm SDK after its separate publication gate, connect to a local
+daemon or a PR16-enrolled remote authority, call every supported public
+operation with behavioral/lifecycle parity, and complete the same accepted
+PR17 journeys:
 
 - use project, source, symbol, graph, retrieval, session/LCM, memory,
   configuration, health/Doctor, feedback, test, diagnostics, edit, Git,
@@ -51,10 +57,10 @@ requests.
 
 ### Supported public operation coverage
 
-Every Rust and TypeScript SDK exposes every supported public
-operation, not only the PR17 additions, with distinct IDs and typed legal
-actions. The base includes all callable PR12 families and every operation
-accepted before the PR18 freeze; the PR17 additions include:
+Every published SDK exposes every supported public operation, not only the
+PR17 additions, with distinct IDs and typed legal actions. The base includes
+all callable PR12 families and every operation accepted before the PR18
+freeze; the PR17 additions include:
 
 - initiative, work-item, and version creation/update/read;
 - dependency mutation and readiness, history, projection, Kanban/DAG/timeline/
@@ -141,7 +147,8 @@ events, cancellation, backpressure, reconnect, and bounded terminal errors;
 and does not expose an arbitrary LSP or daemon invocation tunnel through SDKs.
 
 PR18 freezes two distinct public handoff-token consumption operations and
-exposes each through Rust and TypeScript:
+exposes each through Rust immediately and through TypeScript after npm
+publication:
 
 - `open_investigation_handoff` consumes a feedback/diagnostic-cue token and
   delegates to Plan 09's owning investigation application operation/result;
@@ -205,32 +212,43 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
   Syntax may differ; semantics and lifecycle may not.
 - Bind both `open_investigation_handoff` and `open_task_handoff` to their
   owning application operations and expose the same authorized,
-  non-enumerating result in Rust and TypeScript without a raw LSP
-  tunnel. Plan 35 owns transport projection, Plan 09 owns investigation
+  non-enumerating result in Rust immediately and in TypeScript after npm
+  publication, without a raw LSP tunnel. Plan 35 owns transport projection, Plan 09 owns investigation
   results, and Plan 24 owns task semantics; PR18 owns only the public names,
   token-consumption contract, SDK bindings, and compatibility.
 
-### Publish two usable SDKs
+### Publish usable SDKs
 
-- Ship Rust and TypeScript packages with authenticated connection
-  setup, typed operation calls, pagination iterators, streaming, cancellation,
-  timeout, retry/idempotency, reconnect/resume, and structured errors idiomatic
-  to each ecosystem.
-- Generated low-level bindings may be used internally, but reviewed façades
-  provide complete journeys and contain no generic invocation tunnel or local
-  product logic.
-- SDKs never accept shell strings or raw process environments and never execute
-  Claude Code, Codex, or provider binaries locally.
+**Rust (now).** Ship the Rust package through workspace GitHub release assets
+with authenticated connection setup, typed operation calls, pagination
+iterators, streaming, cancellation, timeout, retry/idempotency,
+reconnect/resume, and structured errors idiomatic to native consumers.
+crates.io publication is a later release step after the crate structure is
+settled; it is not part of current acceptance.
+
+**TypeScript (later).** Ship the npm package only after npm OIDC trusted
+publishing is configured and the Rust release path, daemon wire contracts, and
+lifecycle fixtures are stable. The TypeScript package uses the same generated
+wire models and reviewed handwritten lifecycle façades over browser/Node
+`fetch`; npm publication is not required on Rust release day.
+
+Generated low-level bindings may be used internally in either package, but
+reviewed façades provide complete journeys and contain no generic invocation
+tunnel or local product logic. SDKs never accept shell strings or raw process
+environments and never execute Claude Code, Codex, or provider binaries locally.
 
 ### Prove and document real use
 
-- Publish executable quickstarts that cover every public capability family,
+- Publish executable Rust quickstarts that cover every public capability family,
   plus complete work-graph, admitted-runtime, investigation-handoff, and
-  task-handoff journeys in both languages.
-- Test installed packages against one released daemon build on Linux and
+  task-handoff journeys.
+- Test the installed Rust package against one released daemon build on Linux and
   Windows, including current and oldest-supported client/daemon combinations.
-- Publish package versions only after the examples and lifecycle tests pass
-  against the same daemon artifact.
+- Publish the Rust crate version only after those examples and lifecycle tests
+  pass against the same daemon artifact.
+- After the npm OIDC gate opens, publish TypeScript quickstarts and npm package
+  versions using the same daemon artifact and lifecycle fixtures; npm publication
+  is a separate acceptance gate from the Rust release.
 
 ## Replacement and deletion
 
@@ -248,17 +266,18 @@ matrices, and compilation-only conformance are not retained as release gates.
 
 ## Direct acceptance
 
-- Every supported public operation is callable from Rust and TypeScript
-  against the same production daemon boundary; no operation family is
-  omitted because it predates PR17, and no SDK operation bypasses daemon
-  authorization or opens product storage.
-- Each Rust and TypeScript SDK runs representative read, paged,
-  streamed, cancellable, and effect/receipt operations against both a local
-  daemon and a PR16-enrolled remote authority. The two routes preserve
-  identical application semantics, stable problem/error taxonomy, exact retry
-  directive, authorization decisions, redaction, coverage, legal actions,
-  effects, and terminal receipts; only explicitly declared transport or
-  authority availability differs.
+- Every supported public operation is callable from the Rust SDK against the
+  same production daemon boundary; no operation family is omitted because it
+  predates PR17, and no SDK operation bypasses daemon authorization or opens
+  product storage. TypeScript npm acceptance follows the later npm OIDC gate
+  with the same operation coverage once published.
+- The Rust SDK runs representative read, paged, streamed, cancellable, and
+  effect/receipt operations against both a local daemon and a PR16-enrolled
+  remote authority. The two routes preserve identical application semantics,
+  stable problem/error taxonomy, exact retry directive, authorization decisions,
+  redaction, coverage, legal actions, effects, and terminal receipts; only
+  explicitly declared transport or authority availability differs. The
+  TypeScript SDK proves the same journeys after npm publication.
 - Local and remote variants exercise authentication, disconnect,
   reconnect/resume, paging, streaming/backpressure, cancellation before and
   after an effect commit point, and partial/unavailable authority as applicable.
@@ -276,7 +295,7 @@ matrices, and compilation-only conformance are not retained as release gates.
   request defaults, authorization, scope, paging/streaming, coverage,
   redaction, stable problem plus exact retry directive, idempotency/effect
   receipt, cancellation, reconnect/resume, and unavailable/partial states
-  through Rust and TypeScript.
+  through the Rust SDK and, after npm publication, through TypeScript.
 - Stateful fixtures cover task/work versioning, dependencies, paged
   projections/history, assignment/review, assessment/proposal/recommendation/
   outcome/calibration semantics, abstention and deterministic fallback,
@@ -292,11 +311,12 @@ matrices, and compilation-only conformance are not retained as release gates.
   bindings and idiomatic façades share those fixtures.
 - The Plan 35 session journey covers negotiation, ordered bidirectional
   delivery, cancellation, backpressure, reconnect, stale revisions, and
-  authentication without exposing a raw LSP tunnel. For each Rust and
-  TypeScript SDK, local-daemon and PR16-enrolled-remote variants
-  produce and consume both token kinds: a feedback/diagnostic cue opens the
-  owning investigation surface, and a ready-commit/cross-worktree/task cue
-  opens the owning task surface. Both variants assert identical application
+  authentication without exposing a raw LSP tunnel. The Rust SDK and, after
+  npm publication, the TypeScript SDK each exercise local-daemon and
+  PR16-enrolled-remote variants that produce and consume both token kinds: a
+  feedback/diagnostic cue opens the owning investigation surface, and a
+  ready-commit/cross-worktree/task cue opens the owning task surface. Both
+  variants assert identical application
   semantics and problem taxonomy.
 - Handoff failures cover wrong kind/destination/session/project/root/cue/task
   version/authority, expiry, replay, authorization or policy revocation,
