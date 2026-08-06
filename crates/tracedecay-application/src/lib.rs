@@ -233,6 +233,7 @@ pub use settings_preview::{
     validate_project_settings_patch, validate_user_settings_values,
 };
 pub use source_edit::{
+    RenameFileEditV1, RenameResult, RenameSymbolBindingV1, RenameTextOnlyMatchV1,
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
     SourceEditDiagnosticV1, SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,

@@ -72,7 +72,8 @@ pub(super) fn def_source_edit_reconcile() -> ToolDefinition {
                         "ast_grep_rewrite",
                         "replace_symbol",
                         "insert_at_symbol",
-                        "move_symbol"
+                        "move_symbol",
+                        "rename_symbol"
                     ],
                     "description": "Original source-edit operation kind retained in the uncertain journal."
                 },
@@ -269,9 +270,10 @@ pub(super) fn def_rename_preview() -> ToolDefinition {
          line snippet, and a per-file count of literal textual occurrences of \
          the name that are NOT graph references ('text-only matches — review \
          manually'). It does NOT edit anything and does NOT rewrite occurrences \
-         — a true rename tool is a later addition. Graph call-edge coverage \
-         improves as the resolver does; text-only counts catch what the graph \
-         misses (comments, strings, dynamic dispatch, unresolved refs).",
+         — pass the reported node identity to `tracedecay_rename_symbol` to \
+         apply the rename. Graph call-edge coverage improves as the resolver \
+         does; text-only counts catch what the graph misses (comments, \
+         strings, dynamic dispatch, unresolved refs).",
         json!({
             "type": "object",
             "properties": {
@@ -286,6 +288,69 @@ pub(super) fn def_rename_preview() -> ToolDefinition {
             },
             "required": ["node_id"]
         }),
+    )
+}
+
+pub(super) fn def_rename_symbol() -> ToolDefinition {
+    def_rw(
+        "tracedecay_rename_symbol",
+        "Rename Symbol",
+        "Apply-grade rename of a graph-bound symbol across its declaration and \
+         every graph reference site. Consumes the exact identity reported by \
+         `tracedecay_rename_preview` (node_id, qualified_name, kind, file, \
+         old_name) — a bare spelling is never sufficient — and rewrites \
+         whole-identifier occurrences only on graph-attested lines. Text-only \
+         matches (comments, strings, dynamic dispatch, unresolved refs) are \
+         reported and never rewritten. Defaults to a DRY RUN returning the \
+         per-file plan, diff, and the expected_state digest; applying is \
+         opt-in via `dry_run: false` with a fresh `idempotency_key` and that \
+         `expected_state`. The apply refuses stale identity or drifted files \
+         before any write, and a partial failure restores every preimage.",
+        {
+            let mut schema = source_edit_schema(json!({
+                "type": "object",
+                "properties": {
+                    "node_id": {
+                        "type": "string",
+                        "description": "Exact node ID of the symbol, as reported by tracedecay_rename_preview."
+                    },
+                    "qualified_name": {
+                        "type": "string",
+                        "description": "Exact qualified name the preview reported for the node."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Exact symbol kind the preview reported (e.g. 'function')."
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Exact project-relative defining file the preview reported."
+                    },
+                    "old_name": {
+                        "type": "string",
+                        "description": "Exact current name the preview reported. Apply refuses if the live symbol drifted."
+                    },
+                    "new_name": {
+                        "type": "string",
+                        "description": "New identifier. Must be a valid identifier and must not already occur in any touched file."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "If true (DEFAULT), bind every site and compute the full plan, per-file diff, and expected_state but write nothing. Set false to apply."
+                    },
+                    "verify": {
+                        "type": "boolean",
+                        "description": "If true, re-run file-scoped diagnostics after a real rename and include a compact verdict. Ignored for dry runs. Default: false."
+                    }
+                },
+                "required": ["node_id", "qualified_name", "kind", "file", "old_name", "new_name"]
+            }));
+            // Like move_symbol, rename defaults to preview; only an explicit
+            // dry_run=false selects the apply branch.
+            schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
+            schema["properties"]["dry_run"]["default"] = json!(true);
+            schema
+        },
     )
 }
 
@@ -498,7 +563,7 @@ mod tests {
     use super::*;
     use tracedecay_application::SourceEditKind;
 
-    fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 7] {
+    fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 8] {
         [
             (def_str_replace(), SourceEditKind::StrReplace),
             (def_multi_str_replace(), SourceEditKind::MultiStrReplace),
@@ -507,6 +572,7 @@ mod tests {
             (def_replace_symbol(), SourceEditKind::ReplaceSymbol),
             (def_insert_at_symbol(), SourceEditKind::InsertAtSymbol),
             (def_move_symbol(), SourceEditKind::MoveSymbol),
+            (def_rename_symbol(), SourceEditKind::RenameSymbol),
         ]
     }
 
@@ -527,7 +593,10 @@ mod tests {
             );
             assert_eq!(
                 schema["properties"]["dry_run"]["default"],
-                json!(matches!(kind, SourceEditKind::MoveSymbol))
+                json!(matches!(
+                    kind,
+                    SourceEditKind::MoveSymbol | SourceEditKind::RenameSymbol
+                ))
             );
         }
     }
@@ -554,15 +623,14 @@ mod tests {
                 json!(false)
             );
         }
-        let move_schema = def_move_symbol().input_schema;
-        assert_eq!(
-            move_schema["allOf"][0]["if"]["required"],
-            json!(["dry_run"])
-        );
-        assert_eq!(
-            move_schema["allOf"][0]["then"]["required"],
-            json!(["idempotency_key", "expected_state"])
-        );
+        for definition in [def_move_symbol(), def_rename_symbol()] {
+            let schema = definition.input_schema;
+            assert_eq!(schema["allOf"][0]["if"]["required"], json!(["dry_run"]));
+            assert_eq!(
+                schema["allOf"][0]["then"]["required"],
+                json!(["idempotency_key", "expected_state"])
+            );
+        }
     }
 
     #[test]

@@ -608,6 +608,7 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_replace_symbol(),
         def_insert_at_symbol(),
         def_move_symbol(),
+        def_rename_symbol(),
         def_source_edit_reconcile(),
         def_find_exact_symbol(),
     ];
@@ -865,6 +866,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_insert_at_symbol",
     "tracedecay_replace_symbol",
     "tracedecay_move_symbol",
+    "tracedecay_rename_symbol",
     "tracedecay_ast_grep_rewrite",
     "tracedecay_source_edit_reconcile",
     // git & info

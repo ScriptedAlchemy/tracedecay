@@ -1339,6 +1339,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
     let declaration = json!({
         "id": node.id,
         "name": node.name,
+        "qualified_name": node.qualified_name,
         "kind": node.kind.as_str(),
         "file": node.file_path,
         "line": user_line(node.start_line),
