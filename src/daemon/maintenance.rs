@@ -523,8 +523,11 @@ impl MaintenanceCoordinator {
                         }
                         MaintenanceStoreWork::Graph(graph) => {
                             let mut unit_succeeded =
-                                super::store_maintenance::run_code_generation_retention(graph)
-                                    .await;
+                                super::store_maintenance::run_code_generation_retention(
+                                    graph,
+                                    &self.cancellation,
+                                )
+                                .await;
                             if !self.cancellation.is_cancelled() {
                                 unit_succeeded &=
                                     super::store_maintenance::run_code_index_scope_reconciliation(

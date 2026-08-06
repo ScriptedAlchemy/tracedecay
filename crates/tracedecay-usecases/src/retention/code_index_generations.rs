@@ -286,6 +286,31 @@ pub fn plan_next_code_generation_retention_cancellable(
     Ok(plan)
 }
 
+/// Recover any bounded prior apply, then build the next fully verified
+/// collection unit while preserving the caller's cancellation authority.
+///
+/// Daemon maintenance performs this preparation before it acquires the graph
+/// writer transaction. Full verification checks `is_cancelled` between bounded
+/// read chunks, so shutdown never waits for every byte in a multi-GiB store
+/// while that transaction is held.
+pub fn prepare_next_code_generation_retention_cancellable(
+    store_root: &Path,
+    vector_readable_sources: &BTreeSet<CodeGenerationId>,
+    rollback_floor: usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<CodeGenerationRetentionPlanV1, CodeGenerationRetentionErrorV1> {
+    if is_cancelled() {
+        return Err(CodeGenerationRetentionErrorV1::Cancelled);
+    }
+    recover_code_generation_retention(store_root, vector_readable_sources)?;
+    plan_next_code_generation_retention_cancellable(
+        store_root,
+        vector_readable_sources,
+        rollback_floor,
+        is_cancelled,
+    )
+}
+
 fn plan_code_generation_retention_with_verification_cancellable(
     store_root: &Path,
     vector_readable_sources: &BTreeSet<CodeGenerationId>,
@@ -526,11 +551,8 @@ pub fn run_code_generation_retention(
     mode: CodeGenerationRetentionModeV1,
     completed_at: UtcMicros,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
-    if mode == CodeGenerationRetentionModeV1::Apply {
-        recover_code_generation_retention(store_root, vector_readable_sources)?;
-    }
     let plan = match mode {
-        CodeGenerationRetentionModeV1::Apply => plan_next_code_generation_retention_cancellable(
+        CodeGenerationRetentionModeV1::Apply => prepare_next_code_generation_retention_cancellable(
             store_root,
             vector_readable_sources,
             rollback_floor,
@@ -2046,12 +2068,12 @@ mod tests {
     }
 
     #[test]
-    fn cancellable_plan_stops_during_generation_verification_without_a_journal() {
+    fn cancellable_maintenance_preparation_stops_during_generation_verification() {
         let (store, mut generations) = fixture_store(1);
         pad_generation_file(&store, &mut generations[0], 3 * 1024 * 1024, true);
         let checks = std::sync::atomic::AtomicUsize::new(0);
 
-        let error = plan_next_code_generation_retention_cancellable(
+        let error = prepare_next_code_generation_retention_cancellable(
             store.path(),
             &BTreeSet::new(),
             DEFAULT_SUPERSEDED_GENERATION_FLOOR,
