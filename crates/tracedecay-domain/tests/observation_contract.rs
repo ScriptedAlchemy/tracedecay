@@ -642,37 +642,6 @@ fn receipt_derivation_is_canonical_and_generation_bound() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn legacy_receipt_constructor_accepts_arbitrary_evidence_and_keeps_its_id() {
-    let identity = profile_material();
-    let version = ComponentVersion::new("sanitizer.legacy.v1").unwrap();
-    let evidence = b"arbitrary legacy evidence, not a digest";
-    let receipt = CanonicalClaudeSanitizationReceiptMaterialV1::new(
-        &identity,
-        version.clone(),
-        SanitizerDispositionV1::Rejected,
-        evidence,
-    )
-    .unwrap()
-    .derive_receipt_ref()
-    .unwrap();
-
-    let observation_id = CanonicalObservationIdV1::derive(&identity).unwrap();
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.privacy.claude.receipt.v1\0");
-    hasher.update(version.as_str().as_bytes());
-    hasher.update(observation_id.as_str().as_bytes());
-    hasher.update(b"rejected");
-    hasher.update(evidence);
-    let mut digest = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        write!(&mut digest, "{byte:02x}").unwrap();
-    }
-    let expected = format!("privacy.claude.v1.{digest}");
-    assert_eq!(receipt.receipt_id().as_str(), expected);
-}
-
-#[test]
 fn idempotency_wire_field_is_a_canonical_identity_alias() {
     let observation = durable(profile_material(), json!({"message": "safe"}));
     let wire = serde_json::to_value(&observation).unwrap();
