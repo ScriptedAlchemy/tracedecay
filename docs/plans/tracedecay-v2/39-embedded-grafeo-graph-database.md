@@ -4,12 +4,12 @@
 
 **Architecture:** `tracedecay-graph-db` is the only workspace crate allowed
 to depend directly on Grafeo. Domain crates keep typed TraceDecay identities
-and contracts; storage adapters translate those contracts into labels, typed
-edges, properties, vectors, traversals, and snapshots without exposing Grafeo
-types. Each datum has exactly one authority: canonical events, facts, content,
-and source manifests remain in their domain stores; Grafeo is the sole
-persisted and queried graph/vector projection over those sources. SQLite does
-not store shadow adjacency, graph indexes, or vector indexes.
+and contracts; the graph-db boundary translates those contracts into labels,
+typed edges, properties, vectors, traversals, and snapshots without exposing
+Grafeo types. Each datum has exactly one authority: canonical events, facts,
+content, and source manifests remain in their domain stores; Grafeo is the
+sole persisted and queried graph/vector projection over those sources. SQLite
+does not store shadow adjacency, graph indexes, or vector indexes.
 
 **Tech Stack:** Rust 2024, the published Grafeo `=0.5.42` crates from
 crates.io, TraceDecay domain/store ports, Tokio cancellation, Criterion, and
@@ -118,7 +118,9 @@ Move to Grafeo as the sole persisted/query graph and vector projection:
 - Work-item/dependency/current-version topology and rebuildable projections over immutable Work events;
 - workflow-definition DAGs and rebuildable run/attempt topology;
 - LCM summary/source/successor, logical-copy, thread, and agent hierarchy relations;
-- memory fact/entity/assertion relations, holographic vector banks, semantic vectors, and graph/vector indexes; and
+- derived memory fact/entity/assertion links and cross-domain retrieval
+  references, without moving fact content or holographic vector banks out of
+  the project-wide memory authority; and
 - cross-domain relation locators used for bounded authorized traversal.
 
 Keep in SQLite:
@@ -535,7 +537,7 @@ cargo nextest run -p tracedecay-sessions -p tracedecay-global-db -p tracedecay-t
 git commit -am "refactor(sessions): move relation DAGs to graph-db"
 ```
 
-## Task 7: Move V2 memory graph and holographic vectors
+## Task 7: Connect project-wide memory relations to Grafeo
 
 **Files:**
 - Modify: `crates/tracedecay-runtime-core/src/db/memory_v2/mod.rs`
@@ -546,7 +548,6 @@ git commit -am "refactor(sessions): move relation DAGs to graph-db"
 - Delete: `crates/tracedecay-runtime-core/src/db/memory_v2/schema/upgrades.rs`
 - Modify: `crates/tracedecay-runtime-core/src/db/memory_v2/writers/lineage.rs`
 - Modify: `crates/tracedecay-runtime-core/src/db/memory_v2/writers/purge.rs`
-- Modify: `crates/tracedecay-runtime-core/src/memory/store/vectors.rs`
 - Modify: `crates/tracedecay-application/src/memory.rs`
 - Modify: `crates/tracedecay-dashboard-api/src/memory_service/graph.rs`
 - Modify: `crates/tracedecay-dashboard-api/src/memory_analysis.rs`
@@ -555,8 +556,13 @@ git commit -am "refactor(sessions): move relation DAGs to graph-db"
 - Delete: `crates/tracedecay-migrate/src/consolidate/sqlite/memory_v2.rs`
 
 **Interfaces:**
-- Consumes: project-wide fact/assertion/entity identities, trust and feedback events, FHRR/HRR bank identity, semantic vectors, retention policy, and exact provenance.
-- Produces: project-wide fact/entity/relation traversal, holographic binding/unbinding candidates, semantic similarity, curation, feedback, retention, and diagnostics.
+- Consumes: project-wide fact/assertion/entity identities, trust and feedback
+  events, retention policy, exact provenance, and opaque retrieval references
+  emitted by the holographic memory authority.
+- Produces: project-wide fact/entity/relation traversal and bounded
+  cross-domain links. Holographic binding/unbinding, fact similarity, curation,
+  feedback, retention, and memory diagnostics remain owned by the project-wide
+  memory authority.
 
 ```rust
 pub trait MemoryGraphStore {
@@ -574,11 +580,22 @@ pub trait MemoryGraphStore {
 
 - [ ] **Step 1: Add failing complete fact-store journey tests**
 
-Exercise `tracedecay_fact_store` add/search/probe/related/reason/contradict/get/update/remove/list, trust feedback, entity traversal, FHRR/HRR retrieval, semantic ranking, restart, retention, and worktree deletion. Assert facts never vary by branch/worktree.
+Exercise `tracedecay_fact_store`
+add/search/probe/related/reason/contradict/get/update/remove/list, trust
+feedback, entity traversal, FHRR/HRR retrieval, semantic ranking, restart,
+retention, worktree deletion, and Grafeo-backed cross-domain traversal. Assert
+facts and holographic recall never vary by branch/worktree and remain available
+when the rebuildable Grafeo projection is unavailable.
 
-- [ ] **Step 2: Split relational fact content from graph/vector state**
+- [ ] **Step 2: Project only memory relations into Grafeo**
 
-Keep exact content, provenance, trust history, current-fact CAS, feedback, deletion tombstones, and retention receipts relational. Store entity/assertion/relation topology and holographic/semantic vectors only in graph-db, keyed by the same project-wide typed IDs.
+Keep exact content, provenance, trust history, current-fact CAS, feedback,
+deletion tombstones, retention receipts, FHRR/HRR fact vectors, holographic
+banks, and fact-retrieval scoring in the project-wide memory store. Project
+only entity/assertion/relation topology and opaque cross-domain retrieval
+references into graph-db, keyed by the same project-wide typed IDs. Grafeo
+failure may weaken graph-assisted recall truthfully, but must not make ordinary
+holographic fact retrieval unavailable.
 
 - [ ] **Step 3: Delete legacy and branch-era memory machinery**
 
