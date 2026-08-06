@@ -7,10 +7,11 @@
 use tracedecay_domain::feedback::{
     FeedbackBaselineStateV1, FeedbackContentIdentityV1, FeedbackDiagnosticBaselineIdentityV1,
     FeedbackDiagnosticBaselineV1, FeedbackDiagnosticV1, FeedbackDurabilityV1,
-    FeedbackEvaluationInputV1, FeedbackImpactStateV1, FeedbackImpactV1,
+    FeedbackEvaluationInputV1,
 };
 use tracedecay_domain::{GenerationDiagnosticV1, RetrievalAnchorId};
 
+use super::ports::{FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackRuntimeStateV1};
 use crate::context::{RequestAdmission, RequestContext};
 use crate::diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderIdentity,
@@ -18,18 +19,6 @@ use crate::diagnostics::{
     GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest,
 };
 use crate::error::ApplicationContractError;
-use crate::handlers::ApplicationOperation;
-use crate::result::{CoverageCompleteness, FreshnessState, RetrievalEvidence};
-use crate::retrieval::{
-    AffectedTestsRequest, AffectedTestsRetrievalPort, GraphImpactRequest, GraphImpactResult,
-    GraphImpactRetrievalPort, PageRequest, ResultProjection, RetrievalOrder, RetrievalPortContext,
-    RetrievalPortOutcome, RetrievalRequestMeta,
-};
-
-use super::ports::{
-    FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
-    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackRuntimeStateV1,
-};
 
 /// Builds the one canonical baseline identity shared by feedback orchestration
 /// and the generation-bound diagnostics adapter. Keeping this calculation in
@@ -301,133 +290,6 @@ where
     }
 }
 
-/// Binds the in-process Plan-05 graph-impact and affected-test kernels into
-/// the one feedback impact port. It only folds their explicit coverage states;
-/// it never walks graph edges, identifies tests, or manufactures anchors.
-pub struct GraphImpactFeedbackAdapter<G, T> {
-    graph: G,
-    tests: T,
-    graph_operation: ApplicationOperation,
-    tests_operation: ApplicationOperation,
-}
-
-impl<G, T> GraphImpactFeedbackAdapter<G, T> {
-    pub fn new(
-        graph: G,
-        tests: T,
-        graph_operation: ApplicationOperation,
-        tests_operation: ApplicationOperation,
-    ) -> Self {
-        Self {
-            graph,
-            tests,
-            graph_operation,
-            tests_operation,
-        }
-    }
-}
-
-impl<G, T> FeedbackImpactPort for GraphImpactFeedbackAdapter<G, T>
-where
-    G: GraphImpactRetrievalPort + Sync,
-    T: AffectedTestsRetrievalPort + Sync,
-{
-    fn impact<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        request: &'a FeedbackImpactRequest,
-    ) -> super::FeedbackPortFuture<'a, FeedbackImpactPortOutcome> {
-        Box::pin(async move {
-            if request.validate().is_err() {
-                return FeedbackImpactPortOutcome::Unavailable;
-            }
-            match context.admission_at(request.input.observed_at) {
-                RequestAdmission::Admitted => {}
-                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            }
-            let Some(symbol) = request.input.target.symbol.clone() else {
-                return FeedbackImpactPortOutcome::Unavailable;
-            };
-            let Some(generation) = request.input.target.generation_id.clone() else {
-                return FeedbackImpactPortOutcome::Unavailable;
-            };
-            let meta = feedback_retrieval_meta();
-            let graph = self.graph.graph_impact(
-                &RetrievalPortContext {
-                    request: context,
-                    operation: &self.graph_operation,
-                },
-                &GraphImpactRequest {
-                    file: request.input.target.file.clone(),
-                    symbol: symbol.clone(),
-                    generation: generation.clone(),
-                    meta: meta.clone(),
-                },
-            );
-            let (graph, graph_state) = match graph_outcome(graph) {
-                FeedbackRetrievalOutcome::Evidence { payload, state } => (payload, state),
-                FeedbackRetrievalOutcome::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                FeedbackRetrievalOutcome::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            };
-            match graph_state {
-                FeedbackImpactStateV1::Stale => return FeedbackImpactPortOutcome::Stale,
-                FeedbackImpactStateV1::Unavailable => {
-                    return FeedbackImpactPortOutcome::Unavailable;
-                }
-                FeedbackImpactStateV1::Complete | FeedbackImpactStateV1::Partial => {}
-            }
-
-            let tests = self.tests.affected_tests(
-                &RetrievalPortContext {
-                    request: context,
-                    operation: &self.tests_operation,
-                },
-                &AffectedTestsRequest {
-                    symbol,
-                    generation,
-                    meta,
-                },
-            );
-            let (tests, tests_state) = match tests_outcome(tests) {
-                FeedbackRetrievalOutcome::Evidence { payload, state } => (payload, state),
-                FeedbackRetrievalOutcome::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                FeedbackRetrievalOutcome::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            };
-            if tests_state == FeedbackImpactStateV1::Stale {
-                return FeedbackImpactPortOutcome::Stale;
-            }
-            let graph = graph.unwrap_or_else(empty_graph_impact);
-            let state = if graph_state == FeedbackImpactStateV1::Complete
-                && tests_state == FeedbackImpactStateV1::Complete
-            {
-                FeedbackImpactStateV1::Complete
-            } else {
-                FeedbackImpactStateV1::Partial
-            };
-            let impact = FeedbackImpactV1 {
-                target: request.input.target.clone(),
-                affected_files: graph.affected_files,
-                affected_callers: graph.affected_callers,
-                affected_tests: tests.map_or_else(Vec::new, |tests| tests.tests),
-                evidence_anchors: graph.evidence_anchors,
-                state,
-                affected_tests_state: tests_state,
-            };
-            if impact.validate().is_err() {
-                return FeedbackImpactPortOutcome::Unavailable;
-            }
-            match state {
-                FeedbackImpactStateV1::Complete => FeedbackImpactPortOutcome::Complete(impact),
-                FeedbackImpactStateV1::Partial => FeedbackImpactPortOutcome::Partial(impact),
-                FeedbackImpactStateV1::Stale | FeedbackImpactStateV1::Unavailable => {
-                    FeedbackImpactPortOutcome::Unavailable
-                }
-            }
-        })
-    }
-}
-
 fn provider_result<T>(
     identity: DiagnosticProviderIdentity,
     state: DiagnosticProviderState,
@@ -502,88 +364,5 @@ fn baseline(
         identity,
         diagnostic_anchors,
         state,
-    }
-}
-
-fn feedback_retrieval_meta() -> RetrievalRequestMeta {
-    RetrievalRequestMeta::current(
-        PageRequest::first(100).expect("static feedback page size is valid"),
-        ResultProjection::ReferencesOnly,
-        RetrievalOrder::StableIdentity,
-    )
-}
-
-fn graph_outcome(
-    outcome: RetrievalPortOutcome<GraphImpactResult>,
-) -> FeedbackRetrievalOutcome<GraphImpactResult> {
-    outcome_state(outcome)
-}
-
-fn tests_outcome(
-    outcome: RetrievalPortOutcome<crate::retrieval::AffectedTestsResult>,
-) -> FeedbackRetrievalOutcome<crate::retrieval::AffectedTestsResult> {
-    outcome_state(outcome)
-}
-
-enum FeedbackRetrievalOutcome<T> {
-    Evidence {
-        payload: Option<T>,
-        state: FeedbackImpactStateV1,
-    },
-    Cancelled,
-    TimedOut,
-}
-
-fn outcome_state<T>(outcome: RetrievalPortOutcome<T>) -> FeedbackRetrievalOutcome<T> {
-    match outcome {
-        RetrievalPortOutcome::Completed(evidence) => {
-            let state = completed_evidence_state(&evidence);
-            let payload = evidence.payload;
-            if payload.is_none() && state == FeedbackImpactStateV1::Complete {
-                FeedbackRetrievalOutcome::Evidence {
-                    payload: None,
-                    state: FeedbackImpactStateV1::Unavailable,
-                }
-            } else {
-                FeedbackRetrievalOutcome::Evidence { payload, state }
-            }
-        }
-        RetrievalPortOutcome::Partial(evidence) => {
-            let state = if evidence.temporal.freshness == FreshnessState::Stale {
-                FeedbackImpactStateV1::Stale
-            } else {
-                FeedbackImpactStateV1::Partial
-            };
-            FeedbackRetrievalOutcome::Evidence {
-                payload: evidence.payload,
-                state,
-            }
-        }
-        RetrievalPortOutcome::Cancelled(_) => FeedbackRetrievalOutcome::Cancelled,
-        RetrievalPortOutcome::TimedOut(_) => FeedbackRetrievalOutcome::TimedOut,
-        RetrievalPortOutcome::Failed(_) | RetrievalPortOutcome::Unavailable(_) => {
-            FeedbackRetrievalOutcome::Evidence {
-                payload: None,
-                state: FeedbackImpactStateV1::Unavailable,
-            }
-        }
-    }
-}
-
-fn completed_evidence_state<T>(evidence: &RetrievalEvidence<T>) -> FeedbackImpactStateV1 {
-    if evidence.temporal.freshness == FreshnessState::Stale {
-        FeedbackImpactStateV1::Stale
-    } else if evidence.coverage.completeness == CoverageCompleteness::Complete {
-        FeedbackImpactStateV1::Complete
-    } else {
-        FeedbackImpactStateV1::Partial
-    }
-}
-
-fn empty_graph_impact() -> GraphImpactResult {
-    GraphImpactResult {
-        affected_files: Vec::new(),
-        affected_callers: Vec::new(),
-        evidence_anchors: Vec::new(),
     }
 }

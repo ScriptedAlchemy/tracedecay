@@ -268,10 +268,8 @@ where
                                 checkpoint,
                             )),
                         );
-                        contributions.set_state(
-                            AdvisoryProviderV1::Ci,
-                            ProviderEvaluationStateV1::Partial,
-                        );
+                        contributions
+                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Partial);
                     }
                     CiFailureLocalizationPortOutcomeV1::Failed(cause) => {
                         self.observe_ci_terminal(
@@ -284,10 +282,8 @@ where
                                 ),
                             ),
                         );
-                        contributions.set_state(
-                            AdvisoryProviderV1::Ci,
-                            ProviderEvaluationStateV1::Failed,
-                        );
+                        contributions
+                            .set_state(AdvisoryProviderV1::Ci, ProviderEvaluationStateV1::Failed);
                     }
                     CiFailureLocalizationPortOutcomeV1::Unavailable => {
                         self.observe_ci_terminal(
@@ -369,11 +365,12 @@ where
                         contributor.advisory_findings(request.validity),
                     );
                 }
-                ProximityRuntimeOutcomeV1::Denied
-                | ProximityRuntimeOutcomeV1::Unavailable => contributions.set_state(
-                    AdvisoryProviderV1::Proximity,
-                    ProviderEvaluationStateV1::Unavailable,
-                ),
+                ProximityRuntimeOutcomeV1::Denied | ProximityRuntimeOutcomeV1::Unavailable => {
+                    contributions.set_state(
+                        AdvisoryProviderV1::Proximity,
+                        ProviderEvaluationStateV1::Unavailable,
+                    )
+                }
                 ProximityRuntimeOutcomeV1::Cancelled => {
                     return Ok(self.finish_interruption(
                         &request.feedback.input,

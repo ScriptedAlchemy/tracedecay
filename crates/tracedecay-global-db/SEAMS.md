@@ -47,7 +47,7 @@ compile.
 | `crate::config::SemanticConfig` | 4 | **Moved down** into `configuration::semantic`; the registry that defaults and validates the setting now lives here. |
 | `crate::config::brand_env` | 2 | Owned as a private `lib.rs` helper — one `std::env::var` call with a branded prefix. |
 | `crate::context::read_modes::estimate_tokens` | 2 | Owned as `crate::estimate_tokens`; `context::read_modes` is an MCP read handler that drags the whole root graph database. |
-| `crate::application::{evidence_assembly, external_source_store}`, `crate::store::observation`, `crate::daemon::work_runtime` | 8 | **Inverted**: the four factories that returned root-owned adapters are gone; `RegisteredGlobalDb::{runtime, authority}` expose the ingredients so root builds what root owns. |
+| `crate::application::external_source_store`, `crate::store::observation`, `crate::daemon::work_runtime` | 8 | **Inverted**: the factories that returned root-owned adapters are gone; `RegisteredGlobalDb::{runtime, authority}` expose the ingredients so root builds what root owns. The unmounted evidence-assembly adapter was removed instead of preserving a composition seam with no production caller. |
 | `crate::retention::…` | 8 | **Inverted**: `prune_global_retention` / `global_retention_report` are gone; both were three lines over the public transaction API. |
 | `crate::daemon::{store_runtime::session_registry, profile_identity}` | 4 | **Inverted** behind `host_ports::profile_sessions`. |
 
@@ -85,13 +85,12 @@ scope rather than just ahead of it.
 
 ### 2. Build the root-owned adapters at the call site
 
-These four `RegisteredGlobalDb` methods were deleted. Each is a one-liner over
+These three `RegisteredGlobalDb` methods were deleted. Each is a one-liner over
 the public accessors:
 
 | Deleted method | Root replacement |
 | --- | --- |
 | `observation_store()` | `store::observation::GlobalDbObservationStore::with_runtime(registered.runtime(), registered.authority())` |
-| `evidence_assembly_store()` | `application::evidence_assembly::RuntimeEvidenceAssemblyStore::new(registered.binding().shard_id.profile_id.clone(), registered.runtime().clone(), registered.authority().clone())` |
 | `external_source_store()` | `application::external_source_store::RuntimeExternalSourceStore::new(registered.runtime().clone(), registered.authority().clone())` |
 | `work_runtime(authority, config, digest, root)` | `daemon::work_runtime::DaemonWorkRuntimeV1::new(authority, registered.work_storage()?, config, digest, Arc::clone(&registered), root)` |
 

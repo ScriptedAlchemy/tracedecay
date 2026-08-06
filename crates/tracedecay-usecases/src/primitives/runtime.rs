@@ -777,9 +777,8 @@ pub fn open_primitive_project_runtime(
     let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> = Arc::new(
         CanonicalSymbolGraphAdapter::new(Arc::clone(&graph), symbol_graph_cursors),
     );
-    let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> = Arc::new(
-        SourceReadAdapter::new(Arc::clone(&graph), scope.clone())?,
-    );
+    let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> =
+        Arc::new(SourceReadAdapter::new(Arc::clone(&graph), scope.clone())?);
     let services = PrimitiveProjectServices::new(
         symbol_graph,
         source,
@@ -2090,9 +2089,9 @@ fn validate_bounds(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtendedPrimitivePort, OperationalPrimitiveRequest, PrimitiveCapacity,
-        PrimitiveDispatch, PrimitiveRequest, StorageStatusPrimitiveRequest,
-        pre_admission_problem, valid_owned_symbol_graph_request, validate_admitted_root_uri,
+        ExtendedPrimitivePort, OperationalPrimitiveRequest, PrimitiveCapacity, PrimitiveDispatch,
+        PrimitiveRequest, StorageStatusPrimitiveRequest, pre_admission_problem,
+        valid_owned_symbol_graph_request, validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
         GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,

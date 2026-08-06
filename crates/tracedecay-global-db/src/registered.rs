@@ -301,9 +301,8 @@ impl RegisteredGlobalDb {
     /// The store runtime this registered database is mounted on.
     ///
     /// Exposed so the composition root can build the adapters it owns —
-    /// `RuntimeEvidenceAssemblyStore`, `RuntimeExternalSourceStore`,
-    /// `GlobalDbObservationStore` — without this crate
-    /// naming a root type. See the "root-owned adapters" seam note in
+    /// `RuntimeExternalSourceStore`, `GlobalDbObservationStore` — without this
+    /// crate naming a root type. See the "root-owned adapters" seam note in
     /// `SEAMS.md`.
     pub fn runtime(&self) -> &StoreRuntimeHandle {
         &self.runtime

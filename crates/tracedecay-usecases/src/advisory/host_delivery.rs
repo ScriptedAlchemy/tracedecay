@@ -34,9 +34,8 @@ use tracedecay_host_integration::{
 };
 
 use super::runtime::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
-    AdvisoryDaemonRegistrationV1, AdvisoryProviderAuthoritiesV1,
-    AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryDaemonRegistrationV1,
+    AdvisoryProviderAuthoritiesV1, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
     open_advisory_daemon_registration,
 };
 
@@ -158,8 +157,7 @@ impl AdvisoryHookNoticeQueueV1 {
     }
 }
 
-type AdvisoryHookNoticeQueueMapV1 =
-    BTreeMap<([u8; 16], [u8; 16]), Weak<AdvisoryHookNoticeQueueV1>>;
+type AdvisoryHookNoticeQueueMapV1 = BTreeMap<([u8; 16], [u8; 16]), Weak<AdvisoryHookNoticeQueueV1>>;
 type AdvisoryHookNoticeQueuesLockV1 = Mutex<AdvisoryHookNoticeQueueMapV1>;
 
 fn registered_hook_notice_queues() -> &'static AdvisoryHookNoticeQueuesLockV1 {
@@ -238,10 +236,7 @@ impl HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> for AdvisoryHookDeli
         (self.hook_v2)(notice)
     }
 
-    fn deliver_legacy(
-        &self,
-        notice: &AdvisoryHookLookupNoticeV1,
-    ) -> HookFeedbackDeliveryOutcomeV1 {
+    fn deliver_legacy(&self, notice: &AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
         if !feedback_scope_matches(&self.scope, &notice.scope) {
             return HookFeedbackDeliveryOutcomeV1::Unavailable;
         }
@@ -686,10 +681,7 @@ pub fn register_advisory_daemon_startup<GR, GA, CS, CE, PE, PC>(
     hook_delivery_port: Arc<
         dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync,
     >,
-) -> Result<
-    AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>,
-    AdvisoryDaemonStartupErrorV1,
->
+) -> Result<AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>, AdvisoryDaemonStartupErrorV1>
 where
     GR: super::GitHubCurrentBranchRemapper + Sync,
     GA: super::GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Sync,
@@ -700,12 +692,8 @@ where
 {
     let scope = input.resolved_scope.clone();
     let advisory = open_advisory_daemon_registration(input, providers)?;
-    let host_delivery = mount_advisory_host_delivery(
-        scope,
-        &advisory,
-        lsp_session_factory,
-        hook_delivery_port,
-    );
+    let host_delivery =
+        mount_advisory_host_delivery(scope, &advisory, lsp_session_factory, hook_delivery_port);
     Ok(AdvisoryDaemonStartupRegistrationV1 {
         advisory,
         host_delivery,
@@ -902,10 +890,7 @@ mod tests {
             first_worktree,
             &first_notice
         ));
-        assert_eq!(
-            peek_advisory_hook_notice(project, first_worktree),
-            None
-        );
+        assert_eq!(peek_advisory_hook_notice(project, first_worktree), None);
         assert_eq!(
             peek_advisory_hook_notice(project, second_worktree),
             Some(second_notice)

@@ -57,9 +57,7 @@ use tracedecay_store::DiagnosticStore as _;
 use url::Url;
 
 use crate::diagnostics_store::DiagnosticsStore;
-use crate::feedback::concrete::{
-    ConcreteFeedbackOwner, FeedbackRuntime, ProjectFeedbackStore,
-};
+use crate::feedback::concrete::{ConcreteFeedbackOwner, FeedbackRuntime, ProjectFeedbackStore};
 use crate::feedback::owner::{
     FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
 };
