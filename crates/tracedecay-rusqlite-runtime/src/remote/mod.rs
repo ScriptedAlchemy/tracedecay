@@ -56,7 +56,7 @@ mod schema;
 mod status;
 
 pub use credential_admission::{RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1};
-pub use crypto::{RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
+pub use crypto::{CredentialDerivedSpoolKeyringV1, RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
 use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,
     map_enrollment_error,
@@ -174,6 +174,18 @@ impl RemoteSqliteStorageV1 {
             keyring,
             limits,
         })
+    }
+
+    /// The same registered storage bound to a request-scoped keyring, used to
+    /// serve spool encryption under the presented enrollment credential.
+    #[must_use]
+    pub fn with_keyring(&self, keyring: Arc<dyn RemoteSpoolKeyringV1>) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            binding: self.binding.clone(),
+            keyring,
+            limits: self.limits,
+        }
     }
 
     pub fn provision_registered(

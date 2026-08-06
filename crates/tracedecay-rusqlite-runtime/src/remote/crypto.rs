@@ -49,3 +49,40 @@ pub trait RemoteSpoolKeyringV1: Send + Sync {
         revision: u64,
     ) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1>;
 }
+
+/// Single-key keyring derived from the presented enrollment credential.
+///
+/// The key revision is the enrollment credential revision, so frames written
+/// under a rotated-away credential resolve to no key and surface as typed
+/// `AtRestEncryptionUnavailable` instead of decrypting under a foreign key.
+pub struct CredentialDerivedSpoolKeyringV1 {
+    key: Arc<RemoteSpoolKeyV1>,
+}
+
+impl CredentialDerivedSpoolKeyringV1 {
+    pub fn from_secret_bytes(
+        revision: u64,
+        bytes: Vec<u8>,
+    ) -> Result<Self, RemoteSqliteStorageErrorV1> {
+        Ok(Self {
+            key: Arc::new(RemoteSpoolKeyV1::from_secret_bytes(revision, bytes)?),
+        })
+    }
+}
+
+impl RemoteSpoolKeyringV1 for CredentialDerivedSpoolKeyringV1 {
+    fn active_key(&self) -> Result<Arc<RemoteSpoolKeyV1>, RemoteSqliteStorageErrorV1> {
+        Ok(Arc::clone(&self.key))
+    }
+
+    fn key(
+        &self,
+        revision: u64,
+    ) -> Result<Option<Arc<RemoteSpoolKeyV1>>, RemoteSqliteStorageErrorV1> {
+        if revision == self.key.revision() {
+            Ok(Some(Arc::clone(&self.key)))
+        } else {
+            Ok(None)
+        }
+    }
+}

@@ -6,11 +6,17 @@ use tempfile::TempDir;
 use tracedecay_application::remote::{
     auth::{
         OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1,
-        RemoteEnrollmentCommitReceiptV1, revoke_credential,
+        RemoteEnrollmentAuthorityErrorV1, RemoteEnrollmentCommitReceiptV1,
+        RemoteEnrollmentCredentialLookupPortV1, revoke_credential,
     },
     capture::{
-        AdmittedRemoteCaptureV1, RemoteCaptureDispositionV1, RemoteCapturePersistenceErrorV1,
-        RemoteCapturePortV1, RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
+        AdmittedRemoteCaptureV1, RemoteCaptureApplicationErrorV1, RemoteCaptureDispositionV1,
+        RemoteCapturePersistenceErrorV1, RemoteCapturePortV1, RemoteCaptureReceiptV1,
+        RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
+    },
+    capture_protocol::{
+        RemoteCapturePolicyEvidencePortV1, RemoteCaptureProtocolErrorV1, RemoteCaptureRequestV1,
+        RemoteOfflineCaptureProtocolServiceV1,
     },
     credential_admission::{
         RemoteCredentialAdmissionErrorV1, RemoteCredentialAdmissionPortV1,
@@ -18,6 +24,7 @@ use tracedecay_application::remote::{
         RemoteCredentialClassV1, RemoteCredentialLookupErrorV1, RemoteCredentialLookupPortV1,
         RemoteCredentialUseV1,
     },
+    protocol::RemoteProtocolRequestV1,
     query::RemoteExactObservationQueryErrorV1,
     replay::{
         RemoteReplayApplicationErrorV1, RemoteReplayFrameLookupPortV1,
@@ -27,7 +34,7 @@ use tracedecay_application::remote::{
 };
 use tracedecay_application::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
-    PolicyDecisionRef, ResolvedScope,
+    PolicyDecisionRef, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, BrainId, BrainNodeId, ComponentVersion, DurableObservationV1,
@@ -875,5 +882,340 @@ fn replay_policy_is_revision_guarded_and_loaded_from_the_final_store() {
     assert_eq!(
         storage.store_replay_policy(&conflict),
         Err(RemoteReplayApplicationErrorV1::PolicyMismatch)
+    );
+}
+
+fn capture_policy_evidence() -> RemoteReplayPolicyEvidenceV1 {
+    let repository_scope = writer().scope;
+    let scope = ResolvedScope::new(
+        repository_scope.project_id.clone(),
+        repository_scope.repository_id.clone(),
+        repository_scope.worktree_id.clone(),
+        repository_scope.reference.clone(),
+    )
+    .unwrap();
+    let digest = ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap();
+    RemoteReplayPolicyEvidenceV1 {
+        scope,
+        repository_scope,
+        policy_revision: 1,
+        decision: RemoteReplayPolicyDecisionV1::Admit,
+        policy: PolicyDecisionRef::new(
+            "policy.remote.capture",
+            1,
+            digest.clone(),
+            ComponentVersion::new("policy.remote.capture.v1").unwrap(),
+        )
+        .unwrap(),
+        configuration_digest: digest.clone(),
+        catalog_digest: digest.clone(),
+        privacy_digest: digest,
+        revalidated_at: UtcMicros(10),
+    }
+}
+
+fn capture_enrollment(
+    secret: &[u8],
+) -> (
+    EnrollmentCredentialRecordV1,
+    RemoteEnrollmentCommitReceiptV1,
+) {
+    let mut grant = enrollment_grant(&[3_u8; 32]);
+    grant.capabilities = std::collections::BTreeSet::from([RemoteCapabilityV1::CaptureOffline]);
+    let enrollment = EnrollmentCredentialRecordV1 {
+        enrollment_id: EntityId::new("enrollment.remote").unwrap(),
+        brain_id: grant.brain_id.clone(),
+        node_id: grant.node_id.clone(),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(secret).unwrap(),
+        revision: 1,
+        issued_at: UtcMicros(10),
+        expires_at: UtcMicros(100),
+        revoked_at: None,
+        capabilities: grant.capabilities.clone(),
+        scope: grant.scope.clone(),
+    };
+    let grant_digest = canonical_sha256(&grant).unwrap();
+    let receipt = RemoteEnrollmentCommitReceiptV1 {
+        admission: enrollment_admission(&grant),
+        prior_grant_digest: grant_digest,
+        input_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+        committed_state_digest: canonical_sha256(&enrollment).unwrap(),
+        consumed_at: enrollment.issued_at,
+        budget: OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 1,
+            elapsed_micros: 0,
+        },
+        enrollment: enrollment.clone(),
+    };
+    receipt.validate().unwrap();
+    (enrollment, receipt)
+}
+
+struct FixedCaptureCredentials {
+    record: EnrollmentCredentialRecordV1,
+    receipt: RemoteEnrollmentCommitReceiptV1,
+}
+
+impl RemoteEnrollmentCredentialLookupPortV1 for FixedCaptureCredentials {
+    fn enrollment_by_id(
+        &self,
+        _enrollment_id: &EntityId,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
+        Ok(self.record.clone())
+    }
+
+    fn authority_enrollment(
+        &self,
+        _brain_id: &BrainId,
+        _node_id: &BrainNodeId,
+        _revision: u64,
+    ) -> Result<EnrollmentCredentialRecordV1, RemoteEnrollmentAuthorityErrorV1> {
+        Ok(self.record.clone())
+    }
+
+    fn enrollment_commit_receipt(
+        &self,
+        _enrollment_id: &EntityId,
+    ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteEnrollmentAuthorityErrorV1> {
+        Ok(self.receipt.clone())
+    }
+}
+
+struct FixedCapturePolicy(RemoteReplayPolicyEvidenceV1);
+
+impl RemoteCapturePolicyEvidencePortV1 for FixedCapturePolicy {
+    fn capture_policy_evidence(
+        &self,
+        _scope: &tracedecay_domain::RemoteRepositoryScopeV1,
+    ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
+        Ok(self.0.clone())
+    }
+}
+
+struct FakeCapturePort {
+    authority: CurrentRemoteAuthorityStateV1,
+    captures: std::sync::Mutex<Vec<u64>>,
+}
+
+impl RemoteCapturePortV1 for FakeCapturePort {
+    fn current_writer_authority(
+        &self,
+        _writer: &RemoteWriterAuthorityV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteCapturePersistenceErrorV1> {
+        Ok(self.authority.clone())
+    }
+
+    fn capture_pending(
+        &self,
+        command: &AdmittedRemoteCaptureV1,
+    ) -> Result<RemoteCaptureReceiptV1, RemoteCapturePersistenceErrorV1> {
+        self.captures
+            .lock()
+            .unwrap()
+            .push(command.sequence.sequence);
+        Ok(RemoteCaptureReceiptV1 {
+            event_id: canonical_remote_event_id_v1(command).unwrap(),
+            sequence: command.sequence.sequence,
+            disposition: RemoteCaptureDispositionV1::CapturedPending,
+        })
+    }
+}
+
+fn capture_service(
+    secret: &[u8],
+    authority: CurrentRemoteAuthorityStateV1,
+) -> RemoteOfflineCaptureProtocolServiceV1<FakeCapturePort> {
+    let (record, receipt) = capture_enrollment(secret);
+    RemoteOfflineCaptureProtocolServiceV1::new(
+        Arc::new(FixedCaptureCredentials { record, receipt }),
+        Arc::new(FixedCapturePolicy(capture_policy_evidence())),
+        FakeCapturePort {
+            authority,
+            captures: std::sync::Mutex::new(Vec::new()),
+        },
+        capture_test_clock,
+    )
+}
+
+fn capture_test_clock() -> UtcMicros {
+    UtcMicros(20)
+}
+
+fn capture_request(
+    secret: &[u8],
+) -> (
+    RemoteProtocolRequestV1<RemoteCaptureRequestV1>,
+    OpaqueRemoteCredential,
+) {
+    let writer = writer();
+    let body = RemoteCaptureRequestV1 {
+        writer: writer.clone(),
+        policy_revision: 1,
+        sequence: RemoteCaptureSequenceV1 {
+            sequence: 1,
+            previous_event_id: None,
+        },
+        observation: observation(),
+    };
+    let request = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-capture").unwrap(),
+        writer.authority.fence.brain_id.clone(),
+        BrainNodeId::new("node.remote").unwrap(),
+        1,
+        None,
+        UtcMicros(15),
+        body,
+    )
+    .unwrap();
+    (
+        request,
+        OpaqueRemoteCredential::new(secret.to_vec().into_boxed_slice()).unwrap(),
+    )
+}
+
+fn unreachable_authority() -> CurrentRemoteAuthorityStateV1 {
+    CurrentRemoteAuthorityStateV1::Unavailable {
+        reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+        observed_at: UtcMicros(19),
+    }
+}
+
+#[test]
+fn offline_capture_admits_a_frame_only_when_the_authority_is_unreachable() {
+    let secret = &[9_u8; 32];
+    let service = capture_service(secret, unreachable_authority());
+    let (request, credential) = capture_request(secret);
+    let outcome = service.capture(&request, &credential).unwrap();
+    assert_eq!(outcome.receipt.sequence, 1);
+    assert_eq!(
+        outcome.receipt.disposition,
+        RemoteCaptureDispositionV1::CapturedPending
+    );
+}
+
+#[test]
+fn offline_capture_is_denied_while_the_authority_is_reachable() {
+    let secret = &[9_u8; 32];
+    let writer = writer();
+    let reachable = CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
+    let service = capture_service(secret, reachable);
+    let (request, credential) = capture_request(secret);
+    assert!(matches!(
+        service.capture(&request, &credential),
+        Err(RemoteCaptureProtocolErrorV1::Capture(
+            RemoteCaptureApplicationErrorV1::AuthorityReachable
+        ))
+    ));
+}
+
+#[test]
+fn offline_capture_rejects_a_credential_that_fails_authentication() {
+    let service = capture_service(&[9_u8; 32], unreachable_authority());
+    let (request, _credential) = capture_request(&[9_u8; 32]);
+    let foreign = OpaqueRemoteCredential::new(vec![1_u8; 32].into_boxed_slice()).unwrap();
+    assert!(matches!(
+        service.capture(&request, &foreign),
+        Err(RemoteCaptureProtocolErrorV1::Authentication(_))
+    ));
+}
+
+#[test]
+fn offline_capture_rejects_a_stale_policy_revision() {
+    let secret = &[9_u8; 32];
+    let service = capture_service(secret, unreachable_authority());
+    let (mut request, credential) = capture_request(secret);
+    request.body.policy_revision = 2;
+    assert!(matches!(
+        service.capture(&request, &credential),
+        Err(RemoteCaptureProtocolErrorV1::Policy(
+            RemoteReplayApplicationErrorV1::PolicyMismatch
+        ))
+    ));
+}
+
+#[test]
+fn credential_derived_spool_key_isolates_rotated_and_foreign_credentials() {
+    let fixture = fixture();
+    let capture = admitted();
+
+    let owner = OpaqueRemoteCredential::new(vec![5_u8; 32].into_boxed_slice()).unwrap();
+    let owner_bytes = owner.derive_spool_key_bytes().unwrap();
+    let owner_keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(
+        CredentialDerivedSpoolKeyringV1::from_secret_bytes(
+            capture.enrollment_revision,
+            owner_bytes,
+        )
+        .unwrap(),
+    );
+    let owner_storage = RemoteSqliteStorageV1::from_registered(
+        fixture.handle.clone(),
+        fixture.binding.clone(),
+        Arc::clone(&owner_keyring),
+    )
+    .unwrap();
+    let authority = CurrentRemoteAuthorityStateV1::Available(capture.writer.authority.clone());
+    owner_storage
+        .publish_authority(&authority, &capture.writer, UtcMicros(10))
+        .unwrap();
+    let receipt = owner_storage.capture_pending(&capture).unwrap();
+
+    // A restart re-derives the same key from the same credential and decrypts.
+    let restart_bytes = owner.derive_spool_key_bytes().unwrap();
+    let restart_storage = RemoteSqliteStorageV1::from_registered(
+        fixture.handle.clone(),
+        fixture.binding.clone(),
+        Arc::new(
+            CredentialDerivedSpoolKeyringV1::from_secret_bytes(
+                capture.enrollment_revision,
+                restart_bytes,
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        restart_storage
+            .load_replay_frame(&receipt.event_id)
+            .unwrap()
+            .capture,
+        capture
+    );
+
+    // A foreign credential derives a disjoint key and cannot decrypt the frame.
+    let foreign = OpaqueRemoteCredential::new(vec![6_u8; 32].into_boxed_slice()).unwrap();
+    let foreign_storage = RemoteSqliteStorageV1::from_registered(
+        fixture.handle.clone(),
+        fixture.binding.clone(),
+        Arc::new(
+            CredentialDerivedSpoolKeyringV1::from_secret_bytes(
+                capture.enrollment_revision,
+                foreign.derive_spool_key_bytes().unwrap(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        foreign_storage.load_replay_frame(&receipt.event_id),
+        Err(RemoteCapturePersistenceErrorV1::Corruption)
+    );
+
+    // A rotated credential revision resolves to no key at all.
+    let rotated_storage = RemoteSqliteStorageV1::from_registered(
+        fixture.handle.clone(),
+        fixture.binding.clone(),
+        Arc::new(
+            CredentialDerivedSpoolKeyringV1::from_secret_bytes(
+                capture.enrollment_revision + 1,
+                owner.derive_spool_key_bytes().unwrap(),
+            )
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        rotated_storage.load_replay_frame(&receipt.event_id),
+        Err(RemoteCapturePersistenceErrorV1::AtRestEncryptionUnavailable)
     );
 }
