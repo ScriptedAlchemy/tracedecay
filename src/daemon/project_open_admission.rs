@@ -559,7 +559,7 @@ impl ProjectServerKey {
                 &handshake.client_identity.global_db_path,
                 layout.identity.project_id.clone(),
                 &layout.data_root,
-                &cg.db_path(),
+                &layout.graph_db_path,
             )?,
             project_root: authority::canonical_identity_path(cg.project_root())?,
             scope_prefix: handshake.scope_prefix.clone(),

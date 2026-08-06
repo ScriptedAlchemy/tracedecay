@@ -101,9 +101,9 @@ pub(crate) fn is_detached_linked_worktree(dir: &Path) -> bool {
 
 /// Stable internal graph scope for a detached linked worktree.
 ///
-/// Detached worktrees share repository identity and storage with the primary
-/// checkout, but need a distinct graph database so indexing branchless files
-/// cannot replace the primary checkout's graph.
+/// Detached worktrees share repository identity and the mutable project store
+/// with the primary checkout, but retain an exact graph provenance scope so
+/// indexing branchless files cannot replace another checkout's generation.
 pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
