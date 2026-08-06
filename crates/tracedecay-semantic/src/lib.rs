@@ -38,7 +38,6 @@ use self::session_pool::{PooledSession, SessionPoolConfigV1, SystemMonotonicCloc
 mod artifact_store;
 pub mod embedding_parallelism;
 mod fastembed_adapter;
-pub mod legacy_migration;
 mod manifest;
 mod model_catalog;
 mod model_lifecycle;

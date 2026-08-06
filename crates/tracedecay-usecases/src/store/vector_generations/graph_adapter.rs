@@ -24,8 +24,8 @@ mod transitions;
 pub use reclaim::VectorGenerationReclaimReceiptV1;
 
 use native_records::{
-    read_build_records, read_cataloged_generation_records, read_generation_metadata,
-    read_state_metadata,
+    read_build_records, read_cataloged_generation_records, read_generation_catalog,
+    read_generation_metadata, read_optional_state_metadata, read_state_metadata,
 };
 use persistence::{
     check_cancelled, generation_label, graph_namespace, graph_projection, map_graph_error,
@@ -129,6 +129,51 @@ impl ActiveVectorGenerationPublicationGuardV1 {
     }
 }
 
+/// Identity-only snapshot of every cataloged vector generation plus the
+/// record revision that produced it.
+///
+/// This is the graph-side liveness authority for code-generation retention
+/// and Doctor's collectable-byte census (Plan 31 semantics: a sweep must
+/// never delete code generations vectors still read from). Retention pins the
+/// inventory by comparing two reads for equality — any vector mutation in
+/// between moves the revision and refuses the sweep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphVectorRetentionInventoryV1 {
+    /// `None` when the semantic-vector projection was never installed: no
+    /// vectors exist, so nothing pins a source generation.
+    revision: Option<u64>,
+    active_generation: Option<VectorGenerationIdV1>,
+    readable_sources: BTreeSet<CodeGenerationId>,
+}
+
+impl GraphVectorRetentionInventoryV1 {
+    /// Code generations still named by cataloged vector generations.
+    pub fn retained_readable_sources(&self) -> BTreeSet<CodeGenerationId> {
+        self.readable_sources.clone()
+    }
+}
+
+/// Active generation plus the monotonic record revision that made it current.
+#[derive(Clone, Debug)]
+pub struct ActiveGraphVectorGenerationSnapshotV1 {
+    revision: u64,
+    generation: super::PublishedVectorGenerationV1,
+}
+
+impl ActiveGraphVectorGenerationSnapshotV1 {
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn generation(&self) -> &super::PublishedVectorGenerationV1 {
+        &self.generation
+    }
+
+    pub fn into_generation(self) -> super::PublishedVectorGenerationV1 {
+        self.generation
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveVectorResidentPlanV1 {
     pub watermark: GraphWatermark,
@@ -177,6 +222,14 @@ impl GraphVectorGenerationStoreV1 {
         }
         store.verify_existing_state(cancellation)?;
         Ok(store)
+    }
+
+    /// Read-only handle over an already-resolved graph runtime. Unlike
+    /// [`Self::open`] this never installs or verifies the projection: a graph
+    /// that has never published a semantic-vector generation reads as "no
+    /// vectors" on the identity-filtered read surface.
+    pub fn read_only(graph: Arc<GraphDb>) -> Self {
+        Self { graph }
     }
 
     fn verify_existing_state(
@@ -255,12 +308,141 @@ impl GraphVectorGenerationStoreV1 {
         self.publish_generation_records(build_id, expected_active_generation, cancellation)
     }
 
+    pub async fn activate_generation(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        self.activate_generation_records(generation_id, expected_active_generation, cancellation)
+    }
+
+    pub async fn deactivate_generation(
+        &self,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        self.deactivate_generation_records(expected_active_generation, cancellation)
+    }
+
     pub async fn active_generation_id(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
         let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        read_state_metadata(&snapshot, cancellation).map(|metadata| metadata.active_generation)
+        read_optional_state_metadata(&snapshot, cancellation)
+            .map(|metadata| metadata.and_then(|metadata| metadata.active_generation))
+    }
+
+    /// Read the active immutable generation together with the monotonic
+    /// record revision that made it current. Callers holding the revision can
+    /// later verify currency without re-reading vector payloads.
+    pub async fn active_generation_snapshot_for(
+        &self,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<ActiveGraphVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
+        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
+        else {
+            return Ok(None);
+        };
+        let Some(active) = metadata.active_generation.as_ref() else {
+            return Ok(None);
+        };
+        let records = read_cataloged_generation_records(&snapshot, active, cancellation)?
+            .ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Corrupt(
+                    "active semantic vector generation records are missing".to_owned(),
+                )
+            })?;
+        let generation = records.generation;
+        if generation.embedding_key() != embedding_key
+            || generation.source_generation() != source_generation
+            || generation.source_manifest_digest() != source_manifest_digest
+        {
+            return Ok(None);
+        }
+        Ok(Some(ActiveGraphVectorGenerationSnapshotV1 {
+            revision: metadata.revision,
+            generation,
+        }))
+    }
+
+    /// Return the active immutable generation only when every query-facing
+    /// projection and source identity matches exactly.
+    pub async fn active_generation_for(
+        &self,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<super::PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        Ok(self
+            .active_generation_snapshot_for(
+                embedding_key,
+                source_generation,
+                source_manifest_digest,
+                cancellation,
+            )
+            .await?
+            .map(ActiveGraphVectorGenerationSnapshotV1::into_generation))
+    }
+
+    /// True while `revision` still names the record state that activated
+    /// `generation_id`. Any later vector mutation retires the revision.
+    pub async fn active_snapshot_is_current(
+        &self,
+        revision: u64,
+        generation_id: &VectorGenerationIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+        Ok(
+            read_optional_state_metadata(&snapshot, cancellation)?.is_some_and(|metadata| {
+                metadata.revision == revision
+                    && metadata.active_generation.as_ref() == Some(generation_id)
+            }),
+        )
+    }
+
+    /// Snapshot cataloged generation identities without reading any vector
+    /// payload. See [`GraphVectorRetentionInventoryV1`].
+    pub async fn retention_inventory(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<GraphVectorRetentionInventoryV1, VectorGenerationStoreErrorV1> {
+        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
+        else {
+            return Ok(GraphVectorRetentionInventoryV1 {
+                revision: None,
+                active_generation: None,
+                readable_sources: BTreeSet::new(),
+            });
+        };
+        let catalog = read_generation_catalog(&snapshot, Arc::clone(&cancellation))?;
+        let mut readable_sources = BTreeSet::new();
+        for entry in catalog {
+            let generation = read_generation_metadata(
+                &snapshot,
+                &entry.generation_id,
+                Arc::clone(&cancellation),
+            )?
+            .ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Corrupt(
+                    "cataloged semantic vector generation metadata is missing".to_owned(),
+                )
+            })?;
+            readable_sources.insert(generation.source_generation);
+        }
+        Ok(GraphVectorRetentionInventoryV1 {
+            revision: Some(metadata.revision),
+            active_generation: metadata.active_generation,
+            readable_sources,
+        })
     }
 
     pub async fn staged_checkpoint(
@@ -278,7 +460,10 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<super::PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
         let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
+        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
+        else {
+            return Ok(None);
+        };
         metadata
             .active_generation
             .as_ref()

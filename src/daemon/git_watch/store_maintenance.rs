@@ -200,8 +200,7 @@ pub(super) async fn run_code_generation_retention(
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         execute_code_generation_retention, prepare_next_code_generation_retention_cancellable,
     };
-    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
-    use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
+    use crate::store::vector_generations::GraphVectorGenerationStoreV1;
 
     if cancellation.is_cancelled() {
         log_code_generation_retention_degraded("retention_cancelled");
@@ -214,27 +213,37 @@ pub(super) async fn run_code_generation_retention(
         return true;
     }
 
-    let store = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
-        Ok(store) => store,
+    // Published vectors live in the mounted code graph. Without a resolvable
+    // graph the protection set cannot be proven, so this pass collects
+    // nothing rather than sweeping with an empty set, which would delete
+    // generations vectors still read from.
+    let Some(provider) =
+        crate::daemon::code_index_scheduler::semantic_vector_graph::project_semantic_vector_graph_provider(
+            &layout.project_root,
+        )
+    else {
+        log_code_generation_retention_degraded("vector_graph_provider_unavailable");
+        return false;
+    };
+    let retained = match provider.graph_for_current().await {
+        Ok(retained) => retained,
         Err(_) => {
             log_code_generation_retention_degraded("vector_generation_store_unavailable");
             return false;
         }
     };
-    let inventory = match store.read_legacy_inventory().await {
+    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
+    let inventory = match store
+        .retention_inventory(Arc::clone(retained.cancellation()))
+        .await
+    {
         Ok(inventory) => inventory,
         Err(_) => {
             log_code_generation_retention_degraded("vector_inventory_read_failed");
             return false;
         }
     };
-    let vector_readable_sources = match inventory.read_only_inventory() {
-        Ok(inventory) => inventory.retained_readable_sources(),
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_inventory_unreadable");
-            return false;
-        }
-    };
+    let vector_readable_sources = inventory.retained_readable_sources();
 
     // Full digest verification routinely reads several GiB. Run it before
     // entering the graph transaction and preserve the daemon shutdown token
@@ -277,44 +286,33 @@ pub(super) async fn run_code_generation_retention(
         return false;
     }
 
-    // Pin the exact vector inventory only for the bounded apply. The second
-    // read happens after this immediate transaction fences vector writers; any
-    // revision or identity change since planning refuses the sweep.
-    let writer = match graph
-        .db()
-        .begin_write_transaction("code generation retention pin fence")
+    // Pin the exact vector inventory only for the bounded apply. The daemon's
+    // semantic runtime is the only vector writer, so freezing its shared
+    // writer lane fences publication; the second inventory read then proves
+    // no revision or identity change since planning, refusing the sweep
+    // otherwise. When no semantic runtime is mounted nothing can mutate
+    // vectors, so equality of the two reads is the whole fence.
+    let vector_writer_freeze = match crate::application::semantic_runtime::project_semantic_production_runtime(
+        &layout.project_root,
+    ) {
+        Some(runtime) => Some(runtime.freeze_vector_mutations().await),
+        None => None,
+    };
+    let pinned_inventory = match store
+        .retention_inventory(Arc::clone(retained.cancellation()))
         .await
     {
-        Ok(writer) => writer,
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_writer_lane_unavailable");
-            return false;
-        }
-    };
-    let pinned_inventory = match store.read_legacy_inventory().await {
         Ok(inventory) => inventory,
         Err(_) => {
-            if writer.rollback().await.is_err() {
-                log_code_generation_retention_degraded("vector_writer_lane_release_failed");
-                return false;
-            }
             log_code_generation_retention_degraded("vector_inventory_read_failed");
             return false;
         }
     };
     if pinned_inventory != inventory {
-        if writer.rollback().await.is_err() {
-            log_code_generation_retention_degraded("vector_writer_lane_release_failed");
-            return false;
-        }
         log_code_generation_retention_degraded("vector_inventory_changed");
         return false;
     }
     if cancellation.is_cancelled() {
-        if writer.rollback().await.is_err() {
-            log_code_generation_retention_degraded("vector_writer_lane_release_failed");
-            return false;
-        }
         log_code_generation_retention_degraded("retention_cancelled");
         return false;
     }
@@ -328,10 +326,7 @@ pub(super) async fn run_code_generation_retention(
         )
     })
     .await;
-    if writer.rollback().await.is_err() {
-        log_code_generation_retention_degraded("vector_writer_lane_release_failed");
-        return false;
-    }
+    drop(vector_writer_freeze);
 
     match report {
         Ok(Ok(report)) => {

@@ -69,16 +69,22 @@ pub(crate) fn read_build_records(
         target_projection_key: required_bytes(owner, TARGET_PROJECTION)?,
         source_generation: parse_id(required_string(owner, SOURCE_GENERATION)?)?,
         source_manifest_digest: digest(required_string(owner, SOURCE_MANIFEST)?)?,
-        expected_chunk_ids: rows_with_owner(
-            &entities,
-            BUILD_MEMBER_LABEL,
-            BUILD_ID,
-            build.0.as_str(),
-        )?
-        .into_iter()
-        .map(|member| parse_id(required_string(member, CHUNK_ID)?))
-        .collect::<Result<Vec<_>, _>>()?
-        .into(),
+        expected_chunk_ids: {
+            // Member rows are set-semantic and surface in graph-entity order;
+            // the canonical plan form is strictly ascending, so reconstruction
+            // restores that order. Duplicates still fail canonical validation.
+            let mut chunk_ids = rows_with_owner(
+                &entities,
+                BUILD_MEMBER_LABEL,
+                BUILD_ID,
+                build.0.as_str(),
+            )?
+            .into_iter()
+            .map(|member| parse_id(required_string(member, CHUNK_ID)?))
+            .collect::<Result<Vec<_>, _>>()?;
+            chunk_ids.sort();
+            chunk_ids.into()
+        },
         base_generation: optional_generation(owner, BASE_GENERATION)?,
     };
     validate_plan(&plan).map_err(|error| {
@@ -177,12 +183,14 @@ pub(crate) fn read_build_records(
     {
         return Err(corrupt("semantic vector build checkpoint is inconsistent"));
     }
+    // The plan's expected chunk IDs enumerate the vectors the finished
+    // generation must carry (publication requires exact equality); deletions
+    // are tombstones outside that set, so effects may land on either.
     let expected_chunks = plan.expected_chunk_ids.iter().collect::<BTreeSet<_>>();
     if vectors.keys().any(|chunk| !expected_chunks.contains(chunk))
-        || tombstones
-            .keys()
-            .any(|chunk| !expected_chunks.contains(chunk))
-        || effects.iter().any(|chunk| !expected_chunks.contains(chunk))
+        || effects
+            .iter()
+            .any(|chunk| !expected_chunks.contains(chunk) && !tombstones.contains_key(chunk))
         || vectors.keys().any(|chunk| tombstones.contains_key(chunk))
     {
         return Err(corrupt(
@@ -225,17 +233,22 @@ pub(crate) fn read_build_records(
             "semantic vector build base relation is inconsistent",
         ));
     }
-    let expected_relations = plan
+    let contained_records = plan
         .expected_chunk_ids
         .len()
         .checked_add(vectors.len())
         .and_then(|count| count.checked_add(tombstones.len()))
         .and_then(|count| count.checked_add(batches.len()))
-        .and_then(|count| count.checked_add(usize::from(plan.base_generation.is_some())))
         .ok_or_else(|| corrupt("semantic vector build relation count overflowed"))?;
+    let expected_relations = contained_records
+        .checked_add(usize::from(plan.base_generation.is_some()))
+        .ok_or_else(|| corrupt("semantic vector build relation count overflowed"))?;
+    // The base relation points into the prior generation's scope; its target
+    // entity is intentionally not hydrated here, so only contained children
+    // plus the owner are expected in the entity set.
     if relations.len() != expected_relations
         || entities.len()
-            != expected_relations
+            != contained_records
                 .checked_add(1)
                 .ok_or_else(|| corrupt("semantic vector build record count overflowed"))?
     {
@@ -376,15 +389,20 @@ pub(crate) fn read_generation_records(
             "semantic vector generation base relation is inconsistent",
         ));
     }
-    let expected_relations = vectors
+    let contained_records = vectors
         .len()
         .checked_add(tombstone_digests.len())
         .and_then(|count| count.checked_add(receipts.len()))
-        .and_then(|count| count.checked_add(base_relations.len()))
         .ok_or_else(|| corrupt("semantic vector generation relation count overflowed"))?;
+    let expected_relations = contained_records
+        .checked_add(base_relations.len())
+        .ok_or_else(|| corrupt("semantic vector generation relation count overflowed"))?;
+    // The base relation points into the prior generation's scope; its target
+    // entity is intentionally not hydrated here, so only contained children
+    // plus the owner are expected in the entity set.
     if relations.len() != expected_relations
         || entities.len()
-            != expected_relations
+            != contained_records
                 .checked_add(1)
                 .ok_or_else(|| corrupt("semantic vector generation record count overflowed"))?
     {

@@ -122,6 +122,9 @@ impl ProjectRuntimeRegistryV1 {
             if let Some(external_acquisition) = runtime.external_acquisition {
                 external_acquisition.cancel();
             }
+            crate::daemon::code_index_scheduler::semantic_vector_graph::unregister_project_semantic_vector_graph_provider(
+                &project_root,
+            );
             if let Some(semantic) = runtime.semantic {
                 crate::application::semantic_runtime::unregister_project_semantic_runtime(
                     &project_root,

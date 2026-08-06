@@ -109,10 +109,13 @@ async fn handle_migrate_storage_report(
     } else {
         let offline = match (&project_id, &project_root) {
             (Some(project_id), Some(project_root)) => {
+                // Offline runs have no mounted code graph, so vector liveness
+                // is unprovable and the retention dry run reports unavailable.
                 tracedecay::retention::storage_report::build_project_storage_report(
                     &profile_root,
                     project_id,
                     project_root,
+                    None,
                 )
             }
             (None, None) => {

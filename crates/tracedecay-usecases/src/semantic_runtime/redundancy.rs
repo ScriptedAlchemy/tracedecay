@@ -9,11 +9,12 @@ use tracedecay_domain::{
 };
 
 use crate::config::retrieval::SemanticCompatibilityPinsV1;
-use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
-use tracedecay_runtime_core::db::Database;
 
-use super::{CommittedRetrievalProfileStateV1, project_semantic_generation_pointer};
+use super::{
+    CommittedRetrievalProfileStateV1, project_semantic_generation_pointer,
+    project_semantic_production_runtime,
+};
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;
 const MAX_COSINE_DISTANCE_MICROS: i64 = 2_000_000_000;
@@ -174,7 +175,6 @@ pub(crate) fn unregister_project_semantic_redundancy_generation(project_root: &P
 /// the semantic runtime's atomically current pointer.
 pub async fn project_semantic_redundancy_generation(
     project_root: &Path,
-    database: &Database,
 ) -> Option<SemanticRedundancyGenerationV1> {
     let pointer = project_semantic_generation_pointer(project_root)?;
     let authority = retained_authorities()
@@ -198,9 +198,9 @@ pub async fn project_semantic_redundancy_generation(
         }
         project.generations.get(&source_generation).cloned()?
     };
-    let vectors = DatabaseVectorGenerationStoreV1::read_active_generation(database)
-        .await
-        .ok()??;
+    let vectors = project_semantic_production_runtime(project_root)?
+        .active_vector_generation()
+        .await?;
     if vectors.source_generation() != &source_generation
         || vectors.generation_id() != &authority.pins.vector_generation_id
         || vectors.embedding_key() != &authority.pins.projection
