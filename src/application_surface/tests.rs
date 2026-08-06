@@ -1577,7 +1577,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for RecordingMultiRootExecut
 }
 
 #[tokio::test]
-async fn production_http_router_does_not_mount_multi_root_operations() {
+async fn production_http_router_mounts_all_multi_root_operations() {
     let executor = Arc::new(RecordingMultiRootExecutor::default());
     let application_executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> =
         executor.clone();
@@ -1629,14 +1629,18 @@ async fn production_http_router_does_not_mount_multi_root_operations() {
             .expect("HTTP response");
         assert_eq!(
             response.status(),
-            StatusCode::NOT_FOUND,
-            "{path} must remain unmounted"
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{path} must use the controlled daemon invocation owner"
         );
     }
 
     assert_eq!(
         *executor.operations.lock().expect("recorded operations"),
-        Vec::<crate::daemon_contract::DaemonInvocationOperation>::new()
+        vec![
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetRead,
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap,
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootExecute,
+        ]
     );
 }
 

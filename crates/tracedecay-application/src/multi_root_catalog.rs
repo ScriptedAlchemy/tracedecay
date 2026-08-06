@@ -1,16 +1,24 @@
 //! Canonical executable bindings for multi-root application operations.
 
+use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
+    AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
     CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
-    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
-    ExecutableUnavailableDispositionV1, IdempotencyContract, LifecycleClass, OperationId,
-    PaginationContract, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
-    UnavailabilityReason, UseCaseId,
+    CodecBindingKey, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
+    IdempotencyContract, LifecycleClass, OperationId, PaginationContract, PrivacyClass, ProfileId,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension,
+    ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
+
+use crate::{
+    AuthorizedScopeSet, MultiRootExecuteRequestV1, MultiRootQueryPageV1,
+    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
+};
+
+const MULTI_ROOT_SERVICE_ID: &str = "service.multi_root";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MultiRootApplicationOperation {
@@ -42,6 +50,14 @@ impl MultiRootApplicationOperation {
         }
     }
 
+    pub const fn route_path(self) -> &'static str {
+        match self {
+            Self::ScopeSetRead => "/multi-root/scope-set/read",
+            Self::ScopeSetCompareAndSwap => "/multi-root/scope-set/compare-and-swap",
+            Self::Execute => "/multi-root/execute",
+        }
+    }
+
     const fn effect(self) -> EffectClass {
         match self {
             Self::ScopeSetCompareAndSwap => EffectClass::Administrative,
@@ -63,19 +79,43 @@ pub fn multi_root_operation_authority(
 pub fn multi_root_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(vec![
-        unavailable(MultiRootApplicationOperation::ScopeSetRead)?,
-        unavailable(MultiRootApplicationOperation::ScopeSetCompareAndSwap)?,
-        unavailable(MultiRootApplicationOperation::Execute)?,
+        available::<MultiRootScopeSetReadRequestV1, Option<AuthorizedScopeSet>>(
+            MultiRootApplicationOperation::ScopeSetRead,
+        )?,
+        available::<MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1>(
+            MultiRootApplicationOperation::ScopeSetCompareAndSwap,
+        )?,
+        available::<MultiRootExecuteRequestV1, MultiRootQueryPageV1<serde_json::Value>>(
+            MultiRootApplicationOperation::Execute,
+        )?,
     ])
 }
 
-fn unavailable(
+fn available<Request, Output>(
     operation: MultiRootApplicationOperation,
-) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError> {
-    Ok(ExecutableBindingAvailabilityV1::Unavailable {
-        operation_id: operation_id(operation)?,
-        disposition: ExecutableUnavailableDispositionV1::CapabilityDisabled,
-    })
+) -> Result<ExecutableBindingAvailabilityV1, CatalogValidationError>
+where
+    Request: JsonSchema,
+    Output: JsonSchema,
+{
+    let manifest = manifest(operation)?;
+    let request_schema =
+        SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?;
+    let result_schema =
+        SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?;
+    let binding = ExecutableBindingV1::daemon_owned(
+        &manifest,
+        operation_id(operation)?,
+        service_id()?,
+        request_schema,
+        result_schema,
+        codec_key(operation)?,
+        RouteExposureV1::Public {
+            binding_id: binding_id(operation)?,
+            route_path: operation.route_path().to_owned(),
+        },
+    )?;
+    Ok(ExecutableBindingAvailabilityV1::available(binding))
 }
 
 fn manifest(
@@ -116,7 +156,20 @@ fn manifest(
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Stateless,
         streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(vec![CancellationPoint::BeforeAdmission])?,
+        cancellation: CancellationContract::cooperative(if read_only {
+            vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ]
+        } else {
+            vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeEffect,
+                CancellationPoint::EffectInFlight,
+                CancellationPoint::AfterCommit,
+            ]
+        })?,
         deadline: DeadlineContract::new(
             30_000,
             if read_only {
@@ -157,10 +210,8 @@ fn manifest(
             ReceiptContract::DurableEffect
         },
         terminal_states: TerminalStateContract::new(terminal_states(read_only))?,
-        availability: AvailabilityContract::Unavailable {
-            reason: UnavailabilityReason::NotImplemented,
-        },
-        binding_ids: Vec::new(),
+        availability: AvailabilityContract::Available,
+        binding_ids: vec![binding_id(operation)?],
         profile_eligibility: vec![catalog_id(
             ProfileId::new("profile.default"),
             "multi-root profile ID",
@@ -175,6 +226,37 @@ fn operation_id(
     catalog_id(
         OperationId::new(operation.operation_id()),
         "multi-root operation ID",
+    )
+}
+
+fn service_id() -> Result<ServiceId, CatalogValidationError> {
+    catalog_id(
+        ServiceId::new(MULTI_ROOT_SERVICE_ID),
+        "multi-root service ID",
+    )
+}
+
+fn codec_key(
+    operation: MultiRootApplicationOperation,
+) -> Result<CodecBindingKey, CatalogValidationError> {
+    catalog_id(
+        CodecBindingKey::new(format!(
+            "codec.multi_root.{}.json.v1",
+            operation.operation_key()
+        )),
+        "multi-root codec ID",
+    )
+}
+
+fn binding_id(
+    operation: MultiRootApplicationOperation,
+) -> Result<BindingId, CatalogValidationError> {
+    catalog_id(
+        BindingId::new(format!(
+            "binding.http.multi_root.{}.v1",
+            operation.operation_key()
+        )),
+        "multi-root binding ID",
     )
 }
 
@@ -218,26 +300,33 @@ fn catalog_id<T>(
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_tool_catalog::{
-        ExecutableBindingAvailabilityV1, ExecutableUnavailableDispositionV1,
-    };
+    use tracedecay_tool_catalog::RouteExposureV1;
 
     use super::{MultiRootApplicationOperation, multi_root_executable_binding_registry};
 
     #[test]
-    fn executable_registry_reports_every_multi_root_route_as_unavailable() {
+    fn executable_registry_is_the_single_route_and_contract_authority() {
         let registry = multi_root_executable_binding_registry().unwrap();
 
         for operation in MultiRootApplicationOperation::ALL {
             let operation_id =
                 tracedecay_tool_catalog::OperationId::new(operation.operation_id()).unwrap();
-            assert!(matches!(
-                registry.get(&operation_id),
-                Some(ExecutableBindingAvailabilityV1::Unavailable {
-                    disposition: ExecutableUnavailableDispositionV1::CapabilityDisabled,
-                    ..
-                })
-            ));
+            let binding = registry
+                .get(&operation_id)
+                .and_then(|availability| availability.binding())
+                .unwrap();
+            let RouteExposureV1::Public {
+                binding_id,
+                route_path,
+            } = binding.exposure()
+            else {
+                panic!("multi-root binding must be public");
+            };
+            assert_eq!(route_path, operation.route_path());
+            assert_eq!(
+                binding_id.as_str(),
+                format!("binding.http.multi_root.{}.v1", operation.operation_key())
+            );
         }
     }
 }
