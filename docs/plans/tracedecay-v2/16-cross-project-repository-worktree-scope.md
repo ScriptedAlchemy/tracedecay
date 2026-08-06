@@ -4,7 +4,7 @@
 
 Status: active product plan.
 
-PR15 delivers one authorized multi-root journey across query, CLI, MCP, HTTP,
+The multi-root delivery provides one authorized multi-root journey across query, CLI, MCP, HTTP,
 LSP, inventory, and safe native Git integration. This plan owns scope identity,
 resolution, and coverage. [Plan 36](36-git-aware-change-context-and-index-transactions.md)
 owns Git preflight, apply, receipts, and recovery over the exact resolved scope.
@@ -171,7 +171,7 @@ create a second watcher, parser, chunker, vector store, or scheduler.
    Authorized provider review-topology observations may join the projection
    for display and drift evidence but never create, remove, or reorder nodes or
    edges.
-   Plan 37's PR15 stack fanout freezes this exact visible revision and
+   Plan 37's multi-root stack fanout freezes this exact visible revision and
    reauthorizes every source and recipient at enqueue, delivery, and expansion.
    Scope resolution supplies bounded deterministic batches and truthful
    hidden/denied/partial coverage; it never broadens a recipient set during
@@ -324,24 +324,24 @@ inventory, unsafe cleanup, collection membership/default/source-binding drift,
 non-final saved-set admission, cyclic/inferred stack edges, ref/worktree recreation,
 and ambiguous targets.
 
-The PR15 stack-fanout branch drives bursts across visible and denied roots and
+The stack-fanout journey drives bursts across visible and denied roots and
 proves recipient/signal batches stay within 64/128; 250 ms readiness/
 potential-conflict and 1,000 ms stack/PR/CI debounce never merge scopes;
 material conflict/revocation transitions bypass debounce; deterministic
 overflow and restart preserve every visible transition and per-root
 watermark/coverage; and an open/half-open Plan 37 circuit breaker cannot reveal
 or add a root, reuse stale stack authorization, or block truthful non-preflight
-delivery. The final PR15 check is the relevant ordinary all-feature repository
-test run, not a separate acceptance gate; PR15 adds no benchmark harness or
+delivery. The final multi-root check is the relevant ordinary all-feature repository
+test run, not a separate acceptance gate; this journey adds no benchmark harness or
 placeholder baseline.
 
-## Not in PR15
+## Not in multi-root scope
 
 - Creating or provisioning repositories, branches, or worktrees; branch
   deletion; cleanup beyond the exact safe worktree removal above; autonomous
   scope expansion; generic Git execution; rebase, amend, force-push, push,
   remote mutation, or any GitHub mutation.
 - Remote multi-machine authority, replay, backup, restore, or failover, owned
-  by [Plan 28](28-remote-multi-machine-shared-brain.md) in PR16.
+  by [Plan 28](28-remote-multi-machine-shared-brain.md).
 - Persistent task graphs, execution planning, or agent scheduling, owned by
   later delivery slices.
