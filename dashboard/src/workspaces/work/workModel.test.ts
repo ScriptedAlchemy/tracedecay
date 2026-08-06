@@ -128,27 +128,6 @@ describe('which commands a task may be offered', () => {
       'attach_runtime_evidence',
     );
   });
-
-  it('offers no runtime-attempt operation while that authority is unavailable', () => {
-    expect(availableCommands(projection())).toEqual([
-      'replan_dependencies',
-      'review_proposal',
-      'accept_proposal',
-      'accept_task',
-    ]);
-    expect(availableCommands(projection({ accepted_proposal: 'p' }))).toEqual([
-      'replan_dependencies',
-      'accept_task',
-    ]);
-    expect(
-      availableCommands(projection({ accepted_proposal: 'p', task_accepted: true })),
-    ).toEqual(['replan_dependencies', 'admit_execution']);
-    expect(
-      availableCommands(
-        projection({ accepted_proposal: 'p', task_accepted: true, execution_admitted: true }),
-      ),
-    ).toEqual(['replan_dependencies', 'attach_runtime_evidence']);
-  });
 });
 
 describe('how much of the board is being shown', () => {

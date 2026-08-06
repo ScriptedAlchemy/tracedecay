@@ -82,7 +82,6 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::WorkApplication
         | DaemonInvocationOperation::WorkflowApplication
         | DaemonInvocationOperation::HandoffApplication
-        | DaemonInvocationOperation::WorkAttempt
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
         | DaemonInvocationOperation::GitStatus
         | DaemonInvocationOperation::GitDiff
@@ -119,7 +118,6 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> Plan26Fee
         | DaemonInvocationOutcome::WorkApplication { .. }
         | DaemonInvocationOutcome::WorkflowApplication { .. }
         | DaemonInvocationOutcome::HandoffApplication { .. }
-        | DaemonInvocationOutcome::WorkAttempt { .. }
         | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
