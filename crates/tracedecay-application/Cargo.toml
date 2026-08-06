@@ -14,10 +14,12 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 native-git = ["dep:gix"]
 
 [dependencies]
-gix = { version = "0.81", default-features = false, features = [
+gix = { version = "=0.86.0", default-features = false, features = [
     "revision",
     "blob-diff",
+    "parallel",
     "sha1",
+    "sha256",
     "status",
 ], optional = true }
 schemars = "1.2.1"

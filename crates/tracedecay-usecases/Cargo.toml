@@ -35,7 +35,7 @@ cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 getrandom = "0.2"
 fs2 = "0.4"
-gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 glob = "0.3"
 hmac = { version = "0.13.0", features = ["zeroize"] }
 hex = "0.4"

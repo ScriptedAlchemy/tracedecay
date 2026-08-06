@@ -35,7 +35,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
-gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
 percent-encoding = "2"
 regex = "1.12.3"
@@ -76,6 +76,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+criterion = "0.5"
 # `store_runtime::rusqlite_parity` is `#![cfg(test)]` and speaks the parity
 # helper's wire protocol. Leaf crate (hex/serde/serde_json/sha2 only), so this
 # adds no crate-graph edge outside the test build.
@@ -90,6 +91,10 @@ hex = "0.4"
 sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
+
+[[bench]]
+name = "git_repository_authority"
+harness = false
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

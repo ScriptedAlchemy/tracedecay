@@ -319,7 +319,7 @@ sha2 = "0.11"
 glob = "0.3"
 walkdir = "2"
 ignore = "0.4"
-gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 dirs = "6"
 hex = "0.4"
 rayon = "1"

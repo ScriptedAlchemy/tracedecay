@@ -62,10 +62,12 @@ pub mod host_admission;
 pub mod lsp_runtime;
 mod lsp_support;
 pub mod memory;
+pub mod native_integration;
 pub mod observability;
 pub mod observation;
 pub mod operation_stream;
 pub mod primitives;
+pub mod stack_coordinator;
 // The TTL'd remote-JSON cache mechanism shared by the two model-pricing
 // tables (root `accounting::pricing` and the dashboard's `savings_pricing`).
 // Both crates already depend on this one, so it is the shared home that costs

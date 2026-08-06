@@ -18,7 +18,7 @@ test-transport = [
 [dependencies]
 dirs = "6"
 fs2 = "0.4"
-gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
+gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 getrandom = "0.2"
 hex = "0.4"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }

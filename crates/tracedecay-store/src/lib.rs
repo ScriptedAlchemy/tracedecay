@@ -19,6 +19,7 @@ pub mod external_source;
 pub mod fault_harness;
 pub mod git_index_transactions;
 pub mod memory;
+pub mod native_integration;
 pub mod observation;
 pub mod projection;
 pub mod remote_recovery;
@@ -131,6 +132,10 @@ pub use memory::{
     FactQueryCoverageV1, FactStore, FactStoreError, FactStoreResult, FactWriteBatch,
     LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS, PromoteFactProposal,
     PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+};
+pub use native_integration::{
+    NativeIntegrationBeginResultV1, NativeIntegrationRecordV1, NativeIntegrationStore,
+    NativeIntegrationStoreError, NativeIntegrationStoreResult,
 };
 pub use observation::{
     AnchoredObservationWrite, CursorAdvanceOutcome, ObservationAdmissionPort,
