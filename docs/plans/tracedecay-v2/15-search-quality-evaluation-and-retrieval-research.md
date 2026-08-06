@@ -258,10 +258,10 @@ pub struct FusionProfile {
     pub retrieval_budget: RetrievalBudget,
 }
 
-pub struct LexicalGraphFallbackSubpayload {
+pub struct QueryFallbackSubpayload {
     pub profile_id: FusionProfileId,
     pub ordered_candidates: Vec<RankedCandidate>,
-    pub public_exact_lexical_graph_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    pub public_fallback_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub freshness: Vec<SourceFreshness>,
     pub cursor: Option<RetrievalCursor>,
     pub digest: FallbackSubpayloadDigest,
@@ -284,7 +284,7 @@ pub struct SemanticRerankOutcome {
 pub struct RetrievalResult {
     pub snapshot: RetrievalSnapshot,
     pub profile_id: FusionProfileId,
-    pub lexical_graph_fallback: LexicalGraphFallbackSubpayload,
+    pub query_fallback: QueryFallbackSubpayload,
     pub ordered_candidates: Vec<RankedCandidate>,
     pub internal_lane_outcomes: BTreeMap<RetrieverKind, RetrieverOutcome<()>>,
     pub public_lane_coverage: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
@@ -304,16 +304,15 @@ statuses, and checkpoint IDs for admitted authorized lanes only. Sealed denial o
 never affect cursor or cache-key bytes. Resume uses the bound candidate set or rejects
 the cursor; it never recomputes a differently completed set.
 
-`LexicalGraphFallbackSubpayload` is canonical-encoded and hashed independently with the
-schema/domain separator `tracedecay.lexical-graph-fallback.v1`; the digest field itself
-is excluded from those hashed bytes. Its
-ranked candidates contain the exact/lexical/graph contributions, decisions, and explanations; its
-maps contain only `ExactLiteral`, `Lexical`, and `Graph`. Semantic/rerank
-execution may change the enclosing final candidates and
-`semantic_rerank_outcome`, but cannot change the subpayload, its digest, or
-cursor identity. "Byte-identical fallback" means this typed capability subpayload is
-identical; it does not forbid the enclosing response from truthfully reporting
-semantic unavailability.
+`QueryFallbackSubpayload` is canonical-encoded and hashed independently with the
+schema/domain separator `tracedecay.query-fallback.v1`; the digest field itself
+is excluded from those hashed bytes. Its ranked candidates contain the exact,
+lexical, and graph contributions/decisions/explanations; its maps contain only
+`ExactLiteral`, `Lexical`, and `Graph`. Semantic/rerank execution may change
+the enclosing final candidates and `semantic_rerank_outcome`, but cannot change
+the subpayload, its digest, or cursor identity. "Byte-identical fallback" means
+this typed query fallback subpayload is identical; it does not forbid the
+enclosing response from truthfully reporting semantic unavailability.
 
 Sealed `internal_lane_outcomes` remains only in the enclosing audit result and
 is excluded from fallback bytes/digest, cursors, public coverage, and cache
