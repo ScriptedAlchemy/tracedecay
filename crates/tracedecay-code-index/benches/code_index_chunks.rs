@@ -672,11 +672,13 @@ fn execute_case(
     let mut sink = CountingSink { calls: 0 };
     let handoff = project_for_publication(&mut sink, request)
         .map_err(|error| format!("project {} changes: {error}", case.as_str()))?;
+    // Stop the clock before evidence accounting: serializing the full manifest
+    // is measurement bookkeeping, not part of the measured sync journey.
+    let wall_ns = u64::try_from(started.elapsed().as_nanos())
+        .map_err(|_| "sample wall time overflowed u64".to_owned())?;
     let output_bytes = serde_json::to_vec(&(current.manifest.chunks(), &changes, handoff.receipt()))
         .map_err(|error| format!("serialize {} output evidence: {error}", case.as_str()))?
         .len() as u64;
-    let wall_ns = u64::try_from(started.elapsed().as_nanos())
-        .map_err(|_| "sample wall time overflowed u64".to_owned())?;
     let changed_ranges = u64::from(case == CaseName::WarmOneFile);
     let invalidated_chunks = changes.deleted.len() as u64
         + changes
