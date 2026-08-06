@@ -1,8 +1,8 @@
-# 11c — Work workspace design: PR14 core and PR17 advanced controls
+# 11c — Work workspace design: core delivery and advanced controls
 
-Status: design contract for the Work workspace, allocated to PR14 core delivery
-with residual advanced workflow controls in PR17 by the approved 2026-07-28
-sequencing decision. It was written 2026-07-25 after the PR14 grammar library landed.
+Status: design contract for the Work workspace, allocated to the core Work delivery
+with residual advanced workflow controls in the advanced workflow delivery by the approved 2026-07-28
+sequencing decision. It was written 2026-07-25 after the dashboard grammar library landed.
 Semantics are owned by
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md); this doc
 owns how those semantics look, move, and connect. Normative like 11a/11b: every
@@ -20,9 +20,9 @@ version.
 
 The user explicitly requires a first-class TraceDecay task graph/Kanban
 inspired by Hermes but more powerful; it is a product feature, not roadmap
-plumbing and does not require GitHub. PR14 ships Kanban, DAG, timeline, causal,
+plumbing and does not require GitHub. The core delivery ships Kanban, DAG, timeline, causal,
 workload, basic topology read, TaskId selection, `task_activity` SSE, and deep
-links over the canonical graph. PR17 adds advanced topology, placement,
+links over the canonical graph. The advanced delivery adds advanced topology, placement,
 automation execution, expertise/calibration, fan-out/synthesis/recovery, and
 host/LSP handoff controls over those same authorities.
 
@@ -36,8 +36,8 @@ from Plans 11a/11b are design-owner/agent decisions, not user preferences.
 
 ## Inheritance — one grammar, new nouns
 
-PR14's Work slice reuses the five visual grammars already proved on real data;
-PR17's advanced controls do not invent a sixth.
+The core Work slice reuses the five visual grammars already proved on real data;
+the advanced controls do not invent a sixth.
 it maps each Plan 24 projection onto the grammar that already carries that
 shape of meaning:
 
@@ -74,7 +74,7 @@ edge below already has (or has a named dependency for) a wire source:
 
 - task → sessions that executed it: the weave (needs the commit/session
   correlation + span-refresh fix — filed, currently 0/12 commit links and
-  instant-collapsed spans; PR17 hard-depends on it).
+  instant-collapsed spans; the advanced delivery hard-depends on it).
 - task → commits/PRs it produced: Delivery landings; the PR-421 weave sheet is
   the prototype of this join.
 - task → code it touched: file-granular edited_files today (stated as
@@ -137,8 +137,8 @@ evidence manifest.
 2. commit↔session correlation + span refresh fix — blocking for the weave
    projection (chip filed 2026-07-25).
 3. `task_activity` SSE family — thin, after Plan 24 lands events.
-4. Build order inside PR14: Kanban + DAG first (pure projections over the
+4. Build order inside the core delivery: Kanban + DAG first (pure projections over the
    store), weave/causal second (need correlation fix), cortex workload last.
-   PR17 then layers advanced workflow controls without replacing projections
+   The advanced delivery then layers advanced workflow controls without replacing projections
    or canonical selection.
    (needs volume to be worth aggregating).
