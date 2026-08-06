@@ -29,6 +29,8 @@ pub enum WorkProjectionPortError {
     Unavailable,
     #[error("Work projection resume cursor is stale")]
     StaleCursor,
+    #[error("Work projection does not exist or is not authorized")]
+    NotFoundOrNotAuthorized,
 }
 
 pub trait WorkProjectionReadPort: Send + Sync {
