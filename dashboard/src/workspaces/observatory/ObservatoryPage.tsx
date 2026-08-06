@@ -24,6 +24,7 @@ import { formatMicrosUtc } from '../../ui/format.ts';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { CanonicalObservations } from './CanonicalObservations.tsx';
+import { HookHints } from './HookHints.tsx';
 import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
@@ -65,6 +66,8 @@ export function ObservatoryPage() {
       <DoctorInspector />
 
       <CanonicalObservations />
+
+      <HookHints />
 
       <EnvelopeSection
         title="Store telemetry"
