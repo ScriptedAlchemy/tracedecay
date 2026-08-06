@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tracedecay_application::{
     ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
 };
 use tracedecay_domain::canonical_sha256;
+use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 
 use super::{
@@ -44,6 +44,10 @@ impl DaemonSessionRuntimeRegistryV1 {
         let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
         let registry =
             StoreRuntimeRegistry::new(registry_resolver, Arc::new(LifecycleShardRuntimePublisher));
+        let graph_registry =
+            GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 8 }).map_err(|error| {
+                session_registry_error("create graph runtime registry", error.to_string())
+            })?;
         let profile_shard =
             StoreShardIdV1::profile(identity.brain_id().clone(), identity.profile_id().clone());
         let profile_runtime = open_runtime(
@@ -71,6 +75,8 @@ impl DaemonSessionRuntimeRegistryV1 {
             incarnation,
             resolver,
             registry,
+            graph_registry,
+            graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
             profile_pin,
             profile_runtime,
             profile_database: Mutex::new(None),

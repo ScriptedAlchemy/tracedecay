@@ -197,6 +197,9 @@ impl DaemonInvocationState {
         semantic_database: Option<Arc<crate::db::Database>>,
         semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
         semantic_resources: Option<crate::config::SemanticResourceCeilings>,
+        graph_runtime: Arc<
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+        >,
     ) -> Result<()> {
         // Code-index identity is anchored on the project root's own git
         // repository (`IndexingIdentityV1::resolve` uses `gix::open` on the
@@ -243,7 +246,13 @@ impl DaemonInvocationState {
                 },
             );
         self.code_index_schedulers
-            .mount_worktree(project_id, project_root, store_root, semantic_schedule)
+            .mount_worktree_with_graph_runtime(
+                project_id,
+                project_root,
+                store_root,
+                semantic_schedule,
+                graph_runtime,
+            )
             .await
             .map(|_| ())
             .map_err(|error| TraceDecayError::Config {

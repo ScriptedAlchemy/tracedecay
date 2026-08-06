@@ -27,6 +27,7 @@ use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 
+mod code_graph;
 mod code_reads;
 mod maintenance;
 mod mounts;
@@ -65,6 +66,8 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     incarnation: StoreIncarnationV1,
     resolver: Arc<LocalStoreRuntimeResolverV1>,
     registry: StoreRuntimeRegistry,
+    graph_registry: tracedecay_graph_db::GraphDbRegistry,
+    graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
     profile_runtime: StoreRuntimeHandle,
     profile_database: Mutex<Option<Arc<RegisteredGlobalDb>>>,

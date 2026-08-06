@@ -26,7 +26,7 @@ use tracedecay_domain::{
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
-    ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
+    ProjectId, ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
@@ -529,6 +529,7 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
     // resolve to the primary checkout's canonical project identity through
     // the shared git common dir.
     let linked_worktree = tmp.path().join("project-a-linked-worktree");
+    std::fs::create_dir_all(&linked_worktree).unwrap();
     let linked = runtime
         .resolve_project_store_by_identity(&linked_worktree, Some(&common_a))
         .await
@@ -536,6 +537,47 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         .expect("a linked worktree must resolve through the canonical project identity");
     assert_eq!(linked.project.project_id, "fact-anchor.project.ambiguity-a");
     assert_eq!(linked.store.store_id, still_a.store.store_id);
+
+    // Facts asserted from the linked worktree bind to the canonical project
+    // owner and remain in its SQLite fact store after that worktree vanishes.
+    let project_id = ProjectId::new(linked.project.project_id.clone()).unwrap();
+    let owner = FactOwnerV1::Project {
+        project_id: project_id.clone(),
+    };
+    let fact_db = fact_db(
+        &tmp.path()
+            .join("projects/fact-anchor.project.ambiguity-a/memory.db"),
+    )
+    .await;
+    let store = DatabaseFactStore::new(&fact_db);
+    let batch = assertion_batch(
+        &owner,
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        "authority.worktree-fact",
+        "entity.authority.worktree-fact",
+        "fact asserted from the linked worktree",
+        1,
+        None,
+    );
+    let fact_id = batch.fact_id().clone();
+    committed(store.commit_fact(batch).await.unwrap());
+    assert_eq!(
+        current(&store, &owner, &fact_id)
+            .await
+            .expect("the worktree fact must commit under the canonical owner")
+            .owner(),
+        &owner
+    );
+    std::fs::remove_dir_all(&linked_worktree).unwrap();
+    assert_eq!(
+        current(&store, &owner, &fact_id)
+            .await
+            .expect("retiring a linked worktree must not delete its project-owned fact")
+            .owner(),
+        &owner
+    );
 
     // Unknown scope fails closed too: no identity, no store, and no alias or
     // fallback store minted as a side effect of the lookup.

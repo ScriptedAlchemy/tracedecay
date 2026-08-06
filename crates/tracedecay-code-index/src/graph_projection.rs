@@ -129,6 +129,8 @@ pub trait CodeGraphProjectionPublisher {
 #[derive(Clone)]
 pub struct CodeGraphProjectionStore {
     database: Arc<GraphDb>,
+    namespace: GraphNamespace,
+    generation_scope: Option<CodeGenerationId>,
     _owner: Option<Arc<GraphDbOwner>>,
 }
 
@@ -142,9 +144,15 @@ impl fmt::Debug for CodeGraphProjectionStore {
 
 impl CodeGraphProjectionStore {
     #[must_use]
-    pub fn from_graph_db(database: Arc<GraphDb>) -> Self {
+    pub fn from_graph_db(
+        database: Arc<GraphDb>,
+        namespace: GraphNamespace,
+        generation: CodeGenerationId,
+    ) -> Self {
         Self {
             database,
+            namespace,
+            generation_scope: Some(generation),
             _owner: None,
         }
     }
@@ -160,6 +168,8 @@ impl CodeGraphProjectionStore {
         let database = owner.handle();
         Ok(Self {
             database,
+            namespace: default_namespace()?,
+            generation_scope: None,
             _owner: Some(owner),
         })
     }
@@ -171,13 +181,29 @@ impl CodeGraphProjectionStore {
         freshness: SourceFreshness,
         cancellation: &CancellationSignal,
     ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
+        self.evidence_reader_with_cancellation(
+            generation,
+            repository_id,
+            freshness,
+            application_cancellation(cancellation),
+        )
+    }
+
+    pub fn evidence_reader_with_cancellation(
+        &self,
+        generation: &CodeGenerationId,
+        repository_id: Option<RepositoryId>,
+        freshness: SourceFreshness,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
+        self.require_generation_scope(generation)?;
         generation
             .validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
         validate_reader_metadata(repository_id.as_ref(), &freshness)?;
-        let cancellation = application_cancellation(cancellation);
         let snapshot = Arc::new(self.database.snapshot()?);
-        let current = read_current_generation(&snapshot, Arc::clone(&cancellation))?;
+        let current =
+            read_current_generation(&snapshot, &self.namespace, Arc::clone(&cancellation))?;
         if current.generation != *generation {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
@@ -185,19 +211,21 @@ impl CodeGraphProjectionStore {
             generation: generation.clone(),
             repository_id,
             freshness,
+            namespace: self.namespace.clone(),
             snapshot,
             projection_node_count: current.projection_node_count,
             cancellation,
         })
     }
 
-    fn publish_with_cancellation(
+    pub fn publish_code_graph_with_cancellation(
         &self,
         generation: &CodeGenerationId,
         edges: &[CanonicalRelationEdgeV1],
         chunks: &[CodeSearchChunkV1],
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<GraphWatermark, CodeGraphProjectionError> {
+        self.require_generation_scope(generation)?;
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
@@ -205,7 +233,7 @@ impl CodeGraphProjectionStore {
         let watermark = built.watermark.clone();
         self.database
             .replace_projection_unverified(ProjectionReplacement {
-                namespace: namespace()?,
+                namespace: self.namespace.clone(),
                 projection: projection()?,
                 source_generation: source_generation(generation)?,
                 next_watermark: built.watermark,
@@ -214,6 +242,20 @@ impl CodeGraphProjectionStore {
                 cancellation,
             })?;
         Ok(watermark)
+    }
+
+    fn require_generation_scope(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> Result<(), CodeGraphProjectionError> {
+        if self
+            .generation_scope
+            .as_ref()
+            .is_some_and(|expected| expected != generation)
+        {
+            return Err(CodeGraphProjectionError::GenerationMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -234,11 +276,24 @@ impl CodeGraphProjectionPublisher for CodeGraphProjectionStore {
     }
 }
 
+impl CodeGraphProjectionStore {
+    fn publish_with_cancellation(
+        &self,
+        generation: &CodeGenerationId,
+        edges: &[CanonicalRelationEdgeV1],
+        chunks: &[CodeSearchChunkV1],
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<GraphWatermark, CodeGraphProjectionError> {
+        self.publish_code_graph_with_cancellation(generation, edges, chunks, cancellation)
+    }
+}
+
 #[derive(Clone)]
 pub struct CodeGraphEvidenceReader {
     generation: CodeGenerationId,
     repository_id: Option<RepositoryId>,
     freshness: SourceFreshness,
+    namespace: GraphNamespace,
     snapshot: Arc<GraphSnapshot>,
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
@@ -269,11 +324,13 @@ impl CodeGraphEvidenceReader {
         store.publish_with_cancellation(&generation, edges, chunks, Arc::clone(&cancellation))?;
         validate_reader_metadata(repository_id.as_ref(), &freshness)?;
         let snapshot = Arc::new(store.database.snapshot()?);
-        let current = read_current_generation(&snapshot, Arc::clone(&cancellation))?;
+        let current =
+            read_current_generation(&snapshot, &store.namespace, Arc::clone(&cancellation))?;
         Ok(Self {
             generation,
             repository_id,
             freshness,
+            namespace: store.namespace.clone(),
             snapshot,
             projection_node_count: current.projection_node_count,
             cancellation,
@@ -363,7 +420,7 @@ impl CodeGraphEvidenceReader {
                 )
             })?;
         let result = self.snapshot.traverse(TraversalRequest {
-            namespace: namespace()?,
+            namespace: self.namespace.clone(),
             start: symbol_entity_id(seed)?,
             relation_kinds: BTreeSet::new(),
             direction: GraphTraversalDirection::Outgoing,
@@ -379,7 +436,11 @@ impl CodeGraphEvidenceReader {
             }
             let entity = self
                 .snapshot
-                .entity(&namespace()?, &visit.entity, Arc::clone(&self.cancellation))?
+                .entity(
+                    &self.namespace,
+                    &visit.entity,
+                    Arc::clone(&self.cancellation),
+                )?
                 .ok_or_else(|| {
                     CodeGraphProjectionError::Corrupt(
                         "graph traversal referenced a missing edge entity".to_owned(),
@@ -521,7 +582,7 @@ impl CodeGraphEvidenceReader {
         let identity = symbol_entity_id(occurrence)?;
         let Some(entity) =
             self.snapshot
-                .entity(&namespace()?, &identity, Arc::clone(&self.cancellation))?
+                .entity(&self.namespace, &identity, Arc::clone(&self.cancellation))?
         else {
             return Ok(None);
         };
@@ -652,11 +713,12 @@ struct CurrentGenerationV1 {
 
 fn read_current_generation(
     snapshot: &GraphSnapshot,
+    namespace: &GraphNamespace,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<CurrentGenerationV1, CodeGraphProjectionError> {
     let identity = GraphEntityId::new(CURRENT_GENERATION_ENTITY)?;
     let entity = snapshot
-        .entity(&namespace()?, &identity, cancellation)?
+        .entity(namespace, &identity, cancellation)?
         .ok_or_else(|| {
             CodeGraphProjectionError::Unavailable(
                 "code graph generation is not published".to_owned(),
@@ -781,7 +843,7 @@ fn stable_identity(kind: &str, value: &str) -> String {
     format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
-fn namespace() -> Result<GraphNamespace, CodeGraphProjectionError> {
+fn default_namespace() -> Result<GraphNamespace, CodeGraphProjectionError> {
     GraphNamespace::new(CODE_NAMESPACE).map_err(Into::into)
 }
 
