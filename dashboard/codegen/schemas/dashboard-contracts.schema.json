@@ -9432,7 +9432,7 @@
       "type": "object"
     },
     "ReviewProposalDispositionV1": {
-      "description": "A proposal review records a non-accepting disposition.",
+      "description": "A proposal review records a non-accepting disposition. Acceptance remains a\nseparate command so callers cannot accidentally collapse review into\napproval.",
       "enum": [
         "rejected",
         "superseded"

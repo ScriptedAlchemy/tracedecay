@@ -235,17 +235,12 @@ describe('the Work page over mounted routes', () => {
     expect(calls.some((url) => url.includes('/delta'))).toBe(false);
   });
 
-  it('states the boundary that remains, and does not overstate it', async () => {
+  it('draws no boundary aside for the retired attempt family', async () => {
     renderPage();
     await screen.findByText('Alpha task');
-    const boundary = screen.getByLabelText('Work boundary');
-    // Nine, matching `WorkOperation::ATTEMPT`. This asserted eight, which is
-    // what the page said while its list omitted `attempt_finish`; the count
-    // and the list were wrong together, so neither caught the other.
-    expect(boundary.textContent).toContain('9');
-    expect(boundary.textContent).toContain('terminalize');
-    expect(boundary.textContent).toContain('finish');
-    expect(boundary.textContent).toContain('pending proposals');
+    // Execution belongs to the Workflow runtime; there is no withheld attempt
+    // inventory left to disclose, so the page must not print one.
+    expect(screen.queryByLabelText('Work boundary')).toBeNull();
   });
 
   it('selects a task by keyboard and records it in the address', async () => {

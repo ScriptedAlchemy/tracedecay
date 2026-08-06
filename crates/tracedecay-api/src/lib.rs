@@ -49,7 +49,7 @@ pub use multi_root::{
 pub use sse::sse_response;
 pub use work::{
     WorkApplicationOwner, WorkHttpRequest, WorkInvocationFuture, WorkOperation,
-    WorkOperationFamily, work_application_router, work_core_router, work_invalid_request_response,
+    work_application_router, work_core_router, work_invalid_request_response,
 };
 pub use workflow::{
     WorkflowApplicationOwner, WorkflowHttpRequest, WorkflowInvocationFuture, WorkflowOperation,
