@@ -16,6 +16,7 @@ use std::{
     },
 };
 
+use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::LspRuntimeFailure;
 
@@ -39,8 +40,8 @@ enum CodeGraphActivationAuthorityV1 {
     Memory,
 }
 
-struct SchedulerGraphCancellationV1 {
-    shutting_down: Arc<AtomicBool>,
+pub(super) struct SchedulerGraphCancellationV1 {
+    pub(super) shutting_down: Arc<AtomicBool>,
 }
 
 impl tracedecay_graph_db::GraphCancellation for SchedulerGraphCancellationV1 {
@@ -80,6 +81,15 @@ fn bounded_daemon_admission_permits() -> usize {
     std::thread::available_parallelism().map_or(1, |cores| {
         cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
     })
+}
+
+/// One mounted worktree's code scope identity and serving generation, read
+/// without touching the scheduler mutex.
+pub(in crate::daemon) struct CodeIndexServingScopeV1 {
+    pub(in crate::daemon) repository_id: RepositoryId,
+    pub(in crate::daemon) worktree_id: WorktreeId,
+    pub(in crate::daemon) shutting_down: Arc<AtomicBool>,
+    pub(in crate::daemon) serving_generation: Option<Arc<CodeIndexPublishedGenerationV1>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1159,6 +1169,38 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexCadenceTriggerV1::Overflow,
         );
         true
+    }
+
+    /// Mounted scope identity plus the currently serving generation for one
+    /// project. Daemon authorities that must retain this scope's code-graph
+    /// runtime (semantic vectors, generation retention) resolve through this
+    /// read instead of re-deriving repository/worktree identity themselves.
+    pub(in crate::daemon) async fn serving_code_scope(
+        &self,
+        project_root: &Path,
+    ) -> Option<CodeIndexServingScopeV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (repository_id, worktree_id, shutting_down, serving) = {
+            let mounted = self.mounted.lock().await;
+            let worktree = mounted.get(&project_root)?;
+            (
+                worktree.repository_id.clone(),
+                worktree.worktree_id.clone(),
+                Arc::clone(&worktree.shutting_down),
+                Arc::clone(&worktree.serving_generation),
+            )
+        };
+        let serving_generation = serving
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|latest| Arc::clone(&latest.generation));
+        Some(CodeIndexServingScopeV1 {
+            repository_id,
+            worktree_id,
+            shutting_down,
+            serving_generation,
+        })
     }
 
     pub async fn latest_generation_id(&self, project_root: &Path) -> Option<CodeGenerationId> {

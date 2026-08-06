@@ -2434,6 +2434,7 @@ pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
 mod registry;
 pub(crate) mod semantic_query_runtime;
+pub(in crate::daemon) mod semantic_vector_graph;
 
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
