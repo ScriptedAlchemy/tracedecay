@@ -103,8 +103,8 @@ when semantics are unavailable.
 - Projector scheduling, retries, or checkpoints.
 - Query ranking, semantic embedding inference, UI, or public transport bindings.
 - A second code-specific retrieval kernel, code-only fusion profile, or
-  code-only application service. PR9 implements code adapters and the shared
-  query stages under Plans 05/15; PR11 later composes application use cases.
+  code-only application service. This plan implements code adapters and the shared
+  query stages under Plans 05/15; the application delivery later composes application use cases.
 - Retrieval-research policy, fusion weights, diversity limits, candidate
   budgets, corpus labels, metric interpretation, or profile promotion; Plan 15
   owns those decisions and Plan 05 owns retrieval/fusion implementation.
@@ -167,7 +167,7 @@ The required contract is behavioral: generation-bound storage-neutral
 documents and chunks, deterministic identity and coverage, explicit
 changed/reused/deleted manifests, projection compatibility, receipts, and
 truthful invalidation. The following Rust names and layout are a historical
-design sketch, not artifact-name parity requirements. PR9 may realize the
+design sketch, not artifact-name parity requirements. The delivery may realize the
 contract through current owner-approved names and paths when direct contract
 regressions prove all fields and invariants below.
 
@@ -381,8 +381,8 @@ pub struct ProjectionBatchReceiptV1 {
 
 ### Git evidence joins
 
-- PR7 anchors exact commit, tree, blob, index, or captured-worktree evidence.
-  PR9 consumes native Git status, history, blame, and working/staged/range diff
+- The anchor delivery anchors exact commit, tree, blob, index, or captured-worktree evidence.
+  Code intelligence consumes native Git status, history, blame, and working/staged/range diff
   results through typed ports and addresses hunks with `HunkRef`; it never
   reconstructs patches from indexed rows.
 - Map a hunk to symbols only when repository identity, path/content identity,
@@ -599,7 +599,7 @@ normal CI.
 - TaskId-linked composition fixtures resolve exact generation/
   occurrence evidence through Plan 13 anchors, remain losslessly expandable,
   and introduce no task-owned rows or task authority into the code index; they
-  are not a PR9 completion gate.
+  are not a completion gate for this plan.
 - Canonical descriptor fixtures prove analyzer routing and host LSP projection
   use the same extension, language-ID, root-marker, and capability facts without
   copying executable commands or settings into this boundary.
@@ -616,7 +616,7 @@ normal CI.
   capture as the only intake and store/projector composition as the only
   publication path.
 - Focused non-indexing package checks do not compile Tree-sitter grammars or
-  structural-search implementation, and PR9 retains the production compilation
+  structural-search implementation, and this plan retains the production compilation
   measurements used by end-to-end performance comparison.
 - Exact and lexical lanes are independently disableable and inspectable, use
   one immutable generation, and emit Plan 15 `CompactCandidate` values without a
@@ -627,11 +627,11 @@ normal CI.
   compiler/runtime error, CLI flag, tool name, configuration key, and commit
   identifier precedes every approximate-only result. Exact admission
   precision, false promotion, and protected-stratum support are reported.
-- The PR9 exact+lexical+graph baseline is versioned with its profile and
+- The exact+lexical+graph baseline is versioned with its profile and
   fallback-subpayload bytes. Completion depends on validated callable behavior,
   direct tests, a passing Linux evaluation, and normal CI, not a historical
   artifact filename, saved-candidate packet, evidence map, or acceptance
-  snapshot. A failed or pending result does not complete PR9.
+  snapshot. A failed or pending result does not complete this delivery.
 - Working/staged/range Git, history, blame, rename, binary, merge, and
   `HunkRef` fixtures retain native Git identity and independent Git/code/
   diagnostic/test watermarks. No code-index row becomes Git object or patch

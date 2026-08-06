@@ -2,9 +2,9 @@
 
 ## Status / role
 
-PR12 ships the official daemon API. PR17 adds accepted task/work graph and
-workflow-runtime application operations. PR18 stabilizes every supported
-public operation, including the PR12 base and all later accepted additions, and
+The surface delivery ships the official daemon API. The work/workflow delivery adds accepted task/work graph and
+workflow-runtime application operations. The SDK delivery stabilizes every supported
+public operation, including the daemon-API base and all later accepted additions, and
 publishes working SDK bindings. No operation family is deferred. The originally
 planned Python SDK was dropped: delivery is Rust-first through GitHub release
 assets. crates.io publication follows only after the crate structure is
@@ -14,13 +14,13 @@ package ships.
 
 Earlier operation inventories, compatibility matrices, generated declarations,
 package fixtures, and conformance packets are historical evidence, not
-prerequisites or artifacts that PR18 must recreate. Only actually
+prerequisites or artifacts that the SDK delivery must recreate. Only actually
 independently released public operation names, wire schemas, and SDK APIs may
 retain protocol compatibility. Persisted cursors and receipts use the V2
 fresh-store rule; all other retention is judged by the direct cross-language,
 lifecycle, platform, and regression behavior below.
 
-PR18's first Rust package shape is not yet published; the TypeScript npm
+The first Rust package shape is not yet published; the TypeScript npm
 package publishes on a separate later gate. Branch acceptance and generated
 schemas do not create an older supported SDK contract. Branch-local V2
 request/response APIs change in place. Persisted cursors, idempotency keys,
@@ -34,9 +34,9 @@ compatibility starts only at an actual independent release.
 
 An external developer can install the supported Rust SDK now and the
 TypeScript npm SDK after its separate publication gate, connect to a local
-daemon or a PR16-enrolled remote authority, call every supported public
+daemon or an enrolled remote authority, call every supported public
 operation with behavioral/lifecycle parity, and complete the same accepted
-PR17 journeys:
+work/workflow journeys:
 
 - use project, source, symbol, graph, retrieval, session/LCM, memory,
   configuration, health/Doctor, feedback, test, diagnostics, edit, Git,
@@ -58,9 +58,9 @@ requests.
 ### Supported public operation coverage
 
 Every published SDK exposes every supported public operation, not only the
-PR17 additions, with distinct IDs and typed legal actions. The base includes
-all callable PR12 families and every operation accepted before the PR18
-freeze; the PR17 additions include:
+work/workflow additions, with distinct IDs and typed legal actions. The base includes
+all callable daemon-API families and every operation accepted before the SDK
+freeze; the work/workflow additions include:
 
 - initiative, work-item, and version creation/update/read;
 - dependency mutation and readiness, history, projection, Kanban/DAG/timeline/
@@ -86,8 +86,8 @@ scheduling, completion, or calibration independently.
 2. The public daemon boundary maps the request to the same canonical
    application operation used by CLI, MCP, and HTTP. The daemon remains the
    only process that authorizes, reads or writes product storage, schedules
-   work, and records receipts. A remote session routes only through PR16's
-   enrolled, fenced authority; PR18 binds accepted operations but owns no
+   work, and records receipts. A remote session routes only through Plan 28's
+   enrolled, fenced authority; the SDK delivery binds accepted operations but owns no
    remote authority, replication, failover, or offline semantics.
 3. The SDK exposes the operation through an idiomatic façade and returns the
    canonical value, page, stream event, legal action, structured error, or
@@ -146,7 +146,7 @@ project, and client revisions before document content; preserves ordered
 events, cancellation, backpressure, reconnect, and bounded terminal errors;
 and does not expose an arbitrary LSP or daemon invocation tunnel through SDKs.
 
-PR18 freezes two distinct public handoff-token consumption operations and
+The SDK delivery freezes two distinct public handoff-token consumption operations and
 exposes each through Rust immediately and through TypeScript after npm
 publication:
 
@@ -159,7 +159,7 @@ publication:
 After explicit capability negotiation, Plan 35 may project an LSP action for
 either kind. Each opaque token is 60-second, single-use, kind- and
 destination-bound, and bound to the exact session, project/root, cue/finding
-or task version, authorization/policy epoch, and local or PR16 remote authority
+or task version, authorization/policy epoch, and local or enrolled remote authority
 identity. Consumption reauthenticates, reauthorizes exact scope, checks kind,
 destination, expiry, use state, and current owner version, then returns only
 the owning operation's open-surface result.
@@ -172,7 +172,7 @@ carry no edit, task body, source, raw path/ID/query/arguments, credential, or
 durable evidence. Consumption cannot invoke `workspace/applyEdit`, Git,
 provider execution, work mutation, or an arbitrary daemon/LSP method.
 
-## PR18 implementation defaults
+## SDK implementation defaults
 
 - Use Serde plus `schemars` as the accepted wire-model source. Admit Aide only
   after typed DTOs exist and only when it deletes route/OpenAPI glue without
@@ -195,8 +195,8 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
 ### Stabilize every supported public operation
 
 - Choose public names and request/response shapes at the daemon application
-  boundary for every supported operation, including all PR12 base families and
-  the accepted PR17 additions.
+  boundary for every supported operation, including all daemon-API base families and
+  the accepted work/workflow additions.
 - Preserve names proven by an actual independent public release as
   compatibility aliases that delegate to the canonical operation. Pure
   source-only and branch-era callable names are replaced in place. A
@@ -214,7 +214,7 @@ provider execution, work mutation, or an arbitrary daemon/LSP method.
   owning application operations and expose the same authorized,
   non-enumerating result in Rust immediately and in TypeScript after npm
   publication, without a raw LSP tunnel. Plan 35 owns transport projection, Plan 09 owns investigation
-  results, and Plan 24 owns task semantics; PR18 owns only the public names,
+  results, and Plan 24 owns task semantics; the SDK delivery owns only the public names,
   token-consumption contract, SDK bindings, and compatibility.
 
 ### Publish usable SDKs
@@ -252,7 +252,7 @@ environments and never execute Claude Code, Codex, or provider binaries locally.
 
 ## Replacement and deletion
 
-PR18 removes source-only temporary PR17 spellings directly. Callable PR17
+The SDK delivery removes source-only temporary work/workflow spellings directly. Callable
 spellings change in place unless release or live-host evidence establishes a
 predecessor; aliases then follow that explicit compatibility disposition.
 Branch sequencing alone creates no public compatibility window.
@@ -268,11 +268,11 @@ matrices, and compilation-only conformance are not retained as release gates.
 
 - Every supported public operation is callable from the Rust SDK against the
   same production daemon boundary; no operation family is omitted because it
-  predates PR17, and no SDK operation bypasses daemon authorization or opens
+  predates the work/workflow delivery, and no SDK operation bypasses daemon authorization or opens
   product storage. TypeScript npm acceptance follows the later npm OIDC gate
   with the same operation coverage once published.
 - The Rust SDK runs representative read, paged, streamed, cancellable, and
-  effect/receipt operations against both a local daemon and a PR16-enrolled
+  effect/receipt operations against both a local daemon and an enrolled
   remote authority. The two routes preserve identical application semantics,
   stable problem/error taxonomy, exact retry directive, authorization decisions,
   redaction, coverage, legal actions, effects, and terminal receipts; only
@@ -281,9 +281,9 @@ matrices, and compilation-only conformance are not retained as release gates.
 - Local and remote variants exercise authentication, disconnect,
   reconnect/resume, paging, streaming/backpressure, cancellation before and
   after an effect commit point, and partial/unavailable authority as applicable.
-  Remote authority loss or failover uncertainty remains PR16's typed
+  Remote authority loss or failover uncertainty remains Plan 28's typed
   partial/unavailable/reconciliation state and never triggers a local writer,
-  SDK fallback, semantic substitution, or PR18-owned recovery policy.
+  SDK fallback, semantic substitution, or SDK-owned recovery policy.
 - In each language, an executable journey creates and pages work, observes
   legal proposal/review outcomes, admits a provider-backed attempt, consumes
   progress, exercises cancellation, reconnects or resumes where supported, and
@@ -313,7 +313,7 @@ matrices, and compilation-only conformance are not retained as release gates.
   delivery, cancellation, backpressure, reconnect, stale revisions, and
   authentication without exposing a raw LSP tunnel. The Rust SDK and, after
   npm publication, the TypeScript SDK each exercise local-daemon and
-  PR16-enrolled-remote variants that produce and consume both token kinds: a
+  enrolled-remote variants that produce and consume both token kinds: a
   feedback/diagnostic cue opens the owning investigation surface, and a
   ready-commit/cross-worktree/task cue opens the owning task surface. Both
   variants assert identical application
@@ -328,9 +328,9 @@ matrices, and compilation-only conformance are not retained as release gates.
   languages, followed by the ordinary aggregate repository checks rather
   than a separate acceptance gate.
 
-## Not in PR18
+## Not in the SDK delivery
 
-- New task/work or provider-runtime semantics; PR17 owns them.
+- New task/work or provider-runtime semantics; the work/workflow delivery owns them.
 - A JavaScript workflow runtime, arbitrary daemon/LSP payload tunnel, local
   provider executor, or direct database API.
 - Generated compatibility inventories, standalone conformance services,

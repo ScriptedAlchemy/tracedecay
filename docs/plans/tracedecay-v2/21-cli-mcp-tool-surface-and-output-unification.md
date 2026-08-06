@@ -1,13 +1,13 @@
 # TraceDecay V2 CLI, MCP, LSP, and output unification
 
-**Delivery scope:** PR12 core requirements; PR17 executable work loop; PR18
+**Delivery scope:** core surface requirements; the executable work loop; the
 public SDK/name freeze.
 
 ## Status / role
 
 CLI, MCP, and HTTP are thin clients over daemon-owned application use cases.
 Dashboard uses the same application results only when its first binding ships
-in PR14. LSP remains a stateful sibling adapter over the same typed code and
+in the dashboard delivery. LSP remains a stateful sibling adapter over the same typed code and
 diagnostic operations; it is not a generic workflow transport.
 
 Completion and activity status is owned solely by
@@ -15,16 +15,17 @@ Completion and activity status is owned solely by
 retained delivery requirements and does not infer milestone status from branch
 artifacts.
 
-PR11 requires the canonical application surface; PR12 requires every CLI, MCP,
+The application delivery requires the canonical application surface; the core
+surface delivery requires every CLI, MCP,
 HTTP/SSE, feedback, Git, and LSP binding to route through it while preserving
 output, cursor, cancellation, daemon-capacity, and semantic parity. Dispatcher,
 binding, schema, and fixture names visible on a branch are implementation
 evidence rather than a spine to reconstruct. A missing callable operation or
-lost semantic is a gap; a renamed/deleted scaffold is not. PR17 adds only the
+lost semantic is a gap; a renamed/deleted scaffold is not. The work loop adds only the
 surface needed to complete the Plan 24/32 user journey.
 
 Only actually independently released public CLI/MCP/HTTP names and protocol
-shapes retain compatibility. Pure source-only/internal PR12/PR17 bindings,
+shapes retain compatibility. Pure source-only/internal bindings,
 branch-era V2 callable names, and V2 generated request/response revisions
 change in place. Persisted cursors, cancellation records, idempotency keys,
 journals, checkpoints, and receipts accept only their exact final shape; any
@@ -80,7 +81,7 @@ surface capabilities:
 - configuration, Doctor, rejected-argument observations, daemon health and
   saturation, progress streams, cursors, receipts, and safe output retain
   CLI/MCP/HTTP semantic compatibility; and
-- PR17 retains every task graph, Kanban/DAG/timeline/causal/workload,
+- The work loop retains every task graph, Kanban/DAG/timeline/causal/workload,
   decomposition/sizing/routing, workflow definition/run/control,
   provider-execution, topology, placement, integration, evidence, and
   SDK-facing semantic operation listed by Plans 24 and 32.
@@ -95,7 +96,7 @@ errors, and reversible digests never enter the event. A client-side rejection
 that cannot reach the daemon remains unreported coverage, not a fabricated
 zero.
 
-## PR12 user outcome
+## Core surface user outcome
 
 From CLI, MCP, or HTTP, a user can call the same authorized TraceDecay
 operation and receive the same semantic result, stable problem, cursor,
@@ -105,7 +106,7 @@ LSP host, the user also receives compact current diagnostics, impact, affected
 tests, and test results through standard LSP methods and the owned TraceDecay
 context extension without turning LSP into a generic tool proxy.
 
-## PR12 end-to-end production path
+## Core surface end-to-end production path
 
 1. A CLI command, MCP tool, HTTP operation, standard LSP method, or negotiated
    TraceDecay context request resolves the applicable Plan 08 binding and
@@ -116,7 +117,7 @@ context extension without turning LSP into a generic tool proxy.
    handler-local query, policy, or fallback behavior.
 3. Canonical feedback diagnostics, impact, affected-test, test-result,
    get/list, and exact-expansion reads return real typed results. CLI, MCP, and
-   HTTP bind the applicable readers in PR12; no advertised PR12 route delegates
+   HTTP bind the applicable readers in this delivery; no advertised route delegates
    to a placeholder or permanent unavailable handler. Indexing is never a
    transport-level wait condition: operations use the latest complete
    compatible generation, preserve exact/lexical/graph behavior, and return
@@ -132,10 +133,10 @@ context extension without turning LSP into a generic tool proxy.
    includes the same non-blocking indexing semantics and selected-generation
    identity.
 5. Each adapter renders the canonical result for its protocol. HTTP feedback
-   parity is part of PR12. Dashboard binding and dashboard parity begin in
-   PR14, not PR12.
+   parity is part of the core surface. Dashboard binding and dashboard parity begin in
+   the dashboard delivery, not here.
 
-## PR12 implementation slices
+## Core surface implementation slices
 
 1. Bind representative read, write, administrative, streaming, and
    long-running application operations through the revisioned catalog and the
@@ -143,7 +144,7 @@ context extension without turning LSP into a generic tool proxy.
    parity.
 2. Bind the canonical diagnostics/impact feedback readers, affected tests,
    test results, get/list, and exact expansion as callable operations and
-   delete placeholder/unavailable PR12 handlers.
+   delete placeholder/unavailable handlers.
 3. Bind retained standard LSP methods and the negotiated, versioned TraceDecay
    context extension to the same handlers, including bounded envelopes and
    opaque authorized expansion.
@@ -154,13 +155,13 @@ context extension without turning LSP into a generic tool proxy.
    forwarding, and duplicate output/error contracts only after direct parity
    passes.
 
-## PR12 direct acceptance
+## Core surface direct acceptance
 
 - Invoke representative canonical operations through CLI, MCP, and HTTP and
   compare typed results before rendering, including stable error, cursor,
   progress, cancellation, saturation, receipt, and Markdown/JSON semantics.
 - Invoke real feedback diagnostics and impact readers through CLI, MCP, and
-  HTTP; prove every advertised PR12 binding reaches the canonical application
+  HTTP; prove every advertised binding reaches the canonical application
   handler and no placeholder/unavailable implementation remains.
 - Negotiate the TraceDecay experimental LSP capability in a real client,
   project current diagnostics, impact, affected tests, and test results, and
@@ -170,24 +171,24 @@ context extension without turning LSP into a generic tool proxy.
 - Reject an unnegotiated extension call, unknown version, arbitrary method or
   payload forwarding, cross-scope handle reuse, hidden-resource enumeration,
   and any adapter attempt to persist or become authority for LSP/feedback data.
-- Compare HTTP feedback semantics with CLI/MCP in PR12 while proving no
-  dashboard adapter or dashboard-only handler is required before PR14.
+- Compare HTTP feedback semantics with CLI/MCP while proving no
+  dashboard adapter or dashboard-only handler is required before the dashboard delivery.
 
-## PR12 future boundaries
+## Future boundaries
 
-- PR13 registers callable GitHub-review, CI-localization, and proximity
+- Advisory feedback registers callable GitHub-review, CI-localization, and proximity
   producers/contributions behind the same feedback readers and LSP provider
   extension point. It does not change reader transport, framing, output, or
   expansion semantics, and an uncallable producer remains a typed unavailable
   contribution rather than a reserved field.
-- PR14 first binds dashboard actions and feedback reads and proves dashboard
+- The dashboard delivery first binds dashboard actions and feedback reads and proves dashboard
   parity over the already callable application results.
-- PR17 adds the task/work and runtime loop below through the same canonical
+- The work loop adds the task/work and runtime operations below through the same canonical
   application path;
-  PR18 freezes supported public names and SDK bindings. Neither milestone
+  the SDK delivery freezes supported public names and SDK bindings. Neither delivery
   turns LSP into arbitrary forwarding or makes a surface the data owner.
 
-## PR17 user outcome
+## Work loop user outcome
 
 From a supported surface, a user can:
 
@@ -222,7 +223,7 @@ chooses a hidden model, or mutates graph/runtime state locally.
 
 ## Surface contract
 
-PR17 exposes one compact work family covering:
+The work loop exposes one compact work family covering:
 
 - work creation, detail, dependencies, derived readiness, comments/artifacts,
   assignment, handoff, and legal actions;
@@ -240,8 +241,8 @@ PR17 exposes one compact work family covering:
 - split/merge/resize/reroute/re-review/minimal-repair/restart/escalation replan
   review and explicit accept/reject/supersede.
 
-Names used during PR17 are internal product bindings, not frozen SDK or
-long-term public vocabulary. PR18 may improve names, but it cannot merge
+Names used during the work-loop delivery are internal product bindings, not frozen SDK or
+long-term public vocabulary. The SDK delivery may improve names, but it cannot merge
 distinct effect classes, hide semantic states, weaken authorization, or turn a
 review into an implicit effect.
 
@@ -311,7 +312,7 @@ attempt and request. Timeout denies or cancels; it never approves.
 ## Explicit Git effects
 
 Existing Git index mutation remains preview then explicit apply with immutable
-CAS evidence and an idempotent receipt. PR17 optional integration follows the
+CAS evidence and an idempotent receipt. Optional work-loop integration follows the
 same user-controlled shape: preview shows exact source/destination identities,
 candidate effect, checks, conflicts, and expiry; apply requires an explicit
 grant, current expected versions, and the native Git owner.
@@ -340,7 +341,7 @@ fixture does not land before its operation is callable.
 
 - Delete handler-local store/query/policy/readiness/provider/retry/error logic
   as each application operation becomes live.
-- Remove PR17 internal operation inventories, temporary cross-worktree
+- Remove internal work-loop operation inventories, temporary cross-worktree
   registries, exact command/tool/type/file catalogs, generated parity
   manifests, shadow profiles, and declaration-only gates.
 - Compatibility aliases with release evidence delegate to the canonical
@@ -371,11 +372,11 @@ compare semantic JSON and required human fields across CLI, MCP, HTTP, and
 dashboard, prove adapters open no business store or provider/runtime path, and
 prove old handler logic is deleted. They create no separate acceptance gate and
 do not require byte-identical prose, a generated inventory, giant Cartesian
-fixture matrix, or PR17 public SDK names.
+fixture matrix, or public SDK names.
 
-## Not in PR17
+## Not in the work loop
 
-- PR18 freezes public API, CLI/MCP compatibility, and SDK names.
-- PR20 optimizes measured surface and daemon latency.
+- The SDK delivery freezes public API, CLI/MCP compatibility, and SDK names.
+- Measured performance optimization covers surface and daemon latency.
 - A blind LSP/JSON-RPC proxy, generic process execution, developer-plan
   executor, and JavaScript workflow runtime remain out of scope.

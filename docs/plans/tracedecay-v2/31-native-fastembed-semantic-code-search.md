@@ -52,21 +52,21 @@ Exact results remain authoritative without a model; similarity alone never prove
   daemon-owned writer authority.
 - Plans 05/15 own the common `CompactCandidate`, independent lane, deterministic
   fusion, contribution, diversity, rerank, hydration, cursor, fallback,
-  explanation, and redundancy contracts to be shipped in PR9. PR10 adds one semantic
+  explanation, and redundancy contracts shipped by federated retrieval. This plan adds one semantic
   adapter; it does not create a parallel code-search kernel.
 - Plan 20 owns versioned model/reranker profile selection, configuration
   precedence, and atomic active/rollback profile pointers. This plan owns the
   root-private versioned artifact manifest and SHA-256 integrity verifier,
   FastEmbed runtime adapter,
-  bounded sessions, semantic generation service, and their typed ports. PR11's
+  bounded sessions, semantic generation service, and their typed ports. The
   Plan 09 application layer later composes those accepted ports; it does not
-  retroactively own PR10's model implementation.
+  retroactively own this plan's model implementation.
 - Daemon/application orchestration schedules changed eligible chunks and
   rebuilds. Plan 04 owns deterministic projection, checkpoint, retry, and
   publication semantics, not scheduling policy.
 - Plan 15 exclusively owns retrieval-research design, versioned corpora and
   labels, metrics and strata, candidate profile comparison, thresholds, and
-  activation recommendations. PR10 implements measured profiles and emits
+  activation recommendations. This plan implements measured profiles and emits
   results; it cannot tune or activate itself from aggregate or public benchmark
   rank.
 - Plans 10/11/20/21 expose the same application operations through API,
@@ -84,14 +84,14 @@ requirements. Current owner-approved names and locations are valid when direct
 contract regressions prove the same lane isolation, generation compatibility,
 authorization, coverage, fallback, and receipt behavior.
 
-The original PR10 design proposed these files:
+The original semantic-delivery design proposed these files:
 
 - `crates/tracedecay-domain/src/code_intelligence/search.rs`:
   `EmbeddingProjectionKeyV1`, `SemanticSearchIndexKeyV1`,
   `SemanticCapabilityManifestV1` and
   code-specific semantic evidence values. Generic ranked-list, compact-
   candidate, contribution, fusion, rerank, hydration, and cursor values remain
-  in PR9's `crates/tracedecay-domain/src/retrieval.rs`.
+  in federated retrieval's `crates/tracedecay-domain/src/retrieval.rs`.
   Semantic projection uses Plan 25's `CodeChunkProjectionReceiptV1` and
   `ProjectionBatchReceiptV1`; no semantic-specific receipt authority exists.
 - `src/semantic_code/artifacts.rs`: versioned manifest parsing, SHA-256 member
@@ -106,12 +106,12 @@ The original PR10 design proposed these files:
 - `src/semantic_code/session_pool.rs`: bounded sessions keyed by the complete
   projection/privacy identity.
 - `src/query/retrieval/semantic.rs`: the code-semantic implementation of the
-  PR9 `Retriever` port. It emits generic `CompactCandidate` values carrying a
+  federated `Retriever` port. It emits generic `CompactCandidate` values carrying a
   typed code anchor and semantic evidence; it consumes neither lexical nor
   graph candidates.
-- `src/semantic_code/service.rs`: temporary root-private PR10 orchestration for
+- `src/semantic_code/service.rs`: temporary root-private semantic orchestration for
   artifact/runtime admission, projection generation, shadow execution, and
-  activation/rollback. It exposes typed ports consumed by the PR11 application
+  activation/rollback. It exposes typed ports consumed by the application
   layer and contains no transport binding.
 - `src/config/retrieval.rs`: Plan-20-owned versioned profile definitions and atomic
   active/rollback profile pointers.
@@ -119,7 +119,7 @@ The original PR10 design proposed these files:
   semantic projection read/write ports. Query and semantic modules do not
   depend on its physical schema.
 
-The semantic adapter extends the PR9 retrieval contract rather than replacing
+The semantic adapter extends the federated retrieval contract rather than replacing
 it:
 
 ```rust
@@ -152,7 +152,7 @@ pub struct CodeSemanticEvidenceV1 {
 }
 ```
 
-The adapter implements the one PR9 `Retriever<R, E>` port and receives one
+The adapter implements the one federated `Retriever<R, E>` port and receives one
 frozen authorized scope, code generation, semantic
 projection, and bounded ephemeral sanitized query view. It returns the generic
 Plan 15 batch with one `CompactCandidate` and one occurrence-keyed
@@ -162,7 +162,7 @@ retain raw query text/query vectors. Store conformance uses separate lexical,
 graph, vector, receipt, and hydration representations; no table, vector index,
 or materialized join becomes authority.
 Deadline and cancellation limits are fields of the shared `RetrievalBudget`;
-PR10 does not introduce semantic-only budget or continuation types.
+this plan does not introduce semantic-only budget or continuation types.
 
 ## Deterministic documents and generations
 
@@ -228,8 +228,10 @@ their exact key; partial receipt sets never activate.
   the derived exact-flat/search structure.
 - Reuse vector bytes across worktrees only when canonical chunk content,
   projection key, privacy domain, and key epoch match. Every projection row,
-  receipt, vector generation, and active pointer remains bound to its exact
-  source worktree snapshot and code generation.
+  receipt, and immutable vector generation remains bound to its exact source
+  worktree snapshot and code generation. The committed retrieval profile names
+  that vector generation, while each admitted query separately pins the exact
+  source code generation; neither identity is inferred from a process cache.
 - Coalesce superseded projection batches by exact worktree and source
   generation. Bound queued bytes, batch size, session count, model memory, and
   publication concurrency. Interactive exact/lexical/graph queries have
@@ -247,13 +249,13 @@ queues the selected catalog model's immutable Hugging Face repository revision
 in the background. Manifests pin actual model/tokenizer/config bytes, licenses,
 runtime/build identity, dimensions, normalization, metric, device, threads,
 batching, and resource ceilings. Implementation selects maintained
-crate/runtime versions during PR10; activated model and reranker profiles still
+crate/runtime versions during the semantic delivery; activated model and reranker profiles still
 require a passing Plan 15 evaluation. This plan contains no stale crate or
 model-version pin.
 
 Every acquisition/import path verifies artifacts before installation or
 activation. Queries never download a model or open an ambient cache. Offline
-startup remains healthy and PR9-baseline-complete. Compatible warmed sessions
+startup remains healthy and baseline-complete. Compatible warmed sessions
 are pooled under bounded memory, concurrency, idle, and cancellation policy.
 Load failure, OOM, corruption, missing bytes, or incompatible pins disables the
 affected semantic stage without silently selecting another model.
@@ -298,7 +300,7 @@ retrieval. Optional `SemanticCapabilityManifestV1` pins the authorized scope
 digest, code and vector generations, projection and search-index keys,
 supported chunk grains/languages, coverage, partial states, privacy domain/key
 epoch, and manifest digest. Fusion, candidate budgets, diversity, reranking,
-and hydration are validated separately from the active Plan 15/20 profile. The PR10 service validates the base
+and hydration are validated separately from the active Plan 15/20 profile. The semantic service validates the base
 manifest before any channel and validates the semantic augmentation only before
 semantic/rerank work. Missing semantic capability yields lexical/graph mode; an
 explicit strict-semantic request yields the typed unavailable result.
@@ -306,7 +308,7 @@ explicit strict-semantic request yields the typed unavailable result.
 ## Query and redundancy
 
 Search resolves exact scope and frozen generation first, reproduces the
-versioned PR9 exact+lexical+graph baseline, then adds a compatible semantic
+versioned exact+lexical+graph baseline, then adds a compatible semantic
 candidate list. Fusion is stable and explainable; Plan 15's exact-admission
 authority keeps exact identifiers, paths, quoted phrases, errors, tool names,
 and configuration keys in a non-demotable tier. The first production semantic
@@ -327,7 +329,7 @@ compatible immutable vector generation becomes current through a single atomic
 publication. Staged, partial, indexing, stale, failed, cancelled, or
 incompatible generations contribute no candidates, score, cap pressure,
 cursor bytes, or rank effects. A request for strict semantic alone may return
-typed unavailable; it may not delay or replace the normal PR9 path.
+typed unavailable; it may not delay or replace the normal federated path.
 
 `code.redundancy` reuses the same active generation. It canonicalizes pairs,
 removes self/overlapping chunks, and reports `exact_clone`,
@@ -340,7 +342,7 @@ The Plan-05 query pipeline executes these phases without combining them:
 1. Resolve and authorize project/repository/worktree/ref scope; freeze code,
    exact, lexical, graph, and compatible semantic generations; validate the
    base and semantic capability manifests, authorization epochs, and budgets.
-2. Reuse PR9's separately inspectable `RetrieverOutcome` values for
+2. Reuse federated retrieval's separately inspectable `RetrieverOutcome` values for
    `ExactLiteral`, `Lexical`, and `Graph`; produce one independent
    `Semantic` outcome. No semantic code calls, wraps, filters, or mutates
    another lane.
@@ -348,9 +350,9 @@ The Plan-05 query pipeline executes these phases without combining them:
    contract: finite canonical scores, candidate identity dedupe, generation and
    authorization equality, stable lane-local ordering, complete coverage, and
    a bounded continuation.
-4. Pass all compact candidates to the one PR9 fusion implementation. The
+4. Pass all compact candidates to the one federated fusion implementation. The
    existing exact tier remains lexicographically first and cannot be demoted by
-   graph/semantic scores, diversity, or reranking. PR10 evaluates semantic
+   graph/semantic scores, diversity, or reranking. This plan evaluates semantic
    weighting/fusion candidates—including exact rational RRF if proposed—on
    the same recorded candidate inputs; no algorithm, constant, or weight
    activates without a passing Plan 15 evaluation.
@@ -369,7 +371,7 @@ The Plan-05 query pipeline executes these phases without combining them:
    preserving the pre-rerank list and contributions. Absence/failure returns
    those bytes unchanged.
 8. After fusion, diversity, reranking, and page selection, reauthorize and
-   hydrate only selected hits through the PR9 hydration port. Hydration may add bounded
+   hydrate only selected hits through the federated hydration port. Hydration may add bounded
    symbol text, file context, declarations, and graph neighbors from the same
    generation; it cannot add candidates or change rank.
 
@@ -383,9 +385,9 @@ measurements.
 ## Authorization and local/private boundary
 
 - Owning source stores authorize exact scope, operation, privacy domain, key
-  epoch, and code generation. Plan 20's accepted profile and the PR10 service
+  epoch, and code generation. Plan 20's accepted profile and the semantic service
   separately authorize semantic projection generation and runtime profile. The
-  PR10 query composition validates both receipts before invoking the semantic
+  semantic query composition validates both receipts before invoking the semantic
   lane; source denial invokes zero channels, while
   semantic denial invokes no semantic/rerank port and preserves authorized
   lexical/graph execution.
@@ -439,7 +441,7 @@ wrong-scope and no-answer error, worst strata, build/update time, p50/p95/p99,
 CPU/RSS, model/vector/cache bytes, cancellation, and offline behavior.
 
 Plan 15 owns this corpus's partition/label policy, metrics, thresholds, and
-activation recommendation. PR10 owns reproducible Linux execution and truthful
+activation recommendation. This plan owns reproducible Linux execution and truthful
 `pass`, `fail`, or `pending` summaries. Activation requires a passing Plan 15
 evaluation showing no scope/privacy or protected
 exact/no-answer/wrong-scope regression, demonstrated semantic gain, and
@@ -448,7 +450,7 @@ ineligible bytes never enter documents, artifacts, metrics, explanations, or
 model-assisted routes.
 
 Late interaction, quantization, and specialized ANN remain measured candidate
-profiles, not PR10 defaults. ANN is admitted only when it beats exact search's
+profiles, not semantic-delivery defaults. ANN is admitted only when it beats exact search's
 reviewed resource budget while meeting exact-oracle average, tail, minimum,
 and zero-recall-query gates under immutable-generation compatibility. No HNSW,
 DiskANN, ScaNN, vector database, precision, or quantization choice is
@@ -514,12 +516,15 @@ fail, and restoring the source makes it pass.
   `SemanticCodeRetriever`/`SemanticVectorReadPort::scan_exact_flat`, with direct
   deterministic ordering, provenance, generation, and coverage regression in
   `exact_flat_scan_is_deterministic_and_emits_generic_semantic_evidence`.
-- **Immutable generations and atomic publication:** delivered by the staged
-  vector-generation store. Direct regressions
-  `indexing_and_cancellation_leave_only_the_compatible_prior_generation_queryable`
-  and `checkpoint_and_active_pointer_publish_atomically` prove staged work is
-  not queryable, cancellation preserves the current generation, and a failed
-  publication cannot expose half of a swap.
+- **Immutable generations and verified publication:** active integration work
+  uses the staged vector-generation store and the Plan 39 verified Grafeo
+  publication boundary. Staged work is not queryable, cancellation preserves
+  every prior verified generation, and failed publication cannot expose a
+  partial generation. Publication only adds immutable catalog state and may
+  advance the relational verified graph head; it never activates semantic
+  routing. Plan 20's linked configuration transition and activation receipt
+  are the sole active/rollback authority, while process-local runtime pointers
+  are observed readiness caches only.
 - **Asynchronous, non-blocking indexing:** delivered at the projection,
   generation-selection, runtime-routing, and bounded-session boundaries.
   `only_a_current_receipt_routes_to_semantic_search` routes indexing, degraded,
@@ -543,7 +548,7 @@ fail, and restoring the source makes it pass.
 
 ## Planned behavioral delivery and direct verification
 
-PR10 remains unfinished. The checkpoints below are required product behavior.
+The native semantic delivery remains unfinished. The checkpoints below are required product behavior.
 Paths, type spellings, fixture filenames, benchmark entrypoints, and test-suite
 registration are non-normative historical suggestions. Completion follows the
 callable semantic operation, direct regressions, the Plan 15 Linux evaluation,
@@ -551,7 +556,7 @@ and normal CI.
 
 1. **Contracts and capability admission:** add semantic-only domain values,
    ports, manifest validators, ephemeral query-view rules, and split in-memory
-   adapters. Reuse PR9's generic retrieval/fusion/hydration behavior. Direct
+   adapters. Reuse federated retrieval's generic retrieval/fusion/hydration behavior. Direct
    regressions cover contract validation, capability admission, and storage
    independence.
 2. **Artifact and runtime foundation:** implement one root-private artifact
@@ -564,7 +569,7 @@ and normal CI.
    compatibility.
 3. **Incremental vector projection:** implement the projector and vector-generation
    store against Plan 04 projection/checkpoint semantics, Plan 02
-   receipt/publication authority, and PR10 runtime ports. Daemon/service
+   receipt/publication authority, and this plan's runtime ports. Daemon/service
    orchestration owns asynchronous worktree-fair bounded scheduling; do not
    assign it to Plan 04. Direct regressions cover changed-chunk batching,
    deletion without inference, no-op zero inference, cross-worktree physical
@@ -573,11 +578,11 @@ and normal CI.
    incompatible generations, atomic publication, cancellation/failure
    isolation, and offline lifecycle.
 4. **Exact-flat semantic retrieval and shadow composition:** implement one
-   independent semantic outcome and compose it with frozen PR9 lane outputs
+   independent semantic outcome and compose it with frozen federated lane outputs
    through the shared fusion/diversity/cursor behavior. Direct regressions
    cover lane isolation, contribution provenance, protected exact results,
    diversity/pagination, and byte-identical fallback.
-5. **Late hydration, privacy, and rollback:** reuse PR9 hydration with semantic
+5. **Late hydration, privacy, and rollback:** reuse federated hydration with semantic
    profile admission, generation checks, authorization recheck,
    domain-keyed caches, payload-safe receipts, active/rollback pointer CAS, and
    cold offline rollback. Direct regressions cover hydration, authorization,
@@ -594,7 +599,7 @@ and normal CI.
    tests, Linux evaluation, and normal all-feature cross-platform CI. Status
    and Doctor behavior are exercised through the production lifecycle states;
    activation still requires the remaining evaluation and indexing evidence.
-   PR10 does not create a temporary public semantic endpoint or reserve later
+   This plan does not create a temporary public semantic endpoint or reserve later
    surface contracts.
 
 A reproducible projection workload measures clean, warm one-symbol, deletion,
@@ -611,9 +616,11 @@ recommendations.
 The query workload also overlaps queries with a blocked projection worker and
 with staged, partial, failed, cancelled, stale, and incompatible generations.
 It records exact/lexical/graph completion independently, requires zero wait on
-the semantic worker, compares the visible PR9 fallback bytes and rank before
+the semantic worker, compares the visible federated fallback bytes and rank before
 and during indexing, and observes semantic candidates only after the complete
-compatible generation and active pointer become visible in one atomic step.
+compatible generation is verified and Plan 20 has committed the matching
+activation receipt. Those are ordered publication and configuration
+transactions, not a graph-local pointer swap.
 
 Each workload manifest pins corpus/query digests, exact file/chunk/query counts,
 language/source strata, seed, model/projection/fusion revisions, hardware and
@@ -659,15 +666,16 @@ semantic similarity as identity, impact, lineage, or equivalence.
   Plan 25's canonical rebuild path.
 - Receipt fixtures reject missing, duplicate, extra, wrong-generation, wrong-
   digest, and wrong-key entries; crash/cancellation leaves the previous active
-  pointer unchanged and no partial projection queryable. Queries issued while
+  retrieval configuration unchanged and no partial projection queryable.
+  Queries issued while
   projection is blocked complete through exact/lexical/graph without waiting
-  and match the versioned PR9 fallback bytes and rank. Only a complete compatible
-  generation published with its active pointer in one atomic step may add the
-  semantic lane.
+  and match the versioned federated fallback bytes and rank. Only a complete,
+  recovered-state-verified generation named by the current linked activation
+  receipt may add the semantic lane.
 - The semantic adapter emits a separately inspectable generic
-  `RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>`; PR9 exact,
+  `RetrieverOutcome<RetrieverBatch<CodeSemanticEvidenceV1>>`; the exact,
   lexical, and graph outcomes are unchanged. Disabling or failing semantic
-  retrieval preserves Plan 15's named PR9 fallback subpayload bytes. Fused
+  retrieval preserves Plan 15's named federated fallback subpayload bytes. Fused
   explanations reproduce every declared generic profile
   contribution and the complete comparator for every result.
 - Exact-hit retention and first-relevant-protected-hit Recall@10 are 100% over

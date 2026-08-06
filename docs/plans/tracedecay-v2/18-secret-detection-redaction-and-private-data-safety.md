@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-- Cross-cutting V2 safety requirement; its PR5 capture foundation is complete.
+- Cross-cutting V2 safety requirement; its sanitized-capture foundation is complete.
 - Mandatory for every later ingestion, storage, indexing, retrieval, logging, and export path.
 - Delivered structural sanitization remains required product behavior.
   Sensitive-value redaction of lossless LCM raw payloads is conditionally
@@ -124,7 +124,7 @@ this sensitive-value setting.
 
 ## Acceptance
 
-- PR5 established shared parsing, detection, redaction, receipt, and safe-marker primitives.
+- Sanitized capture established shared parsing, detection, redaction, receipt, and safe-marker primitives.
 - Representative structured and malformed inputs prove parse-before-scan behavior.
 - Every covered sink rejects raw, tainted, unmarked, and stale-policy payloads;
   LCM raw sensitive values follow the conditional guarantee above.

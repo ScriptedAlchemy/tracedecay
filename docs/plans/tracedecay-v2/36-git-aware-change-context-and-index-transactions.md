@@ -3,10 +3,10 @@
 ## Status / role
 
 Completion and activity status is owned solely by
-[the plan-set index](00-plan-set-index.md). This component plan defines
-retained PR11 native-Git/application requirements, PR12 CLI/MCP parity
-requirements, and the PR15 safe native-integration journey without inferring
-milestone status from branch artifacts.
+[the plan-set index](00-plan-set-index.md). This component plan defines the
+retained native Git index-transaction and application requirements, the
+CLI/MCP parity requirements, and the safe native-integration journey without
+inferring delivery status from branch artifacts.
 
 Native Git remains authoritative for objects, refs, working trees, indexes,
 attributes, ignore rules, hooks, signatures, and commit creation. TraceDecay
@@ -23,8 +23,9 @@ artifacts to recreate.
 
 **Portability gap (found 2026-07-27; closed).** Path canonicalization was
 inconsistent across the preview boundary: the daemon canonicalized
-`repository_root` before building the assembler while callers — the pr11/pr12
-acceptance fixture among them — captured snapshots from uncanonicalized paths.
+`repository_root` before building the assembler while callers — the
+index-transaction acceptance fixture among them — captured snapshots from
+uncanonicalized paths.
 On Linux with a real `/tmp` the two forms were identical, so the defect stayed
 latent; on hosts whose repository path traverses a symlink (macOS
 `/tmp` → `/private/tmp`), daemon recapture and caller snapshot diverged and
@@ -36,9 +37,9 @@ sides derive the same filesystem identity. Comparison remains exact: mismatched
 forms are not loosened to compare equal, and genuine content drift still fails
 CAS. Focused Unix symlink-alias fixtures cover capture parity and owner reuse.
 
-## Retained PR11 and PR12 delivery requirements
+## Retained index-transaction and surface-parity requirements
 
-- PR7 delivery records generation-bound repository/worktree/ref/HEAD/index
+- Provenance capture records generation-bound repository/worktree/ref/HEAD/index
   provenance,
   native Git/object-format/adapter/options evidence, attributes/filters,
   sparse/submodule state, path and dirty-state classification, and distinct
@@ -46,14 +47,14 @@ CAS. Focused Unix symlink-alias fixtures cover capture parity and owner reuse.
   detached, unborn, conflicted, or partial state remains explicit. Paths and
   timestamps are observations, never identity or causality; no Git object is
   copied into TraceDecay storage.
-- PR9 delivery exposes typed read-only status; staged/unstaged structured
+- Read-only Git intelligence exposes typed read-only status; staged/unstaged structured
   diff; bounded history/object metadata; blame/line provenance; hunk-to-symbol/caller/
   diagnostics/test/ownership intelligence; branch-relative origin/destination
   impact with independent coverage; and read-only plans for excluded Git
   operations. The fixed adapter accepts typed inputs rather than raw flags and
   preserves native path, encoding, traversal, rename/follow, mailmap,
   attributes, and unavailable-state behavior.
-- PR9 delivery also retains immutable `PullRequestSnapshot`,
+- Read-only Git intelligence also retains immutable `PullRequestSnapshot`,
   `ReviewThreadAnchor`, and `CommentAnchor` evidence with provider IDs,
   base/head/merge-base, exact hunk,
   blob/content and original/current coordinates, lifecycle, URL, cursor/ETag,
@@ -62,27 +63,38 @@ CAS. Focused Unix symlink-alias fixtures cover capture parity and owner reuse.
   evidence to current without exact content-and-anchor identity. These
   operations never perform GitHub ingress themselves or post, update, reply
   to, resolve, dismiss, or otherwise mutate GitHub.
-- PR11 delivery exposes only `stage_hunks`, `unstage_hunks`, and
-  `commit_index`.
+- The index-transaction surface exposes only `stage_hunks`, `unstage_hunks`,
+  and `commit_index`.
   Immutable `HunkRef` and repository snapshots bind the exact repository,
   worktree, base/index/worktree content, selected lines, attributes, and
   preview. The daemon serializes each operation, compare-and-swap revalidates
-  all state, and emits a durable terminal receipt. `commit_index` cannot amend,
-  create a merge commit, bypass hooks/signing, stage extra files, or push.
-  It retains structured author/committer identity policy, validated message,
-  optional signing policy, and exact expected parent/ref behavior; hook,
-  signing, index, or ref drift fails without reporting success.
+  all state, and emits a durable terminal receipt.
   Binary, submodule, intent-to-add, conflict-stage, symlink, mode-only,
   rename/copy, filter, sparse-path, and other special hunk kinds retain
   explicit capability states; a kind without a proven native round trip stays
   read-only rather than yielding an applicable `HunkRef`.
-- PR12 must expose the same application operations, exact project scope,
+- **`commit_index` publication is deliberately unavailable (deferred,
+  2026-08-05).** Native ref publication has an unresolved soundness issue: the
+  files ref backend locks only names already present in an update-ref
+  transaction and has no primitive that prevents a new loose ref from
+  appearing between namespace validation and destination publication, so a
+  commit could publish against a ref state the preflight never validated.
+  Until that is soundly closed, `commit_index` preflight reports typed
+  `AtomicRefNamespaceUnavailable` and apply returns `ProvenNoMutation`; no
+  commit is created and no success is reported. The commit requirement itself
+  is deferred, not deleted: when publication becomes sound, `commit_index`
+  must not amend, create a merge commit, bypass hooks/signing, stage extra
+  files, or push, and must retain structured author/committer identity policy,
+  validated message, optional signing policy, and exact expected parent/ref
+  behavior; hook, signing, index, or ref drift fails without reporting
+  success.
+- CLI and MCP must expose the same application operations, exact project scope,
   schemas, errors, rendering, and receipts through CLI and MCP. Transports
   contain no Git logic or fallback mutation path. This requirement is complete
   only when the direct preview/apply parity journey passes; a catalog
   declaration or schema alone is insufficient.
 
-## PR15 user outcome
+## Native integration user outcome
 
 After a multi-root query or LSP investigation, a user can select one exact
 authorized independent-branch pair or one visible declared edge from a frozen
@@ -160,7 +172,7 @@ committed, unchanged, rolled back, or requiring inspection.
    boundary. Only fast-forward, one conflict-free two-parent merge, or the
    preview-bound ordered single-parent cherry-pick chain can be encoded.
    The source worktree is never modified. Configured applicable commit/merge
-   hooks keep V1 preview-only rather than being invoked or bypassed; required
+   hooks remain preview-only rather than being invoked or bypassed; required
    signing cannot be disabled. Merge messages are fixed from encoded
    source/destination identity, commit IDs, strategy, and preview; cherry-pick
    may preserve only the exact preview-bound source commit message. Caller,
@@ -189,7 +201,7 @@ provable terminal outcome.
 
 - `preflight_native_integration` is read-only with respect to real refs,
   indexes, and worktrees. `apply_native_integration` is the sole additional
-  PR15 mutation and cannot accept arbitrary Git arguments or caller-supplied
+  native-integration mutation and cannot accept arbitrary Git arguments or caller-supplied
   paths, SHAs, patches, commit lists, messages, environment, or config.
 - Dry-run uses the identical preview and revalidation path, emits no apply
   receipt, and never mutates. A stale preview never refreshes or partially
@@ -231,7 +243,7 @@ provable terminal outcome.
   response handles and Plan 05 cursors are not canonical evidence identity or
   mutation inputs.
 
-## PR15 implementation defaults
+## Native integration implementation defaults
 
 - Retain existing `gix` for Git object/ref intelligence, `notify` for bounded
   filesystem observation, and Tokio for cancellation-aware async
@@ -293,7 +305,7 @@ provable terminal outcome.
   authorized immutable revision directly in `stack_snapshot`, preflight,
   apply, status, cancellation, receipt, and recovery. Branch names, paths,
   provider order, or graph proximity never infer an edge.
-- Remove schema-, port-, table-, catalog-, and adapter-only PR15 phases. Add
+- Remove schema-, port-, table-, catalog-, and adapter-only delivery phases. Add
   only the storage and adapters required inside the callable
   preflight/apply/recovery slices.
 - Remove cached conflict guesses, path-keyed worktree mutation logs, untyped
@@ -308,7 +320,7 @@ provable terminal outcome.
 
 ## Direct acceptance
 
-One PR15 end-to-end test begins with a Plan 16 multi-root query/LSP result,
+One native-integration end-to-end test begins with a Plan 16 multi-root query/LSP result,
 loads the authorized worktree inventory and branch-stack projection, freezes
 both an independent same-repository pair and an exact visible declared stack
 edge through `stack_snapshot`, and preflights each without changing real
@@ -343,15 +355,15 @@ The direct journey also confirms the shipped status/diff/history/blame/hunk,
 branch-relative impact, PR/review anchor/remap, stage/unstage/commit, and
 CLI/MCP compatibility capabilities still reach their existing production
 kernels. It differentially verifies candidate and final trees against pinned
-native Git and runs the relevant ordinary all-feature repository checks. PR15
-adds no benchmark harness, placeholder performance baseline, or separate
-acceptance gate.
+native Git and runs the relevant ordinary all-feature repository checks. The
+native-integration journey adds no benchmark harness, placeholder performance
+baseline, or separate acceptance gate.
 
-## Not in PR15
+## Not in native integration
 
 - Generic Git execution or support for any mutation not listed in the shipped
-  PR11 operations and exact `apply_native_integration`.
+  index-transaction operations and exact `apply_native_integration`.
 - Automated semantic conflict resolution, autonomous integration loops,
   provider/GitHub writes, remote publication, or history rewriting.
 - Remote multi-machine authority and failover, owned by
-  [Plan 28](28-remote-multi-machine-shared-brain.md) in PR16.
+  [Plan 28](28-remote-multi-machine-shared-brain.md).

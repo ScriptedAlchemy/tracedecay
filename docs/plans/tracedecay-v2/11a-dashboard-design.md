@@ -1,6 +1,6 @@
 # Dashboard design: shell, layout, and visual system
 
-Design authority for the PR14 fresh-start dashboard. Owned by the design
+Design authority for the fresh-start dashboard. Owned by the design
 owner; foundation and workspace lanes implement against this document and do
 not make structural, styling, or dependency decisions. Binding contracts
 (journeys, typed envelopes, state taxonomy, accessibility and performance
@@ -71,7 +71,7 @@ One responsive shell, four fixed regions plus content:
 
 - **Left navigation rail.** The twelve workspaces (Brain, Explorer, Loom,
   Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory,
-  Costs, Settings; Work joins in PR17), icon+label, collapsible to icons at
+  Costs, Settings; Work joins with the Work delivery), icon+label, collapsible to icons at
   narrow widths, bottom-anchored Settings. The rail is navigation only — no
   status, no badges except a single Doctor attention dot driven by typed
   findings.
@@ -111,7 +111,7 @@ Every workspace composes from four archetypes; no bespoke layouts:
    renders per-source progress rows here. The synchronized list/table is an
    accessible evidence surface, not the bland dominant composition or a
    massive real-estate consumer.
-3. **Canvas + table** (Loom, Code graph, Brain map, PR17 topology): the
+3. **Canvas + table** (Loom, Code graph, Brain map, Work topology): the
    renderer-neutral canvas above, the synchronized accessible table below
    (toggleable to table-only), shared selection, playback controls docked
    to the canvas, cluster/aggregation counts always visible.
@@ -343,7 +343,7 @@ Per-domain assignments:
 | Task DAGs / decomposition (Plan 24) | layered DAG + critical path | d3-dag (MIT) headless in a Worker; tight-tree-style ranking, IndexedDB layout cache keyed by graph version, edge virtualization |
 | Commit/branch history (Delivery) | commit rails | hand-rolled canvas, pvigier active-branches algorithm, interval-tree hits |
 | PR review / merge queue / checks | review lanes + check matrix | track-engine lanes + accessible matrix (Graphite/GitHub-merge-box interaction model) |
-| Execution topology (PR17) | lanes, rails, heat cells | track engine (Perfetto track hierarchy for worktree/stack grouping) |
+| Execution topology (Work delivery) | lanes, rails, heat cells | track engine (Perfetto track hierarchy for worktree/stack grouping) |
 | Agent/session traces (Loom, Agents) | span waterfall; spawn = nested collapsible track, handoff = span-link arc | track engine (Honeycomb depth-collapse, Datadog hover-re-root) |
 | Causality across lanes (Loom) | swimlane timeline + cross-lane arcs; Sigma ego-lens for pure topology | track engine + Sigma; W&B-style cluster-collapse ≥N with expansion cursor |
 | LCM lineage | SVG icicle (d3-flame-graph, Apache-2.0); speedscope-style eval-free canvas as scale escalation; Sandwich-style raw↔summary drill-down | d3-flame-graph / bespoke |

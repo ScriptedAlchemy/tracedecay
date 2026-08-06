@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-PR5 production **session-observation** persistence is complete. External-source
+Production **session-observation** persistence is complete. External-source
 persistence is split (status corrected again 2026-07-26): host observations
 reach the daemon-owned `RuntimeExternalSourceStore`, dispatch a
 `RepositoryWritePayloadV1::ExternalSource`, and execute `apply_source_commit`
@@ -11,7 +11,7 @@ through `ExternalSourceExecutor` before persisting `external_source_states_v1`.
 earlier claim that this reducer had no production caller, adapter, or migration
 was wrong for the host-observation specialization. The broader acquisition and
 canonical-refetch surface remains without production composition and is still
-a retained future seam, not PR8–PR14 work to duplicate.
+a retained future seam, not later-slice work to duplicate.
 
 `tracedecay-store` owns persistence contracts and DTOs; the daemon-owned
 `GlobalDb` adapter owns live connections and transactions. This boundary
@@ -31,12 +31,12 @@ cannot diverge after crashes or retries.
 ## Owns
 
 - Store-facing records, batches, errors, and persistence traits.
-- The transcript contract landed in PR4, including explicit physical transcript
+- The transcript contract landed with the store foundation, including explicit physical transcript
   identity and separate opaque cursor identity.
 - Shipped atomic append contract for sanitized observations, receipts, and offsets.
 - Atomic projection-effect and checkpoint contracts added with each consuming
   view slice.
-- PR9 canonical clean-generation diagnostic records and snapshots, including
+- Canonical clean-generation diagnostic records and snapshots, including
   clearing and supersession evidence.
 - Contract-level idempotency, compare-and-set, read-only, and recovery outcomes.
 
@@ -55,18 +55,18 @@ cannot diverge after crashes or retries.
 
 ## Required behavior
 
-- PR4 routes CLI, MCP, dashboard, hooks, analytics, LCM, and ingestion through
+- The store foundation routes CLI, MCP, dashboard, hooks, analytics, LCM, and ingestion through
   the daemon authority; daemon unavailability fails closed.
-- PR4 commits a transcript batch and its offset atomically. A failed write leaves
+- The store foundation commits a transcript batch and its offset atomically. A failed write leaves
   both unchanged and the same writer remains usable after rollback.
-- PR4 full-batch cursor compare-and-set is strict; compatible offset-only advance
+- Full-batch cursor compare-and-set is strict; compatible offset-only advance
   is idempotent and cannot create transcript rows.
-- PR4 read-only audit paths do not create a missing database or become writers.
-- PR5 commits the sanitized observation, sanitization receipt, and source offset
+- Read-only audit paths do not create a missing database or become writers.
+- Sanitized capture commits the sanitized observation, sanitization receipt, and source offset
   in one authoritative transaction; acknowledgement follows commit.
-- PR5 duplicate identity plus matching digest is a no-op. A conflicting digest
+- Duplicate identity plus matching digest is a no-op. A conflicting digest
   fails without advancing progress or overwriting evidence.
-- PR9 persists only canonical, sanitized diagnostics bound to a clean code
+- Code intelligence persists only canonical, sanitized diagnostics bound to a clean code
   generation, with clearing and supersession evidence, through daemon-owned
   store adapters. Unsaved overlays and client document versions remain
   ephemeral daemon session state and never become durable authority; see

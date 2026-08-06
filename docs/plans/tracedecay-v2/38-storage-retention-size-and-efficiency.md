@@ -166,7 +166,7 @@ measurements, not inferred table sizes.
 
 ## Delivery
 
-- The Doctor storage finding family is implemented through the PR14 Doctor
+- The Doctor storage finding family is implemented through the dashboard-delivery Doctor
   slice (Plan 09) over Plan 26 observability read models; route verification
   remains pending as recorded above.
 - Branch lifecycle and registry orphan collection are implemented through
