@@ -1035,6 +1035,7 @@ mod tests {
     use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
     async fn database() -> (TempDir, Database) {
+        crate::register_test_schema_installer();
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("graph.db");
         let authority = DatabaseAuthority::acquire_test(&path, "Scout address registry").unwrap();
