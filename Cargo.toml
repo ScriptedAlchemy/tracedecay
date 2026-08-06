@@ -59,7 +59,7 @@ edition = "2024"
 grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
 grafeo-common = { version = "=0.5.42", default-features = false }
 grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
-grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "vector-index"] }
+grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
 
 [package]
 name = "tracedecay"

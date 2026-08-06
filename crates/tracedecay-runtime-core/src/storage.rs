@@ -9,7 +9,6 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_domain::framed_log::DirectorySyncPolicy;
-use tracedecay_store::DURABLE_GRAPH_STORE_DIRECTORY;
 
 use crate::config::{self, TRACEDECAY_DIR};
 use crate::errors::{Result, TraceDecayError};
@@ -24,58 +23,6 @@ pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 /// metadata as non-authoritative debris.
 pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
-
-/// Ensures the daemon-owned durable Grafeo root beneath one canonical store.
-///
-/// This is deliberately part of store initialization, not graph resolution:
-/// the resolver only validates canonical authorities and never creates live
-/// artifacts. The private leaf and its parent-directory synchronization make
-/// the creation durable before a graph-store lease can select a child.
-pub fn ensure_durable_graph_store_root(store_root: &Path) -> Result<PathBuf> {
-    let graph_store_root = store_root.join(DURABLE_GRAPH_STORE_DIRECTORY);
-    PrivateStoreIo::create_private_directory(&graph_store_root).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!(
-                "failed to create durable graph-store root '{}': {error}",
-                graph_store_root.display()
-            ),
-        }
-    })?;
-    sync_parent_directory(&graph_store_root).map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "failed to synchronize durable graph-store parent for '{}': {error}",
-            graph_store_root.display()
-        ),
-    })?;
-    let canonical_store_root =
-        store_root
-            .canonicalize()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "failed to resolve canonical store root '{}': {error}",
-                    store_root.display()
-                ),
-            })?;
-    let canonical_graph_store_root =
-        graph_store_root
-            .canonicalize()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "failed to resolve canonical durable graph-store root '{}': {error}",
-                    graph_store_root.display()
-                ),
-            })?;
-    if canonical_graph_store_root.parent() != Some(canonical_store_root.as_path()) {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "durable graph-store root '{}' is outside canonical store root '{}'",
-                canonical_graph_store_root.display(),
-                canonical_store_root.display()
-            ),
-        });
-    }
-    Ok(canonical_graph_store_root)
-}
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 static DURABLE_ATOMIC_WRITE_FAULT: AtomicU8 = AtomicU8::new(0);
@@ -1762,28 +1709,6 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::sync::{Arc, Barrier};
-
-    #[test]
-    fn durable_graph_store_root_is_private_canonical_and_idempotent() {
-        let temporary = tempfile::tempdir().unwrap();
-        let store_root = temporary.path().canonicalize().unwrap().join("store");
-        fs::create_dir(&store_root).unwrap();
-
-        let first = ensure_durable_graph_store_root(&store_root).unwrap();
-        let second = ensure_durable_graph_store_root(&store_root).unwrap();
-
-        assert_eq!(first, second);
-        assert_eq!(first, store_root.join(DURABLE_GRAPH_STORE_DIRECTORY));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            assert_eq!(
-                fs::metadata(first).unwrap().permissions().mode() & 0o777,
-                0o700
-            );
-        }
-    }
 
     #[test]
     fn repository_marker_keeps_the_existing_store_when_fallback_identity_differs() {

@@ -149,22 +149,6 @@ fn process_runtime_generation(process_run_id: &str) -> Option<u64> {
     Some((raw & i64::MAX as u64).max(1))
 }
 
-/// Creates the root before any graph resolver can lease a child beside this
-/// runtime's canonical relational store. Resolver code only validates this
-/// authority and never creates it itself.
-pub(super) fn initialize_durable_graph_store_root(runtime: &StoreRuntimeHandle) -> Result<()> {
-    let store_root = runtime.canonical_path().parent().ok_or_else(|| {
-        session_registry_error(
-            "initialize durable graph-store root",
-            format!(
-                "canonical store path has no parent: {}",
-                runtime.canonical_path().display()
-            ),
-        )
-    })?;
-    crate::storage::ensure_durable_graph_store_root(store_root).map(|_| ())
-}
-
 async fn open_runtime(
     registry: &StoreRuntimeRegistry,
     resolver: &LocalStoreRuntimeResolverV1,

@@ -16,9 +16,9 @@ use super::{
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
     LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, ProfileAuthorityPinResult,
     RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, StoreRuntimeOpenRequest,
-    StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver,
-    initialize_durable_graph_store_root, open_runtime, register_registered_schema_installer,
-    registry_open_error, runtime_incarnation, session_registry_error,
+    StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver, open_runtime,
+    register_registered_schema_installer, registry_open_error, runtime_incarnation,
+    session_registry_error,
 };
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -57,7 +57,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount profile authority store",
         )
         .await?;
-        initialize_durable_graph_store_root(&profile_runtime)?;
         let profile_pin = match registry.profile_authority_pin(&profile_shard) {
             ProfileAuthorityPinResult::Pinned(pin) => pin,
             outcome => {
@@ -120,7 +119,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount profile session store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database = self
             .attach_registered(runtime, "mount profile session store")
             .await?;
@@ -151,7 +149,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount profile memory store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
@@ -208,7 +205,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount project session store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database = self
             .attach_registered(runtime, "mount project session store")
             .await?;
@@ -362,7 +358,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount project memory store",
         )
         .await?;
-        initialize_durable_graph_store_root(&runtime)?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
