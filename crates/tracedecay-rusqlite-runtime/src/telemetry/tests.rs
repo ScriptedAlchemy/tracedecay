@@ -1,5 +1,5 @@
 use super::*;
-use tracedecay_store::RuntimeSubmitOutcomeV1;
+use tracedecay_store::{RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeSubmitOutcomeV1};
 
 fn batch(priority: OperationPriorityV1) -> WriterBatchMetrics {
     WriterBatchMetrics {
@@ -26,6 +26,21 @@ fn one_recorder_owns_admission_and_completion_snapshot() {
     assert_eq!(snapshot.operations.admitted_operations, 1);
     assert_eq!(snapshot.operations.completed_operations, 1);
     assert_eq!(snapshot.queue, WriterQueueSnapshot::default());
+}
+
+#[test]
+fn interruption_outcomes_remain_distinct_in_writer_telemetry() {
+    let recorder = WriterTelemetry::default();
+    recorder.completed(&Ok(RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit {
+        deadline: RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new("deadline.telemetry").unwrap(),
+        },
+    }));
+
+    let snapshot = recorder.snapshot();
+    assert_eq!(snapshot.operations.completed_operations, 1);
+    assert_eq!(snapshot.operations.deadline_exceeded_operations, 1);
+    assert_eq!(snapshot.operations.cancelled_operations, 0);
 }
 
 #[test]

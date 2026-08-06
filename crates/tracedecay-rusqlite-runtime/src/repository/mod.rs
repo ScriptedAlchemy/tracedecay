@@ -50,6 +50,7 @@ use crate::StorageOperationExecutor;
 pub use attachment::{
     RepositoryAttachmentStartError, RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
     RepositoryRuntimePhysicalAttachment, RepositoryRuntimePhysicalSnapshot,
+    RepositoryWriterRuntimeSnapshot,
 };
 pub use configuration::ConfigurationExecutor;
 pub use diagnostics::DiagnosticExecutor;

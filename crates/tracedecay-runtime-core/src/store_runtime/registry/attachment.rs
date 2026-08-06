@@ -8,11 +8,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_store::{
-    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
-    RuntimeSubmitRequestV1,
+    CommitSequenceV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
+    RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
 };
 
 use super::StoreRuntimeRegistryFailure;
+
+/// Cumulative, path-free facts sampled from one retained writer authority.
+///
+/// The horizon begins when this writer starts and ends when the registry closes
+/// it. These counters are not process-lifetime totals; presence in the parent
+/// snapshot is the coverage signal for this writer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhysicalWriterRuntimeSnapshot {
+    pub offered_operations: u64,
+    pub admitted_operations: u64,
+    pub completed_operations: u64,
+    pub shed_operations: u64,
+    pub retried_operations: u64,
+    pub cancelled_operations: u64,
+    pub deadline_exceeded_operations: u64,
+    pub conflicted_operations: u64,
+    pub committed_batches: u64,
+    pub queue_wait_micros: u64,
+    pub transaction_micros: u64,
+    pub error_events: u64,
+    pub health_lane_services: u64,
+    pub commit_sequence: CommitSequenceV1,
+}
 
 /// Bounded, path-free facts sampled from the physical writer/read runtime.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -25,8 +48,9 @@ pub struct PhysicalRuntimeSnapshot {
     pub queued_operations: u32,
     pub queued_bytes: u64,
     pub writer_busy_events: u64,
-    pub wal_bytes: u64,
-    pub memory_estimate_bytes: u64,
+    pub writer: Option<PhysicalWriterRuntimeSnapshot>,
+    pub wal_bytes: Option<u64>,
+    pub memory_estimate_bytes: Option<u64>,
 }
 
 impl PhysicalRuntimeSnapshot {

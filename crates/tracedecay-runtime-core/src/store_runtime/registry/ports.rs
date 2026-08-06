@@ -14,8 +14,9 @@ use tracedecay_store::{
 };
 
 use super::{
-    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime,
-    StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
+    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot,
+    PublishedShardRuntime, StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode,
+    StoreRuntimeRegistryFailure,
 };
 use crate::store_runtime::shard::{ShardRuntime, ShardRuntimeError};
 
@@ -379,8 +380,24 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
             queued_operations: snapshot.queued_operations,
             queued_bytes: snapshot.queued_bytes,
             writer_busy_events: snapshot.writer_busy_events,
+            writer: snapshot.writer.map(|writer| PhysicalWriterRuntimeSnapshot {
+                offered_operations: writer.operations.offered_operations,
+                admitted_operations: writer.operations.admitted_operations,
+                completed_operations: writer.operations.completed_operations,
+                shed_operations: writer.operations.shed_operations,
+                retried_operations: writer.operations.retried_operations,
+                cancelled_operations: writer.operations.cancelled_operations,
+                deadline_exceeded_operations: writer.operations.deadline_exceeded_operations,
+                conflicted_operations: writer.operations.conflicted_operations,
+                committed_batches: writer.batches.committed_batches,
+                queue_wait_micros: writer.batches.queue_wait_micros,
+                transaction_micros: writer.batches.transaction_micros,
+                error_events: writer.error_events,
+                health_lane_services: writer.health_lane_services,
+                commit_sequence: writer.commit_sequence,
+            }),
             wal_bytes: snapshot.wal_bytes,
-            memory_estimate_bytes: 0,
+            memory_estimate_bytes: None,
         }
     }
 

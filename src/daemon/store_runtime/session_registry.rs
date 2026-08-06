@@ -54,7 +54,7 @@ impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) fn runtime_telemetry(
         &self,
     ) -> crate::daemon::store_runtime::telemetry::RuntimeTelemetryProjection {
-        let inventory = self.registry.inventory(AdmissionConfigV1::default(), 0);
+        let inventory = self.registry.inventory(AdmissionConfigV1::default(), None);
         crate::daemon::store_runtime::telemetry::project_runtime_telemetry(&inventory)
     }
 }
