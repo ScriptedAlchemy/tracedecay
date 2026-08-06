@@ -16,6 +16,7 @@ use crate::{
 };
 
 pub const MAX_WORK_ATTEMPT_ARTIFACTS: usize = 256;
+pub const MAX_WORK_INSTRUCTIONS_BYTES: usize = 65_536;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkRuntimeContractError {
@@ -313,6 +314,10 @@ pub struct WorkExecutionEnvelopeV1 {
     worktree_root: String,
     reference: Option<RefId>,
     commit: CommitId,
+    /// Exact provider instructions admitted with this attempt. The adapter
+    /// delivers these bytes verbatim on the provider's typed input channel;
+    /// they are never interpolated into argv or an ambient prompt source.
+    instructions: String,
     cancellation_generation: u64,
     effect_state: WorkEffectStateV1,
 }
@@ -330,12 +335,16 @@ impl WorkExecutionEnvelopeV1 {
         worktree_root: String,
         reference: Option<RefId>,
         commit: CommitId,
+        instructions: String,
         cancellation_generation: u64,
         effect_state: WorkEffectStateV1,
     ) -> Result<Self, WorkRuntimeContractError> {
         if worktree_root.len() > 4_096
             || !Path::new(&worktree_root).is_absolute()
             || worktree_root.contains('\0')
+            || instructions.is_empty()
+            || instructions.len() > MAX_WORK_INSTRUCTIONS_BYTES
+            || instructions.contains('\0')
             || cancellation_generation == 0
         {
             return Err(WorkRuntimeContractError::InvalidExecutionEnvelope);
@@ -351,6 +360,7 @@ impl WorkExecutionEnvelopeV1 {
             worktree_root,
             reference,
             commit,
+            instructions,
             cancellation_generation,
             effect_state,
         })
@@ -410,6 +420,10 @@ impl WorkExecutionEnvelopeV1 {
 
     pub fn commit(&self) -> &CommitId {
         &self.commit
+    }
+
+    pub fn instructions(&self) -> &str {
+        &self.instructions
     }
 
     pub const fn deadline(&self) -> UtcMicros {
@@ -492,6 +506,7 @@ impl<'de> Deserialize<'de> for WorkExecutionEnvelopeV1 {
             worktree_root: String,
             reference: Option<RefId>,
             commit: CommitId,
+            instructions: String,
             cancellation_generation: u64,
             effect_state: WorkEffectStateV1,
         }
@@ -508,6 +523,7 @@ impl<'de> Deserialize<'de> for WorkExecutionEnvelopeV1 {
             wire.worktree_root,
             wire.reference,
             wire.commit,
+            wire.instructions,
             wire.cancellation_generation,
             wire.effect_state,
         )
@@ -1232,14 +1248,14 @@ fn canonicalize_artifacts(
 fn valid_transition(from: WorkAttemptStateV1, to: WorkAttemptStateV1) -> bool {
     use WorkAttemptStateV1::{
         CancellationAcknowledged, CancellationEscalated, CancellationRequested, Cancelled, Failed,
-        Leased, RecoveryRequired, Running, Succeeded,
+        Leased, RecoveryRequired, Running, Succeeded, TimedOut,
     };
     matches!(
         (from, to),
         (Leased, Running | RecoveryRequired)
             | (
                 Running,
-                Running | CancellationRequested | RecoveryRequired | Succeeded | Failed
+                Running | CancellationRequested | RecoveryRequired | Succeeded | Failed | TimedOut
             )
             | (
                 CancellationRequested,

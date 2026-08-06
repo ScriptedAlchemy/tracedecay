@@ -111,6 +111,7 @@ fn execution(
         "/tmp/work-runtime".to_owned(),
         Some(id::<RefId>("refs/heads/work-runtime")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+        "Execute the admitted provider step.".to_owned(),
         1,
         WorkEffectStateV1::Observational,
     )
