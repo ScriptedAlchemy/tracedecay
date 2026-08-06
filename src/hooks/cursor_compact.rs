@@ -1,16 +1,17 @@
 //! Cursor `preCompact` machinery.
 //!
 //! Cursor's compaction event exposes pressure metadata but not Cursor's own
-//! generated summary text. The hook delegates compaction to the daemon, which
-//! ingests the current transcript tail, asks LCM for the compactable raw-message
-//! backlog, generates a summary through `cursor-agent -p`, and stores that
-//! summary as a normal LCM summary node.
+//! generated summary text. The hook delegates pressure admission to the daemon,
+//! which reports native summary content as unavailable without ingesting the
+//! transcript. It never substitutes `cursor-agent` output.
 
 use std::time::Duration;
 
-/// A hook only waits for daemon acknowledgement; the daemon owns the eventual
-/// transcript capture and model-backed compaction work.
-const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_millis(25);
+/// A hook only waits for the daemon's typed pressure acknowledgement; the
+/// daemon owns any eventual transcript capture and compaction work. The budget
+/// covers one handshake plus one hook-runtime round trip, matching the
+/// hot-ingest acknowledgement scale used by the sibling Cursor hooks.
+const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_millis(1_500);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CursorPreCompactOutcome {

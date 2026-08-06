@@ -99,8 +99,9 @@ change any recommendation) is recorded in §5.
 - **129/129 facts never recalled** and **5 orphan entities** exist; the
   never-recalled/below-threshold counts are now reachable via Q3's status output,
   though there is still no standing stale-memory card or orphan badge (M7).
-- **No memory doctor** — LCM has a full diagnose/repair/clean doctor; holographic
-  memory has none (only `curate` dedup). This remains open (M5).
+- **No memory doctor** — LCM has daemon-owned read-only diagnosis; holographic
+  memory has none (only `curate` dedup). Recovery remains an independently
+  admitted owner operation rather than a Doctor mode. This remains open (M5).
 - **Q3 and Q6 are DONE** — both were the highest value-to-effort read surfaces,
   reusing already-computed data with zero new logic.
 

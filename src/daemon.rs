@@ -221,6 +221,7 @@ use invocation_executor::{
 mod external_acquisition;
 mod invocation_state;
 use invocation_state::DaemonInvocationState;
+pub(crate) mod lcm_authority;
 mod lsp_sessions;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
@@ -349,9 +350,9 @@ pub(crate) use service::invocation::{
     DaemonInvocationService, DaemonLspOwnerRegistrar, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
-    HookOrchestrationAdmissionV1, HookOrchestrationRequestV1,
-    HookOrchestrationTriggerV1, admit_registered_hook_orchestration,
-    advisory_cycle_invocation_result, daemon_operation_event_authority,
+    HookOrchestrationAdmissionV1, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
+    admit_registered_hook_orchestration, advisory_cycle_invocation_result,
+    daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,

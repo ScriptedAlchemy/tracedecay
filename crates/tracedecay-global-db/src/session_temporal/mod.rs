@@ -56,7 +56,6 @@ use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content_wi
 
 pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
-    session_temporal_doctor_health_at,
 };
 pub use projection::record_canonical_observation_effect;
 pub use refresh::{SessionRefreshRecoveryV1, SessionRefreshRestartStateV1};

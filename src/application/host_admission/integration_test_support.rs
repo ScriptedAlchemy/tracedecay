@@ -27,16 +27,10 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
-        profile_root: &Path,
+        _profile_root: &Path,
     ) -> Result<crate::mcp::tools::ToolResult> {
-        crate::mcp::tools::handle_user_lcm_tool_with_retained_authority(
-            tool_name,
-            arguments,
-            profile_root,
-            &self.profile_registered,
-            None,
-        )
-        .await
+        crate::mcp::tools::handle_user_lcm_tool_with_authorities(tool_name, arguments, None, None)
+            .await
     }
 
     #[doc(hidden)]

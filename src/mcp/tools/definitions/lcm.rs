@@ -1,23 +1,15 @@
 //! LCM session-store and session health-baseline tool definitions.
 
-use serde_json::{Value, json};
+use serde_json::json;
 
-use super::{def, def_rw, git_scope};
+use super::{def, git_scope};
 use crate::mcp::tools::ToolDefinition;
-
-fn lcm_pattern_array_schema(description: &str) -> Value {
-    json!({
-        "type": "array",
-        "items": { "type": "string" },
-        "description": description
-    })
-}
 
 pub(super) fn def_lcm_status() -> ToolDefinition {
     def(
         "tracedecay_lcm_status",
         "LCM Status",
-        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, stored summary-depth distribution with compression ratio, payload byte totals, and payload GC status from the active project session store. Codex compaction summaries store compaction generation in the depth field.",
+        "Return LCM schema, raw-message, summary, payload, and maintenance counts plus store token estimates, stored summary-depth distribution with compression ratio, payload byte totals, and payload GC status from the active project session store. Summaries are present only after authenticated host publication.",
         json!({
             "type": "object",
             "properties": {
@@ -42,20 +34,11 @@ pub(super) fn def_lcm_doctor() -> ToolDefinition {
     def(
         "tracedecay_lcm_doctor",
         "LCM Doctor",
-        "Run bounded, read-only LCM diagnostics for one provider without payload body exposure. The report includes integrity findings and retention or cleanup candidates; daemon-owned maintenance acts on those findings outside this tool.",
+        "Read a bounded, redacted temporal-store health report through the daemon-owned LCM authority without payload body exposure. This surface never repairs, cleans, or garbage-collects; daemon-owned maintenance acts on findings outside this tool.",
         json!({
             "type": "object",
-            "properties": {
-                "provider": {
-                    "type": "string",
-                    "description": "Specific provider id to inspect. Required; 'all' is not accepted."
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Optional provider-local session id filter."
-                }
-            },
-            "required": ["provider"]
+            "properties": {},
+            "additionalProperties": false
         }),
     )
 }
@@ -457,242 +440,6 @@ pub(super) fn def_lcm_expand_query() -> ToolDefinition {
                 }
             },
             "required": ["provider", "session_id", "prompt"]
-        }),
-    )
-}
-
-pub(super) fn def_lcm_preflight() -> ToolDefinition {
-    def_rw(
-        "tracedecay_lcm_preflight",
-        "LCM Preflight",
-        "Run compression preflight checks against the active project LCM store.",
-        json!({
-            "type": "object",
-            "properties": {
-                "provider": {
-                    "type": "string",
-                    "description": "Specific provider id. Required for compression lifecycle operations."
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Provider-local session id."
-                },
-                "messages": {
-                    "type": "array",
-                    "description": "Current active context messages to inspect before compression.",
-                    "items": {"type": "object"}
-                },
-                "transcript_projection": {
-                    "type": "boolean",
-                    "description": "Host-integration flag: also upsert these stable-id messages into this project's searchable transcript projection. Intended for Hermes live turn ingestion when its state.db session lacks cwd provenance."
-                },
-                "current_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional current context token estimate."
-                },
-                "threshold_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional token threshold that allows preflight to request compression when current_tokens meets or exceeds it and eligible backlog exists."
-                },
-                "max_assembly_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens meets or exceeds it."
-                },
-                "leaf_chunk_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional token budget for the oldest raw-message leaf chunk selected for compression."
-                },
-                "max_source_messages": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Optional source-window cap for raw messages included in one compression unit."
-                },
-                "summary_fan_in": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
-                },
-                "incremental_max_depth": {
-                    "type": "integer",
-                    "description": "Optional maximum condensation depth. Values < 0 allow all depths; default is 1."
-                },
-                "fresh_tail_count": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional count of newest unsummarized messages preserved outside leaf compression."
-                },
-                "dynamic_leaf_chunk_enabled": {
-                    "type": "boolean",
-                    "description": "When true, leaf chunk budget may grow up to dynamic_leaf_chunk_max under backlog pressure."
-                },
-                "dynamic_leaf_chunk_max": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional upper bound for dynamic leaf chunk token budget."
-                },
-                "context_length": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional model context window used with reserve_tokens_floor to derive the assembly cap when max_assembly_tokens is unset."
-                },
-                "reserve_tokens_floor": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional token headroom reserved inside context_length; derives an assembly cap of context_length - reserve_tokens_floor."
-                },
-                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
-                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage.")
-            },
-            "required": ["provider", "session_id"]
-        }),
-    )
-}
-
-pub(super) fn def_lcm_compress() -> ToolDefinition {
-    def_rw(
-        "tracedecay_lcm_compress",
-        "LCM Compress",
-        "Operator/host-lifecycle tool: called by an agent host's own pre-compact or compaction hook, not by a model in response to a user request. Advances the LCM compression lifecycle in the active project store without invoking an auxiliary LLM.",
-        json!({
-            "type": "object",
-            "properties": {
-                "provider": {
-                    "type": "string",
-                    "description": "Specific provider id. Required for compression lifecycle operations."
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Provider-local session id."
-                },
-                "messages": {
-                    "type": "array",
-                    "description": "Current active context messages to ingest before compression.",
-                    "items": {"type": "object"}
-                },
-                "current_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional current context token estimate."
-                },
-                "focus_topic": {
-                    "type": "string",
-                    "description": "Optional focus for the summary request prompt."
-                },
-                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
-                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage."),
-                "expected_current_frontier_store_id": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional optimistic guard. Compression no-ops if the durable frontier has changed."
-                },
-                "threshold_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional token threshold mirrored from Hermes config for parity with preflight calls."
-                },
-                "max_assembly_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional active-context cap that triggers forced overflow recovery when current_tokens meets or exceeds it."
-                },
-                "leaf_chunk_tokens": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional token budget for the oldest raw-message leaf chunk selected for compression."
-                },
-                "max_source_messages": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Optional source-window cap for raw messages included in one compression unit."
-                },
-                "summary_fan_in": {
-                    "type": "integer",
-                    "minimum": 2,
-                    "description": "Optional fan-in threshold for condensing lower-depth summary nodes into a higher-depth node."
-                },
-                "incremental_max_depth": {
-                    "type": "integer",
-                    "description": "Optional maximum condensation depth. Values < 0 allow all depths; default is 1."
-                },
-                "fresh_tail_count": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional count of newest unsummarized messages preserved outside leaf compression."
-                },
-                "dynamic_leaf_chunk_enabled": {
-                    "type": "boolean",
-                    "description": "When true, leaf chunk budget may grow up to dynamic_leaf_chunk_max under backlog pressure."
-                },
-                "dynamic_leaf_chunk_max": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional upper bound for dynamic leaf chunk token budget."
-                },
-                "context_length": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional model context window used with reserve_tokens_floor to derive the assembly cap when max_assembly_tokens is unset."
-                },
-                "reserve_tokens_floor": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Optional token headroom reserved inside context_length; derives an assembly cap of context_length - reserve_tokens_floor."
-                },
-                "summarizer": {
-                    "type": "object",
-                    "description": "Runtime summarizer mode: provided or hermes_auxiliary.",
-                    "properties": {
-                        "mode": {
-                            "type": "string",
-                            "enum": ["provided", "hermes_auxiliary"]
-                        },
-                        "summary_text": {"type": "string"},
-                        "route": {"type": "string"}
-                    },
-                    "required": ["mode"]
-                }
-            },
-            "required": ["provider", "session_id"]
-        }),
-    )
-}
-
-pub(super) fn def_lcm_session_boundary() -> ToolDefinition {
-    def_rw(
-        "tracedecay_lcm_session_boundary",
-        "LCM Session Boundary",
-        "Operator/host-lifecycle tool: called by an agent host's own session-boundary hook to report a compression-boundary session start, not by a model in response to a user request. When the old session does not match the bound session the boundary skipped carry-over and a short compression cooldown starts for the new session.",
-        json!({
-            "type": "object",
-            "properties": {
-                "provider": {
-                    "type": "string",
-                    "description": "Specific provider id. Required for compression lifecycle operations."
-                },
-                "session_id": {
-                    "type": "string",
-                    "description": "Provider-local session id the host bound after the boundary."
-                },
-                "old_session_id": {
-                    "type": "string",
-                    "description": "Session id the host reports as having crossed the compression boundary."
-                },
-                "boundary_reason": {
-                    "type": "string",
-                    "description": "Host boundary reason; only 'compression' boundaries are evaluated."
-                },
-                "bound_session_id": {
-                    "type": "string",
-                    "description": "Session id that was bound before this boundary; a mismatch with old_session_id records the cooldown."
-                }
-            },
-            "required": ["provider", "session_id"]
         }),
     )
 }

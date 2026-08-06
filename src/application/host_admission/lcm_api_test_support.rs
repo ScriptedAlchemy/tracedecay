@@ -32,19 +32,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn lcm_doctor_for_test(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-    ) -> std::result::Result<serde_json::Value, crate::sessions::lcm::LcmError> {
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_doctor(provider, session_id)
-            .await
-    }
-
-    #[doc(hidden)]
     pub async fn lcm_expand_for_test(
         &self,
         request: crate::sessions::lcm::LcmExpandRequest,

@@ -60,6 +60,7 @@ impl ConfigurationResetConfirmation {
 }
 
 const FINAL_CONFIGURATION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
+    ("index", "configuration_semantic_retrieval_transition_v1"),
     ("index", "idx_configuration_audit_occurred_at"),
     ("index", "idx_configuration_component_activation_latest"),
     ("index", "idx_configuration_entry_key"),
@@ -79,6 +80,10 @@ const FINAL_CONFIGURATION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("table", "configuration_format"),
     ("table", "configuration_mutation_receipts"),
     ("table", "configuration_revisions"),
+    ("table", "configuration_semantic_accepted_profile_receipt_key_v1"),
+    ("table", "configuration_semantic_accepted_profiles_v1"),
+    ("table", "configuration_semantic_retrieval_pending_v1"),
+    ("table", "configuration_semantic_retrieval_state_v1"),
     ("table", "configuration_source_bindings"),
     ("table", "configuration_topology_policies"),
     ("table", "configuration_topology_protected_refs"),
@@ -143,6 +148,14 @@ const FINAL_CONFIGURATION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ),
     ("trigger", "configuration_revisions_immutable_delete"),
     ("trigger", "configuration_revisions_immutable_update"),
+    (
+        "trigger",
+        "configuration_semantic_accepted_profile_receipt_key_no_delete_v1",
+    ),
+    (
+        "trigger",
+        "configuration_semantic_accepted_profile_receipt_key_no_update_v1",
+    ),
     ("trigger", "configuration_source_bindings_immutable_delete"),
     ("trigger", "configuration_source_bindings_immutable_update"),
     ("trigger", "configuration_topology_policy_immutable_delete"),
@@ -510,6 +523,55 @@ BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutab
 CREATE TRIGGER IF NOT EXISTS configuration_component_activation_events_immutable_delete
 BEFORE DELETE ON configuration_component_activation_events
 BEGIN SELECT RAISE(ABORT, 'configuration component activation events are immutable'); END;
+
+-- Semantic retrieval runtime state. The semantic runtime reads and writes
+-- these rows through this database, so their shape is published here: the
+-- exact-final-schema validation covers the whole configuration_% namespace
+-- and runtime code must never issue its own DDL.
+CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
+    scope_digest TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    configuration_revision TEXT NOT NULL,
+    transition_digest TEXT,
+    activation_receipt_digest TEXT,
+    state_json TEXT NOT NULL,
+    activation_receipt_json TEXT,
+    PRIMARY KEY (scope_digest, epoch)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS configuration_semantic_retrieval_transition_v1
+    ON configuration_semantic_retrieval_state_v1(scope_digest, transition_digest)
+    WHERE transition_digest IS NOT NULL;
+CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_pending_v1 (
+    scope_digest TEXT NOT NULL,
+    transition_digest TEXT NOT NULL,
+    base_epoch INTEGER NOT NULL CHECK (base_epoch >= 0),
+    base_configuration_revision TEXT NOT NULL,
+    transition_json TEXT NOT NULL,
+    resulting_state_json TEXT NOT NULL,
+    staged_at INTEGER NOT NULL,
+    PRIMARY KEY (scope_digest, transition_digest)
+);
+CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
+    profile_digest TEXT PRIMARY KEY NOT NULL,
+    authority_json TEXT NOT NULL
+);
+-- Retained receipts do not carry a fallback signer. Replacing this singleton
+-- would invalidate every accepted profile, so its database lifetime is
+-- enforced rather than allowing an unjournaled key rotation.
+CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_v1 (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    key_material BLOB NOT NULL CHECK (length(key_material) = 32)
+);
+CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_update_v1
+BEFORE UPDATE ON configuration_semantic_accepted_profile_receipt_key_v1
+BEGIN
+    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS configuration_semantic_accepted_profile_receipt_key_no_delete_v1
+BEFORE DELETE ON configuration_semantic_accepted_profile_receipt_key_v1
+BEGIN
+    SELECT RAISE(ABORT, 'accepted profile receipt key is immutable');
+END;
 ";
 
 async fn configuration_schema_objects(
@@ -725,7 +787,9 @@ mod tests {
                  INSERT INTO configuration_component_activation_events (
                     component, desired_revision_id, observed_revision_id,
                     last_working_revision_id, restart_required, activation_error_code, occurred_at
-                 ) VALUES ('gateway', 'revision.1', 'revision.1', 'revision.1', 0, NULL, 1);",
+                 ) VALUES ('gateway', 'revision.1', 'revision.1', 'revision.1', 0, NULL, 1);
+                 INSERT INTO configuration_semantic_accepted_profile_receipt_key_v1 VALUES
+                    (1, zeroblob(32));",
             )
             .await
             .unwrap();
@@ -745,7 +809,20 @@ mod tests {
         }
         drop(rows);
         assert!(!tables.is_empty());
+        // Semantic runtime state advances by compare-and-swap under the
+        // configuration authority: epochs append, pending transitions are
+        // consumed, and accepted profiles allow only an idempotent no-op
+        // upsert. Those tables are runtime state, not immutable revision
+        // evidence, so the append-only sweep does not apply to them.
+        let mutable_semantic_runtime_state = [
+            "configuration_semantic_accepted_profiles_v1",
+            "configuration_semantic_retrieval_pending_v1",
+            "configuration_semantic_retrieval_state_v1",
+        ];
         for table in tables {
+            if mutable_semantic_runtime_state.contains(&table.as_str()) {
+                continue;
+            }
             assert!(
                 connection
                     .execute(&format!("UPDATE {table} SET rowid = rowid"), ())

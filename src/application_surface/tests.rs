@@ -155,22 +155,43 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
+    let administrative_profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+    )
+    .expect("administrative profile");
 
     for name in tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
         let operation = ApplicationSurfaceOperation::from_tool_name(name)
             .unwrap_or_else(|| panic!("{name} must be a canonical surface operation"));
         assert_eq!(operation.as_str(), name);
-        for surface in [
-            tracedecay_tool_catalog::BindingSurface::Cli,
-            tracedecay_tool_catalog::BindingSurface::Mcp,
-            tracedecay_tool_catalog::BindingSurface::Http,
-        ] {
+        // The destructive reset journey binds only to the CLI surface and is
+        // eligible only under the administrative profile; its catalog
+        // contribution never publishes MCP or HTTP bindings.
+        let (resolution_profile, surfaces): (
+            &tracedecay_tool_catalog::ProfileId,
+            &[tracedecay_tool_catalog::BindingSurface],
+        ) = if operation == ApplicationSurfaceOperation::ConfigurationReset {
+            (
+                &administrative_profile_id,
+                &[tracedecay_tool_catalog::BindingSurface::Cli],
+            )
+        } else {
+            (
+                &profile_id,
+                &[
+                    tracedecay_tool_catalog::BindingSurface::Cli,
+                    tracedecay_tool_catalog::BindingSurface::Mcp,
+                    tracedecay_tool_catalog::BindingSurface::Http,
+                ],
+            )
+        };
+        for &surface in surfaces {
             assert!(
                 crate::daemon_client::BindingResolver::resolve_binding(
                     &resolver,
                     surface,
                     &crate::daemon_client::BindingResolution {
-                        profile_id: profile_id.clone(),
+                        profile_id: resolution_profile.clone(),
                         operation: tracedecay_tool_catalog::SurfaceOperationName::new(name)
                             .expect("operation"),
                         protocol_revision: APPLICATION_PROTOCOL_REVISION,
@@ -241,11 +262,25 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
+    let administrative_profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+    )
+    .expect("administrative profile");
 
     for operation in APPLICATION_SURFACE_OPERATIONS {
         let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
             .expect("operation name");
-        let expected_surfaces = if matches!(
+        // The destructive reset journey is eligible only under the
+        // administrative profile.
+        let resolution_profile = if operation == ApplicationSurfaceOperation::ConfigurationReset {
+            &administrative_profile_id
+        } else {
+            &profile_id
+        };
+        let expected_surfaces = if operation == ApplicationSurfaceOperation::ConfigurationReset {
+            // The destructive reset journey is CLI-only by catalog design.
+            &[(tracedecay_tool_catalog::BindingSurface::Cli, "cli")][..]
+        } else if matches!(
             operation,
             ApplicationSurfaceOperation::GitPreview | ApplicationSurfaceOperation::GitApply
         ) {
@@ -265,7 +300,7 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
                 &resolver,
                 surface,
                 &crate::daemon_client::BindingResolution {
-                    profile_id: profile_id.clone(),
+                    profile_id: resolution_profile.clone(),
                     operation: operation_name.clone(),
                     protocol_revision: APPLICATION_PROTOCOL_REVISION,
                     negotiated_features: application_negotiated_features(),
@@ -613,15 +648,12 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
             "fact_store",
             "insert_at",
             "insert_at_symbol",
-            "lcm_compress",
             "lcm_describe",
             "lcm_doctor",
             "lcm_expand",
             "lcm_expand_query",
             "lcm_grep",
             "lcm_load_session",
-            "lcm_preflight",
-            "lcm_session_boundary",
             "lcm_status",
             "memory_status",
             "message_search",

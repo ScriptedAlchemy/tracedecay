@@ -88,7 +88,7 @@ hashes recorded under `[hooks.state]` in `config.toml`):
 | `UserPromptSubmit` | session id, cwd, **prompt text** | `hookSpecificOutput.additionalContext` | **Yes — per prompt** |
 | `SubagentStart` | session id, agent type | `hookSpecificOutput.additionalContext` | **Yes** |
 | `PostToolUse` | tool name, command | (used for ingest/steering) | Yes |
-| `PostCompact` | rollout path | side effects (summary replacement) | Indirect |
+| `PostCompact` | rollout path / pressure boundary | typed native-payload availability probe | No |
 
 **Key asymmetry vs Cursor:** Codex's `UserPromptSubmit` hook receives the
 prompt text *and* can inject `additionalContext` — a true per-prompt memory
@@ -193,6 +193,9 @@ What the hooks currently do (all fail-open):
   not read transcripts, memory, or hint state.
 - `preCompact` submits only the bounded daemon compaction event. The daemon,
   not the hook process, owns any transcript, LCM, review, or indexing work.
+  The pressure probe is read-only: Cursor exposes no authenticated native
+  summary payload, so compaction publication stays typed
+  `host_payload_unavailable` and no summary node is produced.
 
 ### 3.2 `tracedecay install --agent codex` (`crates/tracedecay-agent-hosts/src/agents/codex.rs`)
 
@@ -216,8 +219,9 @@ marketplace entry (`install_codex_marketplace_entry`) and
   `additionalContext` instead (`build_codex_session_context`,
   `codex_user_prompt_submit_context_for_event` — index status + skills + tool
   hints. **No facts.**).
-- `PostCompact` replaces encrypted compaction placeholders with LCM-backed
-  summaries via a `codex app-server` child.
+- `PostCompact` forwards the native pressure boundary to the daemon. Because
+  the hook exposes no authenticated compacted payload, publication is typed
+  unavailable and no auxiliary summary is substituted.
 
 Codex transcripts (rollouts under `~/.codex/sessions/`) are ingested into the
 LCM store as well (session-recall skills cover "Cursor/Codex/agent

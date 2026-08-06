@@ -21,6 +21,14 @@ fn projectless_runtime_rejects_project_database_actions() {
         "ingest_transcript",
         &json!({ "user_scope": true }),
     ));
+    assert!(!projectless_action_allowed(
+        "claude_compact",
+        &json!({ "user_scope": false }),
+    ));
+    assert!(projectless_action_allowed(
+        "claude_compact",
+        &json!({ "user_scope": true }),
+    ));
 }
 
 #[test]

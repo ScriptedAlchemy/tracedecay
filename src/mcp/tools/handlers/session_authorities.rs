@@ -20,6 +20,8 @@ pub struct SessionAuthorities<'a> {
         Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
     pub(super) profile_retrieval:
         Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    pub(crate) project_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
+    pub(crate) profile_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
 }
 
 impl<'a> SessionAuthorities<'a> {
@@ -37,6 +39,8 @@ impl<'a> SessionAuthorities<'a> {
             profile_refresh: None,
             project_retrieval: None,
             profile_retrieval: None,
+            project_lcm: None,
+            profile_lcm: None,
         }
     }
 
@@ -77,6 +81,16 @@ impl<'a> SessionAuthorities<'a> {
     ) -> Self {
         self.project_retrieval = project;
         self.profile_retrieval = profile;
+        self
+    }
+
+    pub(crate) const fn with_lcm_authorities(
+        mut self,
+        project: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
+        profile: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
+    ) -> Self {
+        self.project_lcm = project;
+        self.profile_lcm = profile;
         self
     }
 

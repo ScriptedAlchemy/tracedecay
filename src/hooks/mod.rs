@@ -34,8 +34,9 @@ pub(crate) use dispatch::protected_session_id_for_native as protected_native_ses
 pub(crate) use dispatch::publish_daemon_bindings as publish_hook_bindings;
 
 pub use claude::{
-    evaluate_hook_decision, hook_claude_post_tool_use, hook_claude_session_start,
-    hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit, hook_stop,
+    evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
+    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
+    hook_stop,
 };
 pub use codex::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,

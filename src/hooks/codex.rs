@@ -279,7 +279,8 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
 
 /// Codex `PostCompact` hook handler.
 ///
-/// Replaces temporary compaction summaries from visible LCM source messages.
+/// Codex exposes a pressure boundary but no authenticated compacted payload.
+/// The daemon therefore returns typed unavailable without publishing state.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = event_project_root_with_identity_from_json(&event).await;
@@ -693,26 +694,23 @@ async fn codex_post_compact(
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
 ) {
-    let root = event_project_root_with_identity_from_json(event_json).await;
-    let action = if root.is_some() {
-        "codex_compact"
-    } else {
-        "ingest_transcript"
+    let Some(root) = event_project_root_with_identity_from_json(event_json).await else {
+        return;
     };
     let session_id = serde_json::from_str::<Value>(event_json)
         .ok()
         .as_ref()
         .and_then(event_session_id);
     let mut args = serde_json::json!({
-        "action": action,
+        "action": "codex_compact",
         "provider": "codex",
-        "user_scope": root.is_none(),
+        "user_scope": false,
         "event_json": event_json,
     });
     if let Some(session_id) = session_id {
         args["session_id"] = serde_json::json!(session_id);
     }
-    if let Err(error) = super::daemon_hook_action(root.as_deref(), args, telemetry).await {
+    if let Err(error) = super::daemon_hook_action(Some(&root), args, telemetry).await {
         eprintln!("[tracedecay] Codex PostCompact daemon call failed: {error}");
     }
 }

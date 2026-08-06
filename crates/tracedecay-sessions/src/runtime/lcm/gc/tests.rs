@@ -1,7 +1,5 @@
 use std::fs;
 
-use serde_json::json;
-
 use crate::runtime::lcm::schema;
 use crate::runtime::lcm::util::{self, file_mtime_seconds};
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
@@ -554,24 +552,11 @@ async fn corrupt_tombstone_does_not_block_healthy_pending_delete() -> Result<(),
         .ok_or_else(|| "missing pending-delete diagnostic".to_string())?;
     assert!(error.starts_with(PENDING_PAYLOAD_DELETE_ERROR_PREFIX));
     assert!(error.len() <= 1_024);
-    let doctor = crate::runtime::lcm::doctor::doctor(
-        &store.conn,
-        crate::runtime::lcm::doctor::DoctorRequest {
-            storage_root: &store.storage_root,
-            provider: PROVIDER,
-            session_id: None,
-        },
-    )
-    .await
-    .map_err(|err| err.to_string())?;
-    assert_eq!(
-        doctor.pointer("/diagnostics/payloads/last_gc_status"),
-        Some(&json!("partial"))
-    );
-    assert_eq!(
-        doctor.pointer("/diagnostics/payloads/last_gc_error"),
-        Some(&json!(error))
-    );
+    let status = schema::get_gc_meta(&store.conn, "last_gc_status")
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "missing GC status diagnostic".to_string())?;
+    assert_eq!(status, "partial");
 
     let retry = drain_pending_payload_deletes(&store.conn, &store.storage_root)
         .await

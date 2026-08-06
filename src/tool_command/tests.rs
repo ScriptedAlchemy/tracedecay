@@ -268,13 +268,10 @@ fn explicit_project_lcm_dispatch_allows_first_touch_init() {
 fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
     let dispatch = DaemonToolDispatch::for_tool(
         None,
-        "tracedecay_lcm_preflight",
+        "tracedecay_lcm_status",
         &json!({
             "provider": "hermes",
-            "session_id": "stock-check-session",
             "storage_scope": "user",
-            "transcript_projection": true,
-            "messages": [],
         }),
     );
 
@@ -394,17 +391,17 @@ fn args_payload_required_null_errors() {
 
 #[test]
 fn args_payload_optional_null_is_absent() {
-    let d = def("lcm_compress");
+    let d = def("lcm_expand_query");
     let parsed = parse_invocation(
         &d,
         &[
             "--args".to_string(),
-            r#"{"provider":"hermes","session_id":"s1","messages":[{"role":"user","content":"hello"}],"focus_topic":null}"#
+            r#"{"provider":"hermes","session_id":"s1","prompt":"what changed?","query":null}"#
                 .to_string(),
         ],
     )
     .unwrap();
-    assert!(parsed.tool_args["focus_topic"].is_null());
+    assert!(parsed.tool_args["query"].is_null());
 }
 
 #[test]
@@ -447,9 +444,6 @@ fn lcm_cli_help_exposes_scope_without_hermes_profile_routing() {
         "lcm_describe",
         "lcm_expand",
         "lcm_expand_query",
-        "lcm_preflight",
-        "lcm_compress",
-        "lcm_session_boundary",
         "lcm_doctor",
         "hermes_skill_bridge",
     ] {

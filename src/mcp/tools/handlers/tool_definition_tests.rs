@@ -112,9 +112,25 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_lcm_describe"));
     assert!(tool_names.contains(&"tracedecay_lcm_expand"));
     assert!(tool_names.contains(&"tracedecay_lcm_expand_query"));
-    assert!(tool_names.contains(&"tracedecay_lcm_preflight"));
-    assert!(tool_names.contains(&"tracedecay_lcm_compress"));
-    assert!(tool_names.contains(&"tracedecay_lcm_session_boundary"));
+    assert!(!tool_names.contains(&"tracedecay_lcm_preflight"));
+    assert!(!tool_names.contains(&"tracedecay_lcm_compress"));
+    assert!(!tool_names.contains(&"tracedecay_lcm_session_boundary"));
+    let doctor = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_doctor")
+        .expect("read-only LCM Doctor is advertised");
+    assert_eq!(doctor.annotations.as_ref().unwrap()["readOnlyHint"], true);
+    assert_eq!(doctor.input_schema["additionalProperties"], false);
+    // Doctor takes no provider argument: the daemon query is store-wide. The
+    // only knobs are the output format and which session store to inspect.
+    assert_eq!(
+        doctor.input_schema["properties"]
+            .as_object()
+            .expect("doctor properties object")
+            .keys()
+            .collect::<Vec<_>>(),
+        ["format", "storage_scope"]
+    );
     assert!(tool_names.contains(&"tracedecay_read"));
     assert!(tool_names.contains(&"tracedecay_outline"));
     assert!(tool_names.contains(&"tracedecay_implementations"));
@@ -185,6 +201,12 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 fn every_advertised_application_surface_uses_canonical_output_formats() {
     let tools = get_tool_definitions();
     for operation in APPLICATION_SURFACE_OPERATIONS {
+        // The destructive configuration reset journey is CLI-only by catalog
+        // design and never advertises an MCP tool.
+        if operation == crate::application_surface::ApplicationSurfaceOperation::ConfigurationReset
+        {
+            continue;
+        }
         let tool_name = format!("tracedecay_{}", operation.as_str());
         let tool = tools
             .iter()
@@ -252,10 +274,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_context_scout_claim",
         "tracedecay_context_scout_delivery",
         "tracedecay_context_scout_feedback",
-        "tracedecay_lcm_doctor",
-        "tracedecay_lcm_preflight",
-        "tracedecay_lcm_compress",
-        "tracedecay_lcm_session_boundary",
     ];
     for tool in &tools {
         let ann = tool

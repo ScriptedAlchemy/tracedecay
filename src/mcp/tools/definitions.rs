@@ -593,9 +593,6 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_lcm_describe(),
         def_lcm_expand(),
         def_lcm_expand_query(),
-        def_lcm_preflight(),
-        def_lcm_compress(),
-        def_lcm_session_boundary(),
         def_read(),
         def_outline(),
         def_implementations(),
@@ -849,9 +846,6 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_lcm_describe",
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",
-    "tracedecay_lcm_session_boundary",
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_compress",
     "tracedecay_session_refresh",
     // skills
     "tracedecay_skill_list",
@@ -1061,6 +1055,19 @@ mod tests {
         assert_eq!(dispatch["availability"]["state"], "available");
         assert!(dispatch.get("receipt").is_none());
         assert!(dispatch.get("reconciliation").is_none());
+
+        for retired in [
+            "tracedecay_lcm_preflight",
+            "tracedecay_lcm_compress",
+            "tracedecay_lcm_session_boundary",
+        ] {
+            assert!(
+                definitions
+                    .iter()
+                    .all(|definition| definition.name != retired),
+                "{retired} must remain daemon-internal"
+            );
+        }
     }
 
     #[test]

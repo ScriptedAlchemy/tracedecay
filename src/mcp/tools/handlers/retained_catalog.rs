@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
@@ -18,7 +17,7 @@ use crate::tracedecay::TraceDecay;
 use super::ToolCallRegistryOptions;
 use super::ToolResult;
 use super::dispatch_groups::execute_project_retained_application_tool;
-use super::handle_user_lcm_tool_with_db;
+use super::handle_user_lcm_tool_with_authorities;
 use super::session;
 
 #[derive(Debug)]
@@ -31,7 +30,6 @@ pub(super) struct CatalogBoundRetainedMcpRequest {
 pub(super) enum RetainedMcpExecutionContext<'call, 'authority> {
     Profile {
         tool_name: &'call str,
-        profile_root: &'call Path,
         options: &'call ToolCallRegistryOptions<'authority>,
     },
     Project {
@@ -79,18 +77,8 @@ impl<'call> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
         let context = self.context;
         Box::pin(async move {
             match context {
-                RetainedMcpExecutionContext::Profile {
-                    tool_name,
-                    profile_root,
-                    options,
-                } => {
-                    execute_profile_retained_application_tool(
-                        request,
-                        tool_name,
-                        profile_root,
-                        options,
-                    )
-                    .await
+                RetainedMcpExecutionContext::Profile { tool_name, options } => {
+                    execute_profile_retained_application_tool(request, tool_name, options).await
                 }
                 RetainedMcpExecutionContext::Project {
                     cg,
@@ -172,13 +160,11 @@ pub(super) async fn dispatch_profile_retained_application_tool(
     operation: RetainedSurfaceOperation,
     tool_name: &str,
     args: Value,
-    profile_root: &Path,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     invoke_retained_mcp_request(
         RetainedMcpExecutionContext::Profile {
             tool_name,
-            profile_root,
             options: &options,
         },
         operation,
@@ -190,7 +176,6 @@ pub(super) async fn dispatch_profile_retained_application_tool(
 pub(super) async fn execute_profile_retained_application_tool(
     request: CatalogBoundRetainedMcpRequest,
     tool_name: &str,
-    profile_root: &Path,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match request.operation {
@@ -201,16 +186,11 @@ pub(super) async fn execute_profile_retained_application_tool(
         | RetainedSurfaceOperation::LcmGrep
         | RetainedSurfaceOperation::LcmDescribe
         | RetainedSurfaceOperation::LcmExpand
-        | RetainedSurfaceOperation::LcmExpandQuery
-        | RetainedSurfaceOperation::LcmPreflight
-        | RetainedSurfaceOperation::LcmCompress
-        | RetainedSurfaceOperation::LcmSessionBoundary => {
-            handle_user_lcm_tool_with_db(
+        | RetainedSurfaceOperation::LcmExpandQuery => {
+            handle_user_lcm_tool_with_authorities(
                 tool_name,
                 request.arguments,
-                profile_root,
-                options.session_authorities.user,
-                options.global_db.map(std::sync::Arc::as_ref),
+                options.session_authorities.profile_lcm,
                 options.session_authorities.profile_retrieval,
             )
             .await

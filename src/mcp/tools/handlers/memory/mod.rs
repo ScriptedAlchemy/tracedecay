@@ -148,6 +148,32 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
+/// Typed "operation exceeded deadline" problem for a bounded memory operation.
+///
+/// Reuses the retryable [`TraceDecayError::ProjectRoute`] problem shape (a
+/// stable `reason_code`, a `retryable` flag, and a human `detail`) so the MCP
+/// boundary surfaces a structured, retryable error rather than a transport
+/// hang. The deadline is a backstop, so retry is safe (writes are receipt
+/// idempotent).
+///
+/// The bound itself is applied once, centrally, at the retained memory dispatch
+/// (`dispatch_groups::dispatch_memory_operation`) off the admission-carried
+/// client deadline — mirroring the git dispatcher — so every memory operation
+/// (add/search/feedback/status) is covered uniformly rather than per handler.
+pub(super) fn memory_deadline_error(
+    operation: &str,
+    deadline: std::time::Duration,
+) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "memory_operation_deadline_exceeded",
+        true,
+        format!(
+            "memory {operation} operation exceeded the {}s deadline",
+            deadline.as_secs()
+        ),
+    )
+}
+
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::database_operation("memory application", error)
 }
@@ -206,6 +232,23 @@ mod tests {
         CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1,
         CompatibilityFactSearchKindV1, CompatibilityFactSearchQuery, FactStoreError,
     };
+
+    /// The deadline problem produced by the central memory dispatch bound
+    /// (see `dispatch_groups::dispatch_memory_operation`) must stay a stable,
+    /// retryable project-route problem naming the operation and its budget.
+    #[test]
+    fn memory_deadline_error_is_a_typed_retryable_problem() {
+        let err = memory_deadline_error("fact_store add", std::time::Duration::from_secs(30));
+        let (reason_code, retryable, detail) = err
+            .project_route_context()
+            .expect("an elapsed memory deadline must surface a typed project-route problem");
+        assert_eq!(reason_code, "memory_operation_deadline_exceeded");
+        assert!(retryable, "a deadline backstop is safe to retry");
+        assert!(
+            detail.contains("fact_store add") && detail.contains("deadline"),
+            "detail must name the operation and the deadline: {detail}"
+        );
+    }
 
     fn cursor_fact(content: &str) -> AddFactRequest {
         AddFactRequest {

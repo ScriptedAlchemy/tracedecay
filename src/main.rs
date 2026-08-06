@@ -573,6 +573,7 @@ impl CommandFamily {
             | Commands::HookStop
             | Commands::HookClaudeSessionStart
             | Commands::HookClaudePostToolUse
+            | Commands::HookClaudePostCompact
             | Commands::HookClaudeSubagentStart
             | Commands::HookKiroPreToolUse
             | Commands::HookKiroPromptSubmit
@@ -1111,6 +1112,7 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
         | Commands::HookStop
         | Commands::HookClaudeSessionStart
         | Commands::HookClaudePostToolUse
+        | Commands::HookClaudePostCompact
         | Commands::HookClaudeSubagentStart
         | Commands::HookKiroPreToolUse
         | Commands::HookKiroPromptSubmit

@@ -103,16 +103,6 @@ pub fn str_field<'a>(row: &'a Value, key: &str) -> &'a str {
     row.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// Unwraps the `Map` inside a `json!({…})` object literal so handlers can
-/// mutate payload keys directly instead of guarding `as_object_mut()` calls
-/// that cannot fail. Non-object input yields an empty map.
-pub fn json_object(value: Value) -> Map<String, Value> {
-    match value {
-        Value::Object(map) => map,
-        _ => Map::new(),
-    }
-}
-
 /// Escapes `%`/`_`/`\` for a `LIKE ? ESCAPE '\'` pattern.
 pub fn like_pattern(query: &str) -> String {
     let escaped = query
@@ -120,33 +110,6 @@ pub fn like_pattern(query: &str) -> String {
         .replace('%', "\\%")
         .replace('_', "\\_");
     format!("%{escaped}%")
-}
-
-/// Builds a safe FTS5 MATCH expression from raw user text (port of
-/// `_build_fts_match` in the hermes-lcm plugin API). Returns `None` when no
-/// usable token remains, in which case callers fall back to LIKE.
-pub fn build_fts_match(raw: &str) -> Option<String> {
-    let mut tokens: Vec<String> = Vec::new();
-    for chunk in raw.split_whitespace() {
-        let cleaned: String = chunk.chars().filter(|c| *c != '"').collect();
-        if !cleaned.chars().any(char::is_alphanumeric) {
-            continue;
-        }
-        tokens.push(cleaned);
-    }
-    let last = tokens.len().checked_sub(1)?;
-    let quoted: Vec<String> = tokens
-        .iter()
-        .enumerate()
-        .map(|(i, tok)| {
-            if i == last {
-                format!("\"{tok}\"*")
-            } else {
-                format!("\"{tok}\"")
-            }
-        })
-        .collect();
-    Some(quoted.join(" "))
 }
 
 /// JSON error body matching `FastAPI`'s `HTTPException` shape, which the UIs'
@@ -200,20 +163,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fts_match_quotes_tokens_and_prefixes_last() {
-        assert_eq!(
-            build_fts_match("hello world").as_deref(),
-            Some("\"hello\" \"world\"*")
-        );
-        assert_eq!(
-            build_fts_match("a-b c:d").as_deref(),
-            Some("\"a-b\" \"c:d\"*")
-        );
-        assert_eq!(build_fts_match("-- !!"), None);
-        assert_eq!(build_fts_match(""), None);
-    }
 
     #[test]
     fn like_pattern_escapes_wildcards() {

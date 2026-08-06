@@ -16,8 +16,7 @@ use tracedecay_sessions::runtime::{
         LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
         LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
         LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
-        LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
-        query, raw,
+        LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, gc, payload, query, raw,
     },
 };
 
@@ -452,24 +451,6 @@ impl RegisteredGlobalDb {
         .await?;
         transaction.commit().await?;
         Ok(receipt.summary)
-    }
-
-    pub async fn lcm_doctor(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-    ) -> Result<serde_json::Value, LcmError> {
-        let storage_root = self.lcm_storage_root()?;
-        let snapshot = self.read_snapshot().await?;
-        doctor::doctor(
-            &snapshot,
-            doctor::DoctorRequest {
-                storage_root,
-                provider,
-                session_id,
-            },
-        )
-        .await
     }
 
     pub async fn lcm_session_boundary(

@@ -89,10 +89,7 @@ mod dispatch_tests;
 )]
 mod tool_definition_tests;
 
-pub use lcm_tool_entry::handle_user_lcm_tool;
-pub(crate) use lcm_tool_entry::{
-    handle_user_lcm_tool_with_db, handle_user_lcm_tool_with_retained_authority,
-};
+pub(crate) use lcm_tool_entry::handle_user_lcm_tool_with_authorities;
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
 use std::sync::Arc;
@@ -316,12 +313,6 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     {
                         ensure_mcp_dispatch_available(tool_name)?;
                     }
-                    let profile_root = match options.profile_root {
-                        Some(profile_root) => profile_root.to_path_buf(),
-                        None => support::profile_root_for_global_db(
-                            options.global_db.map(std::sync::Arc::as_ref),
-                        )?,
-                    };
                     if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
                         let dispatch: std::pin::Pin<
                             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
@@ -329,19 +320,16 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                             operation,
                             tool_name,
                             args,
-                            &profile_root,
                             options.clone(),
                         ));
                         return dispatch.await;
                     }
                     let dispatch: std::pin::Pin<
                         Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
-                    > = Box::pin(handle_user_lcm_tool_with_db(
+                    > = Box::pin(handle_user_lcm_tool_with_authorities(
                         tool_name,
                         args,
-                        &profile_root,
-                        options.session_authorities.user,
-                        options.global_db.map(std::sync::Arc::as_ref),
+                        options.session_authorities.profile_lcm,
                         options.session_authorities.profile_retrieval,
                     ));
                     return dispatch.await;
@@ -406,11 +394,9 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 .or(options.session_authorities.project)
         })
         .flatten();
-        let active_lcm_context = session::LcmHandlerContext::active(
-            cg,
-            active_project_session_db,
-            options.session_authorities.project_retrieval,
-        );
+        let active_lcm_context =
+            session::LcmHandlerContext::active(cg, options.session_authorities.project_retrieval)
+                .with_lcm_authority(options.session_authorities.project_lcm);
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
         // `tracedecay_diagnostics` without an executor falls through to the
@@ -447,93 +433,117 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             return Err(unknown_tool_error(tool_name));
         }
         ensure_mcp_dispatch_available(tool_name)?;
-        match dispatch_group {
-            Some(McpToolDispatchGroup::Graph) => {
-                boxed_send(dispatch_graph_tools(
-                    tool_name,
-                    cg,
-                    args,
-                    selected_scope_prefix,
-                    options.code_index_search_executor.as_ref(),
-                    options.code_index_search_authority.as_ref(),
-                    options.application_deadline.clone(),
-                    options.application_cancellation.clone(),
-                ))
-                .await
+        // The universal ceiling. Every dispatch group below runs inside this one
+        // bound, so a group added later inherits it without opting in and no
+        // handler can be reached unbounded. Per-group wraps (git, memory) stay:
+        // they report a nicer domain-shaped result and a shorter bound, and this
+        // is only the backstop beneath them.
+        let dispatch_budget =
+            dispatch_groups::tool_dispatch_budget(tool_name, options.application_deadline.as_ref());
+        let Some(dispatch_budget) = dispatch_budget else {
+            // `deadline_remaining` yields `None` only for an already-elapsed
+            // carried deadline, which must be rejected rather than dispatched.
+            return Err(dispatch_groups::tool_dispatch_deadline_error(
+                tool_name,
+                std::time::Duration::ZERO,
+            ));
+        };
+        let dispatched = async {
+            match dispatch_group {
+                Some(McpToolDispatchGroup::Graph) => {
+                    boxed_send(dispatch_graph_tools(
+                        tool_name,
+                        cg,
+                        args,
+                        selected_scope_prefix,
+                        options.code_index_search_executor.as_ref(),
+                        options.code_index_search_authority.as_ref(),
+                        options.application_deadline.clone(),
+                        options.application_cancellation.clone(),
+                    ))
+                    .await
+                }
+                Some(McpToolDispatchGroup::Info) => {
+                    boxed_send(dispatch_info_tools(
+                        tool_name,
+                        cg,
+                        args,
+                        server_stats,
+                        scope_prefix,
+                        selected_scope_prefix,
+                        active_project_session_db,
+                        options.clone(),
+                    ))
+                    .await
+                }
+                Some(McpToolDispatchGroup::Admin) => {
+                    boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await
+                }
+                Some(McpToolDispatchGroup::Analysis) => {
+                    boxed_send(dispatch_analysis_tools(
+                        tool_name,
+                        cg,
+                        args,
+                        scope_prefix,
+                        active_project_session_db,
+                        options.clone(),
+                    ))
+                    .await
+                }
+                Some(McpToolDispatchGroup::Git) => {
+                    boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await
+                }
+                Some(McpToolDispatchGroup::Edit) => {
+                    boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await
+                }
+                Some(McpToolDispatchGroup::Health) => {
+                    boxed_send(dispatch_health_tools(
+                        tool_name,
+                        cg,
+                        args,
+                        scope_prefix,
+                        active_project_session_db,
+                        options.clone(),
+                    ))
+                    .await
+                }
+                Some(McpToolDispatchGroup::RetainedApplication) => {
+                    boxed_send(dispatch_retained_application_tools(
+                        tool_name,
+                        cg,
+                        args,
+                        scope_prefix,
+                        active_project_session_db,
+                        active_lcm_context,
+                        options.clone(),
+                    ))
+                    .await
+                }
+                Some(McpToolDispatchGroup::Memory) => {
+                    boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await
+                }
+                Some(McpToolDispatchGroup::SessionWorkflow) => {
+                    boxed_send(dispatch_session_workflow_tools(
+                        tool_name,
+                        cg,
+                        args,
+                        options.clone(),
+                    ))
+                    .await
+                }
+                // Application-surface tools already returned above; reaching here means
+                // the name resolves to no reachable dispatch entry.
+                Some(McpToolDispatchGroup::ApplicationSurface) | None => {
+                    Err(unknown_tool_error(tool_name))
+                }
             }
-            Some(McpToolDispatchGroup::Info) => {
-                boxed_send(dispatch_info_tools(
-                    tool_name,
-                    cg,
-                    args,
-                    server_stats,
-                    scope_prefix,
-                    selected_scope_prefix,
-                    active_project_session_db,
-                    options.clone(),
-                ))
-                .await
-            }
-            Some(McpToolDispatchGroup::Admin) => {
-                boxed_send(dispatch_admin_tools(tool_name, cg, args, options.clone())).await
-            }
-            Some(McpToolDispatchGroup::Analysis) => {
-                boxed_send(dispatch_analysis_tools(
-                    tool_name,
-                    cg,
-                    args,
-                    scope_prefix,
-                    active_project_session_db,
-                    options.clone(),
-                ))
-                .await
-            }
-            Some(McpToolDispatchGroup::Git) => {
-                boxed_send(dispatch_git_tools(tool_name, cg, args, options.clone())).await
-            }
-            Some(McpToolDispatchGroup::Edit) => {
-                boxed_send(dispatch_edit_tools(tool_name, cg, args, options.clone())).await
-            }
-            Some(McpToolDispatchGroup::Health) => {
-                boxed_send(dispatch_health_tools(
-                    tool_name,
-                    cg,
-                    args,
-                    scope_prefix,
-                    active_project_session_db,
-                    options.clone(),
-                ))
-                .await
-            }
-            Some(McpToolDispatchGroup::RetainedApplication) => {
-                boxed_send(dispatch_retained_application_tools(
-                    tool_name,
-                    cg,
-                    args,
-                    scope_prefix,
-                    active_project_session_db,
-                    active_lcm_context,
-                    options.clone(),
-                ))
-                .await
-            }
-            Some(McpToolDispatchGroup::Memory) => {
-                boxed_send(dispatch_memory_tools(tool_name, cg, args, options.clone())).await
-            }
-            Some(McpToolDispatchGroup::SessionWorkflow) => {
-                boxed_send(dispatch_session_workflow_tools(
-                    tool_name,
-                    cg,
-                    args,
-                    options.clone(),
-                ))
-                .await
-            }
-            // Application-surface tools already returned above; reaching here means
-            // the name resolves to no reachable dispatch entry.
-            Some(McpToolDispatchGroup::ApplicationSurface) | None => {
-                Err(unknown_tool_error(tool_name))
-            }
+        };
+        match tokio::time::timeout(dispatch_budget, dispatched).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(dispatch_groups::tool_dispatch_deadline_error(
+                tool_name,
+                dispatch_budget,
+            )),
         }
     })
 }

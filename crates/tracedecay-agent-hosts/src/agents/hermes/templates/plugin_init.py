@@ -347,30 +347,21 @@ LCM_NATIVE_SCHEMAS = [
     },
     {
         "name": "lcm_doctor",
-        "description": "Run diagnostics on the LCM database/configuration, including payload GC preview/apply via gc mode.",
+        "description": "Read LCM database and configuration health without mutation.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
-# Tools whose registered value depends on the host forwarding the live
-# in-memory ``messages`` list to plugin tool handlers (their schemas carry a
-# ``messages`` parameter used for lossless LCM ingest). Everything else in
-# TOOL_SCHEMAS works without that capability.
-MESSAGE_DEPENDENT_TOOLS = frozenset((
-    "tracedecay_lcm_compress",
-    "tracedecay_lcm_preflight",
-))
+# Public LCM readers never depend on forwarding the host's live message list.
+MESSAGE_DEPENDENT_TOOLS = frozenset()
 
 STANDARD_HERMES_LCM_PROVIDER = "hermes"
 
 LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
-    "tracedecay_lcm_compress",
     "tracedecay_lcm_describe",
     "tracedecay_lcm_doctor",
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",
-    "tracedecay_lcm_preflight",
-    "tracedecay_lcm_session_boundary",
 ))
 
 # Direct duplicates of the memory provider's own tool surface
@@ -390,13 +381,6 @@ MEMORY_PROVIDER_TOOLS = frozenset((
 _REGISTERED_TOOL_NAMES = set()
 _CONTEXT_TOOL_NAMES = set()
 _HOST_FORWARDS_MESSAGES = None
-
-# Auxiliary task key for pre-compaction extraction. Upgraded to the
-# plugin-registered "lcm_extraction" task when the host supports
-# ctx.register_auxiliary_task (users can then pin its model under
-# auxiliary.lcm_extraction); otherwise hermes' generic "extraction"
-# defaults apply.
-_EXTRACTION_TASK = {"key": "extraction"}
 
 def _active_memory_provider(ctx=None):
     """The memory.provider configured for this profile, if any."""
@@ -996,8 +980,6 @@ def _resolved_project_scope(project_root, hermes_home=None):
     state, resolved = _project_scope_resolution(project_root, hermes_home)
     return resolved if state == "registered" else None
 
-def _project_scope_available(project_root, hermes_home=None) -> bool:
-    return _resolved_project_scope(project_root, hermes_home) is not None
 
 def _decoded_tool_arguments(call):
     if not isinstance(call, dict):
@@ -1067,9 +1049,6 @@ def _turn_project_roots(messages, hermes_home=None):
     roots.reverse()
     return roots
 
-def _turn_project_root(messages, hermes_home=None):
-    roots = _turn_project_roots(messages, hermes_home)
-    return roots[-1] if roots else None
 
 _UNSCOPED_DIRECT_TOOLS = frozenset((
     "tracedecay_project_list",
@@ -1218,29 +1197,9 @@ PLUGIN_CONFIG_FIELDS = {
     "context_threshold": ("", "Compression trigger as a fraction of the context window (default: hermes compression.threshold)."),
     "threshold_tokens": ("", "Absolute compression trigger in tokens (overrides context_threshold)."),
     "context_length": ("", "Context window override when the host does not report one."),
-    "fresh_tail_count": ("", "Newest messages always kept verbatim (default 64)."),
-    "leaf_chunk_tokens": ("", "Token size of LCM leaf summary chunks (default 20000)."),
-    "dynamic_leaf_chunk_enabled": ("", "Scale leaf chunk size with the context window."),
-    "dynamic_leaf_chunk_max": ("", "Ceiling for dynamic leaf chunk sizing (default 40000)."),
-    "max_assembly_tokens": ("", "Hard cap for assembled replay tokens (0 = derive from context)."),
-    "reserve_tokens_floor": ("", "Tokens reserved below the context window when deriving the assembly cap."),
-    "summary_fan_in": ("", "Summary nodes condensed per parent (default 4)."),
-    "incremental_max_depth": ("", "Maximum condensation depth (default 1)."),
-    "summary_model": ("", "Primary auxiliary model for LCM summaries."),
-    "summary_fallback_models": ("", "Comma-separated fallback models for LCM summaries."),
-    "summary_timeout_ms": ("", "Auxiliary summary timeout in milliseconds."),
-    "summary_circuit_breaker_failure_threshold": ("", "Failures before a summary route is cooled down (default 2)."),
-    "summary_circuit_breaker_cooldown_seconds": ("", "Cooldown seconds for a tripped summary route (default 300)."),
-    "custom_instructions": ("", "Extra instructions appended to the LCM summary prompt."),
     "expansion_model": ("", "Model used for lcm_expand_query synthesis."),
     "expansion_context_tokens": ("", "Expanded-context budget for lcm_expand_query (default 32000)."),
     "expansion_timeout_ms": ("", "lcm_expand_query synthesis timeout in milliseconds."),
-    "extraction_enabled": ("", "Run pre-compaction decision/insight extraction."),
-    "extraction_model": ("", "Model used for pre-compaction extraction."),
-    "extraction_output_path": ("", "Extraction output path surfaced in the extraction contract."),
-    "ignore_session_patterns": ("", "Comma-separated session-id patterns LCM ignores."),
-    "stateless_session_patterns": ("", "Comma-separated session-id patterns treated as stateless."),
-    "ignore_message_patterns": ("", "Comma-separated message patterns excluded from ingest."),
 }
 
 PLUGIN_CONFIG_DEFAULTS = {
@@ -1334,10 +1293,6 @@ def _configured_project_root(config):
             return str(value)
     return None
 
-def _has_tracedecay_index(path):
-    if not (isinstance(path, str) and path.strip() and os.path.isabs(path)):
-        return False
-    return os.path.isdir(os.path.join(path, ".tracedecay"))
 
 def _runtime_working_directory():
     if _hermes_resolve_agent_cwd is not None:
@@ -1413,17 +1368,6 @@ def _configured_int(config, *names, default=None):
     except (TypeError, ValueError):
         return None
 
-def _configured_bool(config, *names, default=None):
-    value = _configured_value(config, *names, default=default)
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "on")
-    return bool(value)
-
-def _parse_pattern_list(raw):
-    return [part.strip() for part in str(raw).split(",") if part.strip()]
-
 # Env-aware settings mirroring hermes-lcm LCMConfig.from_env: documented LCM_*
 # env vars take precedence over host ctx.config attributes, which take
 # precedence over the hermes-lcm hardcoded defaults.
@@ -1443,62 +1387,6 @@ def _lcm_int_setting(config, env_key, *names, default=None):
         except (TypeError, ValueError):
             pass
     return _configured_int(config, *names, default=default)
-
-def _lcm_reserve_tokens_floor_setting(config, context_length):
-    raw = os.environ.get("LCM_RESERVE_TOKENS_FLOOR")
-    if raw is not None:
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            pass
-    configured = _configured_value(config, "reserve_tokens_floor")
-    if configured is not None:
-        try:
-            return int(configured)
-        except (TypeError, ValueError):
-            return 0
-    try:
-        return 4096 if int(context_length or 0) > 0 else 0
-    except (TypeError, ValueError):
-        return 0
-
-def _lcm_float_setting(config, env_key, *names, default=None):
-    raw = os.environ.get(env_key)
-    if raw is not None:
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            pass
-    value = _configured_value(config, *names)
-    if value is not None:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            pass
-    return default
-
-def _lcm_bool_setting(config, env_key, *names, default=None):
-    raw = os.environ.get(env_key)
-    if raw is not None:
-        normalized = raw.strip().lower()
-        if normalized in ("1", "true", "yes", "on"):
-            return True
-        if normalized in ("0", "false", "no", "off"):
-            return False
-    return _configured_bool(config, *names, default=default)
-
-def _lcm_list_setting(config, env_key, *names, default=None):
-    raw = os.environ.get(env_key)
-    if raw is not None:
-        return _parse_pattern_list(raw)
-    value = _configured_value(config, *names)
-    if value is None:
-        return default
-    if isinstance(value, str):
-        return _parse_pattern_list(value)
-    if isinstance(value, (list, tuple)):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return default
 
 def _config_bool_disabled(value):
     if isinstance(value, bool):
@@ -1574,103 +1462,6 @@ def _hermes_yaml_compression_threshold(default, hermes_home=None):
     except Exception:
         return default
 
-def _hermes_yaml_auxiliary_compression_timeout_ms(default, hermes_home=None):
-    # Port of hermes-lcm config._hermes_auxiliary_compression_timeout_ms:
-    # read auxiliary.compression.timeout (seconds) from config.yaml and expose
-    # it in milliseconds for LCM summary timeout parity.
-    home = (
-        hermes_home
-        or os.path.join(os.path.expanduser("~"), ".hermes")
-    )
-    cfg_path = Path(home) / "config.yaml"
-    try:
-        text = cfg_path.read_text()
-    except Exception:
-        return default
-    try:
-        import yaml
-    except Exception:
-        yaml = None
-    try:
-        if yaml is not None:
-            cfg = yaml.safe_load(text) or {}
-            auxiliary = cfg.get("auxiliary") or {}
-            compression = auxiliary.get("compression") or {}
-            value = compression.get("timeout")
-            if value is None:
-                return default
-            return int(float(value) * 1000)
-
-        in_auxiliary = False
-        in_compression = False
-        auxiliary_indent = None
-        compression_indent = None
-        for raw_line in text.splitlines():
-            line = raw_line.split('#', 1)[0].rstrip()
-            if not line.strip():
-                continue
-            indent = len(line) - len(line.lstrip(" \t"))
-            stripped = line.strip()
-            if indent == 0:
-                in_auxiliary = stripped == "auxiliary:"
-                in_compression = False
-                auxiliary_indent = None
-                compression_indent = None
-                continue
-            if not in_auxiliary:
-                continue
-            if auxiliary_indent is None:
-                auxiliary_indent = indent
-            if indent == auxiliary_indent:
-                if stripped == "compression:":
-                    in_compression = True
-                    compression_indent = None
-                    continue
-                in_compression = False
-                compression_indent = None
-                continue
-            if not in_compression:
-                continue
-            if compression_indent is None:
-                compression_indent = indent
-            if indent != compression_indent or ":" not in stripped:
-                continue
-            key, raw_value = stripped.split(":", 1)
-            if key == "timeout":
-                return int(float(raw_value.strip().strip("'\"")) * 1000)
-        return default
-    except Exception:
-        return default
-
-def _lcm_summary_timeout_ms(config, hermes_home=None):
-    raw = os.environ.get("LCM_SUMMARY_TIMEOUT_MS")
-    if raw is not None:
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            pass
-    configured = _configured_int(config, "summary_timeout_ms")
-    if configured is not None:
-        return configured
-    return _hermes_yaml_auxiliary_compression_timeout_ms(60000, hermes_home=hermes_home)
-
-def _summary_circuit_breaker_settings(config):
-    threshold = _lcm_clamped_int_setting(
-        config,
-        "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
-        "summary_circuit_breaker_failure_threshold",
-        default=2,
-        minimum=1,
-    )
-    cooldown = _lcm_clamped_int_setting(
-        config,
-        "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
-        "summary_circuit_breaker_cooldown_seconds",
-        default=300,
-        minimum=0,
-    )
-    return threshold, cooldown
-
 def _lcm_context_threshold(config, hermes_home=None):
     raw = os.environ.get("LCM_CONTEXT_THRESHOLD")
     if raw is not None:
@@ -1705,88 +1496,7 @@ def _configured_threshold_tokens(config, hermes_home=None, context_length_overri
     except (TypeError, ValueError):
         return None
 
-def _lcm_config_args(config, hermes_home=None, runtime_context_length=None) -> dict:
-    context_length = runtime_context_length
-    if context_length is None:
-        context_length = _configured_int(
-            config,
-            "context_length",
-            "max_context_tokens",
-            "model_context_tokens",
-        )
-    args = {
-        "fresh_tail_count": _lcm_int_setting(config, "LCM_FRESH_TAIL_COUNT", "fresh_tail_count", default=64),
-        "leaf_chunk_tokens": _lcm_int_setting(config, "LCM_LEAF_CHUNK_TOKENS", "leaf_chunk_tokens", default=20000),
-        "dynamic_leaf_chunk_enabled": _lcm_bool_setting(
-            config,
-            "LCM_DYNAMIC_LEAF_CHUNK_ENABLED",
-            "dynamic_leaf_chunk_enabled",
-            default=False,
-        ),
-        "dynamic_leaf_chunk_max": _lcm_int_setting(
-            config,
-            "LCM_DYNAMIC_LEAF_CHUNK_MAX",
-            "dynamic_leaf_chunk_max",
-            default=40000,
-        ),
-        "max_assembly_tokens": _lcm_int_setting(config, "LCM_MAX_ASSEMBLY_TOKENS", "max_assembly_tokens", default=0),
-        # Hermes derives an assembly cap of context_length - reserve_tokens_floor
-        # when both are positive; pass both through so tracedecay can apply the
-        # same derivation (reserve_tokens_floor defaults to 0 = disabled).
-        "reserve_tokens_floor": _lcm_reserve_tokens_floor_setting(config, context_length),
-        "context_length": context_length,
-        "summary_fan_in": _lcm_int_setting(
-            config,
-            "LCM_CONDENSATION_FANIN",
-            "summary_fan_in",
-            "condensation_fanin",
-            default=4,
-        ),
-        # hermes-lcm caps condensation at depth 1 by default; pass the knob
-        # through so the Rust engine can enforce the same ceiling.
-        "incremental_max_depth": _lcm_int_setting(
-            config,
-            "LCM_INCREMENTAL_MAX_DEPTH",
-            "incremental_max_depth",
-            default=1,
-        ),
-    }
-    threshold_tokens = _configured_threshold_tokens(
-        config,
-        hermes_home=hermes_home,
-        context_length_override=context_length,
-    )
-    if threshold_tokens is not None:
-        args["threshold_tokens"] = threshold_tokens
-    for env_key, name in (
-        ("LCM_IGNORE_SESSION_PATTERNS", "ignore_session_patterns"),
-        ("LCM_STATELESS_SESSION_PATTERNS", "stateless_session_patterns"),
-        ("LCM_IGNORE_MESSAGE_PATTERNS", "ignore_message_patterns"),
-    ):
-        patterns = _lcm_list_setting(config, env_key, name)
-        if patterns:
-            args[name] = patterns
-    return {key: value for key, value in args.items() if value is not None}
 
-
-def _lcm_gc_config_args(config):
-    gc_config = {}
-    for env_key, name, default in (
-        ("LCM_PAYLOAD_GC_GRACE_SECONDS", "grace_seconds", None),
-        ("LCM_PAYLOAD_REAP_MISSING_METADATA_AFTER_SECONDS", "reap_missing_after", None),
-        ("LCM_PAYLOAD_REAP_MISSING_METADATA_ENABLED", "reap_missing_enabled", None),
-        ("LCM_PAYLOAD_GC_MAX_BATCH_SIZE", "max_batch_size", None),
-        ("LCM_PAYLOAD_GC_BACKUP_BEFORE_REAP", "backup_before_reap", None),
-        ("LCM_PAYLOAD_GC_INTERVAL_SECONDS", "interval_seconds", None),
-        ("LCM_PAYLOAD_GC_ENABLED", "gc_enabled", None),
-    ):
-        if name.endswith("enabled") or name == "backup_before_reap":
-            value = _lcm_bool_setting(config, env_key, name, default=default)
-        else:
-            value = _lcm_int_setting(config, env_key, name, default=default)
-        if value is not None:
-            gc_config[name] = value
-    return {"gc_config": gc_config} if gc_config else {}
 
 def _lcm_expansion_model(config):
     value = _lcm_str_setting(config, "LCM_EXPANSION_MODEL", "expansion_model", default="")
@@ -1823,58 +1533,7 @@ def _lcm_expansion_context_tokens(config):
 def _lcm_expansion_timeout_ms(config):
     return _lcm_expansion_settings(config)["timeout_ms"]
 
-def _lcm_extraction_settings(config):
-    return {
-        "enabled": bool(
-            _lcm_bool_setting(
-                config,
-                "LCM_EXTRACTION_ENABLED",
-                "extraction_enabled",
-                default=False,
-            )
-        ),
-        "model": str(
-            _lcm_str_setting(config, "LCM_EXTRACTION_MODEL", "extraction_model", default="") or ""
-        ).strip(),
-        "output_path": str(
-            _lcm_str_setting(
-                config,
-                "LCM_EXTRACTION_OUTPUT_PATH",
-                "extraction_output_path",
-                default="",
-            )
-            or ""
-        ).strip(),
-    }
-
-def _lcm_extraction_enabled(config):
-    return _lcm_extraction_settings(config)["enabled"]
-
-def _lcm_extraction_model(config):
-    return _lcm_extraction_settings(config)["model"]
-
-def _lcm_extraction_output_path(config):
-    return _lcm_extraction_settings(config)["output_path"]
-
-def _apply_lcm_option_overrides(args: dict, kwargs: dict, keys) -> None:
-    for key in keys:
-        if key in kwargs and kwargs[key] is not None:
-            args[key] = kwargs.pop(key)
-
 REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
-FALLBACK_MARKER = "[deterministic compression fallback]"
-RETRY_WORTHY_AUXILIARY_ERRORS = (
-    "context length",
-    "maximum context",
-    "max context",
-    "token limit",
-    "too many tokens",
-    "prompt is too long",
-    "input too long",
-    "request too large",
-    "timed out",
-    "timeout",
-)
 
 def _strip_reasoning(text: str) -> str:
     output = text or ""
@@ -1887,15 +1546,6 @@ def _strip_reasoning(text: str) -> str:
             flags=re.IGNORECASE | re.DOTALL,
         )
     return output.strip()
-
-def _messages_hash(messages):
-    # Keep a full-content hash to preserve debounce correctness: any message
-    # change must invalidate the signature and trigger preflight.
-    try:
-        payload = json.dumps(messages or [], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    except Exception:
-        payload = repr(messages)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def _llm_response_text(response) -> str:
     if isinstance(response, str):
@@ -1916,537 +1566,6 @@ def _llm_response_text(response) -> str:
         if isinstance(content, str):
             return content
     return "" if response is None else str(response)
-
-def _message_content(message) -> str:
-    if not isinstance(message, dict):
-        return str(message)
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict) and isinstance(content.get("text"), str):
-        return content["text"]
-    if isinstance(content, list):
-        parts = [
-            item.get("text")
-            for item in content
-            if isinstance(item, dict) and isinstance(item.get("text"), str)
-        ]
-        if parts:
-            return "\n\n".join(parts)
-    return "" if content is None else str(content)
-
-def _summary_source_messages(source_messages):
-    normalized = []
-    for message in source_messages or []:
-        if not isinstance(message, dict):
-            normalized.append({"role": "user", "content": str(message)})
-            continue
-        entry = {
-            "role": message.get("role") or "user",
-            "content": _message_content(message),
-        }
-        if message.get("tool_calls"):
-            entry["tool_calls"] = message["tool_calls"]
-        if message.get("tool_call_id"):
-            entry["tool_call_id"] = message["tool_call_id"]
-        normalized.append(entry)
-    return normalized
-
-_TOKEN_ENCODER = None
-_TOKEN_ENCODER_CHECKED = False
-
-def _token_encoder():
-    global _TOKEN_ENCODER, _TOKEN_ENCODER_CHECKED
-    if _TOKEN_ENCODER_CHECKED:
-        return _TOKEN_ENCODER
-    _TOKEN_ENCODER_CHECKED = True
-    try:
-        import tiktoken
-        _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
-    except Exception:
-        _TOKEN_ENCODER = None
-    return _TOKEN_ENCODER
-
-def _count_tokens(text):
-    # tiktoken when available; otherwise the same ceil(len/4) chars-per-token
-    # estimate the Rust side uses everywhere ((len+3)//4 — see
-    # dashboard/token_count.rs chars_estimate), so token numbers reported
-    # from Hermes reconcile with dashboard numbers.
-    if not text:
-        return 0
-    encoder = _token_encoder()
-    if encoder is not None:
-        try:
-            return len(encoder.encode(text))
-        except Exception:
-            pass
-    return (len(text) + 3) // 4
-
-def _tool_call_arguments_text(arguments):
-    if isinstance(arguments, str):
-        return arguments
-    if arguments is None:
-        return ""
-    try:
-        return json.dumps(arguments, ensure_ascii=False)
-    except Exception:
-        return str(arguments)
-
-def _count_message_tokens(message):
-    total = 4
-    if not isinstance(message, dict):
-        return total + _count_tokens(str(message))
-    total += _count_tokens(_message_content(message))
-    for tool_call in message.get("tool_calls") or []:
-        if isinstance(tool_call, dict):
-            function = tool_call.get("function") or {}
-            total += _count_tokens(str(function.get("name") or ""))
-            total += _count_tokens(_tool_call_arguments_text(function.get("arguments")))
-        total += 3
-    return total
-
-def _count_messages_tokens(messages):
-    return sum(_count_message_tokens(message) for message in messages or [])
-
-def _matched_tool_call_ids(messages):
-    matched = set()
-    for message in messages or []:
-        if isinstance(message, dict) and message.get("role") == "tool":
-            tool_id = str(message.get("tool_call_id") or "").strip()
-            if tool_id:
-                matched.add(tool_id)
-    return matched
-
-def _summary_tool_call_id(tool_call):
-    if isinstance(tool_call, dict):
-        return str(tool_call.get("id") or "").strip()
-    return ""
-
-def _truncate_serialized_content(content):
-    if len(content) > 3000:
-        return content[:2000] + "\n...[truncated]...\n" + content[-800:]
-    return content
-
-def _serialize_summary_messages(messages):
-    # Mirrors hermes-lcm engine._serialize_messages: labeled per-role text with
-    # matched tool-call enrichment and long-content truncation. Redaction and
-    # externalization stay in the Rust ingest pipeline.
-    parts = []
-    matched_tool_ids = _matched_tool_call_ids(messages)
-    for message in messages or []:
-        if not isinstance(message, dict):
-            parts.append(f"[USER]: {message}")
-            continue
-        role = str(message.get("role") or "unknown")
-        content = _message_content(message)
-        if role == "tool":
-            tool_id = str(message.get("tool_call_id") or "").strip()
-            parts.append(f"[TOOL RESULT {tool_id}]: {_truncate_serialized_content(content)}")
-            continue
-        if role == "assistant":
-            tool_calls = message.get("tool_calls") or []
-            matched_tool_calls = [
-                tool_call
-                for tool_call in tool_calls
-                if not _summary_tool_call_id(tool_call)
-                or _summary_tool_call_id(tool_call) in matched_tool_ids
-            ]
-            content = _truncate_serialized_content(content)
-            if matched_tool_calls:
-                tool_call_parts = []
-                for tool_call in matched_tool_calls:
-                    if isinstance(tool_call, dict):
-                        function = tool_call.get("function") or {}
-                        name = function.get("name") or "?"
-                        arguments = _tool_call_arguments_text(function.get("arguments"))
-                        if len(arguments) > 500:
-                            arguments = arguments[:400] + "..."
-                        tool_call_parts.append(f"  {name}({arguments})")
-                content += "\n[Tool calls:\n" + "\n".join(tool_call_parts) + "\n]"
-            parts.append(f"[ASSISTANT]: {content}")
-            continue
-        parts.append(f"[{role.upper()}]: {_truncate_serialized_content(content)}")
-    return "\n\n".join(parts)
-
-def _normalized_focus_topic(focus_topic, max_chars=160):
-    normalized = " ".join(str(focus_topic or "").split())
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[: max(0, max_chars - 1)].rstrip() + "…"
-
-def _build_l1_focus_brief(focus_topic):
-    topic = _normalized_focus_topic(focus_topic)
-    if not topic:
-        return ""
-    return (
-        "Focus brief:\n"
-        f"Primary focus: {topic}\n"
-        "Preserve concrete decisions, constraints, files, commands, identifiers, and current state for this focus.\n"
-        "Spend roughly 60-70% of the summary budget on the focus when relevant.\n"
-        "Do not discard unrelated blockers or active tasks just because they are off-focus.\n"
-    )
-
-def _build_l2_focus_brief(focus_topic):
-    topic = _normalized_focus_topic(focus_topic)
-    if not topic:
-        return ""
-    return (
-        "Focus brief:\n"
-        f"Primary focus: {topic}\n"
-        "Prefer bullets that preserve decisions, blockers, files, commands, identifiers, and current state for this focus.\n"
-        "Keep other active tasks only when they are current blockers or handoff state.\n"
-    )
-
-_L1_DEPTH_GUIDANCE = {
-    0: "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values.",
-    1: "Distill into arc-level outcomes: what evolved, what was decided, current state. Drop per-turn detail.",
-    2: "Capture durable narrative: decisions in effect, completed milestones, timeline. Drop process detail.",
-}
-
-def _build_l1_prompt(text, token_budget, depth, focus_topic="", custom_instructions=""):
-    guidance = _L1_DEPTH_GUIDANCE.get(depth, _L1_DEPTH_GUIDANCE[2])
-    focus_guidance = _build_l1_focus_brief(focus_topic)
-    custom_block = ""
-    if custom_instructions:
-        custom_block = f"\nAdditional instructions:\n{custom_instructions}\n"
-    return f"""Summarize this conversation segment for future turns.
-{guidance}
-Remove repetition and conversational filler.
-End with: "Expand for details about: <what was compressed>"
-{focus_guidance}{custom_block}
-
-Target ~{token_budget} tokens.
-
-CONTENT:
-{text}"""
-
-def _build_l2_prompt(text, token_budget, focus_topic="", custom_instructions=""):
-    focus_guidance = _build_l2_focus_brief(focus_topic)
-    custom_block = ""
-    if custom_instructions:
-        custom_block = f"\nAdditional instructions:\n{custom_instructions}\n"
-    return f"""Compress this into bullet points. Maximum {token_budget} tokens.
-Keep only: decisions made, files changed, errors hit, current state.
-Drop all reasoning, alternatives considered, and process detail.
-{focus_guidance}{custom_block}
-
-CONTENT:
-{text}"""
-
-# Conservative allowlist mirroring hermes-lcm model_routing._PROVIDER_PREFIXES:
-# many registry provider IDs double as OpenRouter model namespaces, so only
-# explicit entries (plus non-canonical named custom providers) split into
-# provider/model routes.
-_LCM_PROVIDER_ROUTE_PREFIXES = frozenset({"cerebras"})
-
-def _provider_route_is_resolvable(provider):
-    provider = str(provider or "").strip().lower()
-    if not provider:
-        return False
-    if provider.startswith("custom:"):
-        provider = provider.split(":", 1)[1].strip()
-        if not provider:
-            return False
-    try:
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        if provider in PROVIDER_REGISTRY:
-            return provider in _LCM_PROVIDER_ROUTE_PREFIXES
-    except Exception:
-        pass
-    try:
-        from hermes_cli.runtime_provider import _get_named_custom_provider
-        if _get_named_custom_provider(provider):
-            return True
-    except Exception:
-        pass
-    return False
-
-def _parse_lcm_model_override(value):
-    model = str(value or "").strip()
-    if not model:
-        return None, ""
-    provider, separator, rest = model.partition("/")
-    provider = provider.strip().lower()
-    rest = rest.strip()
-    route_provider = provider
-    if provider.startswith("custom:"):
-        route_provider = provider.split(":", 1)[1].strip()
-    if separator and rest and route_provider and _provider_route_is_resolvable(route_provider):
-        return route_provider, rest
-    return None, model
-
-def _apply_lcm_model_route(call_kwargs, model):
-    # Mirrors hermes-lcm model_routing.apply_lcm_model_route.
-    provider, routed_model = _parse_lcm_model_override(model)
-    if provider:
-        call_kwargs["provider"] = provider
-    if routed_model:
-        call_kwargs["model"] = routed_model
-
-def _deterministic_truncation(messages, limit: int = 2048) -> str:
-    lines = []
-    for message in messages or []:
-        if isinstance(message, dict):
-            role = message.get("role") or "user"
-            content = _message_content(message)
-        else:
-            role = "user"
-            content = str(message)
-        if content:
-            lines.append(f"{role}: {content}")
-    text = "\n".join(lines).strip()
-    if not text:
-        text = "No auxiliary summary was available."
-    max_prefix = max(0, limit - len(FALLBACK_MARKER) - 2)
-    return f"{text[:max_prefix].rstrip()}\n\n{FALLBACK_MARKER}"
-
-def _auxiliary_error_classification(error) -> str:
-    message = str(error or "").lower()
-    if any(pattern in message for pattern in RETRY_WORTHY_AUXILIARY_ERRORS):
-        return "retry_worthy"
-    return "permanent"
-
-def _auxiliary_retry_limit(kwargs) -> int:
-    try:
-        limit = int(kwargs.pop("max_auxiliary_attempts", 2) or 2)
-    except Exception:
-        limit = 2
-    return min(max(limit, 1), 8)
-
-def _next_smaller_source_limit(source_messages, current_limit=None):
-    source_count = len(source_messages or [])
-    if source_count <= 1:
-        return None
-    next_limit = max(1, source_count // 2)
-    if current_limit is not None:
-        try:
-            next_limit = min(next_limit, int(current_limit))
-        except Exception:
-            pass
-    if next_limit >= source_count:
-        next_limit = source_count - 1
-    return max(1, next_limit)
-
-def _normalize_extraction_items(text):
-    cleaned = str(text or "").strip()
-    if not cleaned:
-        return []
-    items = []
-    for line in cleaned.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith(("- ", "* ")):
-            stripped = stripped[2:].strip()
-        items.append(stripped)
-    if not items:
-        items = [cleaned]
-    return items
-
-def _extraction_route_payload(route, extraction_result):
-    if extraction_result is None:
-        return route
-    # Route-envelope contract with Rust extraction.rs:
-    # keys are `route` and `pre_compaction_extraction`.
-    payload = {"pre_compaction_extraction": extraction_result}
-    if route:
-        payload["route"] = route
-    return json.dumps(payload, ensure_ascii=False)
-
-def _with_auxiliary_metadata(
-    result,
-    *,
-    attempts,
-    retry_status=None,
-    error_classification=None,
-    fallback_used=False,
-):
-    if not isinstance(result, dict):
-        result = {}
-    if attempts or retry_status is not None or error_classification is not None or fallback_used:
-        result.setdefault("auxiliary_attempts", attempts)
-    if retry_status is not None:
-        result.setdefault("auxiliary_retry_status", retry_status)
-    if error_classification is not None:
-        result.setdefault("auxiliary_error_classification", error_classification)
-    if fallback_used:
-        result["fallback_used"] = True
-    return result
-
-def _auxiliary_error_result(first, *, attempts, retry_status, error_classification, error):
-    result = {}
-    if isinstance(first, dict):
-        for key in (
-            "summary_nodes_created",
-            "summary_nodes",
-            "replay_messages",
-            "replay_token_estimate",
-            "replay_over_budget",
-            "context_recovery_hint",
-            "frontier",
-            "summary_request",
-        ):
-            if key in first:
-                result[key] = first[key]
-    result.setdefault("summary_nodes_created", 0)
-    result.setdefault("summary_nodes", [])
-    result.setdefault("replay_messages", [])
-    result.setdefault("frontier", {"current_frontier_store_id": None, "maintenance_debt": []})
-    result["status"] = "error"
-    result["reason"] = (
-        "auxiliary_summary_permanent_failure"
-        if error_classification == "permanent"
-        else "auxiliary_summary_retry_exhausted"
-    )
-    result["error"] = str(error)
-    return _with_auxiliary_metadata(
-        result,
-        attempts=attempts,
-        retry_status=retry_status,
-        error_classification=error_classification,
-    )
-
-def _replay_message_list(value):
-    """Validate a replay_messages payload as an OpenAI-format message list.
-
-    Returns a list copy when every entry is a role-tagged dict, else None.
-    """
-    if not isinstance(value, list):
-        return None
-    for item in value:
-        if not isinstance(item, dict) or not item.get("role"):
-            return None
-    return list(value)
-
-def _normalize_replay_tool_pairs(messages):
-    """Return a replay containing only structurally paired tool events.
-
-    The returned issue list is intentionally separate from the normalized
-    candidate: callers must reject any replay that required repair instead of
-    silently persisting a transcript different from the one TraceDecay built.
-    """
-    issues = []
-    normalized = []
-    index = 0
-    messages = list(messages or [])
-    while index < len(messages):
-        message = messages[index]
-        if not isinstance(message, dict):
-            index += 1
-            continue
-        if message.get("role") == "tool":
-            issues.append({
-                "code": "orphan_tool_result",
-                "tool_call_id": str(message.get("tool_call_id") or "").strip(),
-                "message_index": index,
-            })
-            index += 1
-            continue
-        tool_calls = message.get("tool_calls")
-        if tool_calls is None:
-            normalized.append(message)
-            index += 1
-            continue
-        if message.get("role") != "assistant" or not isinstance(tool_calls, list) or not tool_calls:
-            issues.append({"code": "invalid_tool_calls", "message_index": index})
-            cleaned = dict(message)
-            cleaned.pop("tool_calls", None)
-            if str(cleaned.get("content") or "").strip():
-                normalized.append(cleaned)
-            index += 1
-            continue
-
-        call_ids = [_summary_tool_call_id(call) for call in tool_calls]
-        result_end = index + 1
-        while result_end < len(messages) and isinstance(messages[result_end], dict) \
-                and messages[result_end].get("role") == "tool":
-            result_end += 1
-        results = messages[index + 1:result_end]
-        result_ids = [str(result.get("tool_call_id") or "").strip() for result in results]
-        trailing_open = (
-            result_end == len(messages)
-            and not results
-            and all(call_ids)
-            and len(set(call_ids)) == len(call_ids)
-        )
-        if trailing_open:
-            normalized.append(message)
-            index = result_end
-            continue
-        complete = (
-            all(call_ids)
-            and len(set(call_ids)) == len(call_ids)
-            and all(result_ids)
-            and len(set(result_ids)) == len(result_ids)
-            and set(result_ids) == set(call_ids)
-            and len(results) == len(tool_calls)
-        )
-        if complete:
-            normalized.append(message)
-            normalized.extend(results)
-        else:
-            for tool_call_id in sorted(set(call_ids) | set(result_ids)):
-                issues.append({
-                    "code": "unmatched_tool_pair",
-                    "tool_call_id": tool_call_id,
-                    "call_count": call_ids.count(tool_call_id),
-                    "result_count": result_ids.count(tool_call_id),
-                    "message_index": index,
-                })
-            cleaned = dict(message)
-            cleaned.pop("tool_calls", None)
-            if str(cleaned.get("content") or "").strip():
-                normalized.append(cleaned)
-        index = result_end
-    return normalized, issues
-
-def _compression_boundary_abort(
-    result,
-    code,
-    *,
-    source_token_estimate,
-    replay_token_estimate,
-    reported_source_tokens=None,
-    reported_replay_tokens=None,
-    issues=None,
-):
-    payload = dict(result) if isinstance(result, dict) else {}
-    raw_replay = payload.pop("replay_messages", None)
-    payload["status"] = "aborted"
-    payload["reason"] = code
-    payload["replay_messages"] = []
-    payload["compression_diagnostic"] = {
-        "type": "replay_boundary_rejection",
-        "code": code,
-        "defer_preflight_to_real_usage": True,
-        "source_token_estimate": source_token_estimate,
-        "replay_token_estimate": replay_token_estimate,
-        "reported_source_tokens": reported_source_tokens,
-        "reported_replay_tokens": reported_replay_tokens,
-        "rejected_replay_message_count": len(raw_replay) if isinstance(raw_replay, list) else 0,
-        "issues": list(issues or []),
-    }
-    return payload
-
-def _compression_replay_is_compacted(result):
-    if not isinstance(result, dict):
-        return False
-    return any(bool(result.get(key)) for key in (
-        "contract_truncated",
-        "replay_messages_truncated_for_mcp",
-        "replay_messages_compacted_for_mcp",
-    ))
-
-def _compacted_lcm_result_error(result):
-    payload = dict(result) if isinstance(result, dict) else {}
-    payload["status"] = "error"
-    payload.setdefault("reason", "mcp_compacted_compression_payload")
-    payload.setdefault(
-        "error",
-        payload.get("mcp_truncation_reason")
-        or "LCM compression payload was compacted for MCP; full replay was not recovered",
-    )
-    return payload
 
 def _bounded_expand_query_answer(text: str, max_tokens: int):
     try:
@@ -2566,8 +1685,6 @@ def _handle_lcm_expand_query(args, **kwargs) -> str:
     payload = _synthesize_expand_query_payload(retrieval, agent=agent, **kwargs)
     return json.dumps(payload)
 
-def _copy_without_none(source: dict) -> dict:
-    return {key: value for key, value in source.items() if value is not None}
 
 def _tokens_from_native_max(max_tokens):
     if max_tokens is None:
@@ -2682,7 +1799,6 @@ class _EngineSessionState:
         "_last_summary_error",
         "_runtime_context_length",
         "_session_start_context_length",
-        "_last_preflight_signature",
     )
 
     def __init__(self):
@@ -2705,7 +1821,6 @@ class _EngineSessionState:
         self._last_summary_error = None
         self._runtime_context_length = None
         self._session_start_context_length = None
-        self._last_preflight_signature = None
 
     def adopt(self, other):
         """Carry conversation state across a compression-rotation rebind."""
@@ -2749,10 +1864,6 @@ class TraceDecayContextEngine(ContextEngine):
             _configured_project_root(self.config),
             self.hermes_home,
         )
-        # Auxiliary-route circuit breakers are process-global on purpose:
-        # a broken summary model is broken for every session.
-        self._route_failures = {}
-        self._cooldown_until = {}
 
     def __deepcopy__(self, memo):
         """Create an agent-local engine without copying locks or live agents."""
@@ -2763,10 +1874,6 @@ class TraceDecayContextEngine(ContextEngine):
         memo[id(self)] = clone
         clone.config = copy.deepcopy(self.config, memo)
         clone.project_root = self.project_root
-        # Auxiliary-route circuit breakers intentionally remain process-wide.
-        clone._route_failures = self._route_failures
-        clone._cooldown_until = self._cooldown_until
-
         with self._state_lock:
             clone.active_session_id = self.active_session_id
             for key, state in self._session_states.items():
@@ -2793,7 +1900,6 @@ class TraceDecayContextEngine(ContextEngine):
     _last_summary_error = _engine_session_property("_last_summary_error")
     _runtime_context_length = _engine_session_property("_runtime_context_length")
     _session_start_context_length = _engine_session_property("_session_start_context_length")
-    _last_preflight_signature = _engine_session_property("_last_preflight_signature")
 
     def _session_key(self, session_id=None):
         if session_id:
@@ -2834,7 +1940,6 @@ class TraceDecayContextEngine(ContextEngine):
                         source = self._session_states.get(_ENGINE_DEFAULT_SESSION)
                     if source is not None:
                         state.adopt(source)
-                        state._last_preflight_signature = None
                     self._session_states[session_key] = state
             # Bind the calling thread so session-less calls (compress,
             # update_from_response, should_compress) resolve this session.
@@ -2909,9 +2014,7 @@ class TraceDecayContextEngine(ContextEngine):
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
 
     def on_session_start(self, session_id=None, hermes_home=None, project_root=None, **kwargs):
-        bound_session_id = self.active_session_id
         self._bind_session(session_id, hermes_home, project_root, **kwargs)
-        self._report_compression_boundary(session_id, bound_session_id, kwargs)
 
     def on_session_end(self, session_id=None, messages=None, **kwargs):
         _join_host_receipts()
@@ -2990,111 +2093,23 @@ class TraceDecayContextEngine(ContextEngine):
             "session_id": session_id if session_id is not None else self.active_session_id
         }
 
-    def _report_compression_boundary(self, session_id, bound_session_id, kwargs):
-        # Mirrors Hermes' compression-boundary session starts: hand the
-        # bound/old session ids to tracedecay so it can record a boundary-skip
-        # cooldown when carry-over did not continue from the bound session.
-        boundary_reason = str(kwargs.get("boundary_reason") or "")
-        old_session_id = str(kwargs.get("old_session_id") or "")
-        if (
-            boundary_reason != "compression"
-            or not old_session_id
-            or not session_id
-            or old_session_id == session_id
-        ):
-            return
-        args = _lcm_store_args({
-            "provider": STANDARD_HERMES_LCM_PROVIDER,
-            "session_id": session_id,
-            "old_session_id": old_session_id,
-            "boundary_reason": boundary_reason,
-        }, self.project_root)
-        if bound_session_id:
-            args["bound_session_id"] = bound_session_id
-        try:
-            tools.call_tracedecay_tool(
-                "tracedecay_lcm_session_boundary",
-                args,
-                **_project_call_kwargs(self.project_root),
-            )
-        except Exception as exc:
-            logger.warning("LCM session boundary report failed: %s", exc)
-
     def should_compress_preflight(self, messages, current_tokens=None, **kwargs):
-        """ABC contract: quick pre-flight check returning a BOOL.
-
-        The dict-shaped probe (status/reason/replay_messages) stays
-        available as ``_preflight_probe`` for internal callers — an error
-        dict returned here would be truthy and trigger bogus compactions.
-        """
-        result = self._preflight_probe(messages, current_tokens=current_tokens, **kwargs)
-        if isinstance(result, dict):
-            original = list(messages or [])
-            replay = _replay_message_list(result.get("replay_messages"))
-            if (
-                replay is not None
-                and replay != original
-                and (replay or not original)
-                and not _compression_replay_is_compacted(result)
-            ):
-                return True
-            return bool(result.get("should_compress"))
+        del messages, current_tokens, kwargs
+        # Hermes does not expose an authentic raw-compression protocol. Its
+        # transcript still ingests through the daemon, but compaction is a
+        # typed unavailable capability.
         return False
 
     def _preflight_probe(self, messages, current_tokens=None, **kwargs):
-        args = self._tool_args()
-        args.update(
-            _lcm_config_args(
-                self.config,
-                self.hermes_home,
-                runtime_context_length=self._effective_context_length(),
-            )
-        )
-        args.update({
-            "provider": STANDARD_HERMES_LCM_PROVIDER,
-            "session_id": self.active_session_id,
-            "messages": messages,
-            "current_tokens": current_tokens,
-        })
-        _apply_lcm_option_overrides(args, kwargs, (
-            "threshold_tokens",
-            "max_assembly_tokens",
-            "leaf_chunk_tokens",
-            "max_source_messages",
-            "summary_fan_in",
-            "incremental_max_depth",
-            "fresh_tail_count",
-            "dynamic_leaf_chunk_enabled",
-            "dynamic_leaf_chunk_max",
-            "context_length",
-            "reserve_tokens_floor",
-            "ignore_session_patterns",
-            "stateless_session_patterns",
-            "ignore_message_patterns",
-        ))
-        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
-        return call_tracedecay_json(
-            "tracedecay_lcm_preflight",
-            args,
-            **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
-        )
+        del messages, current_tokens, kwargs
+        return {
+            "status": "unavailable",
+            "reason": "host_raw_compression_unavailable",
+            "should_compress": False,
+        }
 
     def should_compress(self, prompt_tokens=None, **kwargs):
-        # The host probes this on EVERY agent-loop iteration (up to ~90
-        # times per turn). Below the tracked threshold the subprocess
-        # answer is always "no compression", so gate locally and only pay
-        # the spawn when the conversation is actually near its budget (or
-        # when no threshold is known yet).
-        state = self._state()
-        try:
-            tokens = int(prompt_tokens) if prompt_tokens is not None else None
-        except (TypeError, ValueError):
-            tokens = None
-        if tokens is not None and state.threshold_tokens and tokens < state.threshold_tokens:
-            return False
-        response = self._preflight_probe([], current_tokens=prompt_tokens, **kwargs)
-        if isinstance(response, dict):
-            return bool(response.get("should_compress"))
+        del prompt_tokens, kwargs
         return False
 
     def has_content_to_compress(self, messages, current_tokens=None, **kwargs):
@@ -3107,31 +2122,8 @@ class TraceDecayContextEngine(ContextEngine):
         return len(non_empty) >= 2
 
     def should_defer_preflight_to_real_usage(self, rough_tokens=None):
-        diagnostic = (
-            self.last_compress_result.get("compression_diagnostic")
-            if isinstance(self.last_compress_result, dict)
-            else None
-        )
-        replay_boundary_deferred = bool(
-            isinstance(diagnostic, dict)
-            and diagnostic.get("type") == "replay_boundary_rejection"
-            and diagnostic.get("defer_preflight_to_real_usage")
-        )
-        if not replay_boundary_deferred and not (
-            isinstance(self.last_compress_result, dict)
-            and self.last_compress_result.get("status") == "compressed"
-        ):
-            return False
-        try:
-            rough = int(rough_tokens or 0)
-            real = int(self.last_real_prompt_tokens or 0)
-        except (TypeError, ValueError):
-            return False
-        if real <= 0 or rough <= real:
-            return False
-        # Defer only when the rough estimate is plausibly near the last real
-        # usage; very large estimates should still trigger a backend preflight.
-        return rough <= real * 10
+        del rough_tokens
+        return False
 
     def carry_over_new_session_context(self, old_session_id, new_session_id):
         old_session_id = str(old_session_id or "")
@@ -3139,15 +2131,9 @@ class TraceDecayContextEngine(ContextEngine):
         if not new_session_id:
             return
         self._bind_session(new_session_id, old_session_id=old_session_id)
-        self._report_compression_boundary(
-            new_session_id,
-            old_session_id,
-            {"boundary_reason": "compression", "old_session_id": old_session_id},
-        )
 
     def status(self, session_id=None, **kwargs):
         args = self._tool_args(session_id)
-        args.update(_lcm_gc_config_args(self.config))
         args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
         return call_tracedecay_json(
             "tracedecay_lcm_status",
@@ -3162,12 +2148,6 @@ class TraceDecayContextEngine(ContextEngine):
         last_result = self.last_compress_result
         if not isinstance(last_result, dict):
             last_result = {"status": "never_ran"}
-        now = time.time()
-        route_cooldowns = {
-            route: max(0, int(deadline - now))
-            for route, deadline in self._cooldown_until.items()
-            if deadline > now
-        }
         return {
             "engine": self.name,
             "session_id": self.active_session_id,
@@ -3178,15 +2158,8 @@ class TraceDecayContextEngine(ContextEngine):
             "context_engine_tool_names": sorted(
                 schema["name"] for schema in self.get_tool_schemas()
             ),
-            "route_failures": dict(self._route_failures),
-            "cooldown_routes": sorted(self._cooldown_until.keys()),
-            "route_cooldowns": route_cooldowns,
             "last_compress_result": last_result,
-            "awaiting_real_usage_after_compression": (
-                isinstance(self.last_compress_result, dict)
-                and self.last_compress_result.get("status") == "compressed"
-                and not self.last_real_prompt_tokens
-            ),
+            "awaiting_real_usage_after_compression": False,
             "live_ingest": {
                 "registered_tool_names": sorted(_REGISTERED_TOOL_NAMES),
                 "context_tool_names": sorted(_CONTEXT_TOOL_NAMES),
@@ -3206,52 +2179,6 @@ class TraceDecayContextEngine(ContextEngine):
             },
         }
 
-    def _current_turn_preflight(self, messages, **kwargs):
-        if not messages or not self.active_session_id:
-            return
-        signature = f"{self.active_session_id}:{_messages_hash(messages)}"
-        if signature == self._last_preflight_signature:
-            return
-        args = {}
-        args.update(
-            _lcm_config_args(
-                self.config,
-                self.hermes_home,
-                runtime_context_length=self._effective_context_length(),
-            )
-        )
-        args.update({
-            "session_id": self.active_session_id,
-            "messages": messages,
-        })
-        _apply_lcm_option_overrides(args, kwargs, (
-            "current_tokens",
-            "threshold_tokens",
-            "max_assembly_tokens",
-            "leaf_chunk_tokens",
-            "max_source_messages",
-            "summary_fan_in",
-            "incremental_max_depth",
-            "fresh_tail_count",
-            "dynamic_leaf_chunk_enabled",
-            "dynamic_leaf_chunk_max",
-            "context_length",
-            "reserve_tokens_floor",
-            "ignore_session_patterns",
-            "stateless_session_patterns",
-            "ignore_message_patterns",
-        ))
-        args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
-        try:
-            tools.call_tracedecay_tool(
-                "tracedecay_lcm_preflight",
-                args,
-                **_project_call_kwargs(kwargs.get("project_root") or self.project_root),
-            )
-            self._last_preflight_signature = signature
-        except Exception as exc:
-            logger.warning("LCM current-turn preflight failed: %s", exc)
-
     def handle_tool_call(self, name, arguments=None, **kwargs) -> str:
         tool_name, tool_args = _normalize_memory_tool_call(name, arguments)
         native_name = tool_name
@@ -3262,20 +2189,14 @@ class TraceDecayContextEngine(ContextEngine):
         if tracedecay_name is None:
             return tools.error_payload(f"unknown LCM tool: {tool_name}")
 
-        messages = kwargs.get("messages")
         preflight_kwargs = dict(kwargs)
         preflight_kwargs.pop("messages", None)
-        self._current_turn_preflight(messages, **preflight_kwargs)
 
         tool_args = _translate_lcm_args(native_name, dict(tool_args))
         if tool_args.get("error"):
             return json.dumps({"error": tool_args["error"]})
         if tracedecay_name in LCM_PROVIDER_LOCAL_TOOL_NAMES:
             tool_args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
-        if tracedecay_name == "tracedecay_lcm_compress" and self.project_root:
-            tool_args.setdefault("response_handle_project_root", self.project_root)
-        if native_name in ("lcm_status", "lcm_doctor"):
-            tool_args.update(_lcm_gc_config_args(self.config))
         if self.active_session_id:
             tool_args.setdefault("session_id", self.active_session_id)
         tool_args = _lcm_store_args(
@@ -3334,570 +2255,19 @@ class TraceDecayContextEngine(ContextEngine):
             synthesis_kwargs["expansion_timeout"] = _lcm_expansion_timeout_ms(self.config) / 1000
         return _synthesize_expand_query_payload(retrieval, agent=synthesis_agent, **synthesis_kwargs)
 
-    def _auxiliary_routes(self, summary_request=None, **kwargs):
-        routes = (
-            kwargs.get("routes")
-            or kwargs.get("auxiliary_routes")
-            or (summary_request or {}).get("routes")
-        )
-        if isinstance(routes, dict):
-            routes = [routes]
-        defaults = {}
-        for key in ("model", "temperature", "max_tokens", "timeout"):
-            if kwargs.get(key) is not None:
-                defaults[key] = kwargs[key]
-        if "timeout" not in defaults:
-            timeout_ms = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home)
-            if timeout_ms:
-                defaults["timeout"] = timeout_ms / 1000
-        if not routes:
-            if defaults.get("model") is not None:
-                routes = [{}]
-            else:
-                # Mirror hermes-lcm escalation._summary_model_chain: the
-                # configured summary_model plus summary_fallback_models form
-                # the default route chain, falling back to one task-default
-                # route when nothing is configured.
-                primary = str(
-                    _lcm_str_setting(self.config, "LCM_SUMMARY_MODEL", "summary_model", default="") or ""
-                )
-                fallbacks = _lcm_list_setting(
-                    self.config,
-                    "LCM_SUMMARY_FALLBACK_MODELS",
-                    "summary_fallback_models",
-                    default=[],
-                )
-                chain = []
-                for model in [primary, *(fallbacks or [])]:
-                    normalized_model = str(model or "").strip()
-                    if normalized_model not in chain:
-                        chain.append(normalized_model)
-                if not chain:
-                    chain.append("")
-                routes = [{"model": model} if model else {} for model in chain]
-        normalized = []
-        for route in routes:
-            if not isinstance(route, dict):
-                route = {"model": str(route)}
-            normalized.append({**defaults, **route})
-        return normalized
-
-    def _call_auxiliary_summary(self, prompt, messages, **kwargs):
-        client = _resolve_auxiliary_client(getattr(self, "agent", None))
-        summary_request = kwargs.get("summary_request")
-        allow_retry_signal = bool(kwargs.pop("allow_retry_signal", False))
-        accepts_result = kwargs.pop("accepts_result", None)
-        route_kwargs = dict(kwargs)
-        route_kwargs.pop("summary_request", None)
-        routes = self._auxiliary_routes(summary_request, **route_kwargs)
-        breaker_threshold, breaker_cooldown_seconds = _summary_circuit_breaker_settings(self.config)
-        last_error = None
-        last_classification = None
-        rejected_text = None
-        rejected_route = None
-        rejected_model = None
-        if client is None or not callable(getattr(client, "call_llm", None)):
-            last_error = RuntimeError("Hermes auxiliary_client.call_llm is unavailable")
-        else:
-            now = time.time()
-            for route in routes:
-                route_name = route.get("route") or route.get("name") or route.get("model") or "default"
-                route_key = str(route_name)
-                if self._cooldown_until.get(route_key, 0) > now:
-                    continue
-                call_kwargs = {
-                    "task": "compression",
-                    # Hermes escalation sends the full prompt (guidance plus
-                    # serialized CONTENT block) as a single user message.
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": route.get("temperature", 0.3),
-                    "max_tokens": route.get("max_tokens", 2048),
-                    "timeout": route.get("timeout", 60),
-                }
-                _apply_lcm_model_route(call_kwargs, route.get("model"))
-                try:
-                    response = client.call_llm(**call_kwargs)
-                    text = _strip_reasoning(_llm_response_text(response))
-                    if not text:
-                        raise RuntimeError("Hermes auxiliary summary was empty")
-                    if accepts_result is not None and not accepts_result(text):
-                        rejected_text = text
-                        rejected_route = route_key
-                        rejected_model = route.get("model")
-                        failures = self._route_failures.get(route_key, 0) + 1
-                        self._route_failures[route_key] = failures
-                        if failures >= breaker_threshold:
-                            self._cooldown_until[route_key] = (
-                                time.time() + breaker_cooldown_seconds
-                            )
-                        continue
-                    self._route_failures.pop(route_key, None)
-                    self._cooldown_until.pop(route_key, None)
-                    return {
-                        "status": "ok",
-                        "text": text,
-                        "route": route_key,
-                        "model": route.get("model"),
-                    }
-                except Exception as exc:
-                    last_error = exc
-                    last_classification = _auxiliary_error_classification(exc)
-                    failures = self._route_failures.get(route_key, 0) + 1
-                    self._route_failures[route_key] = failures
-                    if failures >= breaker_threshold:
-                        self._cooldown_until[route_key] = (
-                            time.time() + breaker_cooldown_seconds
-                        )
-        if rejected_text is not None:
-            return {
-                "status": "rejected",
-                "text": rejected_text,
-                "route": rejected_route,
-                "model": rejected_model,
-                "error": "Hermes auxiliary summary was not smaller than source",
-                "error_classification": "non_compressing_summary",
-            }
-        if last_error is not None:
-            last_classification = last_classification or _auxiliary_error_classification(last_error)
-            if allow_retry_signal and last_classification == "retry_worthy":
-                return {
-                    "status": "retry",
-                    "error": str(last_error),
-                    "error_classification": last_classification,
-                }
-            if allow_retry_signal and last_classification == "permanent":
-                return {
-                    "status": "error",
-                    "error": str(last_error),
-                    "error_classification": last_classification,
-                }
-        fallback = {
-            "status": "fallback",
-            "text": _deterministic_truncation(messages),
-            "route": "deterministic_fallback",
-            "model": None,
-        }
-        if last_error is not None:
-            fallback["error"] = str(last_error)
-            fallback["error_classification"] = last_classification
-        return fallback
-
-    def _summarize_with_escalation(self, source_messages, focus_topic="", **kwargs):
-        # Port of hermes-lcm escalation.summarize_with_escalation: L1 detailed
-        # summary, L2 aggressive bullets at reduced budget, then deterministic
-        # L3 truncation. Each LLM rung accepts a result only when its token
-        # estimate is below the source token estimate.
-        serialized = _serialize_summary_messages(source_messages)
-        source_tokens = _count_messages_tokens(source_messages)
-        # Mirrors the leaf budget in hermes-lcm engine._summarize_leaf_chunk_with_rescue.
-        token_budget = min(12000, max(2000, int(source_tokens * 0.20)))
-        custom_instructions = str(
-            _lcm_str_setting(self.config, "LCM_CUSTOM_INSTRUCTIONS", "custom_instructions", default="") or ""
-        )
-        l2_budget_ratio = _lcm_float_setting(
-            self.config,
-            "LCM_L2_BUDGET_RATIO",
-            "l2_budget_ratio",
-            default=0.50,
-        )
-        if l2_budget_ratio is None:
-            l2_budget_ratio = 0.50
-        l3_truncate_tokens = (
-            _lcm_int_setting(self.config, "LCM_L3_TRUNCATE_TOKENS", "l3_truncate_tokens", default=512) or 512
-        )
-
-        def accepts_result(text):
-            return source_tokens <= 0 or _count_tokens(text) < source_tokens
-
-        l1_kwargs = dict(kwargs)
-        l1_kwargs["accepts_result"] = accepts_result
-        l1_kwargs["max_tokens"] = token_budget * 2
-        l1_prompt = _build_l1_prompt(
-            serialized,
-            token_budget,
-            0,
-            focus_topic=focus_topic,
-            custom_instructions=custom_instructions,
-        )
-        rung_failures = []
-
-        def record_rung_failure(level, summary):
-            rung_failures.append({
-                "level": level,
-                "status": summary.get("status"),
-                "route": summary.get("route"),
-                "model": summary.get("model"),
-                "error": summary.get("error"),
-                "error_classification": summary.get("error_classification"),
-            })
-
-        summary = self._call_auxiliary_summary(l1_prompt, source_messages, **l1_kwargs)
-        if summary.get("status") == "ok":
-            return summary
-        record_rung_failure(1, summary)
-
-        l2_budget = max(1, int(token_budget * l2_budget_ratio))
-        l2_kwargs = dict(kwargs)
-        l2_kwargs["accepts_result"] = accepts_result
-        l2_kwargs["max_tokens"] = l2_budget * 2
-        l2_prompt = _build_l2_prompt(
-            serialized,
-            l2_budget,
-            focus_topic=focus_topic,
-            custom_instructions=custom_instructions,
-        )
-        summary = self._call_auxiliary_summary(l2_prompt, source_messages, **l2_kwargs)
-        if summary.get("status") == "ok":
-            if rung_failures:
-                summary["rung_failures"] = rung_failures
-            return summary
-        record_rung_failure(2, summary)
-        if summary.get("status") == "fallback":
-            summary.setdefault("error", "Hermes auxiliary summary was not smaller than source")
-            summary.setdefault("error_classification", "non_compressing_summary")
-        fallback = {
-            "status": "fallback",
-            "text": _deterministic_truncation(source_messages, limit=max(1, l3_truncate_tokens * 4)),
-            "route": "deterministic_fallback",
-            "model": None,
-            "error": summary.get("error") or "Hermes auxiliary summary was not smaller than source",
-            "error_classification": summary.get("error_classification") or "non_compressing_summary",
-            "rung_failures": rung_failures,
-        }
-        if summary.get("error"):
-            fallback["auxiliary_error"] = summary.get("error")
-        if summary.get("error_classification"):
-            fallback["auxiliary_error_classification"] = summary.get("error_classification")
-        return fallback
-
-    def _run_pre_compaction_extraction(self, summary_request, source_messages):
-        if not _lcm_extraction_enabled(self.config):
-            return None
-        if not source_messages:
-            return {"status": "no_source"}
-        extraction_request = (
-            summary_request.get("extraction_request") if isinstance(summary_request, dict) else None
-        )
-        prompt = extraction_request.get("prompt") if isinstance(extraction_request, dict) else None
-        if not isinstance(prompt, str) or not prompt.strip():
-            return {
-                "status": "failed_non_blocking",
-                "error": "LCM extraction envelope missing prompt",
-                "model": None,
-                "output_path": None,
-            }
-        extraction_model = str(
-            _lcm_extraction_model(self.config)
-            or _lcm_str_setting(self.config, "LCM_SUMMARY_MODEL", "summary_model", default="")
-            or ""
-        ).strip()
-        timeout_seconds = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home) / 1000
-        # Intentional divergence from upstream hermes-lcm: Rust stores extraction results in
-        # summary-node metadata instead of writing daily markdown files. We still surface
-        # output_path in the extraction contract for config/API parity.
-        output_path = _lcm_extraction_output_path(self.config)
-        client = _resolve_auxiliary_client(getattr(self, "agent", None))
-        if client is None or not callable(getattr(client, "call_llm", None)):
-            return {
-                "status": "failed_non_blocking",
-                "error": "Hermes auxiliary_client.call_llm is unavailable",
-                "model": extraction_model or None,
-                "output_path": output_path or None,
-            }
-        call_kwargs = {
-            "task": _EXTRACTION_TASK["key"],
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.2,
-            "max_tokens": 2000,
-        }
-        _apply_lcm_model_route(call_kwargs, extraction_model)
-        if timeout_seconds is not None:
-            call_kwargs["timeout"] = timeout_seconds
-        try:
-            response = client.call_llm(**call_kwargs)
-        except Exception as exc:
-            return {
-                "status": "failed_non_blocking",
-                "error": str(exc),
-                "model": extraction_model or None,
-                "output_path": output_path or None,
-            }
-        cleaned = _strip_reasoning(_llm_response_text(response)).strip()
-        if not cleaned or cleaned == "NOTHING_TO_EXTRACT":
-            return {
-                "status": "nothing_to_extract",
-                "model": extraction_model or None,
-                "output_path": output_path or None,
-            }
-        return {
-            "status": "ok",
-            "items": _normalize_extraction_items(cleaned),
-            "text": cleaned,
-            "model": extraction_model or None,
-            "output_path": output_path or None,
-        }
-
     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
-        """Compact ``messages`` and return the new message LIST.
-
-        The hermes ContextEngine ABC contract is a message list: the host
-        appends to the returned value, re-estimates tokens on it, and adopts
-        it as the live transcript (agent/conversation_compression.py). The
-        raw tracedecay result dict is kept on ``self.last_compress_result``
-        for diagnostics/tests. On error or no-op the input list is returned
-        unchanged so the host takes its abort/no-op path instead of
-        corrupting the conversation.
-        """
+        """Return the unchanged transcript when host compaction is unavailable."""
+        del current_tokens, focus_topic, kwargs
         original = list(messages or [])
-        self._last_compress_aborted = False
-        self._last_summary_error = None
-        try:
-            result = self._compress_to_result(
-                original,
-                current_tokens=current_tokens,
-                focus_topic=focus_topic,
-                **kwargs,
-            )
-        except Exception as exc:
-            logger.warning("tracedecay compression failed: %s", exc)
-            self._last_compress_aborted = True
-            self._last_summary_error = str(exc)
-            return original
-        self.last_compress_result = result if isinstance(result, dict) else {}
-        if (
-            not isinstance(result, dict)
-            or result.get("error")
-            or result.get("status") == "error"
-        ):
-            self._last_compress_aborted = True
-            if isinstance(result, dict):
-                self._last_summary_error = str(
-                    result.get("error") or result.get("reason") or "compression error"
-                )
-            else:
-                self._last_summary_error = "invalid compression result"
-            return original
-        if _compression_replay_is_compacted(result):
-            self._last_compress_aborted = True
-            self._last_summary_error = str(
-                result.get("mcp_truncation_reason")
-                or result.get("reason")
-                or "compression replay was compacted for MCP"
-            )
-            return original
-        replay = _replay_message_list(result.get("replay_messages"))
-        if replay is None or (not replay and original):
-            # No usable replay window — treat as a no-op; the host detects
-            # ``compressed == messages`` and skips session rotation.
-            self._last_compress_aborted = True
-            self._last_summary_error = str(result.get("reason") or "no usable replay")
-            return original
-        if replay == original:
-            return original
-        normalized_replay, replay_issues = _normalize_replay_tool_pairs(replay)
-        source_token_estimate = _count_messages_tokens(original)
-        replay_token_estimate = _count_messages_tokens(normalized_replay)
-        try:
-            reported_source_tokens = int(current_tokens) if current_tokens is not None else None
-        except (TypeError, ValueError):
-            reported_source_tokens = None
-        try:
-            reported_replay_tokens = int(result.get("replay_token_estimate"))
-        except (TypeError, ValueError):
-            reported_replay_tokens = None
-        has_reported_estimates = (
-            reported_source_tokens is not None
-            and reported_source_tokens > 0
-            and reported_replay_tokens is not None
-        )
-        boundary_code = None
-        if replay_issues:
-            boundary_code = "invalid_replay_tool_pairs"
-        elif (
-            has_reported_estimates
-            and reported_replay_tokens >= reported_source_tokens
-        ):
-            boundary_code = "non_shrinking_reported_replay"
-        elif (
-            not has_reported_estimates
-            and source_token_estimate > 0
-            and replay_token_estimate >= source_token_estimate
-        ):
-            boundary_code = "non_shrinking_replay"
-        if boundary_code is not None:
-            result = _compression_boundary_abort(
-                result,
-                boundary_code,
-                source_token_estimate=source_token_estimate,
-                replay_token_estimate=replay_token_estimate,
-                reported_source_tokens=reported_source_tokens,
-                reported_replay_tokens=reported_replay_tokens,
-                issues=replay_issues,
-            )
-            self.last_compress_result = result
-            self._last_compress_aborted = True
-            self._last_summary_error = boundary_code
-            return original
-        replay = normalized_replay
-        if replay != original:
-            self.compression_count += 1
-        return replay
-
-    def _compress_to_result(self, messages, current_tokens=None, focus_topic=None, **kwargs):
-        summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
-        force = bool(kwargs.pop("force", False))
-        max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
-        tool_kwargs = _project_call_kwargs(
-            kwargs.get("project_root") or self.project_root
-        )
-        lcm_option_keys = (
-            "expected_current_frontier_store_id",
-            "threshold_tokens",
-            "max_assembly_tokens",
-            "leaf_chunk_tokens",
-            "max_source_messages",
-            "summary_fan_in",
-            "incremental_max_depth",
-            "fresh_tail_count",
-            "dynamic_leaf_chunk_enabled",
-            "dynamic_leaf_chunk_max",
-            "context_length",
-            "reserve_tokens_floor",
-            "ignore_session_patterns",
-            "stateless_session_patterns",
-            "ignore_message_patterns",
-        )
-        args = self._tool_args()
-        args.update(
-            _lcm_config_args(
-                self.config,
-                self.hermes_home,
-                runtime_context_length=self._effective_context_length(),
-            )
-        )
-        args.update({
-            "provider": STANDARD_HERMES_LCM_PROVIDER,
-            "messages": messages,
-            "current_tokens": current_tokens,
-            "focus_topic": focus_topic,
-            "summarizer": summarizer,
-        })
-        args = _lcm_store_args(
-            args,
-            kwargs.get("project_root") or self.project_root,
-        )
-        if self.project_root:
-            args["response_handle_project_root"] = self.project_root
-        _apply_lcm_option_overrides(args, kwargs, lcm_option_keys)
-        if force and not args.get("max_assembly_tokens"):
-            try:
-                current = int(current_tokens or 0)
-            except (TypeError, ValueError):
-                current = 0
-            if current > 1:
-                args["max_assembly_tokens"] = current - 1
-            elif args.get("threshold_tokens"):
-                try:
-                    threshold = int(args["threshold_tokens"])
-                    if threshold > 1:
-                        args["max_assembly_tokens"] = threshold - 1
-                except (TypeError, ValueError):
-                    pass
-
-        attempts = 0
-        retry_status = None
-        error_classification = None
-        fallback_used = False
-        attempt_args = dict(args)
-
-        while attempts < max_auxiliary_attempts:
-            first = call_tracedecay_json(
-                "tracedecay_lcm_compress", attempt_args, **tool_kwargs
-            )
-            if _compression_replay_is_compacted(first):
-                return _with_auxiliary_metadata(
-                    _compacted_lcm_result_error(first),
-                    attempts=attempts,
-                    retry_status=retry_status,
-                    error_classification=error_classification,
-                    fallback_used=fallback_used,
-                )
-            if first.get("status") != "needs_summary":
-                return _with_auxiliary_metadata(
-                    first,
-                    attempts=attempts,
-                    retry_status=retry_status,
-                    error_classification=error_classification,
-                    fallback_used=fallback_used,
-                )
-
-            summary_request = first.get("summary_request") or {}
-            source_messages = _summary_source_messages(
-                summary_request.get("source_messages") or messages
-            )
-            attempts += 1
-            extraction_result = self._run_pre_compaction_extraction(
-                summary_request,
-                source_messages,
-            )
-            summary = self._summarize_with_escalation(
-                source_messages,
-                focus_topic=summary_request.get("focus_topic") or focus_topic or "",
-                summary_request=summary_request,
-                allow_retry_signal=True,
-                **kwargs,
-            )
-            summary_status = summary.get("status")
-            if summary_status in ("retry", "error"):
-                error_classification = summary.get("error_classification") or (
-                    "retry_worthy" if summary_status == "retry" else "permanent"
-                )
-                smaller_limit = _next_smaller_source_limit(
-                    source_messages,
-                    attempt_args.get("max_source_messages"),
-                )
-                if (
-                    summary_status == "retry"
-                    and smaller_limit is not None
-                    and attempts < max_auxiliary_attempts
-                ):
-                    retry_status = "retried"
-                    attempt_args = dict(args)
-                    attempt_args["max_source_messages"] = smaller_limit
-                    continue
-                retry_status = "retry_exhausted" if summary_status == "retry" else "not_retryable"
-                return _auxiliary_error_result(
-                    first,
-                    attempts=attempts,
-                    retry_status=retry_status,
-                    error_classification=error_classification,
-                    error=summary.get("error"),
-                )
-
-            if summary_status == "fallback":
-                fallback_used = True
-                retry_status = retry_status or "fallback_summary"
-                error_classification = summary.get("error_classification") or error_classification
-
-            provided_args = dict(attempt_args)
-            provided_route = _extraction_route_payload(summary.get("route"), extraction_result)
-            provided_args["summarizer"] = {
-                "mode": "provided",
-                "summary_text": summary["text"],
-                "route": provided_route,
-            }
-            result = call_tracedecay_json(
-                "tracedecay_lcm_compress", provided_args, **tool_kwargs
-            )
-            if _compression_replay_is_compacted(result):
-                result = _compacted_lcm_result_error(result)
-            return _with_auxiliary_metadata(
-                result,
-                attempts=attempts,
-                retry_status=retry_status,
-                error_classification=error_classification,
-                fallback_used=fallback_used,
-            )
+        reason = "host_raw_compression_unavailable"
+        self.last_compress_result = {
+            "status": "unavailable",
+            "reason": reason,
+            "semantic_error": True,
+        }
+        self._last_compress_aborted = True
+        self._last_summary_error = reason
+        return original
 
 class TracedecayMemoryProvider(MemoryProvider):
     provider_id = "tracedecay"
@@ -4083,12 +2453,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def sync_turn(self, user_content, assistant_content, *, session_id="", messages=None):
-        """Persist the completed turn into the LCM raw store.
-
-        Uses tracedecay_lcm_preflight's lossless active-message ingest (the
-        same content-cursored path the context engine uses), so the raw
-        store grows every turn instead of only when compression fires.
-        """
+        """Submit a completed turn to the daemon-owned transcript authority."""
         project_roots = _turn_project_roots(messages, self.hermes_home)
         if not project_roots and self.project_root:
             project_roots = [self.project_root]
@@ -4122,29 +2487,33 @@ class TracedecayMemoryProvider(MemoryProvider):
         # without binding the long-lived host session to any one project.
         for project_root in [None, *project_roots]:
             args = _lcm_store_args({
+                "action": "ingest_transcript",
                 "provider": STANDARD_HERMES_LCM_PROVIDER,
                 "session_id": sid,
                 "messages": turn_messages,
-                "transcript_projection": True,
+                "user_scope": project_root is None,
             }, project_root)
             try:
                 result = call_tracedecay_json(
-                    "tracedecay_lcm_preflight",
+                    "tracedecay_hook_runtime",
                     args,
                     **_project_call_kwargs(project_root),
                 )
-                if not result.get("error"):
+                if (
+                    not result.get("error")
+                    and result.get("status") in ("accepted", "committed", "exact_duplicate")
+                ):
                     _notify_turn_completed(sid, project_root, turn_messages[-1]["id"])
                     _notify_turn_ingested(sid, project_root, turn_messages[-1]["id"])
                 else:
                     logger.debug(
-                        "tracedecay sync_turn ingest rejected for %s: %s",
+                        "tracedecay daemon transcript ingest rejected for %s: %s",
                         project_root or "user",
-                        result.get("error"),
+                        result.get("error") or result.get("status"),
                     )
             except Exception as exc:
                 logger.debug(
-                    "tracedecay sync_turn ingest failed for %s: %s",
+                    "tracedecay daemon transcript ingest failed for %s: %s",
                     project_root or "user",
                     exc,
                 )
@@ -4320,22 +2689,6 @@ def register(ctx):
             register_config_defaults({"plugins": {"tracedecay": _plugin_config_defaults()}})
         except Exception as exc:
             logger.warning("tracedecay config defaults registration failed: %s", exc)
-    # Declare the extraction side-LLM as a proper auxiliary task so users can
-    # pin its provider/model under auxiliary.lcm_extraction instead of the
-    # generic auto-resolved "extraction" defaults.
-    register_auxiliary_task = getattr(ctx, "register_auxiliary_task", None)
-    if callable(register_auxiliary_task):
-        try:
-            register_auxiliary_task(
-                "lcm_extraction",
-                display_name="LCM extraction",
-                description="tracedecay pre-compaction decision/insight extraction",
-                defaults={"provider": "auto", "model": "", "timeout": 60},
-            )
-        except Exception as exc:
-            logger.debug("tracedecay auxiliary task registration failed: %s", exc)
-        else:
-            _EXTRACTION_TASK["key"] = "lcm_extraction"
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
         register_command(
@@ -4430,7 +2783,7 @@ def register(ctx):
                     _CONTEXT_TOOL_NAMES.add(name)
         else:
             logger.info(
-                "tracedecay LCM registered live-ingest tools skipped: this Hermes host does not forward messages to registered tool handlers; context-engine compression still receives host messages"
+                "tracedecay LCM registered tools skipped: this Hermes host does not forward messages to registered tool handlers; transcript sync remains on the memory-provider hook"
             )
     else:
         logger.info(

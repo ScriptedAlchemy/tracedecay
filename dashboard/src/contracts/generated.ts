@@ -924,10 +924,9 @@ export type ExplorerRunStateV1 = z.infer<typeof ExplorerRunStateV1Schema>;
 
 export const ExplorerSessionCountsV1Schema = z.object({
   message_count: z.number().int(),
-  source_token_count: z.number().int(),
+  source_token_count: z.number().int().nullable(),
   summary_node_count: z.number().int(),
-  summary_token_count: z.number().int(),
-  token_estimate_total: z.number().int(),
+  summary_token_count: z.number().int().nullable(),
 });
 export type ExplorerSessionCountsV1 = z.infer<typeof ExplorerSessionCountsV1Schema>;
 

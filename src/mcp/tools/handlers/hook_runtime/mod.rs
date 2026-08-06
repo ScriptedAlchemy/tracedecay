@@ -40,7 +40,9 @@ use context_scout::{
 };
 use errors::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
-use ingest::{accounting_receipt, codex_compact, cursor_compact, ingest_transcript};
+use ingest::{
+    accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
+};
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -92,6 +94,7 @@ pub async fn handle_hook_runtime(
             )));
         }
         "codex_compact" => codex_compact(cg, &args, session_authorities).await?,
+        "claude_compact" => claude_compact(&args, session_authorities).await?,
         "cursor_compact" => cursor_compact(cg, &args, session_authorities).await?,
         other => {
             return Err(config_error(format!(
@@ -175,6 +178,7 @@ pub(crate) async fn handle_projectless_hook_runtime(
                 config_error("authenticated profile identity is unavailable for Hook V2 admission")
             })?,
         )?,
+        "claude_compact" => claude_compact(&args, session_authorities).await?,
         _ => unreachable!("projectless hook action validated above"),
     };
     Ok(tool_json(None, &args, &output))
@@ -184,8 +188,10 @@ fn projectless_action_allowed(action: &str, args: &Value) -> bool {
     matches!(
         action,
         "user_review" | "hermes_receipt" | "hook_v2_profile_admit"
-    ) || (action == "ingest_transcript"
+    ) || (action == "claude_compact"
         && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+        || (action == "ingest_transcript"
+            && args.get("user_scope").and_then(Value::as_bool) == Some(true))
 }
 
 fn required_value(args: &Value, key: &str) -> Result<Value> {
