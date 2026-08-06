@@ -1,8 +1,8 @@
 use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
-    AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
-    CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
+    AuthorityRequirement, AvailabilityContract, CancellationContract, CapabilityManifestInputV1,
+    CapabilityManifestV1, CatalogValidationError, DeadlineBehavior, DeadlineContract,
+    DeniedDisclosurePolicy, EffectClass, ExecutableBindingAvailabilityV1,
     ExecutableBindingRegistryV1, ExecutableBindingV1, IdempotencyContract, IdentifierError,
     LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
     RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1,
@@ -114,7 +114,10 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Stateless,
         streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(vec![CancellationPoint::BeforeAdmission])?,
+        // Consuming the token is a single atomic authority commit. A caller
+        // may withdraw before admission, but once admitted there is no safe
+        // cancellable interval or rollback to advertise.
+        cancellation: CancellationContract::NotCancellable,
         deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
         pagination: None::<PaginationContract>,
         idempotency: IdempotencyContract::Required,
@@ -131,7 +134,6 @@ fn handoff_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVali
         receipt: ReceiptContract::DurableEffect,
         terminal_states: TerminalStateContract::new(vec![
             TerminalState::Completed,
-            TerminalState::Cancelled,
             TerminalState::TimedOut,
             TerminalState::Failed,
             TerminalState::Partial,

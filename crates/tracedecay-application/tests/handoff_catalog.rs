@@ -1,5 +1,5 @@
 use tracedecay_application::handoff_executable_binding_registry;
-use tracedecay_tool_catalog::RouteExposureV1;
+use tracedecay_tool_catalog::{CancellationContract, RouteExposureV1};
 
 #[test]
 fn registry_exposes_both_typed_daemon_handoff_open_operations() {
@@ -39,4 +39,9 @@ fn registry_exposes_both_typed_daemon_handoff_open_operations() {
             .to_string()
             .contains("session_id")
     }));
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding.cancellation() == &CancellationContract::NotCancellable)
+    );
 }
