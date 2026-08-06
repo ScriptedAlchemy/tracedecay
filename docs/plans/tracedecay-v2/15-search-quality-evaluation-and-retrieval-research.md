@@ -2,18 +2,21 @@
 
 ## Status / Role
 
-Status: active product plan and quality authority. PR9 and PR10 remain
+Status: active product plan and quality authority. Federated retrieval and
+native semantic search remain
 unfinished until their callable behavior, direct regressions, Linux developer
 evaluation, and normal CI pass; this document does not mark either complete.
 
-PR9 ships the typed federated-retrieval contract, independent exact and lexical
+The federated-retrieval delivery ships the typed federated-retrieval contract,
+independent exact and lexical
 retrievers, adapters for authorities available at that dependency point, deterministic
 fusion, source-aware dedupe and diversity, compact-candidate ranking, and the developer
-evaluation harness. PR10 ships source-local semantic projections, native semantic
+evaluation harness. The native semantic delivery ships source-local semantic
+projections, native semantic
 retrieval, and optional bounded reranking. The application service consumes the
 accepted ports, the dashboard exposes their controls and state, and the
 task/work journey adds the Plan 24 task/session retriever after canonical task
-identity exists. Semantic implementation is required in PR10; activation
+identity exists. Semantic implementation is required in the native semantic delivery; activation
 remains evidence-gated and lexical-only operation remains fully supported.
 
 This plan is the quality and composition authority. It does not replace the canonical
@@ -21,8 +24,8 @@ stores, the Plan 23 temporal query kernel, the Plan 24 task/work graph, the Plan
 graph, Plan 13 diagnostic anchors, or their authorization rules.
 
 Plan 15 owns retrieval quality, composition, evaluation, and profile-selection
-semantics. Plan 25 is the current PR9 delivery owner and Plan 31 the later PR10
-semantic delivery owner. The application, dashboard, task/work, and public
+semantics. Plan 25 is the federated-retrieval delivery owner and Plan 31 the
+native semantic delivery owner. The application, dashboard, task/work, and public
 surface plans are later consumers. They depend on tested callable behavior
 and evaluation results, not exact historical module, type, fixture, benchmark, command,
 or suite-spine names.
@@ -97,8 +100,8 @@ behavior.
   `AuthorizedRerankView`, `HydrationReceipt`, and evaluation decision IDs.
 - `src/application/retrieval/{mod.rs,ports.rs,pipeline.rs,types.rs}` owns orchestration,
   budgets, cancellation, query-snapshot pinning, partial-outcome policy, and the
-  rank-before-hydrate boundary when PR11 delivers the application layer. It depends on
-  PR9/PR10 ports, not storage implementations.
+  rank-before-hydrate boundary when the application layer lands. It depends on
+  the retrieval ports, not storage implementations.
 - `src/query/retrieval/{exact.rs,lexical.rs,semantic.rs,graph.rs,temporal.rs,task_session.rs,diagnostic.rs}`
   owns independent adapters; `src/query/retrieval/ports.rs` owns the single
   generic `Retriever<R, E>` port. `fusion.rs`, `dedupe.rs`, `diversity.rs`, `rerank.rs`, and
@@ -128,7 +131,7 @@ behavior.
   as defense in depth.
 - `src/config/retrieval.rs` owns versioned activation profiles and the atomic active and
   rollback profile pointers under the configuration-control-plane mutation capability.
-  PR14's `src/dashboard/` work renders profile, freshness, fallback, and report state; it
+  The dashboard's `src/dashboard/` work renders profile, freshness, fallback, and report state; it
   does not decide profile activation.
 - The hermetic developer evaluation and direct contract regressions remain
   evaluation infrastructure. Their current owners do not create a service,
@@ -138,7 +141,7 @@ behavior.
 
 ## Typed retrieval contract
 
-PR9 must provide an equivalent typed contract with the behavior and information
+Federated retrieval must provide an equivalent typed contract with the behavior and information
 below. The Rust sketch is explanatory, not an artifact-name or source-layout
 requirement; field/type names may change when direct contract tests preserve
 the semantics.
@@ -418,7 +421,7 @@ candidate budget during comparison.
 
 ## Semantic projection and reranking constraints
 
-PR10 implements native in-process FastEmbed search with no Python, WASM, llama.cpp,
+Native semantic search implements in-process FastEmbed search with no Python, WASM, llama.cpp,
 external inference process, or separate model service. Models load once and reuse
 sessions. Document embeddings batch during indexing; unchanged source occurrences reuse
 vectors only when every compatibility key matches.
@@ -438,14 +441,14 @@ promote a model.
 
 Rerank bounds are fields of `RerankPolicy`: admitted candidate count, input bytes,
 input tokens, work units, model invocations, deadline, and cancellation checkpoints.
-PR10 selects their values from the measured Linux recall/latency/resource comparison and
+The semantic delivery selects their values from the measured Linux recall/latency/resource comparison and
 records them in the enabled profile. Model absence, corruption, incompatibility, refusal,
 timeout, cancellation, or budget exhaustion produces the byte-identical pre-rerank
 order and a typed reason. No unmeasured substitute model is permitted.
 
 ## Developer evaluation and fixtures
 
-PR9 and PR10 use a small checked-in sanitized corpus and direct production
+Federated retrieval and native semantic search use a small checked-in sanitized corpus and direct production
 adapters. The corpus covers exact errors, symbols, flags, paths, IDs,
 false-exact hard negatives, paraphrases, typos, graph questions, temporal
 queries, stale/superseded evidence, wrong-scope cases, authorization canaries,
@@ -501,7 +504,7 @@ causality, and no public benchmark rank selects a production profile.
 The evaluated workload, revisions, seed, budgets, and pass conditions are
 reviewable before a candidate result is used. Zero authorization influence,
 exact-tier precedence, temporal eligibility, source-scope correctness, and a
-byte-identical PR9 fallback subpayload are hard product invariants. Candidate
+byte-identical exact/lexical fallback subpayload are hard product invariants. Candidate
 quality or resource improvements use practical thresholds justified by the
 baseline and product behavior; this plan does not invent universal cutoffs.
 
@@ -533,7 +536,7 @@ redefine the lexical fallback.
 
 ## Behavioral tests and evaluation
 
-PR9/PR10 must keep direct domain/store retrieval contracts, every lane's
+Both deliveries must keep direct domain/store retrieval contracts, every lane's
 regressions, the hermetic quality suite, profile activation/rollback
 regressions, normal all-feature CI, and the Linux developer evaluation green.
 Historical binary names, command lines, test-target names, packet schemas, and
@@ -548,13 +551,14 @@ recovery, copies and echoes, contradictions, stale and superseded evidence, wron
 project/worktree/branch/time, authorization canaries, deterministic pagination,
 contribution explanations, exact-admission hard negatives, deterministic committed
 prefixes under execution-order and timing jitter, partial outcomes, cancellation, no-result behavior,
-rank-before-hydrate, and hydration authorization recheck. PR10 additionally covers model
+rank-before-hydrate, and hydration authorization recheck. The semantic delivery additionally covers model
 installation and offline reuse, batching, incremental vector reuse, incompatibility and
 rebuild, privacy isolation, bounded reranking, model corruption/refusal/timeout,
 configuration pinning, byte-identical fallback, search while semantic indexing is
 blocked, zero wait by exact/lexical/graph operations, omission of every non-current
-generation state, and atomic visibility of the complete compatible generation plus its
-active pointer.
+generation state, verified visibility of the complete compatible immutable generation,
+and semantic routing only after Plan 20 commits the matching linked activation receipt.
+Publication alone never changes the active retrieval profile.
 
 ## Rollout, rollback, and failure handling
 
@@ -570,7 +574,7 @@ Runtime safety ceilings may equal or exceed the enabled profile budgets but may 
 below them; otherwise activation fails because the evaluated profile cannot execute.
 
 Projection workers never enter the request dependency chain. During indexing, status may
-report bounded progress, but normal search routes immediately through the frozen PR9
+report bounded progress, but normal search routes immediately through the frozen
 exact/lexical/graph fallback. Atomic activation is the first point at which a compatible
 semantic lane may appear; any failure before that point preserves the prior route and
 rank bytes.
@@ -613,7 +617,7 @@ evaluated profile budget.
   freshness, coverage, cap and dedupe decisions, and typed fallback reasons.
 - Exact errors, symbols, flags, paths, IDs, diagnostic codes, config keys, tool names,
   and quoted literals cannot be demoted by approximate fusion or reranking.
-- The checked-in fixture and run schemas reproduce the baseline, PR9, PR10, channel
+- The checked-in fixture and run schemas reproduce the baseline, federated, semantic, channel
   ablations, exact-scan/ANN comparison, and reranker comparison with immutable evidence.
 - Temporal correctness, authorization leakage, context precision/recall, p50/p95/p99
   latency, RSS, tokens, cost, and task completion are measured with the declared methods
