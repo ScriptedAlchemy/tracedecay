@@ -17,7 +17,7 @@ use tracedecay_domain::{
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     ProviderId, RetentionClass, SessionId, UtcMicros,
 };
-use tracedecay_store::StoreShardScopeV1;
+use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
 
 use super::admission::{
     HookV2BindingAdmission, hook_v2_binding_admission, hook_v2_catchup_response,
@@ -167,10 +167,23 @@ pub(super) async fn admit_native_context_scout_lifecycle(
         Ok(request) => request,
         Err(_) => return false,
     };
-    matches!(
-        facade.capture_observation(request).await,
-        Ok(CaptureObservationOutcome::Persisted { .. })
-    )
+    // Admission is the durable commit of the lifecycle observation. Providers
+    // routed through the external-source replay path commit the same durable
+    // record while projection continues as bounded background work, so a
+    // queued projection never blocks Scout lifecycle admission. Idempotent
+    // re-admission of the exact same record remains admitted.
+    match facade.capture_observation(request).await {
+        Ok(CaptureObservationOutcome::Persisted { .. }) => true,
+        Ok(CaptureObservationOutcome::AcceptedForReplay { outcome, .. }) => matches!(
+            *outcome,
+            ObservationPersistOutcome::Committed(_) | ObservationPersistOutcome::ExactDuplicate(_)
+        ),
+        Ok(
+            CaptureObservationOutcome::Rejected { .. }
+            | CaptureObservationOutcome::Quarantined { .. },
+        )
+        | Err(_) => false,
+    }
 }
 
 const MAX_RETAINED_HOOK_V2_DELIVERY_CLAIMS: usize = 256;
@@ -325,10 +338,11 @@ pub(super) async fn hook_v2_feedback_notice_delivery(
             return Ok(hook_v2_catchup_response(ACTION));
         }
     }
-    let notice = serde_json::from_value::<
-        crate::application::advisory::AdvisoryHookLookupNoticeV1,
-    >(required_value(args, "feedback_notice")?)
-    .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
+    let notice =
+        serde_json::from_value::<crate::application::advisory::AdvisoryHookLookupNoticeV1>(
+            required_value(args, "feedback_notice")?,
+        )
+        .map_err(|error| config_error(format!("invalid advisory feedback notice: {error}")))?;
     let status = if crate::application::advisory::acknowledge_advisory_hook_notice(
         envelope.project_id,
         envelope.worktree_id,
