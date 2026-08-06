@@ -21,24 +21,25 @@ use serde::{Deserialize, Serialize};
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationContractError,
     ApplicationOutcome, ApplicationProblem, AttachRuntimeEvidenceCommand, AuthorityReceipt,
-    AuthorizedScopeSet, CancellationContext, CreateWorkCommand, Deadline, EffectId, EffectReceipt,
-    EffectResult, EvidenceAuthority, EvidenceCoverage, EvidencePacket, EvidenceScore,
-    IdempotencyKey, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
+    AuthorizedScopeSet, CancelWorkAttemptCommand, CancellationContext, CreateWorkCommand, Deadline,
+    EffectId, EffectReceipt, EffectResult, EvidenceAuthority, EvidenceCoverage, EvidencePacket,
+    EvidenceScore, IdempotencyKey, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
     MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, Omission,
     OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1, OpenTaskHandoffRequestV1,
     OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState, PreviewId, PreviewResult,
     ReconciliationState, ReplanDependenciesCommand, RequestId, ResolvedScope,
-    RetrieverContribution, ReviewProposalRequestV1, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
-    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation,
+    ResumeWorkAttemptsCommand, RetrieverContribution, ReviewProposalRequestV1,
+    StartWorkAttemptCommand, TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
+    TaskHandoffRedeemed, TemporalState, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkflowDefinitionDiff,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
-    ScopeSetId, UtcMicros, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
+    ScopeSetId, UtcMicros, WorkAttemptV1, WorkProjection, WorkProjectionDeltaV1,
+    WorkProjectionSnapshotV1,
 };
 use tracedecay_lsp::{
     LspSessionAccess, LspSessionCredential, LspSessionId, MAX_LSP_FRAME_BYTES,
@@ -240,6 +241,10 @@ pub(crate) enum WorkApplicationInvocationV1 {
     AdmitExecution(AdmitExecutionCommand),
     AttachRuntimeEvidence(AttachRuntimeEvidenceCommand),
     AcceptTask(AcceptTaskCommand),
+    StartAttempt(StartWorkAttemptCommand),
+    AttemptStatus(WorkAttemptStatusRequestV1),
+    CancelAttempt(CancelWorkAttemptCommand),
+    ResumeAttempts(ResumeWorkAttemptsCommand),
 }
 
 impl WorkApplicationInvocationV1 {
@@ -254,6 +259,10 @@ impl WorkApplicationInvocationV1 {
             Self::AdmitExecution(_) => "admit_execution",
             Self::AttachRuntimeEvidence(_) => "attach_runtime_evidence",
             Self::AcceptTask(_) => "accept_task",
+            Self::StartAttempt(_) => "start_attempt",
+            Self::AttemptStatus(_) => "attempt_status",
+            Self::CancelAttempt(_) => "cancel_attempt",
+            Self::ResumeAttempts(_) => "resume_attempts",
         }
     }
 }
@@ -2300,6 +2309,10 @@ pub(crate) enum WorkApplicationOutcomeV1 {
     AdmitExecution(ApplicationOutcome<WorkProjection>),
     AttachRuntimeEvidence(ApplicationOutcome<WorkProjection>),
     AcceptTask(ApplicationOutcome<WorkProjection>),
+    StartAttempt(ApplicationOutcome<WorkAttemptV1>),
+    AttemptStatus(ApplicationOutcome<WorkAttemptV1>),
+    CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
+    ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

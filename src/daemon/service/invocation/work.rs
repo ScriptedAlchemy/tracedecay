@@ -19,8 +19,11 @@ pub(super) fn concealed_application_problem(request_id: String) -> DaemonInvocat
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute_work_application(
     registered: RegisteredWorkRuntime,
+    attempt_processes: Arc<super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
+    project_root: Option<PathBuf>,
     request_id: String,
     request: WorkApplicationInvocationV1,
     observed_at: UtcMicros,
@@ -193,11 +196,128 @@ pub(super) fn execute_work_application(
             deadline,
             WorkApplicationOutcomeV1::AcceptTask,
         ),
+        WorkApplicationInvocationV1::StartAttempt(command) => {
+            let started = services.attempts().start(&context, command);
+            if let (Ok(attempt), Some(project_root)) = (&started, project_root.as_ref())
+                && attempt.state() == tracedecay_domain::WorkAttemptStateV1::Leased
+            {
+                super::work_attempt_exec::spawn_attempt_execution(
+                    registered.clone(),
+                    Arc::clone(&attempt_processes),
+                    project_root.clone(),
+                    attempt.clone(),
+                );
+            }
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                started,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::StartAttempt,
+            )
+        }
+        WorkApplicationInvocationV1::AttemptStatus(request) => complete_work_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services.attempts().status(&context, &request),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::AttemptStatus,
+        ),
+        WorkApplicationInvocationV1::CancelAttempt(command) => {
+            let cancelled = services.attempts().request_cancellation(&context, command);
+            if let Ok(attempt) = &cancelled {
+                attempt_processes.signal_cancellation(attempt.identity());
+            }
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                cancelled,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::CancelAttempt,
+            )
+        }
+        WorkApplicationInvocationV1::ResumeAttempts(command) => {
+            let report = services.attempts().resume(&context, &command);
+            if let (Ok(report), Some(project_root)) = (&report, project_root.as_ref()) {
+                for attempt in &report.recovery_required {
+                    super::work_attempt_exec::spawn_attempt_execution(
+                        registered.clone(),
+                        Arc::clone(&attempt_processes),
+                        project_root.clone(),
+                        attempt.clone(),
+                    );
+                }
+            }
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                report,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::ResumeAttempts,
+            )
+        }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Mints the daemon-owned request context under which background attempt
+/// execution persists transitions. The authority and scope are exactly the
+/// registered runtime's; only the deadline is the runtime's own, because the
+/// provider process outlives the request that started it.
+pub(super) fn work_background_context(
+    registered: &RegisteredWorkRuntime,
+    identity: &tracedecay_domain::WorkAttemptIdentityV1,
+) -> Result<RequestContext, ApplicationContractError> {
+    const BACKGROUND_DEADLINE_MICROS: i64 = 86_400_000_000;
+    let request_id = RequestId::new(format!(
+        "work-attempt-exec-{}-{}-{}",
+        identity.task_id().as_str(),
+        identity.run_id().as_str(),
+        identity.attempt_id().as_str()
+    ))?;
+    let deadline = Deadline::new(UtcMicros(
+        current_micros()
+            .0
+            .saturating_add(BACKGROUND_DEADLINE_MICROS),
+    ))?;
+    let cancellation = CancellationContext::active(format!(
+        "work-attempt-exec-{}",
+        identity.attempt_id().as_str()
+    ))?;
+    RequestContext::new(
+        registered.actor.clone(),
+        registered.grant.scope.clone(),
+        registered.grant.clone(),
+        request_id,
+        deadline,
+        cancellation,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
@@ -806,6 +926,9 @@ fn work_projection_problem(error: WorkProjectionApplicationError) -> Application
             code: "work.projection_unavailable".to_owned(),
             message: "The Work projection authority is unavailable".to_owned(),
         }),
+        WorkProjectionApplicationError::Port(
+            tracedecay_application::WorkProjectionPortError::NotFoundOrNotAuthorized,
+        ) => ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
     }
 }
 

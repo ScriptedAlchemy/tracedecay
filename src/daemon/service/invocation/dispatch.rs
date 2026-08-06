@@ -494,6 +494,8 @@ impl DaemonInvocationService {
                 };
                 execute_work_application(
                     registered,
+                    Arc::clone(&self.work_attempt_processes),
+                    project_root.map(Path::to_path_buf),
                     request_id,
                     request,
                     observed_at,

@@ -32,6 +32,11 @@ pub struct RegisteredWorkApplicationServicesV1 {
     projections: tracedecay_application::WorkProjectionReadService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    attempts: tracedecay_application::WorkAttemptService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
 }
 
 impl RegisteredWorkApplicationServicesV1 {
@@ -48,6 +53,16 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.projections
+    }
+
+    pub fn attempts(
+        &self,
+    ) -> &tracedecay_application::WorkAttemptService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.attempts
     }
 }
 
@@ -415,7 +430,12 @@ impl RegisteredGlobalDb {
         let storage = self.work_storage()?;
         Ok(RegisteredWorkApplicationServicesV1 {
             commands: tracedecay_application::WorkService::new(storage.clone()),
-            projections: tracedecay_application::WorkProjectionReadService::new(storage),
+            projections: tracedecay_application::WorkProjectionReadService::new(storage.clone()),
+            attempts: tracedecay_application::WorkAttemptService::new(
+                storage.clone(),
+                storage.clone(),
+                tracedecay_application::WorkService::new(storage),
+            ),
         })
     }
 

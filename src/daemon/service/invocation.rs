@@ -42,12 +42,11 @@ use tracedecay_application::{
     PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
     ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffGrant, TaskHandoffRedeemed,
-    TaskHandoffToken, TemporalState, WorkProjectionApplicationError,
-    WorkflowCoordinationError, WorkflowEffectAuthorityPortV1,
-    WorkflowEffectIdentityV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
-    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1,
-    WorkflowEffectSuccessV1, WorkflowEffectTerminalV1, callable_code_operations,
-    prepare_task_handoff_issue, prepare_task_handoff_redeem,
+    TaskHandoffToken, TemporalState, WorkProjectionApplicationError, WorkflowCoordinationError,
+    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectOperationV1,
+    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
+    WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1, WorkflowEffectTerminalV1,
+    callable_code_operations, prepare_task_handoff_issue, prepare_task_handoff_redeem,
     prepare_workflow_definition_registration,
 };
 use tracedecay_domain::configuration::{
@@ -92,14 +91,12 @@ use crate::agents::context_scout_ports::{
 };
 use crate::application::ProjectSourceAccessSnapshot;
 use crate::application::advisory::{
-    AdvisoryCycleOutcome, CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1,
-    CiReadOnlyProviderArchiveV1, GitHubCanonicalReviewAnchorAuthorityV1,
-    GitHubCurrentBranchRemapper, AdvisoryDaemonStartupErrorV1,
-    AdvisoryDaemonStartupRegistrationV1, AdvisoryHookLookupNoticeV1,
-    AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
-    AdvisoryProductionStartupRegistrationV1, AdvisoryProviderAuthoritiesV1,
-    AdvisoryRuntimeOpenV1, open_advisory_production_authorities,
-    register_advisory_daemon_startup,
+    AdvisoryCycleOutcome, AdvisoryDaemonStartupErrorV1, AdvisoryDaemonStartupRegistrationV1,
+    AdvisoryHookLookupNoticeV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryProviderAuthoritiesV1, AdvisoryRuntimeOpenV1,
+    CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1,
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCurrentBranchRemapper,
+    open_advisory_production_authorities, register_advisory_daemon_startup,
 };
 use crate::application::configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationControlStore, ConfigurationError,
@@ -136,8 +133,7 @@ use crate::application::operation_stream::{
     OperationEmitter, OperationEventAuthority, OperationKind, operation_event_authority,
 };
 use crate::application::primitives::{
-    PrimitiveDispatch, PrimitiveInvocation, PrimitiveProjectRuntime,
-    PrimitiveRequest,
+    PrimitiveDispatch, PrimitiveInvocation, PrimitiveProjectRuntime, PrimitiveRequest,
 };
 use crate::application::semantic_runtime::{
     ProductionSemanticConfigurationOperationV1, SemanticActivationCoordinationErrorV1,
@@ -197,6 +193,7 @@ mod registrars;
 mod tests;
 mod types;
 mod work;
+mod work_attempt_exec;
 
 use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
@@ -265,6 +262,7 @@ pub(crate) struct DaemonInvocationService {
     /// [`ProjectRuntimeRegistryV1`] for why these are not twelve maps.
     project_runtimes: ProjectRuntimeRegistryV1,
     operation_events: OperationEventAuthority,
+    work_attempt_processes: Arc<work_attempt_exec::WorkAttemptProcessRegistryV1>,
 }
 
 #[cfg(test)]
@@ -289,6 +287,9 @@ impl DaemonInvocationService {
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             project_runtimes: ProjectRuntimeRegistryV1::default(),
             operation_events: daemon_operation_event_authority(),
+            work_attempt_processes: Arc::new(
+                work_attempt_exec::WorkAttemptProcessRegistryV1::default(),
+            ),
         }
     }
 }
