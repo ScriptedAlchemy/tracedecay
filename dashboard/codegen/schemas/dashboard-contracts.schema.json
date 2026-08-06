@@ -5942,15 +5942,24 @@
         },
         "ratio": {
           "format": "double",
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "source_token_count": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "token_count": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -6110,11 +6119,21 @@
             "null"
           ]
         },
-        "token_estimate": {
+        "token_count": {
           "format": "int64",
           "type": [
             "integer",
             "null"
+          ]
+        },
+        "token_count_provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmTokenCountProvenanceV1"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "tool_name": {
@@ -6130,7 +6149,8 @@
         "role",
         "source",
         "timestamp",
-        "token_estimate",
+        "token_count",
+        "token_count_provenance",
         "content",
         "message_id",
         "ordinal",
@@ -6423,19 +6443,11 @@
             "integer",
             "null"
           ]
-        },
-        "token_estimate_total": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
         }
       },
       "required": [
         "message_count",
         "summary_node_count",
-        "token_estimate_total",
         "summary_token_count",
         "source_token_count"
       ],
@@ -6613,7 +6625,21 @@
           "format": "int64",
           "type": "integer"
         },
-        "token_estimate": {
+        "known_message_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token_count": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "token_count_provenance": {
+          "$ref": "#/$defs/LcmTokenCountProvenanceV1"
+        },
+        "unknown_message_count": {
           "format": "int64",
           "type": "integer"
         }
@@ -6621,7 +6647,10 @@
       "required": [
         "bucket",
         "count",
-        "token_estimate"
+        "token_count",
+        "token_count_provenance",
+        "known_message_count",
+        "unknown_message_count"
       ],
       "type": "object"
     },
@@ -6747,16 +6776,40 @@
           "format": "int64",
           "type": "integer"
         },
-        "token_estimate": {
+        "known_message_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token_count": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "token_count_provenance": {
+          "$ref": "#/$defs/LcmTokenCountProvenanceV1"
+        },
+        "unknown_message_count": {
           "format": "int64",
           "type": "integer"
         }
       },
       "required": [
         "count",
-        "token_estimate"
+        "token_count",
+        "token_count_provenance",
+        "known_message_count",
+        "unknown_message_count"
       ],
       "type": "object"
+    },
+    "LcmTokenCountProvenanceV1": {
+      "enum": [
+        "o200k_approximate",
+        "unavailable"
+      ],
+      "type": "string"
     },
     "LoomBranchSpanV1": {
       "properties": {

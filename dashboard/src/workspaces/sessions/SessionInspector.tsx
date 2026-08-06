@@ -9,8 +9,8 @@
  * cannot:
  *
  *   raw messages       the stored turns, in the store's own order, with the
- *                      provider, tool, storage kind and token estimate the
- *                      store recorded for each.
+ *                      provider, tool, storage kind and content-token count
+ *                      provenance available for each.
  *   summary nodes      the LCM compaction boundaries. Each one names the span
  *                      of source tokens it replaced and the token count it
  *                      replaced them with, so a compacted region is visible as
@@ -204,11 +204,7 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
             size="sm"
             value={splitCount(counts.message_count).value}
             unit={splitCount(counts.message_count).unit}
-            note={
-              counts.token_estimate_total != null
-                ? `~${counts.token_estimate_total.toLocaleString()} est. tokens`
-                : 'token estimate unavailable'
-            }
+            note="token counts shown per loaded message"
           />
         </div>
         <div className="td-raised border border-edge-subtle px-2.5 py-2">
@@ -441,6 +437,7 @@ function RawMessages({
 
 function MessageRow({ message }: { message: LcmMessageV1 }) {
   const compacted = message.summary_node_ids.length;
+  const tokenLabel = messageTokenLabel(message);
   return (
     <li
       className="flex flex-col gap-1 border-b border-edge-subtle px-2 py-1.5 last:border-b-0"
@@ -484,9 +481,7 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
         {message.storage_kind && message.content != null ? (
           <span>{message.storage_kind}</span>
         ) : null}
-        {message.token_estimate != null ? (
-          <span className="tabular">~{message.token_estimate.toLocaleString()} tokens</span>
-        ) : null}
+        {tokenLabel ? <span className="tabular">{tokenLabel}</span> : null}
         {compacted > 0 ? (
           <span>
             in {compacted} {compacted === 1 ? 'summary' : 'summaries'}
@@ -496,4 +491,14 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
       </span>
     </li>
   );
+}
+
+function messageTokenLabel(message: LcmMessageV1): string | null {
+  if (message.token_count == null) return null;
+  switch (message.token_count_provenance) {
+    case 'o200k_approximate':
+      return `~${message.token_count.toLocaleString()} tokens · o200k approximate`;
+    default:
+      return null;
+  }
 }

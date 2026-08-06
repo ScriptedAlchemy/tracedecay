@@ -40,7 +40,6 @@ describe('Session transcript drill-down', () => {
         sessionPage({
           counts: {
             message_count: 1,
-            token_estimate_total: null,
             source_token_count: null,
             summary_node_count: 0,
             summary_token_count: null,
@@ -49,9 +48,34 @@ describe('Session transcript drill-down', () => {
       ),
     );
 
-    expect(await screen.findByText('token estimate unavailable')).toBeTruthy();
+    expect(await screen.findByText('token counts shown per loaded message')).toBeTruthy();
     expect(screen.queryByText('~0 est. tokens')).toBeNull();
     expect(screen.getByText('token counts unavailable')).toBeTruthy();
+  });
+
+  it('labels visible-content tokenizer counts as approximate', async () => {
+    renderInspector(
+      fixtureEnvelope(
+        sessionPage({
+          messages: [
+            {
+              ...message('recorded answer'),
+              token_count: 13,
+              token_count_provenance: 'o200k_approximate',
+            },
+            {
+              ...message('tokenized answer'),
+              message_id: 'tokenized answer',
+              token_count: 17,
+              token_count_provenance: 'o200k_approximate',
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(await screen.findByText('~13 tokens · o200k approximate')).toBeTruthy();
+    expect(screen.getByText('~17 tokens · o200k approximate')).toBeTruthy();
   });
 
   it('follows opaque cursors forward and its cursor stack backward', async () => {
@@ -113,7 +137,8 @@ function message(content: string) {
     store_id: null,
     summary_node_ids: [],
     timestamp: null,
-    token_estimate: null,
+    token_count: null,
+    token_count_provenance: null,
     tool_name: null,
   };
 }
@@ -127,7 +152,6 @@ function sessionPage(over: Record<string, unknown> = {}) {
     limit: 100,
     counts: {
       message_count: 1,
-      token_estimate_total: 24,
       source_token_count: 0,
       summary_node_count: 0,
       summary_token_count: 0,

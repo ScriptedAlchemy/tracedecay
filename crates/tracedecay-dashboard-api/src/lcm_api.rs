@@ -1,8 +1,8 @@
 //! LCM dashboard API.
 //!
-//! Search and session reads use a daemon-owned temporal retrieval port. This
-//! crate never opens or queries the session store, and therefore cannot bypass
-//! canonical owning-store hydration or redaction.
+//! All LCM reads use a daemon-owned temporal retrieval port. This crate never
+//! opens or queries the session store, and therefore cannot bypass canonical
+//! owning-store hydration or redaction.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -18,8 +18,14 @@ use super::read_model::{
 };
 use super::util::{JsonPath, JsonQuery};
 
+mod aggregates;
+
 #[derive(Clone, Debug)]
 pub enum DashboardLcmReadRequestV1 {
+    Overview {
+        query: String,
+        limit: i64,
+    },
     Search {
         query: String,
         limit: i64,
@@ -35,6 +41,26 @@ pub enum DashboardLcmReadRequestV1 {
         limit: i64,
         cursor: Option<String>,
     },
+    Timeline {
+        bucket: DashboardLcmTimelineBucketV1,
+        session_id: Option<String>,
+        limit: i64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DashboardLcmTimelineBucketV1 {
+    Hour,
+    Day,
+}
+
+impl DashboardLcmTimelineBucketV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+        }
+    }
 }
 
 pub enum DashboardLcmReadOutcomeV1 {
@@ -97,9 +123,16 @@ pub struct DashboardLcmCanonicalStatsV1 {
 pub struct DashboardLcmCanonicalPageV1 {
     pub messages: Vec<DashboardLcmCanonicalMessageV1>,
     pub summary_nodes: Vec<DashboardLcmCanonicalSummaryV1>,
+    pub overview_matches: Option<DashboardLcmCanonicalMatchesV1>,
     pub stats: DashboardLcmCanonicalStatsV1,
     pub has_more: bool,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DashboardLcmCanonicalMatchesV1 {
+    pub messages: Vec<DashboardLcmCanonicalMessageV1>,
+    pub summary_nodes: Vec<DashboardLcmCanonicalSummaryV1>,
 }
 
 pub type DashboardLcmReadFutureV1<'a> =
@@ -117,9 +150,15 @@ pub trait DashboardLcmReadPortV1: Send + Sync {
 struct LcmSessionCountsV1 {
     message_count: i64,
     summary_node_count: i64,
-    token_estimate_total: Option<i64>,
     summary_token_count: Option<i64>,
     source_token_count: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LcmTokenCountProvenanceV1 {
+    O200kApproximate,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -129,7 +168,8 @@ pub(super) struct LcmMessageV1 {
     role: Option<String>,
     source: Option<String>,
     timestamp: Option<i64>,
-    token_estimate: Option<i64>,
+    token_count: Option<i64>,
+    token_count_provenance: Option<LcmTokenCountProvenanceV1>,
     content: Option<String>,
     message_id: String,
     ordinal: Option<i64>,
@@ -181,9 +221,9 @@ struct LcmDepthCountV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct LcmCompressionSummaryV1 {
-    source_token_count: i64,
-    token_count: i64,
-    ratio: f64,
+    source_token_count: Option<i64>,
+    token_count: Option<i64>,
+    ratio: Option<f64>,
     node_count: i64,
 }
 
@@ -283,7 +323,10 @@ pub(super) struct LcmSessionPayloadV1 {
 struct LcmTimelineBucketV1 {
     bucket: String,
     count: i64,
-    token_estimate: i64,
+    token_count: Option<i64>,
+    token_count_provenance: LcmTokenCountProvenanceV1,
+    known_message_count: i64,
+    unknown_message_count: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -319,7 +362,10 @@ struct LcmTimelineNodeBucketV1 {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct LcmTimelineUndatedV1 {
     count: i64,
-    token_estimate: i64,
+    token_count: Option<i64>,
+    token_count_provenance: LcmTokenCountProvenanceV1,
+    known_message_count: i64,
+    unknown_message_count: i64,
 }
 
 #[derive(Deserialize)]
@@ -331,19 +377,20 @@ pub struct OverviewParams {
 
 /// GET /api/plugins/hermes-lcm/overview
 ///
-/// Transcript data is only safe to expose after temporal retrieval hydrates it
-/// through the owning store's redaction authority. That service is not mounted
-/// on this dashboard floor, so this route stays explicitly unavailable rather
-/// than reading raw LCM tables directly.
+/// The daemon authority freezes and traverses the canonical temporal result
+/// manifest before this boundary reduces the hydrated records.
 pub async fn overview(
     State(state): State<DashboardState>,
-    JsonQuery(_params): JsonQuery<OverviewParams>,
+    JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
-    Json(DashboardEnvelopeV1::unavailable(
-        scope_from_state(&state),
-        None,
-        "lcm_aggregate_cursor_contract_unavailable",
-    ))
+    lcm_read(
+        &state,
+        DashboardLcmReadRequestV1::Overview {
+            query: params.q,
+            limit: params.limit.unwrap_or(25).clamp(1, 200),
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -435,13 +482,22 @@ pub struct TimelineParams {
 /// GET /api/plugins/hermes-lcm/timeline
 pub async fn timeline(
     State(state): State<DashboardState>,
-    JsonQuery(_params): JsonQuery<TimelineParams>,
+    JsonQuery(params): JsonQuery<TimelineParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
-    Json(DashboardEnvelopeV1::unavailable(
-        scope_from_state(&state),
-        None,
-        "lcm_aggregate_cursor_contract_unavailable",
-    ))
+    let bucket = match params.bucket.trim().to_ascii_lowercase().as_str() {
+        "" | "day" => DashboardLcmTimelineBucketV1::Day,
+        "hour" => DashboardLcmTimelineBucketV1::Hour,
+        _ => return invalid_lcm_request(&state),
+    };
+    lcm_read(
+        &state,
+        DashboardLcmReadRequestV1::Timeline {
+            bucket,
+            session_id: trimmed_nonempty(params.session_id),
+            limit: params.limit.unwrap_or(400).clamp(1, 2_000),
+        },
+    )
+    .await
 }
 
 async fn lcm_read<T>(
@@ -463,22 +519,42 @@ where
         .await;
     let scope = scope_from_state(state);
     match outcome {
-        DashboardLcmReadOutcomeV1::Ready(page) => match render_canonical_payload(request, page) {
-            Ok(payload) => Json(DashboardEnvelopeV1::ready(
-                scope,
-                DashboardCoverageV1::unknown(),
-                Some(payload),
-            )),
-            Err(()) => Json(DashboardEnvelopeV1::unavailable(
-                scope,
-                None,
-                "lcm_daemon_payload_invalid",
-            )),
-        },
+        DashboardLcmReadOutcomeV1::Ready(page) => {
+            let timeline_coverage = aggregates::timeline_view_coverage(&request, &page);
+            let coverage = if aggregates::is_aggregate_request(&request) {
+                DashboardCoverageV1::complete(
+                    aggregates::returned_count(&page),
+                    "canonical hydrated records",
+                )
+            } else {
+                DashboardCoverageV1::unknown()
+            };
+            match aggregates::render_canonical_payload(request, page) {
+                Ok(payload) => {
+                    if let Some((eligible, examined, true)) = timeline_coverage {
+                        Json(DashboardEnvelopeV1::partial(
+                            scope,
+                            eligible,
+                            examined,
+                            "timeline_buckets",
+                            vec!["page_limit".to_owned()],
+                            Some(payload),
+                        ))
+                    } else {
+                        Json(DashboardEnvelopeV1::ready(scope, coverage, Some(payload)))
+                    }
+                }
+                Err(()) => Json(DashboardEnvelopeV1::unavailable(
+                    scope,
+                    None,
+                    "lcm_daemon_payload_invalid",
+                )),
+            }
+        }
         DashboardLcmReadOutcomeV1::Partial { page, omitted } => {
-            let examined = returned_count(&page);
+            let examined = aggregates::returned_count(&page);
             let eligible = examined.saturating_add(omitted);
-            match render_canonical_payload(request, page) {
+            match aggregates::render_canonical_payload(request, page) {
                 Ok(payload) => Json(DashboardEnvelopeV1::partial(
                     scope,
                     eligible,
@@ -541,153 +617,6 @@ fn typed_not_ready_envelope<T>(
     )
 }
 
-fn render_canonical_payload<T>(
-    request: DashboardLcmReadRequestV1,
-    page: DashboardLcmCanonicalPageV1,
-) -> Result<T, ()>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let value = match request {
-        DashboardLcmReadRequestV1::Search {
-            query,
-            limit,
-            cursor: _,
-            role,
-            source,
-            session_id,
-            since,
-            until,
-        } => {
-            let messages = page
-                .messages
-                .into_iter()
-                .map(message_json)
-                .collect::<Vec<_>>();
-            let summary_nodes = page
-                .summary_nodes
-                .into_iter()
-                .map(summary_json)
-                .collect::<Vec<_>>();
-            serde_json::json!({
-                "path": "daemon://session-temporal",
-                "storage_scope": "project",
-                "exists": true,
-                "query": query,
-                "limit": limit,
-                "next_cursor": page.next_cursor,
-                "engine": "canonical_temporal",
-                "engine_detail": {
-                    "messages": "canonical_hydration",
-                    "summary_nodes": "canonical_temporal_relations"
-                },
-                "total": {
-                    "messages": messages.len(),
-                    "summary_nodes": summary_nodes.len()
-                },
-                "filters": {
-                    "role": role,
-                    "source": source,
-                    "session_id": session_id,
-                    "since": since,
-                    "until": until
-                },
-                "matches": {"messages": messages, "summary_nodes": summary_nodes},
-            })
-        }
-        DashboardLcmReadRequestV1::Session {
-            session_id,
-            limit,
-            cursor: _,
-        } => {
-            let messages = page
-                .messages
-                .into_iter()
-                .map(message_json)
-                .collect::<Vec<_>>();
-            let summary_nodes = page
-                .summary_nodes
-                .into_iter()
-                .map(summary_json)
-                .collect::<Vec<_>>();
-            let returned_summary_nodes = saturating_usize_to_i64(summary_nodes.len());
-            serde_json::json!({
-                "path": "daemon://session-temporal",
-                "storage_scope": "project",
-                "exists": page.stats.message_count > 0 || page.stats.summary_node_count > 0,
-                "session_id": session_id,
-                "limit": limit,
-                "counts": {
-                    "message_count": page.stats.message_count,
-                    "summary_node_count": page.stats.summary_node_count,
-                    "token_estimate_total": page.stats.source_token_count,
-                    "summary_token_count": page.stats.summary_token_count,
-                    "source_token_count": page.stats.source_token_count
-                },
-                "messages": messages,
-                "summary_nodes": summary_nodes,
-                "has_more": page.has_more,
-                "has_more_messages": page.has_more,
-                "has_more_summary_nodes": page.stats.summary_node_count > returned_summary_nodes,
-                "next_cursor": page.next_cursor
-            })
-        }
-    };
-    serde_json::from_value(value).map_err(|_| ())
-}
-
-fn returned_count(page: &DashboardLcmCanonicalPageV1) -> u64 {
-    match u64::try_from(page.messages.len().saturating_add(page.summary_nodes.len())) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
-}
-
-fn message_json(message: DashboardLcmCanonicalMessageV1) -> serde_json::Value {
-    serde_json::json!({
-        "store_id": null,
-        "session_id": message.session_id,
-        "role": message.role,
-        "source": message.provider,
-        "timestamp": message.timestamp,
-        "token_estimate": null,
-        "content": message.content,
-        "message_id": message.message_id,
-        "ordinal": message.ordinal,
-        "storage_kind": "canonical_temporal",
-        "metadata_json": message.metadata_json,
-        "tool_name": message.tool_names,
-        "pinned": null,
-        "summary_node_ids": [],
-        "snippet": null
-    })
-}
-
-fn summary_json(summary: DashboardLcmCanonicalSummaryV1) -> serde_json::Value {
-    serde_json::json!({
-        "node_id": summary.node_id,
-        "session_id": summary.session_id,
-        "depth": summary.depth,
-        "category": "summary",
-        "source_type": "canonical_temporal",
-        "token_count": summary.token_count,
-        "source_token_count": summary.source_token_count,
-        "latest_at": summary.latest_at,
-        "created_at": summary.created_at,
-        "expand_hint": summary.expand_hint,
-        "summary": summary.summary,
-        "recency": summary.latest_at,
-        "snippet": null
-    })
-}
-
-fn saturating_usize_to_i64(value: usize) -> i64 {
-    match i64::try_from(value) {
-        Ok(value) => value,
-        Err(_) => i64::MAX,
-    }
-}
-
 fn invalid_lcm_request<T>(state: &DashboardState) -> Json<DashboardEnvelopeV1<Option<T>>> {
     Json(DashboardEnvelopeV1::unavailable(
         scope_from_state(state),
@@ -707,38 +636,4 @@ fn parse_optional_i64(value: &str) -> Result<Option<i64>, ()> {
         return Ok(None);
     }
     trimmed.parse().map(Some).map_err(|_| ())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_message_does_not_fabricate_a_token_estimate() {
-        let message = message_json(DashboardLcmCanonicalMessageV1 {
-            session_id: "session.message".to_owned(),
-            provider: "codex".to_owned(),
-            role: "assistant".to_owned(),
-            timestamp: Some(1),
-            ordinal: 1,
-            content: "content whose tokenizer is unknown".to_owned(),
-            message_id: "message.one".to_owned(),
-            metadata_json: None,
-            tool_names: None,
-        });
-
-        assert!(message["token_estimate"].is_null());
-    }
-
-    #[test]
-    fn optional_search_filters_are_trimmed_and_invalid_times_are_rejected() {
-        assert_eq!(
-            trimmed_nonempty("  assistant  ".to_owned()).as_deref(),
-            Some("assistant")
-        );
-        assert_eq!(trimmed_nonempty(" \t ".to_owned()), None);
-        assert_eq!(parse_optional_i64(" 42 "), Ok(Some(42)));
-        assert_eq!(parse_optional_i64(" \t "), Ok(None));
-        assert_eq!(parse_optional_i64("tomorrow"), Err(()));
-    }
 }

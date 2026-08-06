@@ -8,19 +8,18 @@
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
-import { z } from 'zod';
 import {
   ExplorerQueryRunV1Schema,
   ExplorerReadContextV1Schema,
   ExplorerSessionSizeV1Schema,
   GraphOverviewPayloadV1Schema,
+  LcmOverviewPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
   type ExplorerQueryRunV1,
   type ExplorerReadContextV1,
   type ExplorerSessionSizeV1,
 } from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
-import { AnyObject } from '../../data/query/legacy.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { queryTerms } from '../../ui/search/terms.ts';
 import { absenceVerdict, type AbsenceVerdict } from './absence.ts';
@@ -34,19 +33,6 @@ import {
   type ExplorerLaneReadModel,
 } from './laneModel.ts';
 import { LANES, type Hit, type LaneId } from './model.ts';
-
-/* ------------------------------------------------------------- browse wire */
-
-/**
- * The two browse endpoints that have no generated payload type.
- *
- * The LCM overview is the sole generated-contract gap until the next contract
- * generation. Its local schema reads only the field this lane would render;
- * it makes no claim about the rows themselves.
- */
-const LcmOverviewPayload = z
-  .object({ latest_summary_nodes: z.array(AnyObject) })
-  .passthrough();
 
 /* ------------------------------------------------------------------ routes */
 
@@ -181,7 +167,7 @@ export function useExplorerController(): ExplorerController {
   const lcmBrowse = useEnvelope(
     ['explorer', 'lcm-overview'],
     '/api/plugins/hermes-lcm/overview',
-    LcmOverviewPayload,
+    LcmOverviewPayloadV1Schema,
     { enabled: !searching },
   );
   const memory = useEnvelope(
