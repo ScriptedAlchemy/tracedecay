@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use tracedecay_application::{MultiRootApplicationOperation, multi_root_capability_manifest};
 use tracedecay_tool_catalog::{
     BindingSurface, CancellationContract, CancellationPoint, EffectClass, McpDeadlineContractV1,
     McpDispatchAvailability, McpDispatchCatalogV1, McpDispatchContractInputV1,
@@ -30,6 +31,7 @@ use tracedecay_tool_catalog::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum McpToolDispatchGroup {
     ApplicationSurface,
+    MultiRoot,
     Graph,
     Info,
     Admin,
@@ -148,6 +150,9 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_skill_list", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_skill_view", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_hermes_skill_bridge", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_multi_root_scope_set_read", group: Some(McpToolDispatchGroup::MultiRoot), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_multi_root_scope_set_compare_and_swap", group: Some(McpToolDispatchGroup::MultiRoot), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_multi_root_execute", group: Some(McpToolDispatchGroup::MultiRoot), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_diagnose", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_run_affected_tests", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_dashboard", group: Some(McpToolDispatchGroup::SessionWorkflow), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -275,7 +280,8 @@ pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool
 
 fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
-        "tracedecay_dashboard"
+        "tracedecay_multi_root_scope_set_compare_and_swap"
+        | "tracedecay_dashboard"
         | "tracedecay_fact_store"
         | "tracedecay_fact_feedback"
         | "tracedecay_memory_status"
@@ -288,6 +294,29 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_session_end" => EffectClass::Administrative,
         _ => EffectClass::Read,
     }
+}
+
+fn multi_root_operation_for_tool(tool_name: &str) -> Option<MultiRootApplicationOperation> {
+    match tool_name {
+        "tracedecay_multi_root_scope_set_read" => Some(MultiRootApplicationOperation::ScopeSetRead),
+        "tracedecay_multi_root_scope_set_compare_and_swap" => {
+            Some(MultiRootApplicationOperation::ScopeSetCompareAndSwap)
+        }
+        "tracedecay_multi_root_execute" => Some(MultiRootApplicationOperation::Execute),
+        _ => None,
+    }
+}
+
+fn multi_root_capability_for_tool(
+    tool_name: &str,
+) -> Result<
+    Option<tracedecay_tool_catalog::CapabilityManifestV1>,
+    super::dispatch::McpDispatchMetadataError,
+> {
+    multi_root_operation_for_tool(tool_name)
+        .map(multi_root_capability_manifest)
+        .transpose()
+        .map_err(super::dispatch::McpDispatchMetadataError::CatalogValidation)
 }
 
 fn application_capability_for_tool(
@@ -320,6 +349,7 @@ pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
 
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
+        || multi_root_operation_for_tool(tool_name).is_some()
         || tool_dispatches_source_edit_effect(tool_name)
         || matches!(
             tool_name,
@@ -342,7 +372,8 @@ fn executable_handler_is_available(
     effect: EffectClass,
     application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
 ) -> bool {
-    effect.is_read_only()
+    matches!(binding.group, Some(McpToolDispatchGroup::MultiRoot))
+        || effect.is_read_only()
         || verified_effect_journey(binding.name)
         || matches!(binding.group, Some(McpToolDispatchGroup::Edit))
             && application_capability.is_some_and(|capability| {
@@ -416,17 +447,27 @@ fn build_mcp_dispatch_catalog()
         .filter(|binding| !super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&binding.name))
     {
         let application_capability = application_capability_for_tool(binding.name)?;
+        let multi_root_capability = multi_root_capability_for_tool(binding.name)?;
         let direct_effect = direct_effect(binding.name);
         let effect = if direct_effect.is_effect() {
             direct_effect
         } else {
-            application_capability.map_or(
-                EffectClass::Read,
-                tracedecay_tool_catalog::CapabilityManifestV1::effect,
-            )
+            multi_root_capability
+                .as_ref()
+                .or(application_capability)
+                .map_or(
+                    EffectClass::Read,
+                    tracedecay_tool_catalog::CapabilityManifestV1::effect,
+                )
         };
-        let available = executable_handler_is_available(binding, effect, application_capability);
-        let cancellation = cancellation_for_tool(binding.name, application_capability)?;
+        let available = multi_root_capability
+            .as_ref()
+            .is_some_and(|capability| capability.availability().is_callable())
+            || executable_handler_is_available(binding, effect, application_capability);
+        let cancellation = match multi_root_capability.as_ref() {
+            Some(capability) => capability.cancellation().clone(),
+            None => cancellation_for_tool(binding.name, application_capability)?,
+        };
         let mut terminal_states = vec![
             McpTerminalState::Completed,
             McpTerminalState::DeadlineExceeded,
@@ -455,14 +496,29 @@ fn build_mcp_dispatch_catalog()
             deadline: McpDeadlineContractV1::new(
                 super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64,
             )?,
-            idempotency: idempotency_for_tool(binding.name, application_capability),
+            idempotency: multi_root_capability.as_ref().map_or_else(
+                || idempotency_for_tool(binding.name, application_capability),
+                |capability| match capability.idempotency() {
+                    tracedecay_tool_catalog::IdempotencyContract::Required => {
+                        McpIdempotencyContract::KeyRequired
+                    }
+                    _ => McpIdempotencyContract::NotProvided,
+                },
+            ),
             inverse: inverse_for_tool(binding.name, effect),
             cancellation,
             terminal_states,
-            pagination: application_capability
+            pagination: multi_root_capability
+                .as_ref()
+                .or(application_capability)
                 .and_then(tracedecay_tool_catalog::CapabilityManifestV1::pagination)
                 .cloned(),
-            streaming,
+            streaming: multi_root_capability
+                .as_ref()
+                .map(tracedecay_tool_catalog::CapabilityManifestV1::streaming)
+                .filter(|streaming| streaming.is_supported())
+                .cloned()
+                .or(streaming),
         })?);
     }
     Ok(McpDispatchCatalogV1::new(contracts)?)

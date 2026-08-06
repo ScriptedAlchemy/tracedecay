@@ -135,6 +135,9 @@ pub(super) async fn concrete_dispatch_group_accepts(
         McpToolDispatchGroup::ApplicationSurface | McpToolDispatchGroup::RetainedApplication => {
             false
         }
+        McpToolDispatchGroup::MultiRoot => {
+            owned(handle_multi_root(tool_name, invalid_args, None, None, None, None).await)
+        }
         McpToolDispatchGroup::Graph => owned(
             dispatch_graph_tools(tool_name, cg, invalid_args, None, None, None, None, None).await,
         ),

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -17,6 +17,7 @@ use crate::config::lock_user_data_dir_test_env;
 #[derive(Default)]
 struct UnavailableEffectExecutor {
     invocations: AtomicUsize,
+    operations: Mutex<Vec<crate::daemon_contract::DaemonInvocationOperation>>,
 }
 
 impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffectExecutor {
@@ -38,7 +39,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffect
 impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecutor {
     fn invoke_controlled(
         &self,
-        _request: crate::daemon_contract::DaemonInvocationRequest,
+        request: crate::daemon_contract::DaemonInvocationRequest,
         _deadline: tracedecay_application::Deadline,
         _cancellation: tracedecay_application::CancellationSignal,
         _policy: crate::daemon_client::InvocationCancellationPolicy,
@@ -50,6 +51,10 @@ impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecuto
         >,
     > {
         self.invocations.fetch_add(1, Ordering::SeqCst);
+        self.operations
+            .lock()
+            .expect("recorded daemon operations")
+            .push(request.operation());
         Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
     }
 
@@ -61,6 +66,75 @@ impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecuto
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
         Box::pin(async { Ok(()) })
     }
+}
+
+#[tokio::test]
+async fn multi_root_tools_invoke_the_closed_daemon_routes() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("multi-root-mcp");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn mcp_multi_root() {}\n").unwrap();
+    let (cg, _runtime) =
+        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.mcp-multi-root")
+            .await
+            .unwrap();
+    let executor = UnavailableEffectExecutor::default();
+    let requests = [
+        (
+            "tracedecay_multi_root_scope_set_read",
+            json!({"scope_set_id": "scope-set.mcp"}),
+        ),
+        (
+            "tracedecay_multi_root_scope_set_compare_and_swap",
+            json!({
+                "scope_set_id": "scope-set.mcp",
+                "expected_revision": null,
+                "roots": [{"project_id": "project.mcp-root", "root": "/project/mcp-root"}]
+            }),
+        ),
+        (
+            "tracedecay_multi_root_execute",
+            json!({
+                "scope_set_id": "scope-set.mcp",
+                "scope_set_revision": 1,
+                "scope_set_digest": format!("sha256:{}", "a".repeat(64)),
+                "operation": {"kind": "query", "request": {}},
+                "page": 0,
+                "continuation": null
+            }),
+        ),
+    ];
+
+    for (tool_name, args) in requests {
+        let result = handle_tool_call_with_registry_and_implicit_project(
+            &cg,
+            tool_name,
+            args,
+            None,
+            None,
+            ToolCallRegistryOptions {
+                application_invocation_executor: Some(&executor),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.semantic_error(), Some(true));
+    }
+
+    assert_eq!(
+        *executor
+            .operations
+            .lock()
+            .expect("recorded daemon operations"),
+        vec![
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetRead,
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap,
+            crate::daemon_contract::DaemonInvocationOperation::MultiRootExecute,
+        ]
+    );
 }
 
 /// `DiagnosticsRead` answers to two tool names, and the classifier only
@@ -153,6 +227,16 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                     "{} has no application-surface handler entry",
                     definition.name
                 ),
+                McpToolDispatchGroup::MultiRoot => assert!(
+                    matches!(
+                        definition.name.as_str(),
+                        "tracedecay_multi_root_scope_set_read"
+                            | "tracedecay_multi_root_scope_set_compare_and_swap"
+                            | "tracedecay_multi_root_execute"
+                    ),
+                    "{} has no multi-root daemon handler entry",
+                    definition.name
+                ),
                 McpToolDispatchGroup::RetainedApplication => {
                     let operation = RetainedSurfaceOperation::from_name(&definition.name)
                         .unwrap_or_else(|| {
@@ -209,13 +293,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
         }
     }
 
-    for tool_name in [
-        "tracedecay_not_registered",
-        "tracedecay_lcm_not_registered",
-        "tracedecay_multi_root_scope_set_read",
-        "tracedecay_multi_root_scope_set_compare_and_swap",
-        "tracedecay_multi_root_execute",
-    ] {
+    for tool_name in ["tracedecay_not_registered", "tracedecay_lcm_not_registered"] {
         assert!(!advertised.contains(tool_name));
         for executor_available in [true, false] {
             assert_eq!(

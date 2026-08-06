@@ -69,11 +69,21 @@ impl MultiRootApplicationOperation {
 pub fn multi_root_operation_authority(
     operation: MultiRootApplicationOperation,
 ) -> Result<(CapabilityId, UseCaseId), CatalogValidationError> {
-    let manifest = manifest(operation)?;
+    let manifest = multi_root_capability_manifest(operation)?;
     Ok((
         manifest.capability_id().clone(),
         manifest.use_case_id().clone(),
     ))
+}
+
+/// The canonical manifest for one mounted multi-root operation.
+///
+/// Surface adapters project this exact contract; they do not maintain local
+/// effect, cancellation, or pagination copies.
+pub fn multi_root_capability_manifest(
+    operation: MultiRootApplicationOperation,
+) -> Result<CapabilityManifestV1, CatalogValidationError> {
+    manifest(operation)
 }
 
 pub fn multi_root_executable_binding_registry()

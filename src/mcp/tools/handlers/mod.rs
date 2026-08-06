@@ -27,6 +27,7 @@ pub mod hook_runtime;
 pub mod info;
 mod lcm_tool_entry;
 pub mod memory;
+mod multi_root;
 mod project_registry;
 pub mod redundancy;
 mod retained_catalog;
@@ -132,6 +133,7 @@ use dispatch_groups::{
     dispatch_info_tools, dispatch_memory_tools, dispatch_retained_application_tools,
     dispatch_session_workflow_tools,
 };
+use multi_root::handle_multi_root;
 use retained_catalog::dispatch_profile_retained_application_tool;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
@@ -426,6 +428,18 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             ))
             .await;
         }
+        if dispatch_group == Some(McpToolDispatchGroup::MultiRoot) {
+            ensure_mcp_dispatch_available(tool_name)?;
+            return boxed_send(handle_multi_root(
+                tool_name,
+                args,
+                options.application_invocation_executor,
+                options.application_request_id.clone(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            ))
+            .await;
+        }
         // Catalog-declared compatibility operations must resolve the MCP binding
         // before reaching their retained typed handler. Operations without an
         // application-catalog contract remain under the explicit root MCP
@@ -539,11 +553,11 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     ))
                     .await
                 }
-                // Application-surface tools already returned above; reaching here means
+                // Typed daemon surface tools already returned above; reaching here means
                 // the name resolves to no reachable dispatch entry.
-                Some(McpToolDispatchGroup::ApplicationSurface) | None => {
-                    Err(unknown_tool_error(tool_name))
-                }
+                Some(McpToolDispatchGroup::ApplicationSurface)
+                | Some(McpToolDispatchGroup::MultiRoot)
+                | None => Err(unknown_tool_error(tool_name)),
             }
         };
         match tokio::time::timeout(dispatch_budget, dispatched).await {
