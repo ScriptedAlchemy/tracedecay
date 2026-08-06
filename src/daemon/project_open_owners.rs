@@ -73,14 +73,14 @@ use crate::application::advisory::github_runtime::{
     resolve_registered_github_read_only_credential_v1,
 };
 use crate::application::advisory::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, CiSourceAccessAuthorityV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryHookLookupNoticeV1,
+    AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1, CiSourceAccessAuthorityV1,
     GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
     GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
-    GitHubReviewRuntimeOwnerConfigV1, AdvisoryHookLookupNoticeV1,
-    AdvisoryHookNoticeQueueV1, AdvisoryHookNoticeSinkV1, AdvisoryProductionOpenV1,
-    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
-    ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
-    discover_production_ci_failure_request_v1, register_advisory_hook_notice_queue,
+    GitHubReviewRuntimeOwnerConfigV1, ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1,
+    ProjectCiRetainedObservationStoreV1, discover_production_ci_failure_request_v1,
+    register_advisory_hook_notice_queue,
 };
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::observations::{
@@ -88,16 +88,15 @@ use crate::application::feedback::observations::{
     Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
 };
 use crate::application::feedback::{
-    FeedbackCycleInvocation, FeedbackCycleLspInput,
-    ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
-    ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
-    resolve_production_feedback_cycle_parts,
+    FeedbackCycleInvocation, FeedbackCycleLspInput, ProductionFeedbackCycleAuthorizationFuture,
+    ProductionFeedbackCycleAuthorizationPort, ProductionFeedbackCycleOpenV1,
+    ProductionFeedbackRuntimeStateV1, resolve_production_feedback_cycle_parts,
 };
 use crate::application::lsp_runtime::DaemonLspSessionFactory;
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
-    ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project,
-    locator_digest_for_project, open_production_primitive_runtime,
+    ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project, locator_digest_for_project,
+    open_production_primitive_runtime,
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
@@ -112,6 +111,7 @@ use crate::mcp::tools::handlers::hook_runtime::daemon_mint_hook_v2_file_id;
 use tracedecay_lsp::analyzer::broker::{AdmittedLspProvider, MountedLspProvider};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 
+mod advisory_upgrade;
 mod lsp_registration;
 
 use lsp_registration::production_lsp_registration;
@@ -1283,104 +1283,76 @@ pub(super) async fn register_project_open_dependent_owners(
     project_root: &Path,
     state: ProjectOpenDependentOwnerState,
 ) -> Result<()> {
-    let ProjectOpenDependentOwnerState {
-        database,
-        session_db,
-        graph,
-        scope,
-        access,
-        configuration,
-        requester,
-        mounted_providers,
-        lsp_session_factory,
-        scout_registry,
-        scout_configuration,
-        admitted_root_uri,
-        indexed_files,
-    } = state;
-    let feedback_cycle = register_production_feedback_cycle(
-        invocation,
-        project_root,
-        database.clone(),
-        Arc::clone(&session_db),
-        Arc::clone(&graph),
-        scope.clone(),
-        configuration,
-        requester,
-        mounted_providers,
-    )
-    .await?;
-    tracing::info!(
-        event = "project_open_owner_phase",
-        project = %project_root.display(),
-        phase = "feedback_cycle_registered",
-    );
-
-    if let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle {
-        // P3: the advisory owner (Context Scout config install, GitHub provider
-        // resolution — potentially network — CI stores, and code-index-coupled
-        // anchors) is NOT required for the project to be servable: when the
-        // feedback cycle above resolves to `None`, advisory is skipped entirely
-        // and the project still fully publishes and answers queries. Awaiting it
-        // on the open critical path coupled open to the starved reconcile lane
-        // and to network stalls (observed 924 s). Register it as a background
-        // upgrade so open returns as soon as the graph is mounted; the advisory
-        // registrars are idempotent (AlreadyRegistered) and self-contained.
-        let advisory_invocation = invocation.clone();
-        let advisory_project_root = project_root.to_path_buf();
-        let advisory_session_db = Arc::clone(&session_db);
-        let advisory_graph = Arc::clone(&graph);
-        let advisory_scope = scope.clone();
-        let advisory_scout_configuration = scout_configuration.clone();
-        tokio::spawn(async move {
-            let outcome = register_production_advisory_owner(
-                &advisory_invocation,
-                &advisory_project_root,
-                database,
-                advisory_session_db,
-                advisory_graph,
-                advisory_scope,
-                access,
+    let state = Arc::new(state);
+    // Subscribe before the first registration attempt so a generation that
+    // publishes between the attempt and a later subscription cannot be missed.
+    let generation_publications = invocation
+        .code_index_schedulers
+        .subscribe_generation_publications();
+    match register_production_feedback_cycle(invocation, project_root, &state).await? {
+        ProductionFeedbackCycleRegistrationV1::Registered {
+            runtime,
+            feedback_scope,
+            lsp_input,
+        } => {
+            tracing::info!(
+                event = "project_open_owner_phase",
+                project = %project_root.display(),
+                phase = "feedback_cycle_registered",
+            );
+            advisory_upgrade::spawn_advisory_owner_upgrade(
+                invocation.clone(),
+                project_root.to_path_buf(),
+                Arc::clone(&state),
+                runtime,
                 feedback_scope,
-                feedback_cycle,
-                feedback_lsp_input,
-                lsp_session_factory,
-                scout_registry,
-                advisory_scout_configuration,
-                admitted_root_uri,
-                indexed_files,
-            )
-            .await;
-            match outcome {
-                Ok(_) => tracing::info!(
-                    event = "project_open_owner_phase",
-                    project = %advisory_project_root.display(),
-                    phase = "advisory_owner_registered",
-                    deferred = true,
-                ),
-                Err(error) => tracing::warn!(
-                    event = "project_open_owner_phase",
-                    project = %advisory_project_root.display(),
-                    phase = "advisory_owner_deferred_failed",
-                    error = %error,
-                ),
-            }
-        });
-        tracing::info!(
-            event = "project_open_owner_phase",
-            project = %project_root.display(),
-            phase = "advisory_owner_scheduled",
-        );
+                lsp_input,
+            );
+            tracing::info!(
+                event = "project_open_owner_phase",
+                project = %project_root.display(),
+                phase = "advisory_owner_scheduled",
+            );
+        }
+        ProductionFeedbackCycleRegistrationV1::SkippedWithoutGitScope { reason } => {
+            // Skipping feedback (and with it the advisory cycle) is a valid
+            // open outcome, but a silent one made the disabled journey look
+            // registered; record which precondition disabled it.
+            tracing::info!(
+                event = "project_open_owner_phase",
+                project = %project_root.display(),
+                phase = "feedback_cycle_skipped",
+                reason = reason,
+            );
+        }
+        ProductionFeedbackCycleRegistrationV1::SkippedUnindexed => {
+            // A cold open reaches this point before the first code-index
+            // generation seals, so the provider identity is a transient gap,
+            // not a session-permanent one. Defer registration until the
+            // scheduler publishes a generation for this project.
+            tracing::info!(
+                event = "project_open_owner_phase",
+                project = %project_root.display(),
+                phase = "feedback_cycle_deferred",
+                reason = "project-open provider code-index identity",
+            );
+            advisory_upgrade::spawn_deferred_feedback_cycle_upgrade(
+                invocation.clone(),
+                project_root.to_path_buf(),
+                Arc::clone(&state),
+                generation_publications,
+            );
+        }
     }
 
     let semantic_activation_started = Instant::now();
     register_semantic_activation_owner(
         invocation,
         project_root,
-        &graph,
-        Arc::clone(&session_db),
-        scope.clone(),
-        &scout_configuration,
+        &state.graph,
+        Arc::clone(&state.session_db),
+        state.scope.clone(),
+        &state.scout_configuration,
     )
     .await?;
     tracing::info!(
@@ -1561,23 +1533,36 @@ async fn register_semantic_activation_owner(
         .await
 }
 
+/// Typed outcome of one production feedback-cycle registration attempt.
+///
+/// The skip variants are valid open outcomes, not failures, but they differ in
+/// whether a later daemon event can lift them: an unindexed project becomes
+/// registrable once the first complete code-index generation publishes, while
+/// a project without git scope stays skipped for the whole session.
+enum ProductionFeedbackCycleRegistrationV1 {
+    Registered {
+        runtime: Arc<crate::application::feedback::FeedbackCycleRuntime>,
+        feedback_scope: FeedbackScopeV1,
+        lsp_input: crate::application::feedback::FeedbackCycleLspInput,
+    },
+    /// The provider code-index identity has no complete generation yet.
+    SkippedUnindexed,
+    /// The project has no feedback-eligible branch or head commit.
+    SkippedWithoutGitScope { reason: &'static str },
+}
+
 async fn register_production_feedback_cycle(
     invocation: &DaemonInvocationState,
     project_root: &Path,
-    database: crate::db::Database,
-    project_runtime_db: Arc<crate::global_db::RegisteredGlobalDb>,
-    graph: Arc<crate::tracedecay::TraceDecay>,
-    scope: ResolvedScope,
-    configuration: tracedecay_usecases::config::PinnedRuntimeConfiguration,
-    requester: ActorId,
-    mounted_providers: Vec<MountedLspProvider>,
-) -> Result<
-    Option<(
-        Arc<crate::application::feedback::FeedbackCycleRuntime>,
-        FeedbackScopeV1,
-        crate::application::feedback::FeedbackCycleLspInput,
-    )>,
-> {
+    state: &ProjectOpenDependentOwnerState,
+) -> Result<ProductionFeedbackCycleRegistrationV1> {
+    let database = state.database.clone();
+    let project_runtime_db = Arc::clone(&state.session_db);
+    let graph = Arc::clone(&state.graph);
+    let scope = state.scope.clone();
+    let configuration = state.configuration.clone();
+    let requester = state.requester.clone();
+    let mounted_providers = state.mounted_providers.clone();
     let configuration_digest = &configuration.snapshot.effective_behavior_digest;
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
@@ -1619,11 +1604,17 @@ async fn register_production_feedback_cycle(
     {
         Ok(parts) => parts,
         Err(ApplicationContractError::Inconsistent {
-            field:
-                "project-open feedback branch"
-                | "project-open feedback head commit"
-                | "project-open provider code-index identity",
-        }) => return Ok(None),
+            field: "project-open provider code-index identity",
+        }) => {
+            return Ok(ProductionFeedbackCycleRegistrationV1::SkippedUnindexed);
+        }
+        Err(ApplicationContractError::Inconsistent {
+            field: field @ ("project-open feedback branch" | "project-open feedback head commit"),
+        }) => {
+            return Ok(
+                ProductionFeedbackCycleRegistrationV1::SkippedWithoutGitScope { reason: field },
+            );
+        }
         Err(error) => {
             return Err(TraceDecayError::Config {
                 message: format!("project-open feedback cycle parts failed: {error}"),
@@ -1651,7 +1642,13 @@ async fn register_production_feedback_cycle(
             parts.proximity,
         )
         .await
-        .map(|runtime| Some((runtime, feedback_scope, feedback_lsp_input)))
+        .map(
+            |runtime| ProductionFeedbackCycleRegistrationV1::Registered {
+                runtime,
+                feedback_scope,
+                lsp_input: feedback_lsp_input,
+            },
+        )
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open feedback cycle registration failed: {error}"),
         })
@@ -2025,8 +2022,7 @@ async fn run_production_hook_cycle(
     };
     if request.trigger == HookOrchestrationTriggerV1::Stop {
         invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
-        let Ok(validated) =
-            FeedbackCycleInvocation::new(invocation.context, invocation.request)
+        let Ok(validated) = FeedbackCycleInvocation::new(invocation.context, invocation.request)
         else {
             observe_hook_feedback_cycle_terminal(
                 &registration.host_delivery.source_observations,
@@ -3067,7 +3063,7 @@ mod tests {
 
         for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
             .into_iter()
-                .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
+            .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
             .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
             .chain(std::iter::once(
                 tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,

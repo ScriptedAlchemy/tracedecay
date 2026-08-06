@@ -3,6 +3,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -932,25 +933,40 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "format": "json",
     })
     .to_string();
-    let output = common::tracedecay_command_with_home(environment.home())
-        .args([
-            "tool",
-            "--project",
-            project_arg.as_str(),
-            "tracedecay_hook_runtime",
-            "--args",
-            args.as_str(),
-            "--json",
-        ])
-        .current_dir(&project)
-        .output()
-        .expect("invoke registered daemon observation path");
-    assert!(
-        output.status.success(),
-        "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // The first tool call triggers the daemon's cold project open, and the
+    // hook tool surface deliberately returns the typed warming state instead
+    // of retrying internally. Waiting that documented retryable state out is
+    // the client protocol, so only a non-warming failure is a test failure.
+    let ingest_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let output = loop {
+        let output = common::tracedecay_command_with_home(environment.home())
+            .args([
+                "tool",
+                "--project",
+                project_arg.as_str(),
+                "tracedecay_hook_runtime",
+                "--args",
+                args.as_str(),
+                "--json",
+            ])
+            .current_dir(&project)
+            .output()
+            .expect("invoke registered daemon observation path");
+        if output.status.success() {
+            break output;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("is warming in the background"),
+            "registered daemon ingest failed\nstdout:\n{}\nstderr:\n{stderr}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+        assert!(
+            std::time::Instant::now() < ingest_deadline,
+            "registered daemon project stayed warming past the ingest deadline\nstderr:\n{stderr}",
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     let response: Value =
         serde_json::from_slice(&output.stdout).expect("registered daemon ingest response");
     let payload: Value = serde_json::from_str(
@@ -1039,25 +1055,47 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
         "document_uri": format!("file://{}", project.join("src/lib.rs").display()),
     })
     .to_string();
-    let advisory = common::tracedecay_command_with_home(environment.home())
-        .args([
-            "tool",
-            "--project",
-            project_arg.as_str(),
-            "tracedecay_feedback_advisory_cycle",
-            "--args",
-            advisory_args.as_str(),
-            "--json",
-        ])
-        .current_dir(&project)
-        .output()
-        .expect("invoke registered four-pillar advisory path");
-    assert!(
-        advisory.status.success(),
-        "registered advisory cycle failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&advisory.stdout),
-        String::from_utf8_lossy(&advisory.stderr)
-    );
+    // Feedback/advisory registration is a deferred background upgrade keyed
+    // to the first published code-index generation, and the tool reports that
+    // window as a typed retryable unavailable state. Retrying it out is the
+    // client protocol; only a non-retryable failure is a test failure.
+    let advisory_deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let advisory = loop {
+        let advisory = common::tracedecay_command_with_home(environment.home())
+            .args([
+                "tool",
+                "--project",
+                project_arg.as_str(),
+                "tracedecay_feedback_advisory_cycle",
+                "--args",
+                advisory_args.as_str(),
+                "--json",
+            ])
+            .current_dir(&project)
+            .output()
+            .expect("invoke registered four-pillar advisory path");
+        if advisory.status.success() {
+            break advisory;
+        }
+        let stdout = String::from_utf8_lossy(&advisory.stdout).into_owned();
+        let retryable_unavailable =
+            serde_json::from_str::<Value>(&stdout)
+                .ok()
+                .is_some_and(|response| {
+                    response["problem"]["code"] == "feedback.advisory-cycle.unavailable"
+                        && response["problem"]["retryable"] == true
+                });
+        assert!(
+            retryable_unavailable,
+            "registered advisory cycle failed\nstdout:\n{stdout}\nstderr:\n{}",
+            String::from_utf8_lossy(&advisory.stderr),
+        );
+        assert!(
+            std::time::Instant::now() < advisory_deadline,
+            "advisory cycle stayed unavailable past the deferred registration deadline\nstdout:\n{stdout}",
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     let advisory: Value = serde_json::from_slice(&advisory.stdout).unwrap();
     assert_four_pillar_terminal_cycle(&advisory);
 }
