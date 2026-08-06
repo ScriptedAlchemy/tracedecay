@@ -6,6 +6,7 @@ use super::*;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
 async fn database() -> (TempDir, Database) {
+    crate::register_test_schema_installer();
     let temporary = tempfile::tempdir().expect("temporary project database");
     let path = temporary.path().join("graph.db");
     let authority =
