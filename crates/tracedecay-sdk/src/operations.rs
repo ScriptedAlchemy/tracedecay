@@ -6108,6 +6108,1215 @@ typed_operation!(
     1
 );
 #[allow(clippy::all)]
+pub mod work_generate_proposal {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        /**Read-only proposal generation is pinned to the current Work version.
+
+        The optional live Git frontier is supplied by the caller's Git evidence
+        authority; the application never derives it from the Work history, and the
+        evaluator never merges it with the local frontier.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GenerateProposalRequest",
+        ///  "description": "Read-only proposal generation is pinned to the current Work version.\n\nThe optional live Git frontier is supplied by the caller's Git evidence\nauthority; the application never derives it from the Work history, and the\nevaluator never merges it with the local frontier.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "occurred_at",
+        ///    "proposal_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "live_git_evidence": {
+        ///      "default": null,
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkEvidenceFrontierV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "proposal_id": {
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GenerateProposalRequest {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub live_git_evidence: ::std::option::Option<WorkEvidenceFrontierV1>,
+            pub occurred_at: UtcMicros,
+            pub proposal_id: ProposalId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**One immutable evidence frontier. Local code/session evidence and live Git
+        evidence each carry their own frontier; the evaluator never merges,
+        substitutes, or advances one from the other.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One immutable evidence frontier. Local code/session evidence and live Git\nevidence each carry their own frontier; the evaluator never merges,\nsubstitutes, or advances one from the other.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "digest",
+        ///    "watermark"
+        ///  ],
+        ///  "properties": {
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "watermark": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkEvidenceFrontierV1 {
+            pub digest: ManifestDigest,
+            pub watermark: UtcMicros,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        /**One explained, read-only proposal. The digest binds acceptance to the
+        evaluated decision content, so a stale or altered proposal cannot be
+        accepted against a moved Work version.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GeneratedWorkProposal",
+        ///  "description": "One explained, read-only proposal. The digest binds acceptance to the\nevaluated decision content, so a stale or altered proposal cannot be\naccepted against a moved Work version.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "based_on_version",
+        ///    "decision",
+        ///    "proposal_digest",
+        ///    "proposal_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "based_on_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "decision": {
+        ///      "$ref": "#/definitions/WorkProposalDecisionV1"
+        ///    },
+        ///    "proposal_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "proposal_id": {
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GeneratedWorkProposal {
+            pub based_on_version: u64,
+            pub decision: WorkProposalDecisionV1,
+            pub proposal_digest: ManifestDigest,
+            pub proposal_id: ProposalId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**A bounded, canonical identifier owned by the policy input schema.
+
+        It represents immutable references only; it is never a path, display
+        label, provider account, branch name, or native object identifier.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A bounded, canonical identifier owned by the policy input schema.\n\nIt represents immutable references only; it is never a path, display\nlabel, provider account, branch name, or native object identifier.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct PolicyIdentifierV1(pub ::std::string::String);
+        impl ::std::ops::Deref for PolicyIdentifierV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<PolicyIdentifierV1> for ::std::string::String {
+            fn from(value: PolicyIdentifierV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for PolicyIdentifierV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for PolicyIdentifierV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for PolicyIdentifierV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**One immutable evidence frontier. Local code/session evidence and live Git
+        evidence each carry their own frontier; the evaluator never merges,
+        substitutes, or advances one from the other.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One immutable evidence frontier. Local code/session evidence and live Git\nevidence each carry their own frontier; the evaluator never merges,\nsubstitutes, or advances one from the other.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "digest",
+        ///    "watermark"
+        ///  ],
+        ///  "properties": {
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "watermark": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkEvidenceFrontierV1 {
+            pub digest: ManifestDigest,
+            pub watermark: UtcMicros,
+        }
+        /**Recorded relation between the two supplied frontiers. `Incomparable` means
+        at least one side was absent; it is not collapsed into agreement.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Recorded relation between the two supplied frontiers. `Incomparable` means\nat least one side was absent; it is not collapsed into agreement.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "agree",
+        ///    "disagree",
+        ///    "incomparable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkFrontierComparisonV1 {
+            #[serde(rename = "agree")]
+            Agree,
+            #[serde(rename = "disagree")]
+            Disagree,
+            #[serde(rename = "incomparable")]
+            Incomparable,
+        }
+        impl ::std::fmt::Display for WorkFrontierComparisonV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Agree => f.write_str("agree"),
+                    Self::Disagree => f.write_str("disagree"),
+                    Self::Incomparable => f.write_str("incomparable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkFrontierComparisonV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "agree" => Ok(Self::Agree),
+                    "disagree" => Ok(Self::Disagree),
+                    "incomparable" => Ok(Self::Incomparable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkFrontierComparisonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkFrontierComparisonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkFrontierComparisonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**The explicit command the decision recommends next. A recommendation never
+        executes; each action names a separate version-checked application command.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The explicit command the decision recommends next. A recommendation never\nexecutes; each action names a separate version-checked application command.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "proceed_to_acceptance",
+        ///    "hold_for_dependencies",
+        ///    "admit_execution",
+        ///    "replan"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProposalActionV1 {
+            #[serde(rename = "proceed_to_acceptance")]
+            ProceedToAcceptance,
+            #[serde(rename = "hold_for_dependencies")]
+            HoldForDependencies,
+            #[serde(rename = "admit_execution")]
+            AdmitExecution,
+            #[serde(rename = "replan")]
+            Replan,
+        }
+        impl ::std::fmt::Display for WorkProposalActionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ProceedToAcceptance => f.write_str("proceed_to_acceptance"),
+                    Self::HoldForDependencies => f.write_str("hold_for_dependencies"),
+                    Self::AdmitExecution => f.write_str("admit_execution"),
+                    Self::Replan => f.write_str("replan"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProposalActionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "proceed_to_acceptance" => Ok(Self::ProceedToAcceptance),
+                    "hold_for_dependencies" => Ok(Self::HoldForDependencies),
+                    "admit_execution" => Ok(Self::AdmitExecution),
+                    "replan" => Ok(Self::Replan),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProposalActionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProposalActionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProposalActionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///One explained, replayable work-loop decision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One explained, replayable work-loop decision.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "based_on_version",
+        ///    "configuration_digest",
+        ///    "deterministic_fallback",
+        ///    "disposition",
+        ///    "evaluator_id",
+        ///    "evaluator_revision",
+        ///    "frontier_comparison",
+        ///    "input_digest",
+        ///    "ordered_reason_codes",
+        ///    "policy_digest",
+        ///    "policy_revision",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "based_on_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "deterministic_fallback": {
+        ///      "description": "True when the recommendation is the declared deterministic baseline\nselected because the evidence cannot support a stronger claim.",
+        ///      "type": "boolean"
+        ///    },
+        ///    "disposition": {
+        ///      "$ref": "#/definitions/WorkProposalDispositionV1"
+        ///    },
+        ///    "evaluator_id": {
+        ///      "$ref": "#/definitions/PolicyIdentifierV1"
+        ///    },
+        ///    "evaluator_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "frontier_comparison": {
+        ///      "$ref": "#/definitions/WorkFrontierComparisonV1"
+        ///    },
+        ///    "input_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "live_git_evidence": {
+        ///      "description": "The live Git frontier, returned exactly as supplied.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkEvidenceFrontierV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "local_evidence": {
+        ///      "description": "The local code/session frontier, returned exactly as supplied.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkEvidenceFrontierV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "ordered_reason_codes": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkProposalReasonV1"
+        ///      }
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "policy_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "recommended_action": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkProposalActionV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProposalDecisionV1 {
+            pub based_on_version: u64,
+            pub configuration_digest: ManifestDigest,
+            /**True when the recommendation is the declared deterministic baseline
+            selected because the evidence cannot support a stronger claim.*/
+            pub deterministic_fallback: bool,
+            pub disposition: WorkProposalDispositionV1,
+            pub evaluator_id: PolicyIdentifierV1,
+            pub evaluator_revision: u64,
+            pub frontier_comparison: WorkFrontierComparisonV1,
+            pub input_digest: ManifestDigest,
+            ///The live Git frontier, returned exactly as supplied.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub live_git_evidence: ::std::option::Option<WorkEvidenceFrontierV1>,
+            ///The local code/session frontier, returned exactly as supplied.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub local_evidence: ::std::option::Option<WorkEvidenceFrontierV1>,
+            pub ordered_reason_codes: ::std::vec::Vec<WorkProposalReasonV1>,
+            pub policy_digest: ManifestDigest,
+            pub policy_revision: u64,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub recommended_action: ::std::option::Option<WorkProposalActionV1>,
+            pub task_id: TaskId,
+        }
+        ///Exactly one disposition per decision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Exactly one disposition per decision.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "allow",
+        ///    "deny",
+        ///    "abstain",
+        ///    "indeterminate"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProposalDispositionV1 {
+            #[serde(rename = "allow")]
+            Allow,
+            #[serde(rename = "deny")]
+            Deny,
+            #[serde(rename = "abstain")]
+            Abstain,
+            #[serde(rename = "indeterminate")]
+            Indeterminate,
+        }
+        impl ::std::fmt::Display for WorkProposalDispositionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Allow => f.write_str("allow"),
+                    Self::Deny => f.write_str("deny"),
+                    Self::Abstain => f.write_str("abstain"),
+                    Self::Indeterminate => f.write_str("indeterminate"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProposalDispositionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "allow" => Ok(Self::Allow),
+                    "deny" => Ok(Self::Deny),
+                    "abstain" => Ok(Self::Abstain),
+                    "indeterminate" => Ok(Self::Indeterminate),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkProposalReasonV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "invalid_request",
+        ///    "request_cancelled",
+        ///    "deadline_exceeded",
+        ///    "frontier_agreement",
+        ///    "frontier_disagreement",
+        ///    "frontier_incomparable",
+        ///    "task_accepted",
+        ///    "terminal_evidence_observed",
+        ///    "execution_in_flight",
+        ///    "proposal_accepted",
+        ///    "dependencies_unresolved",
+        ///    "ready"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProposalReasonV1 {
+            #[serde(rename = "invalid_request")]
+            InvalidRequest,
+            #[serde(rename = "request_cancelled")]
+            RequestCancelled,
+            #[serde(rename = "deadline_exceeded")]
+            DeadlineExceeded,
+            #[serde(rename = "frontier_agreement")]
+            FrontierAgreement,
+            #[serde(rename = "frontier_disagreement")]
+            FrontierDisagreement,
+            #[serde(rename = "frontier_incomparable")]
+            FrontierIncomparable,
+            #[serde(rename = "task_accepted")]
+            TaskAccepted,
+            #[serde(rename = "terminal_evidence_observed")]
+            TerminalEvidenceObserved,
+            #[serde(rename = "execution_in_flight")]
+            ExecutionInFlight,
+            #[serde(rename = "proposal_accepted")]
+            ProposalAccepted,
+            #[serde(rename = "dependencies_unresolved")]
+            DependenciesUnresolved,
+            #[serde(rename = "ready")]
+            Ready,
+        }
+        impl ::std::fmt::Display for WorkProposalReasonV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::InvalidRequest => f.write_str("invalid_request"),
+                    Self::RequestCancelled => f.write_str("request_cancelled"),
+                    Self::DeadlineExceeded => f.write_str("deadline_exceeded"),
+                    Self::FrontierAgreement => f.write_str("frontier_agreement"),
+                    Self::FrontierDisagreement => f.write_str("frontier_disagreement"),
+                    Self::FrontierIncomparable => f.write_str("frontier_incomparable"),
+                    Self::TaskAccepted => f.write_str("task_accepted"),
+                    Self::TerminalEvidenceObserved => f.write_str("terminal_evidence_observed"),
+                    Self::ExecutionInFlight => f.write_str("execution_in_flight"),
+                    Self::ProposalAccepted => f.write_str("proposal_accepted"),
+                    Self::DependenciesUnresolved => f.write_str("dependencies_unresolved"),
+                    Self::Ready => f.write_str("ready"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProposalReasonV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "invalid_request" => Ok(Self::InvalidRequest),
+                    "request_cancelled" => Ok(Self::RequestCancelled),
+                    "deadline_exceeded" => Ok(Self::DeadlineExceeded),
+                    "frontier_agreement" => Ok(Self::FrontierAgreement),
+                    "frontier_disagreement" => Ok(Self::FrontierDisagreement),
+                    "frontier_incomparable" => Ok(Self::FrontierIncomparable),
+                    "task_accepted" => Ok(Self::TaskAccepted),
+                    "terminal_evidence_observed" => Ok(Self::TerminalEvidenceObserved),
+                    "execution_in_flight" => Ok(Self::ExecutionInFlight),
+                    "proposal_accepted" => Ok(Self::ProposalAccepted),
+                    "dependencies_unresolved" => Ok(Self::DependenciesUnresolved),
+                    "ready" => Ok(Self::Ready),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProposalReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProposalReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProposalReasonV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+    }
+    pub type Request = request::GenerateProposalRequest;
+    pub type Result = result::GeneratedWorkProposal;
+}
+typed_operation!(
+    WorkGenerateProposal,
+    work_generate_proposal,
+    "operation.work.generate_proposal",
+    "/application/work/generate-proposal",
+    "binding.http.work.generate_proposal",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    "schema.work.generate_proposal.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod work_replan_dependencies {
     pub mod request {
         /// Error types.

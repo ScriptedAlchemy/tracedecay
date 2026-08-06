@@ -12,6 +12,9 @@ use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, RuntimeEvidenceRef, TaskId,
     UtcMicros, WorkAuthority, WorkCommandId, WorkEvent, WorkProjection, WorkVersion, WorktreeId,
 };
+use tracedecay_policy::{
+    WorkEvidenceFrontierV1, WorkProposalActionV1, WorkProposalDispositionV1, WorkProposalReasonV1,
+};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 type WorkHistoryKey = (WorkAuthority, TaskId);
@@ -260,17 +263,32 @@ fn proposal_review_and_execution_admission_are_explicit_mutations() {
         "command.work.review.create",
         BTreeSet::new(),
     );
+    let proposal_request = GenerateProposalRequest {
+        task_id: task_id.clone(),
+        proposal_id: id("proposal.work.review"),
+        live_git_evidence: None,
+        occurred_at: UtcMicros(15),
+    };
     let proposal = service
-        .generate_proposal(
-            &context,
-            GenerateProposalRequest {
-                task_id: task_id.clone(),
-                proposal_id: id("proposal.work.review"),
-                proposal_digest: digest('c'),
-            },
-        )
+        .generate_proposal(&context, digest('f'), proposal_request.clone())
         .unwrap();
     assert_eq!(proposal.based_on_version, WorkVersion::initial());
+    assert_eq!(
+        proposal.decision.disposition,
+        WorkProposalDispositionV1::Allow
+    );
+    assert_eq!(
+        proposal.decision.recommended_action,
+        Some(WorkProposalActionV1::ProceedToAcceptance)
+    );
+    // Proposal generation is read-only and deterministic: nothing is appended
+    // and a replay returns the identical explained proposal.
+    assert_eq!(
+        proposal,
+        service
+            .generate_proposal(&context, digest('f'), proposal_request)
+            .unwrap()
+    );
     assert_eq!(service.load(&context, &task_id).unwrap().history_len(), 1);
 
     let accepted = service
@@ -514,6 +532,230 @@ fn a_stale_expected_version_is_a_version_conflict_and_appends_nothing() {
     );
     assert_eq!(store.load(&authority(&context), &task_id).unwrap().len(), 2);
     assert_eq!(service.load(&context, &task_id).unwrap(), first);
+}
+
+#[test]
+fn an_accepted_task_denies_further_proposals() {
+    let service = WorkService::new(TestStore::default());
+    let context = context("project.work.denied", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.denied");
+    create(
+        &service,
+        &context,
+        task_id.as_str(),
+        "command.work.denied.create",
+        BTreeSet::new(),
+    );
+    service
+        .accept_task(
+            &context,
+            AcceptTaskCommand {
+                task_id: task_id.clone(),
+                expected_version: WorkVersion::initial(),
+                command_id: id("command.work.denied.accept"),
+                occurred_at: UtcMicros(20),
+            },
+        )
+        .unwrap();
+
+    let proposal = service
+        .generate_proposal(
+            &context,
+            digest('f'),
+            GenerateProposalRequest {
+                task_id,
+                proposal_id: id("proposal.work.denied"),
+                live_git_evidence: None,
+                occurred_at: UtcMicros(30),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        proposal.decision.disposition,
+        WorkProposalDispositionV1::Deny
+    );
+    assert_eq!(proposal.decision.recommended_action, None);
+    assert!(
+        proposal
+            .decision
+            .ordered_reason_codes
+            .contains(&WorkProposalReasonV1::TaskAccepted)
+    );
+}
+
+#[test]
+fn disagreeing_evidence_frontiers_abstain_and_preserve_both_frontiers() {
+    let service = WorkService::new(TestStore::default());
+    let context = context("project.work.frontier", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.frontier");
+    create(
+        &service,
+        &context,
+        task_id.as_str(),
+        "command.work.frontier.create",
+        BTreeSet::new(),
+    );
+
+    let live = WorkEvidenceFrontierV1 {
+        watermark: UtcMicros(25),
+        digest: digest('9'),
+    };
+    let proposal = service
+        .generate_proposal(
+            &context,
+            digest('f'),
+            GenerateProposalRequest {
+                task_id,
+                proposal_id: id("proposal.work.frontier"),
+                live_git_evidence: Some(live.clone()),
+                occurred_at: UtcMicros(30),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        proposal.decision.disposition,
+        WorkProposalDispositionV1::Abstain
+    );
+    assert_eq!(proposal.decision.recommended_action, None);
+    assert_eq!(proposal.decision.live_git_evidence, Some(live));
+    assert!(proposal.decision.local_evidence.is_some());
+}
+
+#[test]
+fn terminal_evidence_after_admission_recommends_an_explicit_replan() {
+    let service = WorkService::new(TestStore::default());
+    let context = context("project.work.replan", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.replan");
+    create(
+        &service,
+        &context,
+        task_id.as_str(),
+        "command.work.replan.create",
+        BTreeSet::new(),
+    );
+    let generated = service
+        .generate_proposal(
+            &context,
+            digest('f'),
+            GenerateProposalRequest {
+                task_id: task_id.clone(),
+                proposal_id: id("proposal.work.replan.initial"),
+                live_git_evidence: None,
+                occurred_at: UtcMicros(15),
+            },
+        )
+        .unwrap();
+    service
+        .accept_proposal(
+            &context,
+            AcceptProposalCommand {
+                review: ReviewProposalCommand {
+                    task_id: task_id.clone(),
+                    proposal_id: generated.proposal_id,
+                    proposal_digest: generated.proposal_digest,
+                    expected_version: WorkVersion::initial(),
+                    command_id: id("command.work.replan.accept"),
+                    occurred_at: UtcMicros(18),
+                },
+            },
+        )
+        .unwrap();
+    service
+        .admit_execution(
+            &context,
+            AdmitExecutionCommand {
+                task_id: task_id.clone(),
+                expected_version: WorkVersion::new(2).unwrap(),
+                command_id: id("command.work.replan.admit"),
+                occurred_at: UtcMicros(20),
+            },
+        )
+        .unwrap();
+    service
+        .attach_runtime_evidence(
+            &context,
+            AttachRuntimeEvidenceCommand {
+                task_id: task_id.clone(),
+                evidence: RuntimeEvidenceRef::new(id("runtime.work.replan"), digest('e'), true)
+                    .unwrap(),
+                expected_version: WorkVersion::new(3).unwrap(),
+                command_id: id("command.work.replan.attach"),
+                occurred_at: UtcMicros(30),
+            },
+        )
+        .unwrap();
+
+    let proposal = service
+        .generate_proposal(
+            &context,
+            digest('f'),
+            GenerateProposalRequest {
+                task_id,
+                proposal_id: id("proposal.work.replan"),
+                live_git_evidence: None,
+                occurred_at: UtcMicros(40),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        proposal.decision.disposition,
+        WorkProposalDispositionV1::Allow
+    );
+    assert_eq!(
+        proposal.decision.recommended_action,
+        Some(WorkProposalActionV1::Replan)
+    );
+}
+
+#[test]
+fn a_cancelled_or_expired_request_never_reaches_the_evaluator() {
+    let service = WorkService::new(TestStore::default());
+    let admitted = context("project.work.cancel", "actor.work.owner");
+    let task_id = id::<TaskId>("task.work.cancel");
+    create(
+        &service,
+        &admitted,
+        task_id.as_str(),
+        "command.work.cancel.create",
+        BTreeSet::new(),
+    );
+
+    let cancelled = RequestContext::new(
+        admitted.actor().clone(),
+        admitted.scope().clone(),
+        admitted.grant().clone(),
+        RequestId::new("request.work.cancelled").unwrap(),
+        Deadline::new(UtcMicros(9_000)).unwrap(),
+        CancellationContext::cancelled("cancel.work.cancelled", UtcMicros(5)).unwrap(),
+    )
+    .unwrap();
+    let refused = service
+        .generate_proposal(
+            &cancelled,
+            digest('f'),
+            GenerateProposalRequest {
+                task_id: task_id.clone(),
+                proposal_id: id("proposal.work.cancelled"),
+                live_git_evidence: None,
+                occurred_at: UtcMicros(30),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(refused.kind(), ApplicationProblemKind::Cancelled);
+
+    let expired = service
+        .generate_proposal(
+            &admitted,
+            digest('f'),
+            GenerateProposalRequest {
+                task_id,
+                proposal_id: id("proposal.work.expired"),
+                live_git_evidence: None,
+                occurred_at: UtcMicros(10_000),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(expired.kind(), ApplicationProblemKind::TimedOut);
 }
 
 #[test]
