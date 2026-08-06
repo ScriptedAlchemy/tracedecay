@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-PR5 **session-observation** contracts are complete. External-source delivery is
+Sanitized-capture **session-observation** contracts are complete. External-source delivery is
 split (status corrected again 2026-07-26): the host-observation specialization
 is live. Hook V2 host admission constructs the retained external-source
 definition, binding, authorization, refresh, envelope, frontier, object, and
@@ -11,7 +11,7 @@ canonical store. The earlier blanket characterization of this contract as
 having no production capture/authorization composition, adapter, or conversion
 was wrong for that path. Broader provider acquisition and canonical-refetch
 composition remains dormant and is still a retained future seam rather than a
-delivered PR5/PR6 capability or PR8–PR14 work to rebuild.
+delivered capture capability or later-slice work to rebuild.
 
 `tracedecay-domain` is the pure value-and-validation boundary used by vertical
 product PRs. It is not a standalone framework roadmap.
@@ -28,7 +28,7 @@ consumer.
 ## Owns
 
 - Versioned value types, identifiers, validation, and deterministic encoding.
-- Pure research/evidence contracts already landed in PR4.
+- Pure research/evidence contracts already landed with the domain foundation.
 - Shipped observation, source-position, sanitization-receipt, sensitivity, and
   retention values required by capture and persistence.
 - Scope values that distinguish profile-wide user data, project-wide facts and
@@ -47,14 +47,14 @@ consumer.
 
 ## Required behavior
 
-- PR4 keeps the crate free of I/O and root-crate dependencies.
-- PR5 derives observation identity from stable source evidence, never a row ID,
+- The domain foundation keeps the crate free of I/O and root-crate dependencies.
+- Sanitized capture derives observation identity from stable source evidence, never a row ID,
   absolute path, ambient CWD, or provider display label.
-- PR5 permits durable content only after classification and sanitization; every
+- Sanitized capture permits durable content only after classification and sanitization; every
   durable payload is bound to a receipt covering its digest and disposition.
-- PR5 values preserve malformed, partial, duplicate, late, redacted, rejected,
+- Capture values preserve malformed, partial, duplicate, late, redacted, rejected,
   and unavailable evidence as explicit typed outcomes.
-- PR5 source positions and cursors are provider-safe opaque values; numeric and
+- Source positions and cursors are provider-safe opaque values; numeric and
   content-hash cursors cannot be compared under the wrong ordering rule.
 - Each later vertical PR adds the smallest final contract it consumes.
   Pure source-only/internal request helpers change in place. Only an actually

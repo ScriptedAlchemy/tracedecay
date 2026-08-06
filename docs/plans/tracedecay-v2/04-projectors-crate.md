@@ -2,7 +2,7 @@
 
 ## Status / Role
 
-PR5 pinned the first production observation-to-view contract. Projection now
+Sanitized capture pinned the first production observation-to-view contract. Projection now
 participates in each active vertical PR that introduces or replaces a product view. It
 is not a standalone framework, registry, or generated-inventory project. See
 [the plan index](00-plan-set-index.md) for the owning slices and
@@ -23,9 +23,9 @@ the same rows, order, provenance, coverage, and checkpoint.
 - Projector checkpoint semantics and dead-letter disposition required by the
   product view introduced in the same PR.
 - Rebuild validation and atomic publication when a view uses generations.
-- PR9 current-diagnostic derivation from sanitized, identity-matched clean
+- Current-diagnostic derivation from sanitized, identity-matched clean
   generation evidence.
-- Doctor/operations read models introduced by the PR14 product slice.
+- Doctor/operations read models introduced by the dashboard product slice.
 
 ## Does not own
 
@@ -42,7 +42,7 @@ the same rows, order, provenance, coverage, and checkpoint.
 
 ## Required behavior
 
-- PR5 pins one captured observation family and proves its deterministic mapping
+- Sanitized capture pins one captured observation family and proves its deterministic mapping
   to the existing searchable product row without changing capture truth.
 - A projector consumes only sanitized observations and receipt-validated fields;
   it cannot scan or redact content or mint sanitization eligibility.
@@ -51,7 +51,7 @@ the same rows, order, provenance, coverage, and checkpoint.
   the checkpoint at the prior committed input.
 - Duplicate delivery is a no-op. Late and corrected evidence produces explicit
   provenance or supersession rather than an in-place historical rewrite.
-- PR9 projects only sanitized diagnostics whose repository, snapshot,
+- Diagnostic projection admits only sanitized diagnostics whose repository, snapshot,
   generation, file identity, and content digest match the clean code view.
   Dirty-overlay diagnostics bypass durable projection and become eligible only
   after saved content enters the normal capture and generation pipeline with
@@ -63,13 +63,13 @@ the same rows, order, provenance, coverage, and checkpoint.
   rows whose representation is ordered; generated views publish only after
   validation and keep the prior validated generation on failure.
 - Provider expansion PRs add only the mapping needed for that provider and prove
-  parity with its PR5 contract before exposing the view.
+  parity with the pinned capture contract before exposing the view.
 - Canonical transcript bodies remain profile-wide. Project views contain scoped
   rows or locators, never copied message authority.
 - Project facts and sessions are project-wide. Code projections require the
   exact repository, checkout, worktree, ref, snapshot, and generation and never
   fall back to an active branch.
-- PR14 Doctor/operations projections expose real health, lag, corruption,
+- Doctor/operations projections expose real health, lag, corruption,
   recovery, and repair receipts; they do not manufacture findings from source
   code or documentation metadata.
 
@@ -168,7 +168,7 @@ typed generations and their own checkpoints.
 
 ## Acceptance
 
-- PR5: a direct contract test maps the real provider observation to the expected
+- Capture: a direct contract test maps the real provider observation to the expected
   existing row with stable identity, provenance, scope, and sanitized content.
 - Each provider PR proves duplicate and reordered delivery converge on the same
   output and checkpoint.
@@ -176,12 +176,12 @@ typed generations and their own checkpoints.
   checkpoint together, then succeeds on replay.
 - Each view PR using generations proves rebuild equals incremental at a frozen
   frontier and failed validation leaves the prior generation active.
-- PR9 diagnostic tests prove dirty overlays create no durable projection,
+- Diagnostic tests prove dirty overlays create no durable projection,
   mismatched identities cannot enter current views, and rebuild preserves
   clears and supersession without reviving stale findings.
 - Scope tests prove user/project ownership and reject base-checkout fallback for
   branch/worktree code graphs.
-- PR14 tests prove Doctor diagnosis remains read-only. Any separately entered
+- Doctor tests prove Doctor diagnosis remains read-only. Any separately entered
   owner operation is projected only from its authoritative durable receipt;
   Doctor never previews, dispatches, or applies it.
 - Host-surface parity and restart tests must pass before any superseded V1
