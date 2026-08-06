@@ -1,4 +1,4 @@
-//! Manifest-driven host bundle lifecycle contracts (Plan 27 PR13).
+//! Manifest-driven host bundle lifecycle contracts.
 //!
 //! This module plans host-registration mutations only after the embedded
 //! first-party catalog verifies manifest identity and content digests. It

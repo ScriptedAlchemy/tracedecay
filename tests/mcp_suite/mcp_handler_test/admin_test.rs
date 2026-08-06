@@ -198,11 +198,11 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     assert!(unknown_payload["project"].is_null());
 }
 
-/// When no project registry is present for the profile, `tracedecay_project_list`
-/// and `tracedecay_project_search` must still return the same top-level keys
-/// as the ok-shape (`title`, `summary`, `project_tree`) with zeroed/empty
-/// values, mirroring `src/dashboard/projects.rs`'s missing-registry branch,
-/// so callers can rely on a stable payload shape either way.
+/// When no project registry authority is mounted for the profile, all three
+/// registry tools report `unavailable`. List and search still return the same
+/// top-level keys as the ok-shape (`title`, `summary`, `project_tree`) with
+/// zeroed/empty values, so callers can rely on a stable payload shape without
+/// mistaking the unavailable authority for an authoritative empty result.
 #[tokio::test]
 async fn project_registry_tools_missing_registry_carries_stable_shape() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -221,7 +221,7 @@ async fn project_registry_tools_missing_registry_carries_stable_shape() {
     .await
     .unwrap();
     let list_payload: Value = serde_json::from_str(extract_text(&list.value)).unwrap();
-    assert_eq!(list_payload["status"], "not_found");
+    assert_eq!(list_payload["status"], "unavailable");
     assert_eq!(list_payload["title"], "registered projects");
     assert_eq!(list_payload["summary"]["project_count"], 0);
     assert_eq!(list_payload["summary"]["repo_count"], 0);
@@ -239,13 +239,28 @@ async fn project_registry_tools_missing_registry_carries_stable_shape() {
     .await
     .unwrap();
     let search_payload: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
-    assert_eq!(search_payload["status"], "not_found");
+    assert_eq!(search_payload["status"], "unavailable");
     assert_eq!(search_payload["title"], "projects matching \"alpha\"");
     assert_eq!(search_payload["summary"]["project_count"], 0);
     assert_eq!(search_payload["summary"]["repo_count"], 0);
     assert_eq!(search_payload["summary"]["truncated"], false);
     assert_eq!(search_payload["project_tree"].as_array().unwrap().len(), 0);
     assert_eq!(search_payload["projects"].as_array().unwrap().len(), 0);
+
+    let context = handle_tool_call(
+        &cg,
+        "tracedecay_project_context",
+        json!({"project_id": "project.missing", "format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let context_payload: Value = serde_json::from_str(extract_text(&context.value)).unwrap();
+    assert_eq!(
+        context_payload["status"], "unavailable",
+        "an unmounted profile registry is not an authoritative not-found answer"
+    );
 }
 
 #[cfg(feature = "test-transport")]

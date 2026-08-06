@@ -18,7 +18,7 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
 use super::{TraceDecay, TraceDecayOpenOptions};
-use crate::application::primitives::Pr12SourceReadAdapter;
+use crate::application::primitives::SourceReadAdapter;
 
 const NOW: UtcMicros = UtcMicros(1_000);
 
@@ -53,7 +53,7 @@ async fn source_reads_reuse_the_cross_session_cache() {
             .expect("initialize graph"),
     );
     let (scope, context, operation) = application_context("source-read");
-    let adapter = Pr12SourceReadAdapter::new(graph, scope).expect("source adapter");
+    let adapter = SourceReadAdapter::new(graph, scope).expect("source adapter");
     let request = SourceReadPrimitiveRequest {
         file: "src/lib.rs".to_owned(),
         mode: SourceReadModeV1::Lines,

@@ -1,4 +1,4 @@
-//! Doctor source ports and per-source finding producers (Plan 09 §PR14).
+//! Doctor source ports and per-source finding producers.
 //!
 //! The one Doctor use case composes findings from several owning authorities.
 //! Each authority is reached through a narrow, transport-neutral *source port*
@@ -19,13 +19,13 @@
 //! Family mapping (the finding-family enum is fixed; a source never widens it):
 //! - configuration authority (resolve/pin health) → [`DoctorFindingFamilyV1::Configuration`]
 //! - daemon/runtime health snapshot → [`DoctorFindingFamilyV1::StorageRuntime`]
-//! - host/agent integration conformance → [`DoctorFindingFamilyV1::Advisory`] (PR13
+//! - host/agent integration conformance → [`DoctorFindingFamilyV1::Advisory`] (advisory
 //!   host-capability/conformance evidence)
 //! - mounted canonical feedback owner → [`DoctorFindingFamilyV1::Advisory`]
 //!   (finding/scope/generation/provider/evidence/coverage identity)
 //! - code/semantic index mount state → [`DoctorFindingFamilyV1::SemanticIndex`]
 //! - live language-server/analyzer state → [`DoctorFindingFamilyV1::LanguageServer`]
-//! - durable Plan-26 feedback observations → [`DoctorFindingFamilyV1::Observability`]
+//! - durable feedback observations → [`DoctorFindingFamilyV1::Observability`]
 //! - storage retention/size → [`DoctorFindingFamilyV1::Storage`] (producers in
 //!   [`crate::storage::findings`]; this port collects their typed findings)
 
@@ -118,7 +118,7 @@ pub enum ConfigurationDriftV1 {
     PinUnavailable,
 }
 
-/// One configuration-authority resolve/pin health read (Plan 20).
+/// One configuration-authority resolve/pin health read.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ConfigurationAuthorityReadV1 {
@@ -192,7 +192,7 @@ pub fn configuration_finding(
     }
 }
 
-/// Narrow source port for configuration resolve/pin health (Plan 20).
+/// Narrow source port for configuration resolve/pin health.
 pub trait ConfigurationAuthorityDoctorPort: Send + Sync {
     /// Read the current configuration authority resolve/pin health.
     fn configuration_health<'a>(
@@ -509,7 +509,7 @@ pub trait OperationalAuditDoctorPort: Send + Sync {
 
 // --- Host/agent integration conformance (Advisory family) --------------------
 
-/// The observed conformance of a host/agent integration (Plan 27).
+/// The observed conformance of a host/agent integration.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum HostConformanceV1 {
@@ -525,7 +525,7 @@ pub enum HostConformanceV1 {
     InvalidFallback,
 }
 
-/// One host/agent integration conformance read (Plan 27).
+/// One host/agent integration conformance read.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum HostIntegrationReadV1 {
@@ -616,7 +616,7 @@ pub fn host_integration_finding(
     }
 }
 
-/// Narrow source port for host/agent integration conformance (Plan 27).
+/// Narrow source port for host/agent integration conformance.
 pub trait HostIntegrationDoctorPort: Send + Sync {
     /// Read the current host/agent integration conformance.
     fn host_conformance<'a>(
@@ -1262,7 +1262,7 @@ pub enum ObservabilityStateV1 {
     Stale,
 }
 
-/// One canonical Plan-26 feedback-observation read.
+/// One canonical durable feedback-observation read.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ObservabilityReadV1 {
@@ -1283,7 +1283,7 @@ pub enum ObservabilityReadV1 {
     Unknown,
 }
 
-/// Map the canonical Plan-26 read model into its `Observability` finding.
+/// Map the canonical durable read model into its `Observability` finding.
 pub fn observability_finding(
     read: &ObservabilityReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
@@ -1298,23 +1298,23 @@ pub fn observability_finding(
             ObservabilityStateV1::Stale => source_finding(
                 family,
                 DoctorEvidenceStateV1::Stale,
-                "observability.plan26.stale",
+                "observability.feedback-projection.stale",
                 *coverage,
-                "canonical Plan-26 feedback projection is stale at its retained watermark",
+                "canonical feedback projection is stale at its retained watermark",
             ),
             ObservabilityStateV1::Current => {
                 let statement = if last_observed_at_micros.is_some() {
                     format!(
-                        "canonical Plan-26 feedback projection contains {total_count} retained observations through its latest watermark"
+                        "canonical feedback projection contains {total_count} retained observations through its latest watermark"
                     )
                 } else {
                     format!(
-                        "canonical Plan-26 feedback projection contains {total_count} retained observations without a watermark"
+                        "canonical feedback projection contains {total_count} retained observations without a watermark"
                     )
                 };
                 clean_finding(
                     family,
-                    "observability.plan26.feedback-projection",
+                    "observability.feedback-projection.current",
                     *coverage,
                     &statement,
                 )
@@ -1329,8 +1329,8 @@ pub fn observability_finding(
         ObservabilityReadV1::Absent => unobservable_finding(
             family,
             DoctorEvidenceStateV1::Absent,
-            "observability.plan26.absent",
-            "canonical Plan-26 feedback projection contains no observations",
+            "observability.feedback-projection.absent",
+            "canonical feedback projection contains no observations",
         ),
         ObservabilityReadV1::Denied => unobservable_finding(
             family,
@@ -1347,7 +1347,7 @@ pub fn observability_finding(
     }
 }
 
-/// Narrow source port for the canonical durable Plan-26 read model.
+/// Narrow source port for the canonical durable feedback read model.
 pub trait ObservabilityDoctorPort: Send + Sync {
     /// Read current durable feedback-observation state.
     fn observability_health<'a>(
@@ -1404,7 +1404,7 @@ pub enum DoctorStorageFamilyReadV1 {
     Unknown,
 }
 
-/// Narrow source port for storage retention/size Doctor findings (Plan 38 §7).
+/// Narrow source port for storage retention/size Doctor findings.
 ///
 /// Unlike the other source ports, storage has several heterogeneous read models
 /// (budget/telemetry, orphan, retired-generation, debris, backlog), each with its own

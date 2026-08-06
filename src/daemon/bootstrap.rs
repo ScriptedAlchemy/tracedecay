@@ -62,7 +62,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
-    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
@@ -125,12 +125,23 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         }));
     }
     lifecycle.begin_draining();
+    semantic_artifact_gc.cancel();
+    if let Err(error) = semantic_artifact_gc.shutdown().await {
+        log_daemon_event(
+            "semantic_artifact_gc",
+            &[("outcome", "shutdown_failed".to_owned()), ("error", error)],
+        );
+    }
     maintenance.shutdown().await;
-    let _ = timeout(
-        DAEMON_TASK_ABORT_DEADLINE,
-        http_application_service.shutdown(),
-    )
-    .await;
+    if let Err(error) = http_application_service.shutdown().await {
+        log_daemon_event(
+            "daemon_http_application",
+            &[
+                ("outcome", "shutdown_failed".to_owned()),
+                ("error", error.to_string()),
+            ],
+        );
+    }
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
@@ -142,7 +153,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     // all client work drains, so nothing can admit a provider process after the
     // execution registry is emptied and leave it running past shutdown. The
     // deadline bounds a provider that refuses to stop.
-    let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, invocation.shutdown()).await;
+    invocation.shutdown().await;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     store_administration.shutdown_session_sync().await;
     store_administration.shutdown_host_admission_replay().await;
@@ -231,7 +242,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
-    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
+    let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
     let profile_database = engine
         .store_administration
@@ -311,121 +322,88 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // will never be served.
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    let shutdown_completed = timeout(DAEMON_SHUTDOWN_DEADLINE, async {
-        let _ = timeout(
-            DAEMON_TASK_ABORT_DEADLINE,
-            http_application_service.shutdown(),
-        )
-        .await;
-        engine.shutdown_project_open_tasks().await;
-        // Keep auxiliary process creation blocked until every scheduler and client
-        // task is drained or abandoned. A killed app-server call may retry before
-        // unwinding, so a shorter guard leaves a shutdown-time respawn race.
-        let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
-        // Stop automation before announcing shutdown or waiting for clients.
-        // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
-        // shutdown also terminates their tracked process trees before joining.
-        let (automation_stopped, memory_repair_stopped) = tokio::join!(
-            timeout(
-                DAEMON_TASK_ABORT_DEADLINE,
-                engine.shutdown_automation_schedulers(),
-            ),
-            timeout(
-                DAEMON_TASK_ABORT_DEADLINE,
-                engine.shutdown_memory_repair_schedulers(),
-            )
+    // Await each retained owner directly. An outer timeout would only drop
+    // this coordinator and detach whichever owner was active at expiry.
+    semantic_artifact_gc.cancel();
+    if let Err(error) = semantic_artifact_gc.shutdown().await {
+        log_daemon_event(
+            "semantic_artifact_gc",
+            &[("outcome", "shutdown_failed".to_owned()), ("error", error)],
         );
-        let automation_stopped = automation_stopped.is_ok();
-        let memory_repair_stopped = memory_repair_stopped.is_ok();
-        if !automation_stopped || !memory_repair_stopped {
-            log_daemon_event(
-                "daemon_shutdown",
-                &[("outcome", "scheduler_lock_timeout".to_string())],
-            );
-        }
+    }
+    if let Err(error) = http_application_service.shutdown().await {
+        log_daemon_event(
+            "daemon_http_application",
+            &[
+                ("outcome", "shutdown_failed".to_owned()),
+                ("error", error.to_string()),
+            ],
+        );
+    }
+    engine.shutdown_project_open_tasks().await;
+    // Keep auxiliary process creation blocked until every scheduler and client
+    // task is drained or abandoned. A killed app-server call may retry before
+    // unwinding, so a shorter guard leaves a shutdown-time respawn race.
+    let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
+    // Stop automation before announcing shutdown or waiting for clients.
+    // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
+    // shutdown also terminates their tracked process trees before joining.
+    let (automation_stopped, memory_repair_stopped) = tokio::join!(
+        timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            engine.shutdown_automation_schedulers(),
+        ),
+        timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            engine.shutdown_memory_repair_schedulers(),
+        )
+    );
+    let automation_stopped = automation_stopped.is_ok();
+    let memory_repair_stopped = memory_repair_stopped.is_ok();
+    if !automation_stopped || !memory_repair_stopped {
         log_daemon_event(
             "daemon_shutdown",
-            &[("socket", socket_path.display().to_string())],
+            &[("outcome", "scheduler_lock_timeout".to_string())],
         );
-        let in_flight_drained = timeout(
-            DAEMON_CLIENT_DRAIN_DEADLINE,
-            engine.lifecycle.wait_for_idle(),
-        )
-        .await
-        .is_ok();
-        // Once admitted requests are finished (or their bound elapsed), every
-        // remaining client task is an idle socket reader or already-cancelled
-        // request wrapper. Abort those immediately instead of making shutdown wait
-        // for clients to close persistent connections themselves.
-        client_tasks.abort_all();
-        let clients_drained =
-            drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
-        // Client setup and in-flight requests may create schedulers or project
-        // servers. Sweep owned background tasks only after all client work drains.
-        let background_drained = timeout(
-            DAEMON_TASK_ABORT_DEADLINE,
-            engine.shutdown_background_tasks(),
-        )
-        .await
-        .is_ok();
-        if !in_flight_drained || !clients_drained {
-            log_daemon_event(
-                "daemon_shutdown",
-                &[
-                    ("outcome", "client_drain_timeout".to_string()),
-                    (
-                        "deadline_secs",
-                        DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
-                    ),
-                    (
-                        "checkpoint",
-                        "skipped_active_clients_were_aborted".to_string(),
-                    ),
-                ],
-            );
-        }
-        if !background_drained {
-            log_daemon_event(
-                "daemon_shutdown",
-                &[("outcome", "background_task_timeout".to_string())],
-            );
-        }
-        // Graceful shutdown persists tokens-saved counters and checkpoints WALs
-        // for every live project server sequentially; with many servers or large
-        // WALs that can exceed systemd's stop timeout, which then sends `SIGKILL`
-        // to the daemon. On timeout the shutdown future is dropped and we proceed
-        // to exit: the remaining persistence is best-effort and the database WAL
-        // keeps state crash-safe.
-        let completed = timeout(DAEMON_SERVER_SHUTDOWN_DEADLINE, engine.shutdown_servers())
-            .await
-            .is_ok();
-        if !completed {
-            log_daemon_event(
-                "daemon_shutdown",
-                &[
-                    ("outcome", "timeout".to_string()),
-                    (
-                        "deadline_secs",
-                        DAEMON_SERVER_SHUTDOWN_DEADLINE.as_secs().to_string(),
-                    ),
-                ],
-            );
-        }
-    })
+    }
+    log_daemon_event(
+        "daemon_shutdown",
+        &[("socket", socket_path.display().to_string())],
+    );
+    let in_flight_drained = timeout(
+        DAEMON_CLIENT_DRAIN_DEADLINE,
+        engine.lifecycle.wait_for_idle(),
+    )
     .await
     .is_ok();
-    if !shutdown_completed {
+    // Once admitted requests are finished (or their bound elapsed), every
+    // remaining client task is an idle socket reader or already-cancelled
+    // request wrapper. Abort those immediately instead of making shutdown wait
+    // for clients to close persistent connections themselves.
+    client_tasks.abort_all();
+    let clients_drained = drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
+    // Client setup and in-flight requests may create schedulers or project
+    // servers. Sweep owned background tasks only after all client work drains.
+    engine.shutdown_background_tasks().await;
+    if !in_flight_drained || !clients_drained {
         log_daemon_event(
             "daemon_shutdown",
             &[
-                ("outcome", "hard_backstop_timeout".to_string()),
+                ("outcome", "client_drain_timeout".to_string()),
                 (
                     "deadline_secs",
-                    DAEMON_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                    DAEMON_CLIENT_DRAIN_DEADLINE.as_secs().to_string(),
+                ),
+                (
+                    "checkpoint",
+                    "skipped_active_clients_were_aborted".to_string(),
                 ),
             ],
         );
     }
+    // Each MCP server owns its bounded shutdown coordinator. Await the sweep
+    // itself so no unvisited server is discarded by an aggregate timeout.
+    engine.shutdown_servers().await;
     endpoint_cleanup
 }
 

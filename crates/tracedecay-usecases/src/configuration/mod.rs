@@ -1,4 +1,4 @@
-//! Transport-neutral PR11 configuration control plane.
+//! Transport-neutral configuration control plane.
 
 pub mod authorization;
 mod ephemeral_grants;

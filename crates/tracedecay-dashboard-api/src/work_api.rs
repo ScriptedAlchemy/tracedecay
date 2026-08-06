@@ -9,7 +9,6 @@
 
 use std::borrow::Cow;
 
-#[cfg(test)]
 use tracedecay_api::WorkOperation;
 
 /// `operation_id` and `application_path` are the identity the contract test
@@ -27,11 +26,38 @@ pub(super) struct RegisteredWorkRouteContractV1 {
 }
 
 /// Names the dashboard-exposed operations; every column of the document is read
-/// off the descriptor. A test holds this list to `WorkOperation::CORE`.
-static REGISTERED_ROUTE_CONTRACTS: &[RegisteredWorkRouteContractV1] = &[];
+/// off the descriptor. A test holds this list to `WorkOperation::ALL`.
+macro_rules! dashboard_work_routes {
+    ($($variant:ident),+ $(,)?) => {
+        static REGISTERED_ROUTE_CONTRACTS: &[RegisteredWorkRouteContractV1] = &[
+            $(
+                RegisteredWorkRouteContractV1 {
+                    method: "POST",
+                    operation_id: WorkOperation::$variant.operation_id_str(),
+                    path: WorkOperation::$variant.dashboard_route_path(),
+                    application_path: WorkOperation::$variant.application_route_path(),
+                    request_schema_name: || WorkOperation::$variant.request_schema_name(),
+                    response_schema_name: || WorkOperation::$variant.result_schema_name(),
+                },
+            )+
+        ];
 
-#[cfg(test)]
-static DOCUMENTED_OPERATIONS: &[WorkOperation] = &[];
+        #[cfg(test)]
+        static DOCUMENTED_OPERATIONS: &[WorkOperation] = &[$(WorkOperation::$variant),+];
+    };
+}
+
+dashboard_work_routes!(
+    Snapshot,
+    Delta,
+    Create,
+    ReplanDependencies,
+    ReviewProposal,
+    AcceptProposal,
+    AdmitExecution,
+    AttachRuntimeEvidence,
+    AcceptTask,
+);
 
 pub(super) fn registered_route_contracts() -> &'static [RegisteredWorkRouteContractV1] {
     REGISTERED_ROUTE_CONTRACTS
@@ -83,7 +109,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_core_route_is_mounted_and_no_attempt_route_is_reachable() {
+    async fn every_work_route_is_mounted_and_unknown_segments_are_refused() {
         let router = dashboard_router();
 
         for route in super::registered_route_contracts() {
@@ -92,14 +118,6 @@ mod tests {
             assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "{}", route.path);
         }
 
-        for operation in WorkOperation::ATTEMPT {
-            let uri = format!("/api{}", operation.route_path());
-            assert_eq!(
-                post(&router, &uri).await,
-                StatusCode::NOT_FOUND,
-                "the dashboard must not reach {uri}"
-            );
-        }
         assert_eq!(
             post(&router, "/api/work/not-an-operation").await,
             StatusCode::NOT_FOUND
@@ -107,8 +125,8 @@ mod tests {
     }
 
     #[test]
-    fn the_route_document_is_exactly_the_descriptor_core_family() {
-        assert_eq!(super::DOCUMENTED_OPERATIONS, WorkOperation::CORE.as_slice());
+    fn the_route_document_is_exactly_the_descriptor() {
+        assert_eq!(super::DOCUMENTED_OPERATIONS, WorkOperation::ALL.as_slice());
     }
 
     #[test]
@@ -175,14 +193,6 @@ mod tests {
                 binding.result_schema().body()["title"]
                     .as_str()
                     .expect("a titled result schema")
-            );
-            assert!(!route.path.contains("/attempt/"));
-            assert!(!route.application_path.contains("/attempt/"));
-        }
-        for (operation, _, _) in tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1 {
-            assert!(
-                !actual_ids.contains(format!("operation.work.{operation}").as_str()),
-                "dashboard must not expose Work attempt operation {operation}"
             );
         }
     }

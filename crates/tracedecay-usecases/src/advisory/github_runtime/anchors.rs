@@ -30,13 +30,13 @@ use tracedecay_runtime_core::db::engine::params;
 use crate::git_intelligence::NativeGitIntelligence;
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
-const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.code-anchor.v1";
-const FILE_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.file-occurrence.v1";
-const RELATED_ANCHOR_DOMAIN_V1: &str = "tracedecay.pr13.github.related-anchor.v1";
+const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.advisory.github.code-anchor.v1";
+const FILE_ID_DOMAIN_V1: &str = "tracedecay.advisory.github.file-occurrence.v1";
+const RELATED_ANCHOR_DOMAIN_V1: &str = "tracedecay.advisory.github.related-anchor.v1";
 const BODY_KEY_PREFIX_V1: &str = "feedback.github-review.body.v1.";
-const BODY_DIGEST_DOMAIN_V1: &str = "tracedecay.pr13.github.retained-body.v1";
+const BODY_DIGEST_DOMAIN_V1: &str = "tracedecay.advisory.github.retained-body.v1";
 const BODY_SANITIZER_VERSION_V1: &str = "sanitizer.github-review.provider-metadata.v1";
-const BODY_RECEIPT_DOMAIN_V1: &str = "tracedecay.pr13.github.retained-body-receipt.v1";
+const BODY_RECEIPT_DOMAIN_V1: &str = "tracedecay.advisory.github.retained-body-receipt.v1";
 const MAX_GIT_BLOB_BYTES_V1: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]

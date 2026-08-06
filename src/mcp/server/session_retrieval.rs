@@ -1171,15 +1171,46 @@ impl DaemonSessionRetrievalService {
                 return expand_retrieval_outcome(terminal, command.grain(), self.empty_temporal());
             }
         };
-        let canonical_content = match hydration_state(&result, &direct.anchor_id) {
-            Some(HydrationStateV1::Available) => result
-                .hydrated
-                .iter()
-                .find(|hydrated| hydrated.anchor_id() == &direct.anchor_id)
-                .and_then(|hydrated| hydrated.content())
-                .and_then(|content| std::str::from_utf8(content).ok()),
-            Some(state) => return expand_hydration_state(state),
-            None => None,
+        let external_content = if let LcmExpandTarget::ExternalPayload { payload_ref } = &target {
+            let Ok(max_bytes) = usize::try_from(MESSAGE_SEARCH_MAX_BYTES) else {
+                return LcmExpandServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::without_worker(
+                        SessionRetrievalUnavailableReason::HydrationUnavailable,
+                    ),
+                );
+            };
+            match executor
+                .hydrate_lcm_external_payload(
+                    &result.snapshot,
+                    &direct.anchor_id,
+                    command.provider(),
+                    command.session_id(),
+                    payload_ref,
+                    max_bytes,
+                )
+                .await
+            {
+                Ok(content) => Some(content),
+                Err(error) => {
+                    return expand_execution_error(error, self.lcm_temporal_view(&result));
+                }
+            }
+        } else {
+            None
+        };
+        let canonical_content = if let Some(content) = external_content.as_deref() {
+            Some(content)
+        } else {
+            match hydration_state(&result, &direct.anchor_id) {
+                Some(HydrationStateV1::Available) => result
+                    .hydrated
+                    .iter()
+                    .find(|hydrated| hydrated.anchor_id() == &direct.anchor_id)
+                    .and_then(|hydrated| hydrated.content())
+                    .and_then(|content| std::str::from_utf8(content).ok()),
+                Some(state) => return expand_hydration_state(state),
+                None => None,
+            }
         };
         let Some(canonical_content) = canonical_content else {
             return LcmExpandServiceOutcome::Unavailable(

@@ -16,7 +16,7 @@ use super::*;
 
 #[derive(Clone)]
 struct DaemonHandoffOpenTargets {
-    feedback: Option<Arc<Pr12FeedbackRuntime>>,
+    feedback: Option<Arc<FeedbackRuntime>>,
     observed_at: UtcMicros,
     recheck_sequence: Arc<AtomicU64>,
 }
@@ -118,7 +118,7 @@ fn current_feedback_finding(
 
 pub(super) async fn execute_handoff_application(
     registered: RegisteredWorkRuntime,
-    feedback: Option<Arc<Pr12FeedbackRuntime>>,
+    feedback: Option<Arc<FeedbackRuntime>>,
     request_id: String,
     request: HandoffApplicationInvocationV1,
     observed_at: UtcMicros,

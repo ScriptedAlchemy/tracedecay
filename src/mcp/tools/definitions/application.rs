@@ -1306,7 +1306,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pr12_primitive_definitions_expose_closed_typed_request_schemas() {
+    fn primitive_definitions_expose_closed_typed_request_schemas() {
         let definitions = [
             def_feedback_diagnostics(),
             def_feedback_get(),

@@ -14,8 +14,8 @@ use crate::identity::application_identifier;
 
 /// Stable Doctor finding families.
 ///
-/// The initial list is derived from Plan 14's observable classes (advisory
-/// findings from Brain/Explorer/Loom/Code/Observatory) and the legacy
+/// The initial list covers advisory findings from
+/// Brain, Explorer, Loom, Code, and Observatory, plus the legacy
 /// `core_doctor` checks (graph quick-check, temporal/migration health,
 /// configuration compatibility drift, semantic runtime, session ingest).
 /// Each family maps to one audited typed input surface. The set is kept small
@@ -29,33 +29,32 @@ pub enum DoctorFindingFamilyV1 {
     /// advisory/scout findings (GitHub review, CI localization,
     /// proximity, context scout) — `crate::advisory` / domain feedback.
     Advisory,
-    /// Desired-versus-effective configuration and compatibility drift
-    /// (Plan 20 `ProjectConfigurationRuntime` / `ConfigurationControlPlane`).
+    /// Desired-versus-effective configuration and compatibility drift from
+    /// `ProjectConfigurationRuntime` / `ConfigurationControlPlane`.
     Configuration,
     /// Store, graph, and temporal runtime health plus migration coverage
     /// (`RuntimeReadOperationV1` health family, `StoreRuntimeHandle`).
     StorageRuntime,
-    /// Storage retention, size, and efficiency over Plan 26 observability read
-    /// models (Plan 38 §7). Distinct from [`Self::StorageRuntime`] health: this
+    /// Storage retention, size, and efficiency over canonical observability
+    /// read models. Distinct from [`Self::StorageRuntime`] health: this
     /// family surfaces over-budget stores, identity-drift orphans, quarantined
     /// incident debris, and retention backlog. The typed
     /// subclass vocabulary is [`DoctorStorageFindingKindV1`].
     Storage,
-    /// Language-server / analyzer engine status (Plan 35 LSP gateway,
-    /// `AnalyzerState`).
+    /// Language-server / analyzer engine status from the LSP gateway's
+    /// `AnalyzerState`.
     LanguageServer,
     /// Semantic search / index runtime state (indexing, stale, unavailable).
     SemanticIndex,
-    /// Denominator-safe measurement and telemetry health (Plan 26 analytics /
-    /// accounting read models, session ingest).
+    /// Denominator-safe measurement and telemetry health from analytics,
+    /// accounting read models, and session ingest.
     Observability,
 }
 
-/// Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family
-/// (Plan 38 §7).
+/// Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family.
 ///
 /// The storage family never reports a silent overage: each subclass names one
-/// observable retention/size condition Doctor surfaces over the Plan 26 size
+/// observable retention/size condition Doctor surfaces over canonical size
 /// observability read models. The set is closed and grows only through a future
 /// versioned enum, never by widening an existing subclass.
 #[derive(
@@ -79,7 +78,7 @@ pub enum DoctorStorageFindingKindV1 {
     TableGrowth,
 }
 
-/// Exact Doctor evidence states from Plan 09 §PR14.
+/// Exact Doctor evidence states.
 ///
 /// Missing, partial, or unknown truth never becomes healthy or clean. Only
 /// [`DoctorEvidenceStateV1::HealthyCompleteCoverage`] asserts a healthy result,
@@ -338,8 +337,8 @@ impl<'de> Deserialize<'de> for DoctorFindingV1 {
 
 /// A [`DoctorFindingFamilyV1::Storage`] finding paired with its typed subclass.
 ///
-/// Plan 38 §7 review S1: the storage subclass ([`DoctorStorageFindingKindV1`])
-/// must be *attached* to the finding it classifies, not smuggled into an
+/// The storage subclass ([`DoctorStorageFindingKindV1`]) must be *attached* to
+/// the finding it classifies, not smuggled into an
 /// evidence-reference string that a consumer has to parse back out. This wrapper
 /// is the typed carrier. Its constructor enforces that the wrapped finding is the
 /// `Storage` family, so a non-Storage finding can never be mislabeled with a

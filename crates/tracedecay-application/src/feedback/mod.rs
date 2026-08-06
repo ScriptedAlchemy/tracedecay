@@ -1,4 +1,4 @@
-//! One-shot, transport-neutral PR11 post-edit feedback orchestration.
+//! One-shot, transport-neutral post-edit feedback orchestration.
 //!
 //! This module composes canonical diagnostics and graph/test evidence through
 //! narrow ports. It owns neither a diagnostic store nor a graph, scheduler,
@@ -16,7 +16,7 @@ pub use catalog::{
     feedback_surface_handler_descriptors, feedback_surface_operation,
 };
 
-pub use adapters::{GenerationBoundFeedbackDiagnosticsAdapter, GraphImpactFeedbackAdapter};
+pub use adapters::GenerationBoundFeedbackDiagnosticsAdapter;
 pub use github_ci_proximity::{
     ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,

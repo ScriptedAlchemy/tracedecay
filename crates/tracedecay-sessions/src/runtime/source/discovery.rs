@@ -1,6 +1,6 @@
 //! Bounded filesystem discovery for transcript enumeration.
 //!
-//! Limits are derived from existing PR6 host-admission / ingest constants so
+//! Limits are derived from existing host-admission / ingest constants so
 //! discovery cannot invent tighter arbitrary caps. Bounds are enforced before
 //! a candidate path is retained, and directory symlinks are not followed.
 

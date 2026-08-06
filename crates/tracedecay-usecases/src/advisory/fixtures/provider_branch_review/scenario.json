@@ -1,5 +1,5 @@
 {
-  "schema": "tracedecay.pr13.source-backed-composite.v1",
+  "schema": "tracedecay.advisory.source-backed-composite.v1",
   "sources": {
     "pull_request": "pull_request.json",
     "review": "review.json",
@@ -33,7 +33,7 @@
     "advisory_only": true
   },
   "composition": {
-    "diagnostics_and_impact": "acceptance_supplies_existing_pr12_result_for_identity",
+    "diagnostics_and_impact": "acceptance_supplies_existing_feedback_result_for_identity",
     "github_review": "fixture_loader",
     "ci_localization": "fixture_loader",
     "proximity": "fixture_sessions_plus_acceptance_graph_address",

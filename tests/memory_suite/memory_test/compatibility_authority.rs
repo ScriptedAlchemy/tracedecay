@@ -1,4 +1,4 @@
-//! PR7 compatibility fact authority suite (moved verbatim from `memory_test`).
+//! compatibility fact authority suite (moved verbatim from `memory_test`).
 
 use super::*;
 

@@ -622,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_surface_exposes_the_pr14_dashboard_transport() {
+    fn configuration_surface_exposes_the_dashboard_transport() {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
         let surfaces = contribution
             .bindings()

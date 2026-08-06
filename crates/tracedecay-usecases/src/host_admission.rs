@@ -726,40 +726,6 @@ impl<'a> HostAdmissionFacade<'a> {
         Self { authorities }
     }
 
-    #[allow(dead_code)] // evidence-assembly admission port — preserve authority surface
-    pub(crate) async fn resolve_evidence_assembly_anchor(
-        &self,
-        context: &tracedecay_application::RequestContext,
-        owner: &tracedecay_store::EvidenceAssemblyOwnerV1,
-        anchor_id: &RetrievalAnchorId,
-    ) -> tracedecay_store::EvidenceAssemblyStoreResult<
-        crate::evidence_assembly::EvidenceAssemblyAnchorResolutionV1,
-    > {
-        let unavailable = || tracedecay_store::EvidenceAssemblyStoreError::Unavailable;
-        let project_id = owner.owner.project_id().ok_or_else(unavailable)?;
-        if project_id != &context.scope().project_id {
-            return Err(unavailable());
-        }
-        let scope = ObservationScopeV1::Project {
-            project_id: project_id.clone(),
-        };
-        self.authorities
-            .validate_scope(&scope)
-            .map_err(|_| unavailable())?;
-        let database = self
-            .authorities
-            .registered_database(HostAdmissionScope::Project)
-            .map_err(|_| unavailable())?
-            .ok_or_else(unavailable)?;
-        crate::evidence_assembly::RuntimeEvidenceAssemblyStore::new(
-            database.binding().shard_id.profile_id.clone(),
-            database.runtime().clone(),
-            database.authority().clone(),
-        )?
-        .resolve_anchor(context, owner, anchor_id)
-        .await
-    }
-
     pub fn probe(&self, provider: &str, scope: HostAdmissionScope) -> HostAdmissionOutcome {
         if !supported_provider(provider) {
             return HostAdmissionOutcome::new(

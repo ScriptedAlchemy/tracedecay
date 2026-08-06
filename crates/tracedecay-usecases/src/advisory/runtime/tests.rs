@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn absent_provider_states_remain_explicit() {
-    let advisory = Pr13AdvisoryContributionsV1::absent()
+    let advisory = AdvisoryContributionsV1::absent()
         .as_plan09()
         .expect("canonical advisory");
     assert_eq!(
@@ -21,14 +21,14 @@ fn absent_provider_states_remain_explicit() {
 #[test]
 fn interrupted_cycle_has_no_delivery_publication() {
     let outcome = AdvisoryCycleOutcome::Cancelled {
-        contributions: Pr13AdvisoryContributionsV1::absent(),
+        contributions: AdvisoryContributionsV1::absent(),
     };
     assert!(outcome.publication().is_none());
 }
 
 #[test]
 fn provider_state_events_preserve_each_closed_provider_identity() {
-    let events = Pr13AdvisoryContributionsV1::absent()
+    let events = AdvisoryContributionsV1::absent()
         .providers
         .iter()
         .map(provider_state_event)
@@ -54,7 +54,7 @@ fn provider_state_events_preserve_each_closed_provider_identity() {
 
 #[test]
 fn unrequested_remote_providers_are_typed_unavailable_not_omitted() {
-    let mut contributions = Pr13AdvisoryContributionsV1::absent();
+    let mut contributions = AdvisoryContributionsV1::absent();
     mark_unrequested_remote_providers(&mut contributions, false, false);
     assert_eq!(
         contributions

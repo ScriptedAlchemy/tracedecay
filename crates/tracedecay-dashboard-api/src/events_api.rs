@@ -1,6 +1,6 @@
 //! `GET /api/events` — the dashboard's typed Server-Sent Events stream.
 //!
-//! The PR14 frontend replaces polling with one revision-monotone SSE path (plan
+//! The dashboard frontend replaces polling with one revision-monotone SSE path (plan
 //! 11 §"Finalized implementation architecture" → SSE module). Every event
 //! carries stream/run identity, a monotone event revision, an entity revision,
 //! exact scope, observation time, an optional source watermark, and coverage.
@@ -882,6 +882,7 @@ pub(crate) async fn dashboard_state_fixture(
         lcm_db: None,
         lcm_db_path: String::new(),
         lcm_scope: "unavailable".to_owned(),
+        lcm_read_authority: None,
         savings_db: None,
         savings_db_path: String::new(),
         project_root,

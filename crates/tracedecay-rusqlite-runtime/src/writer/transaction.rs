@@ -121,6 +121,21 @@ pub(super) fn process_batch(
         return;
     }
 
+    let commit_denied = prepared
+        .iter()
+        .map(|prepared| {
+            matches!(
+                &prepared.result,
+                PreparedResult::AwaitingTransactionCommit(_)
+            ) && !prepared.item.probe.try_begin_commit()
+        })
+        .collect::<Vec<_>>();
+    if commit_denied.iter().any(|denied| *denied) {
+        drop(transaction);
+        settle_commit_denied(prepared, commit_denied, telemetry);
+        return;
+    }
+
     let commit_failure = match transaction.commit() {
         Err(error) => Some(driver_failure(error, "commit writer transaction")),
         Ok(()) => match publish_committed(&prepared, watermark_publisher) {
@@ -386,6 +401,41 @@ fn settle_authority_denied(
         let PreparedRequest { item, result } = prepared;
         let settled = if authority_denied {
             Ok(super::settlement::missing_authority())
+        } else {
+            match result {
+                PreparedResult::Final(result) => result,
+                PreparedResult::AwaitingTransactionCommit(_) => {
+                    Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                        reason: UnavailableReasonV1::Faulted,
+                    })
+                }
+            }
+        };
+        telemetry.completed(&settled);
+        item.settle(settled);
+    }
+}
+
+fn settle_commit_denied(
+    prepared: Vec<PreparedRequest>,
+    commit_denied: Vec<bool>,
+    telemetry: &WriterTelemetry,
+) {
+    debug_assert_eq!(prepared.len(), commit_denied.len());
+    for (prepared, commit_denied) in prepared.into_iter().zip(commit_denied) {
+        let PreparedRequest { item, result } = prepared;
+        let settled = if commit_denied {
+            interruption_outcome(
+                &item.request,
+                item.probe.as_ref(),
+                RuntimeCancellationStageV1::BeforeCommit,
+            )
+            .map(Ok)
+            .unwrap_or_else(|| {
+                Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                    reason: UnavailableReasonV1::Faulted,
+                })
+            })
         } else {
             match result {
                 PreparedResult::Final(result) => result,

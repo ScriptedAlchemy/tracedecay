@@ -1,12 +1,12 @@
-//! Doctor Storage-family producers (Plan 38 §7 → Plan 09 §PR14).
+//! Doctor Storage-family producers.
 //!
 //! These pure functions map the storage read models onto the landed
 //! [`DoctorFindingV1`] contract, wrapped in a [`DoctorStorageFindingV1`] that
 //! carries the typed subclass. They never invent a finding family or evidence
 //! state: the family is always [`DoctorFindingFamilyV1::Storage`], the typed
-//! subclass is attached as a [`DoctorStorageFindingKindV1`] on the wrapper (Plan
-//! 38 §7 review S1 — the kind is a value on the finding, not a slug a consumer
-//! must parse out of an evidence string), and the evidence state is chosen so
+//! subclass is attached as a [`DoctorStorageFindingKindV1`] on the wrapper (the
+//! kind is a value on the finding, not a slug a consumer must parse out of an
+//! evidence string), and the evidence state is chosen so
 //! that an observed retention/size problem is `Degraded`/`Stale` (never
 //! healthy), an unobservable source is `Unsupported`/`Denied`/`Unknown`, and
 //! only a genuinely clean, fully-covered observation is
@@ -14,7 +14,7 @@
 //! subclass slug for stable provenance, but the typed kind is the source of
 //! truth.
 //!
-//! A budget overage is *never* silent (Plan 38 §7): [`over_budget_finding`]
+//! A budget overage is *never* silent: [`over_budget_finding`]
 //! always yields a non-healthy finding when the store is over budget.
 
 use crate::doctor::{
@@ -239,7 +239,7 @@ pub fn table_growth_finding(
 /// Produce the `OverBudgetStore` finding from a telemetry read and its budget.
 ///
 /// An over-budget store is *always* a non-healthy finding — the budget is never
-/// silently ignored (Plan 38 §7). Unobservable telemetry yields an honest
+/// silently ignored. Unobservable telemetry yields an honest
 /// unsupported/denied/unknown finding, and a within-budget store yields a
 /// healthy finding only when coverage is genuinely complete.
 pub fn over_budget_finding(
@@ -878,8 +878,8 @@ mod tests {
         )
         .expect("backlog");
 
-        // Each producer attaches its typed subclass to the finding (Plan 38 §7
-        // review S1) — the kind is recovered by value, not by parsing evidence.
+        // Each producer attaches its typed subclass to the finding; the kind is
+        // recovered by value, not by parsing evidence.
         assert_eq!(over.kind(), DoctorStorageFindingKindV1::OverBudgetStore);
         assert_eq!(orphan.kind(), DoctorStorageFindingKindV1::OrphanStore);
         assert_eq!(

@@ -2468,8 +2468,8 @@ function workProjections(): readonly Record<string, unknown>[] {
     historyLen: 4,
   }),
   workProjection({
-    taskId: 'task.attempt-inventory',
-    title: 'Name every withheld runtime-attempt operation',
+    taskId: 'task.route-inventory',
+    title: 'Hold the mounted Work routes against the descriptor',
     version: 1,
     historyLen: 1,
   }),

@@ -177,7 +177,25 @@ fn dashboard_configuration_unavailable(
 /// Internal handle for a managed dashboard instance.
 struct RunningDashboard {
     url: String,
-    shutdown: tokio::sync::oneshot::Sender<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<Result<()>>,
+    completed: Arc<tokio::sync::Notify>,
+}
+
+impl RunningDashboard {
+    fn request_shutdown(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+}
+
+struct DashboardTaskCompletion(Arc<tokio::sync::Notify>);
+
+impl Drop for DashboardTaskCompletion {
+    fn drop(&mut self) {
+        self.0.notify_waiters();
+    }
 }
 
 /// Global manager for at most one dashboard per MCP server process.
@@ -187,6 +205,88 @@ static DASHBOARD_MANAGER: std::sync::OnceLock<tokio::sync::Mutex<Option<RunningD
 
 fn get_manager() -> &'static tokio::sync::Mutex<Option<RunningDashboard>> {
     DASHBOARD_MANAGER.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+async fn take_finished_dashboard() -> Option<RunningDashboard> {
+    let mut manager = get_manager().lock().await;
+    if manager
+        .as_ref()
+        .is_some_and(|dashboard| dashboard.task.is_finished())
+    {
+        manager.take()
+    } else {
+        None
+    }
+}
+
+async fn join_dashboard(dashboard: RunningDashboard, exceeded_deadline: bool) -> Result<()> {
+    let url = dashboard.url;
+    match dashboard.task.await {
+        Ok(Ok(())) if !exceeded_deadline => Ok(()),
+        Ok(Ok(())) => Err(TraceDecayError::Config {
+            message: format!("dashboard '{url}' exceeded its shutdown deadline"),
+        }),
+        Ok(Err(error)) => Err(error),
+        Err(error) if error.is_cancelled() && exceeded_deadline => Err(TraceDecayError::Config {
+            message: format!("dashboard '{url}' was aborted after its shutdown deadline"),
+        }),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("dashboard '{url}' task failed: {error}"),
+        }),
+    }
+}
+
+/// Stops the process-local dashboard and joins its serving task. Once the
+/// deadline expires the task is aborted, but its handle stays retained until
+/// the cancellation has actually joined.
+pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> Result<()> {
+    {
+        let mut manager = get_manager().lock().await;
+        let Some(dashboard) = manager.as_mut() else {
+            return Ok(());
+        };
+        dashboard.request_shutdown();
+    }
+
+    let mut exceeded_deadline = false;
+    loop {
+        if let Some(dashboard) = take_finished_dashboard().await {
+            return join_dashboard(dashboard, exceeded_deadline).await;
+        }
+        let completed = {
+            let manager = get_manager().lock().await;
+            let Some(dashboard) = manager.as_ref() else {
+                return Ok(());
+            };
+            Arc::clone(&dashboard.completed)
+        };
+        let notified = completed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(dashboard) = take_finished_dashboard().await {
+            return join_dashboard(dashboard, exceeded_deadline).await;
+        }
+        if exceeded_deadline {
+            notified.as_mut().await;
+            continue;
+        }
+        tokio::select! {
+            biased;
+            () = notified.as_mut() => {}
+            () = tokio::time::sleep_until(deadline) => {
+                let mut manager = get_manager().lock().await;
+                if let Some(dashboard) = manager.as_mut() {
+                    dashboard.task.abort();
+                }
+                exceeded_deadline = true;
+            }
+        }
+    }
+}
+
+pub(crate) async fn shutdown_dashboard() -> Result<()> {
+    shutdown_dashboard_until(tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE)
+        .await
 }
 
 fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
@@ -199,6 +299,7 @@ pub(super) async fn handle_dashboard(
     args: Value,
     retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    lcm_retrieval: Option<Arc<dyn super::SessionRetrievalServicePort>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
@@ -221,17 +322,22 @@ pub(super) async fn handle_dashboard(
 
     match action {
         "stop" => {
-            let manager = get_manager();
-            let mut guard = manager.lock().await;
-            let payload = if let Some(handle) = guard.take() {
-                let _ = handle.shutdown.send(());
-                json!({ "status": "stopped", "previous_url": handle.url })
+            let previous_url = {
+                let manager = get_manager().lock().await;
+                manager.as_ref().map(|dashboard| dashboard.url.clone())
+            };
+            let payload = if let Some(previous_url) = previous_url {
+                shutdown_dashboard().await?;
+                json!({ "status": "stopped", "previous_url": previous_url })
             } else {
                 json!({ "status": "not_running" })
             };
             Ok(dashboard_tool_result(cg, &args, &payload))
         }
         "start" | "" => {
+            if let Some(finished) = take_finished_dashboard().await {
+                join_dashboard(finished, false).await?;
+            }
             let host = args
                 .get("host")
                 .and_then(|v| v.as_str())
@@ -249,12 +355,16 @@ pub(super) async fn handle_dashboard(
             let mut guard = manager.lock().await;
 
             if let Some(handle) = guard.as_ref() {
-                // already running — idempotent return
+                let status = if handle.shutdown.is_some() {
+                    "already_running"
+                } else {
+                    "stopping"
+                };
                 return Ok(dashboard_tool_result(
                     cg,
                     &args,
                     &json!({
-                        "status": "already_running",
+                        "status": status,
                         "url": handle.url
                     }),
                 ));
@@ -284,12 +394,20 @@ pub(super) async fn handle_dashboard(
                         .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
                 })
                 .transpose()?;
+            let lcm_read_authority = lcm_retrieval
+                .zip(retained_cg.store_layout().identity.project_id.clone())
+                .map(|(retrieval, project_id)| {
+                    Arc::new(super::dashboard_lcm::DashboardLcmReadAdapter::new(
+                        retrieval, project_id,
+                    )) as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
+                });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
                 DashboardStateCompositionV1 {
                     project_graph_resolver: dashboard_project_graph_resolver,
                     registered_project_session_db,
+                    lcm_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,
                     automation_writer,
@@ -308,19 +426,25 @@ pub(super) async fn handle_dashboard(
             let url = format!("http://{addr}/");
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-
-            tokio::spawn(async move {
-                // Use with_graceful_shutdown so `stop` can cleanly terminate serve.
-                let _ = axum::serve(listener, app)
+            let completed = Arc::new(tokio::sync::Notify::new());
+            let task_completion = DashboardTaskCompletion(Arc::clone(&completed));
+            let task = tokio::spawn(async move {
+                let _completion = task_completion;
+                axum::serve(listener, app)
                     .with_graceful_shutdown(async move {
                         let _ = shutdown_rx.await;
                     })
-                    .await;
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!("dashboard server failed: {error}"),
+                    })
             });
 
             *guard = Some(RunningDashboard {
                 url: url.clone(),
-                shutdown: shutdown_tx,
+                shutdown: Some(shutdown_tx),
+                task,
+                completed,
             });
 
             Ok(dashboard_tool_result(
@@ -339,5 +463,37 @@ pub(super) async fn handle_dashboard(
                 "unknown action for tracedecay_dashboard: {other} (use 'start' or 'stop')"
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
+        let mut manager = get_manager().lock().await;
+        assert!(manager.is_none(), "dashboard test requires an idle manager");
+        let (shutdown, _shutdown_requested) = tokio::sync::oneshot::channel();
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let completion = DashboardTaskCompletion(Arc::clone(&completed));
+        let task = tokio::spawn(async move {
+            let _completion = completion;
+            std::future::pending::<Result<()>>().await
+        });
+        *manager = Some(RunningDashboard {
+            url: "http://127.0.0.1:0/".to_owned(),
+            shutdown: Some(shutdown),
+            task,
+            completed,
+        });
+        drop(manager);
+
+        let error = shutdown_dashboard_until(tokio::time::Instant::now())
+            .await
+            .expect_err("expired dashboard shutdown must report its abort");
+
+        assert!(error.to_string().contains("was aborted"));
+        assert!(get_manager().lock().await.is_none());
     }
 }

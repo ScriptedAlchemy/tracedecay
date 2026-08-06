@@ -13,7 +13,7 @@ fn foreign_grafeo_store_without_marker_is_reset_required() {
     let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
     )
     .unwrap();
     raw.close().unwrap();
@@ -30,7 +30,7 @@ fn persisted_scalar_identity_mismatch_is_corrupt_on_point_read() {
     let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
     )
     .unwrap();
     let mut session = raw.session();

@@ -1,4 +1,4 @@
-//! PR7 acceptance: fact/anchor writes and resolution hold the writer-authority
+//! Fact-anchor authority acceptance: fact/anchor writes and resolution hold the writer-authority
 //! contract. A revoked or missing authority fails closed with a typed error and
 //! no partial commit, ambiguous project scope never falls back to another
 //! store, linked worktrees resolve through canonical project identity, and
@@ -65,7 +65,7 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
             SanitizationReceiptId::new(receipt_id).unwrap(),
-            ComponentVersion::new("sanitizer.pr7.authority.v1").unwrap(),
+            ComponentVersion::new("sanitizer.fact-anchor-authority.v1").unwrap(),
         )
         .unwrap(),
         SanitizerDispositionV1::Accepted,
@@ -80,7 +80,7 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
         vec!["TraceDecay".to_owned()],
         json!({}),
         receipt,
-        RetentionClass::new("retention.pr7.authority").unwrap(),
+        RetentionClass::new("retention.fact-anchor-authority").unwrap(),
     )
     .unwrap()
 }
@@ -101,20 +101,21 @@ fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> Retri
         ingested_at: UtcMicros(ingested_at),
         evidence_class: EvidenceClass::Observed,
         source_generation: AnchorSourceGenerationV2::Unknown,
-        projection_generation: ProjectionGenerationId::new("projection.pr7.authority").unwrap(),
+        projection_generation: ProjectionGenerationId::new("projection.fact-anchor-authority")
+            .unwrap(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
         source_observations: vec![],
         source_anchors: vec![],
         authorization: ResolutionAuthorizationV1 {
-            resolved_scope_id: ScopeResolutionId::new("scope.pr7.authority").unwrap(),
-            privacy_domain_id: PrivacyDomainId::new("privacy.pr7.authority").unwrap(),
+            resolved_scope_id: ScopeResolutionId::new("scope.fact-anchor-authority").unwrap(),
+            privacy_domain_id: PrivacyDomainId::new("privacy.fact-anchor-authority").unwrap(),
             access_policy_digest: AccessPolicyDigest::new(DIGEST_A).unwrap(),
             capability_id: CapabilityId::new("capability.fact-anchor-authority").unwrap(),
             canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
         },
         payload_access: PayloadAccessState::Eligible,
-        retention_class: RetentionClass::new("retention.pr7.authority").unwrap(),
+        retention_class: RetentionClass::new("retention.fact-anchor-authority").unwrap(),
         durability: AnchorDurabilityClass::DurableEvidence,
     })
     .unwrap()
@@ -273,12 +274,11 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
-    let lease =
-        acquire_exclusive_for_profile(&profile_root, "pr7 revoked authority fixture").unwrap();
+    let lease = acquire_exclusive_for_profile(&profile_root, "revoked authority fixture").unwrap();
     let scope =
-        enter_maintenance_database_scope(&lease, &profile_root, "pr7 revoked authority fixture")
+        enter_maintenance_database_scope(&lease, &profile_root, "revoked authority fixture")
             .unwrap();
-    let authority = DatabaseAuthority::for_runtime(&db_path, "pr7 revoked authority fixture")
+    let authority = DatabaseAuthority::for_runtime(&db_path, "revoked authority fixture")
         .expect("a live maintenance scope must grant the write authority");
     assert_eq!(authority.role(), DatabaseAuthorityRole::Maintenance);
     let db = Database::publish_maintenance_test_runtime(
@@ -418,7 +418,7 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
     let root = ephemeral_safe_fixture_base().join(format!("missing-daemon-{}", std::process::id()));
     let db_path = root.join("global.db");
 
-    let error = match DatabaseAuthority::for_runtime(&db_path, "pr7 missing daemon fixture") {
+    let error = match DatabaseAuthority::for_runtime(&db_path, "missing daemon fixture") {
         Err(error) => error,
         Ok(_) => panic!("a missing daemon must not grant a write authority"),
     };
@@ -430,7 +430,7 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
     );
 
     assert!(
-        DatabaseAuthority::for_runtime(&db_path, "pr7 missing daemon retry").is_err(),
+        DatabaseAuthority::for_runtime(&db_path, "missing daemon retry").is_err(),
         "a repeated authority request must not mint a fallback writer"
     );
     assert!(
@@ -473,14 +473,14 @@ async fn register_project(
 async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical_identity() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
-    let remote = "https://github.com/pr7/ambiguous.git";
+    let remote = "https://github.com/tracedecay-fixture/ambiguous.git";
     let root_a = tmp.path().join("project-a");
     let common_a = root_a.join(".git");
     let root_b = tmp.path().join("project-b");
     let common_b = root_b.join(".git");
     register_project(
         &runtime,
-        "pr7.project.ambiguity-a",
+        "fact-anchor.project.ambiguity-a",
         &root_a,
         &common_a,
         remote,
@@ -491,11 +491,11 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         .resolve_unique_project_store_by_git_remote(remote)
         .await
         .expect("a single registered project must resolve through its remote");
-    assert_eq!(unique.project.project_id, "pr7.project.ambiguity-a");
+    assert_eq!(unique.project.project_id, "fact-anchor.project.ambiguity-a");
 
     register_project(
         &runtime,
-        "pr7.project.ambiguity-b",
+        "fact-anchor.project.ambiguity-b",
         &root_b,
         &common_b,
         remote,
@@ -516,20 +516,68 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         .await
         .unwrap()
         .expect("project A must keep its canonical identity resolution");
-    assert_eq!(still_a.project.project_id, "pr7.project.ambiguity-a");
-    assert_eq!(still_a.store.store_id, "store_pr7.project.ambiguity-a");
+    assert_eq!(
+        still_a.project.project_id,
+        "fact-anchor.project.ambiguity-a"
+    );
+    assert_eq!(
+        still_a.store.store_id,
+        "store_fact-anchor.project.ambiguity-a"
+    );
 
     // A linked worktree has no marker and no path alias of its own; it must
     // resolve to the primary checkout's canonical project identity through
     // the shared git common dir.
     let linked_worktree = tmp.path().join("project-a-linked-worktree");
+    std::fs::create_dir_all(&linked_worktree).unwrap();
     let linked = runtime
         .resolve_project_store_by_identity(&linked_worktree, Some(&common_a))
         .await
         .unwrap()
         .expect("a linked worktree must resolve through the canonical project identity");
-    assert_eq!(linked.project.project_id, "pr7.project.ambiguity-a");
+    assert_eq!(linked.project.project_id, "fact-anchor.project.ambiguity-a");
     assert_eq!(linked.store.store_id, still_a.store.store_id);
+
+    // Facts asserted from the linked worktree bind to the canonical project
+    // owner and remain in its SQLite fact store after that worktree vanishes.
+    let project_id = ProjectId::new(linked.project.project_id.clone()).unwrap();
+    let owner = FactOwnerV1::Project {
+        project_id: project_id.clone(),
+    };
+    let fact_db = fact_db(
+        &tmp.path()
+            .join("projects/fact-anchor.project.ambiguity-a/memory.db"),
+    )
+    .await;
+    let store = DatabaseFactStore::new(&fact_db);
+    let batch = assertion_batch(
+        &owner,
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+        "authority.worktree-fact",
+        "entity.authority.worktree-fact",
+        "fact asserted from the linked worktree",
+        1,
+        None,
+    );
+    let fact_id = batch.fact_id().clone();
+    committed(store.commit_fact(batch).await.unwrap());
+    assert_eq!(
+        current(&store, &owner, &fact_id)
+            .await
+            .expect("the worktree fact must commit under the canonical owner")
+            .owner(),
+        &owner
+    );
+    std::fs::remove_dir_all(&linked_worktree).unwrap();
+    assert_eq!(
+        current(&store, &owner, &fact_id)
+            .await
+            .expect("retiring a linked worktree must not delete its project-owned fact")
+            .owner(),
+        &owner
+    );
 
     // Unknown scope fails closed too: no identity, no store, and no alias or
     // fallback store minted as a side effect of the lookup.
@@ -753,11 +801,10 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
-    let lease = acquire_exclusive_for_profile(&profile_root, "pr7 single writer fixture").unwrap();
+    let lease = acquire_exclusive_for_profile(&profile_root, "single writer fixture").unwrap();
     let scope =
-        enter_maintenance_database_scope(&lease, &profile_root, "pr7 single writer fixture")
-            .unwrap();
-    let authority = DatabaseAuthority::for_runtime(&db_path, "pr7 single writer fixture")
+        enter_maintenance_database_scope(&lease, &profile_root, "single writer fixture").unwrap();
+    let authority = DatabaseAuthority::for_runtime(&db_path, "single writer fixture")
         .expect("a live maintenance scope must grant the write authority");
     let db = Database::publish_maintenance_test_runtime(
         &db_path,
@@ -770,7 +817,7 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
 
     // A foreign authority for the same database cannot be minted while the
     // writer authority is held: there is no second writer lane to join.
-    let error = DatabaseAuthority::acquire_test(&db_path, "pr7 second writer fixture")
+    let error = DatabaseAuthority::acquire_test(&db_path, "second writer fixture")
         .expect_err("a second write authority must be rejected");
     assert!(
         error
@@ -781,7 +828,7 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
 
     // A client re-resolving the same database rides the retained authority —
     // one writer token, one owner — instead of opening another writer.
-    let joined = DatabaseAuthority::for_runtime(&db_path, "pr7 joined client fixture")
+    let joined = DatabaseAuthority::for_runtime(&db_path, "joined client fixture")
         .expect("a client must re-join the retained authority");
     assert_eq!(joined.role(), authority.role());
     assert_eq!(

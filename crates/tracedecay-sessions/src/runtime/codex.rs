@@ -152,7 +152,7 @@ impl TranscriptSource for CodexSource {
         // Archiving a session moves its rollout out of the dated tree; both
         // locations are real transcripts and must be ingested. Share one
         // discovery budget across both trees so the second walk cannot
-        // allocate past the same PR6 caps.
+        // allocate past the same host-admission byte caps.
         let mut live =
             collect_files_with_ext_bounded(&self.sessions_dir, "jsonl", MAX_SCAN_DEPTH, bounds);
         if live.is_truncated() {

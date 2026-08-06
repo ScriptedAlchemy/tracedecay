@@ -1,4 +1,4 @@
-//! Production helpers that open the PR12 feedback-cycle runtime from project-open.
+//! Production helpers that open the feedback-cycle runtime from project-open.
 //!
 //! These builders derive managed diagnostic admissions, policy context, and the
 //! LSP trigger→execution bridge from the admitted project identity. They never
@@ -54,11 +54,11 @@ use tracedecay_policy::analyzer::{
 };
 use tracedecay_tool_catalog::CapabilityId;
 
-use super::cycle_runtime::Pr12FeedbackCycleRuntime;
-use super::cycle_runtime::{Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput};
+use super::cycle_runtime::FeedbackCycleRuntime;
+use super::cycle_runtime::{FeedbackCycleInvocation, FeedbackCycleLspInput};
 use crate::advisory::{
-    ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1, ProximityThresholdPinV1,
-    SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
+    ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1, ProximityThresholdPinV1,
+    SharedCanonicalProximityEvidenceAuthorityV1, open_proximity_runtime,
 };
 use crate::configuration::ConfigurationCurrentStateV1;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -143,14 +143,14 @@ pub struct ProductionFeedbackCyclePartsV1 {
     pub operation: ApplicationOperation,
     pub graph_operation: ApplicationOperation,
     pub tests_operation: ApplicationOperation,
-    pub lsp_input: Pr12FeedbackCycleLspInput,
+    pub lsp_input: FeedbackCycleLspInput,
     pub proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
 }
 
 /// Exact saved-generation proximity contribution mounted into the canonical
 /// Plan 09 cycle. Implementations return no durable artifact; publication and
-/// dedupe remain owned by `Pr12FeedbackCycleRuntime::run_once_with_advisory`.
+/// dedupe remain owned by `FeedbackCycleRuntime::run_once_with_advisory`.
 pub trait ProductionFeedbackCycleProximityPortV1: Send + Sync {
     fn advisory<'a>(
         &'a self,
@@ -159,7 +159,7 @@ pub trait ProductionFeedbackCycleProximityPortV1: Send + Sync {
     ) -> FeedbackPortFuture<'a, Result<FeedbackCycleAdvisoryV1, LspRuntimeFailure>>;
 }
 
-type ProductionProximityOwnerV1 = ConcretePr13ProximityRuntimeOwnerV1<
+type ProductionProximityOwnerV1 = ConcreteProximityRuntimeOwnerV1<
     SharedCanonicalProximityEvidenceAuthorityV1,
     OwnedGlobalDbConfigurationControlStore,
 >;
@@ -192,7 +192,7 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                 .evaluate_with_threshold_pin(context, &request, &self.threshold_pin)
                 .await
             {
-                Pr13ProximityRuntimeOutcomeV1::Completed(contributor) => {
+                ProximityRuntimeOutcomeV1::Completed(contributor) => {
                     let expires_at =
                         UtcMicros(input.observed_at.0.checked_add(1).ok_or_else(|| {
                             LspRuntimeFailure::new("feedback-cycle-proximity-validity")
@@ -206,7 +206,7 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                             LspRuntimeFailure::new("feedback-cycle-proximity-contribution")
                         })?;
                     let advisory = FeedbackCycleAdvisoryV1 {
-                        // Provider order is the PR13 canonical order:
+                        // Provider order is the canonical advisory order:
                         // GitHub, CI, proximity. The LSP/Hook fallback has no
                         // authenticated remote provider target, so it records
                         // those providers as explicitly unavailable rather
@@ -223,10 +223,10 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                         .map_err(|_| LspRuntimeFailure::new("feedback-cycle-proximity-advisory"))?;
                     Ok(advisory)
                 }
-                Pr13ProximityRuntimeOutcomeV1::Denied => {
+                ProximityRuntimeOutcomeV1::Denied => {
                     Err(LspRuntimeFailure::new("feedback-cycle-proximity-denied"))
                 }
-                Pr13ProximityRuntimeOutcomeV1::Unavailable => Ok(FeedbackCycleAdvisoryV1 {
+                ProximityRuntimeOutcomeV1::Unavailable => Ok(FeedbackCycleAdvisoryV1 {
                     provider_states: vec![
                         tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
                         tracedecay_domain::feedback::ProviderEvaluationStateV1::Unavailable,
@@ -234,10 +234,10 @@ impl ProductionFeedbackCycleProximityPortV1 for ProductionFeedbackCycleProximity
                     ],
                     findings: Vec::new(),
                 }),
-                Pr13ProximityRuntimeOutcomeV1::Cancelled => {
+                ProximityRuntimeOutcomeV1::Cancelled => {
                     Err(LspRuntimeFailure::new("feedback-cycle-proximity-cancelled"))
                 }
-                Pr13ProximityRuntimeOutcomeV1::TimedOut => {
+                ProximityRuntimeOutcomeV1::TimedOut => {
                     Err(LspRuntimeFailure::new("feedback-cycle-proximity-timed-out"))
                 }
             }
@@ -277,8 +277,8 @@ fn require_current_saved_identity(
 }
 
 struct ProductionProximityFeedbackCycleRuntimeV1 {
-    feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
-    lsp_input: Pr12FeedbackCycleLspInput,
+    feedback_cycle: Arc<FeedbackCycleRuntime>,
+    lsp_input: FeedbackCycleLspInput,
     proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
 }
 
@@ -308,8 +308,8 @@ impl FeedbackCycleRuntimePort for ProductionProximityFeedbackCycleRuntimeV1 {
 /// publication path: the wrapped feedback owner atomically records the combined
 /// result through its existing store.
 pub fn production_proximity_feedback_cycle_input(
-    feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
-    lsp_input: Pr12FeedbackCycleLspInput,
+    feedback_cycle: Arc<FeedbackCycleRuntime>,
+    lsp_input: FeedbackCycleLspInput,
     proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
 ) -> Arc<dyn FeedbackCycleRuntimePort> {
     Arc::new(ProductionProximityFeedbackCycleRuntimeV1 {
@@ -344,7 +344,7 @@ pub async fn resolve_production_feedback_cycle_parts(
         .ok_or(ApplicationContractError::Inconsistent {
             field: "project-open proximity authority",
         })?;
-    let proximity_owner = open_pr13_proximity_runtime(
+    let proximity_owner = open_proximity_runtime(
         feedback_scope.clone(),
         proximity_evidence,
         OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(Arc::clone(
@@ -713,7 +713,7 @@ struct ProductionLspInputContext {
 
 fn production_lsp_input(
     input: ProductionLspInputContext,
-) -> Result<Pr12FeedbackCycleLspInput, ApplicationContractError> {
+) -> Result<FeedbackCycleLspInput, ApplicationContractError> {
     let ProductionLspInputContext {
         feedback_scope,
         scope,
@@ -836,7 +836,7 @@ fn production_lsp_input(
                 },
                 control: FeedbackCycleControl::Continue,
             };
-            Pr12FeedbackCycleInvocation::new(context, execution)
+            FeedbackCycleInvocation::new(context, execution)
                 .map_err(|_| LspRuntimeFailure::new("feedback-cycle-invocation"))
         })
     }))

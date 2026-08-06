@@ -12,8 +12,6 @@ pub use tracedecay_domain::{
 use super::StorageRuntimeContractErrorV1;
 
 const LOCATOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.store-runtime.local-locator.v1\0";
-/// Daemon-private root holding one durable Grafeo directory per logical store.
-pub const DURABLE_GRAPH_STORE_DIRECTORY: &str = ".tracedecay-graph-store";
 
 macro_rules! canonical_id {
     ($name:ident, $field:literal) => {
@@ -439,9 +437,9 @@ pub fn canonical_store_locator_digest(
 /// Derives the sole persistent Graph locator paired with one relational shard.
 ///
 /// Both inputs have already been selected and canonicalized by daemon store
-/// authority. This pure contract only places the graph-store directory beneath
-/// the daemon's durable graph-store root; it never creates or opens filesystem
-/// artifacts. Grafeo owns every file below the resolved directory.
+/// authority. This pure contract places one ordinary `.grafeo` database file
+/// beside its relational store; it never creates or opens filesystem artifacts.
+/// Grafeo owns the file and its documented transient WAL sidecar.
 pub fn graph_store_locator_path(
     canonical_store_root: &Path,
     relational_store_path: &Path,
@@ -461,9 +459,7 @@ pub fn graph_store_locator_path(
         .ok_or(StorageRuntimeContractErrorV1::NonCanonical {
             field: "graph store locator path",
         })?;
-    Ok(canonical_store_root
-        .join(DURABLE_GRAPH_STORE_DIRECTORY)
-        .join(filename))
+    Ok(canonical_store_root.join(format!("{filename}.grafeo")))
 }
 
 #[cfg(test)]
@@ -515,12 +511,12 @@ mod tests {
     }
 
     #[test]
-    fn graph_locator_is_a_durable_directory_and_shard_specific() {
+    fn graph_locator_is_an_ordinary_database_file_and_shard_specific() {
         let root = Path::new("/stores/project-a");
         assert_eq!(
             graph_store_locator_path(root, &root.join("sessions.db"))
                 .expect("canonical graph locator"),
-            root.join(DURABLE_GRAPH_STORE_DIRECTORY).join("sessions")
+            root.join("sessions.grafeo")
         );
         assert!(graph_store_locator_path(root, Path::new("/stores/project-b/project.db")).is_err());
     }

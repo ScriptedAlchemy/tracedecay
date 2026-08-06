@@ -1,7 +1,7 @@
 //! Cross-host projection glue for a completed advisory publication.
 //!
 //! This module owns no feedback state, analyzer, suggestion channel, retry
-//! loop, or host transport. It mounts the already-authoritative PR12 read
+//! loop, or host transport. It mounts the already-authoritative feedback read
 //! owner/store and LSP factory, then emits only a content-free Hook V2 notice
 //! that directs a host back to those canonical read surfaces.
 
@@ -22,7 +22,7 @@ use tracedecay_hooks::{
 };
 use tracedecay_lsp::DaemonLspProviderBundle;
 
-use crate::feedback::concrete::{ConcretePr12FeedbackOwner, ProjectFeedbackStore};
+use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
     Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1, Plan26HookScoutPhaseV1,
@@ -34,18 +34,17 @@ use tracedecay_host_integration::{
 };
 
 use super::runtime::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
-    Pr13AdvisoryDaemonRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
-    Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
-    open_pr13_advisory_daemon_registration,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryDaemonRegistrationV1,
+    AdvisoryProviderAuthoritiesV1, AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
+    open_advisory_daemon_registration,
 };
 
 /// A content-free notification for a host to perform its usual authorized
 /// feedback lookup. Finding text, anchors, suggestions, and provider payloads
-/// remain in the shared PR12 publication store.
+/// remain in the shared feedback publication store.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Pr13AdvisoryHookLookupNoticeV1 {
+pub struct AdvisoryHookLookupNoticeV1 {
     pub scope: FeedbackScopeV1,
     pub result_id: FeedbackResultId,
     pub cycle_id: FeedbackCycleId,
@@ -55,7 +54,7 @@ pub struct Pr13AdvisoryHookLookupNoticeV1 {
     pub omitted_findings: u64,
 }
 
-impl Pr13AdvisoryHookLookupNoticeV1 {
+impl AdvisoryHookLookupNoticeV1 {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.scope.validate()?;
         self.result_id.validate()?;
@@ -71,7 +70,7 @@ impl Pr13AdvisoryHookLookupNoticeV1 {
     }
 }
 
-impl HookScopedFeedbackV1 for Pr13AdvisoryHookLookupNoticeV1 {
+impl HookScopedFeedbackV1 for AdvisoryHookLookupNoticeV1 {
     fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
         self.validate().is_ok()
             && domain_hash16(self.scope.project_id.as_str(), "project") == envelope.project_id
@@ -88,8 +87,8 @@ fn domain_hash16(value: &str, domain: &str) -> [u8; 16] {
     output
 }
 
-pub type Pr13AdvisoryHookNoticeSinkV1 =
-    dyn Fn(&Pr13AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 + Send + Sync;
+pub type AdvisoryHookNoticeSinkV1 =
+    dyn Fn(&AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 + Send + Sync;
 
 const MAX_PENDING_ADVISORY_HOOK_NOTICES_V1: usize = 32;
 
@@ -97,13 +96,13 @@ const MAX_PENDING_ADVISORY_HOOK_NOTICES_V1: usize = 32;
 /// the next synchronous Hook V2 lookup. The queue stores only content-free
 /// publication identities and rejects scope drift instead of acknowledging a
 /// notice that no host can consume.
-pub struct Pr13AdvisoryHookNoticeQueueV1 {
+pub struct AdvisoryHookNoticeQueueV1 {
     scope: FeedbackScopeV1,
-    pending: Mutex<VecDeque<Pr13AdvisoryHookLookupNoticeV1>>,
+    pending: Mutex<VecDeque<AdvisoryHookLookupNoticeV1>>,
     recent_results: Mutex<VecDeque<String>>,
 }
 
-impl Pr13AdvisoryHookNoticeQueueV1 {
+impl AdvisoryHookNoticeQueueV1 {
     pub fn new(scope: FeedbackScopeV1) -> Arc<Self> {
         Arc::new(Self {
             scope,
@@ -112,12 +111,12 @@ impl Pr13AdvisoryHookNoticeQueueV1 {
         })
     }
 
-    pub fn sink(self: &Arc<Self>) -> Arc<Pr13AdvisoryHookNoticeSinkV1> {
+    pub fn sink(self: &Arc<Self>) -> Arc<AdvisoryHookNoticeSinkV1> {
         let queue = Arc::clone(self);
         Arc::new(move |notice| queue.enqueue(notice))
     }
 
-    fn enqueue(&self, notice: &Pr13AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
+    fn enqueue(&self, notice: &AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
         if notice.validate().is_err() || !feedback_scope_matches(&self.scope, &notice.scope) {
             return HookFeedbackDeliveryOutcomeV1::Unavailable;
         }
@@ -142,11 +141,11 @@ impl Pr13AdvisoryHookNoticeQueueV1 {
         HookFeedbackDeliveryOutcomeV1::Delivered
     }
 
-    pub fn peek(&self) -> Option<Pr13AdvisoryHookLookupNoticeV1> {
+    pub fn peek(&self) -> Option<AdvisoryHookLookupNoticeV1> {
         self.pending.lock().ok()?.front().cloned()
     }
 
-    pub fn acknowledge(&self, notice: &Pr13AdvisoryHookLookupNoticeV1) -> bool {
+    pub fn acknowledge(&self, notice: &AdvisoryHookLookupNoticeV1) -> bool {
         let Ok(mut pending) = self.pending.lock() else {
             return false;
         };
@@ -158,19 +157,18 @@ impl Pr13AdvisoryHookNoticeQueueV1 {
     }
 }
 
-type Pr13AdvisoryHookNoticeQueueMapV1 =
-    BTreeMap<([u8; 16], [u8; 16]), Weak<Pr13AdvisoryHookNoticeQueueV1>>;
-type Pr13AdvisoryHookNoticeQueuesLockV1 = Mutex<Pr13AdvisoryHookNoticeQueueMapV1>;
+type AdvisoryHookNoticeQueueMapV1 = BTreeMap<([u8; 16], [u8; 16]), Weak<AdvisoryHookNoticeQueueV1>>;
+type AdvisoryHookNoticeQueuesLockV1 = Mutex<AdvisoryHookNoticeQueueMapV1>;
 
-fn registered_hook_notice_queues() -> &'static Pr13AdvisoryHookNoticeQueuesLockV1 {
-    static QUEUES: OnceLock<Pr13AdvisoryHookNoticeQueuesLockV1> = OnceLock::new();
+fn registered_hook_notice_queues() -> &'static AdvisoryHookNoticeQueuesLockV1 {
+    static QUEUES: OnceLock<AdvisoryHookNoticeQueuesLockV1> = OnceLock::new();
     QUEUES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-pub fn register_pr13_advisory_hook_notice_queue(
+pub fn register_advisory_hook_notice_queue(
     project_id: [u8; 16],
     worktree_id: [u8; 16],
-    queue: &Arc<Pr13AdvisoryHookNoticeQueueV1>,
+    queue: &Arc<AdvisoryHookNoticeQueueV1>,
 ) -> bool {
     if project_id == [0; 16] || worktree_id == [0; 16] {
         return false;
@@ -187,10 +185,10 @@ pub fn register_pr13_advisory_hook_notice_queue(
     true
 }
 
-pub fn peek_pr13_advisory_hook_notice(
+pub fn peek_advisory_hook_notice(
     project_id: [u8; 16],
     worktree_id: [u8; 16],
-) -> Option<Pr13AdvisoryHookLookupNoticeV1> {
+) -> Option<AdvisoryHookLookupNoticeV1> {
     let queue = registered_hook_notice_queues()
         .lock()
         .ok()?
@@ -199,10 +197,10 @@ pub fn peek_pr13_advisory_hook_notice(
     queue.peek()
 }
 
-pub fn acknowledge_pr13_advisory_hook_notice(
+pub fn acknowledge_advisory_hook_notice(
     project_id: [u8; 16],
     worktree_id: [u8; 16],
-    notice: &Pr13AdvisoryHookLookupNoticeV1,
+    notice: &AdvisoryHookLookupNoticeV1,
 ) -> bool {
     let Some(queue) = registered_hook_notice_queues()
         .lock()
@@ -220,17 +218,17 @@ pub fn acknowledge_pr13_advisory_hook_notice(
 
 /// Concrete Hook V2 delivery port. Both routes delegate to the registered host
 /// response sinks after exact scope validation; finding content remains in the
-/// canonical PR12 store.
-pub struct Pr13AdvisoryHookDeliveryPortV1 {
+/// canonical feedback publication store.
+pub struct AdvisoryHookDeliveryPortV1 {
     scope: FeedbackScopeV1,
-    hook_v2: Arc<Pr13AdvisoryHookNoticeSinkV1>,
-    legacy: Arc<Pr13AdvisoryHookNoticeSinkV1>,
+    hook_v2: Arc<AdvisoryHookNoticeSinkV1>,
+    legacy: Arc<AdvisoryHookNoticeSinkV1>,
 }
 
-impl HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> for Pr13AdvisoryHookDeliveryPortV1 {
+impl HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> for AdvisoryHookDeliveryPortV1 {
     fn deliver_hook_v2(
         &self,
-        notice: &Pr13AdvisoryHookLookupNoticeV1,
+        notice: &AdvisoryHookLookupNoticeV1,
     ) -> HookFeedbackDeliveryOutcomeV1 {
         if !feedback_scope_matches(&self.scope, &notice.scope) {
             return HookFeedbackDeliveryOutcomeV1::Unavailable;
@@ -238,10 +236,7 @@ impl HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> for Pr13Advisory
         (self.hook_v2)(notice)
     }
 
-    fn deliver_legacy(
-        &self,
-        notice: &Pr13AdvisoryHookLookupNoticeV1,
-    ) -> HookFeedbackDeliveryOutcomeV1 {
+    fn deliver_legacy(&self, notice: &AdvisoryHookLookupNoticeV1) -> HookFeedbackDeliveryOutcomeV1 {
         if !feedback_scope_matches(&self.scope, &notice.scope) {
             return HookFeedbackDeliveryOutcomeV1::Unavailable;
         }
@@ -249,12 +244,12 @@ impl HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> for Pr13Advisory
     }
 }
 
-pub fn new_pr13_advisory_hook_delivery_port(
+pub fn new_advisory_hook_delivery_port(
     scope: FeedbackScopeV1,
-    hook_v2: Arc<Pr13AdvisoryHookNoticeSinkV1>,
-    legacy: Arc<Pr13AdvisoryHookNoticeSinkV1>,
-) -> Arc<dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync> {
-    Arc::new(Pr13AdvisoryHookDeliveryPortV1 {
+    hook_v2: Arc<AdvisoryHookNoticeSinkV1>,
+    legacy: Arc<AdvisoryHookNoticeSinkV1>,
+) -> Arc<dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync> {
+    Arc::new(AdvisoryHookDeliveryPortV1 {
         scope,
         hook_v2,
         legacy,
@@ -264,7 +259,7 @@ pub fn new_pr13_advisory_hook_delivery_port(
 /// Host-visible routes assembled only from checked-in registration evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Pr13AdvisoryHostDeliveryPathV1 {
+pub enum AdvisoryHostDeliveryPathV1 {
     HookV2,
     CustomLsp,
     CursorNativeDiagnostics,
@@ -275,8 +270,8 @@ pub enum Pr13AdvisoryHostDeliveryPathV1 {
 /// One truthful per-host route. `state` remains unavailable or degraded when
 /// either the host capability matrix or the registration evidence says so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct Pr13AdvisoryHostDeliveryRouteV1 {
-    pub path: Pr13AdvisoryHostDeliveryPathV1,
+pub struct AdvisoryHostDeliveryRouteV1 {
+    pub path: AdvisoryHostDeliveryPathV1,
     pub capability: HostCapabilityV1,
     pub registration: HostRegistrationRouteV1,
     pub state: HostCapabilityStateV1,
@@ -284,18 +279,18 @@ pub struct Pr13AdvisoryHostDeliveryRouteV1 {
 
 /// An existing LSP provider bundle plus its truthful host route state.
 ///
-/// The wrapped PR12 factory owns the established snapshot behavior, including
+/// The wrapped publication-store factory owns the established snapshot behavior, including
 /// monotone diagnostic clear/re-publish. This glue only selects that existing
 /// mount; it never creates an analyzer or a competing diagnostic channel.
-pub struct Pr13AdvisoryCompletedDeliveryV1 {
+pub struct AdvisoryCompletedDeliveryV1 {
     pub lsp_providers: DaemonLspProviderBundle,
-    pub hook: Pr13AdvisoryHookDeliveryV1,
+    pub hook: AdvisoryHookDeliveryV1,
 }
 
 /// The result of one Hook V2 lookup-notice attempt. The `Unavailable` branch
 /// is reserved for a route the checked-in host matrix actually marks
 /// unavailable; there is no retry or synthetic fallback.
-pub enum Pr13AdvisoryHookDeliveryV1 {
+pub enum AdvisoryHookDeliveryV1 {
     Delivered {
         state: HostCapabilityStateV1,
         outcome: HookFeedbackDeliveryOutcomeV1,
@@ -305,7 +300,7 @@ pub enum Pr13AdvisoryHookDeliveryV1 {
 }
 
 #[derive(Debug, Error)]
-pub enum Pr13AdvisoryHostDeliveryErrorV1 {
+pub enum AdvisoryHostDeliveryErrorV1 {
     #[error("advisory cycle did not complete")]
     AdvisoryNotCompleted,
     #[error("advisory cycle has no recorded shared-store publication")]
@@ -321,47 +316,47 @@ pub enum Pr13AdvisoryHostDeliveryErrorV1 {
 }
 
 #[derive(Debug, Error)]
-pub enum Pr13AdvisoryRunErrorV1 {
+pub enum AdvisoryRunErrorV1 {
     #[error(transparent)]
     Cycle(#[from] ApplicationContractError),
     #[error(transparent)]
-    Delivery(#[from] Pr13AdvisoryHostDeliveryErrorV1),
+    Delivery(#[from] AdvisoryHostDeliveryErrorV1),
 }
 
-pub struct Pr13AdvisoryRunResultV1 {
+pub struct AdvisoryRunResultV1 {
     pub outcome: AdvisoryCycleOutcome,
-    pub delivery: Option<Pr13AdvisoryCompletedDeliveryV1>,
+    pub delivery: Option<AdvisoryCompletedDeliveryV1>,
 }
 
 #[derive(Debug, Error)]
-pub enum Pr13AdvisoryDaemonStartupErrorV1 {
+pub enum AdvisoryDaemonStartupErrorV1 {
     #[error(transparent)]
-    Runtime(#[from] Pr13AdvisoryRuntimeOpenErrorV1),
+    Runtime(#[from] AdvisoryRuntimeOpenErrorV1),
     #[error(transparent)]
     Contract(#[from] ApplicationContractError),
 }
 
-/// A composition-only registration. It retains the one PR12 publication
+/// A composition-only registration. It retains the one feedback publication
 /// authority and the caller-created LSP factory so daemon and host startup can
 /// mount their existing transports from one object.
-pub struct Pr13AdvisoryHostDeliveryRegistrationV1 {
+pub struct AdvisoryHostDeliveryRegistrationV1 {
     pub scope: ResolvedScope,
-    pub feedback_owner: Arc<ConcretePr12FeedbackOwner>,
+    pub feedback_owner: Arc<ConcreteFeedbackOwner>,
     pub publication_store: ProjectFeedbackStore,
     pub lsp_session_factory: Arc<DaemonLspSessionFactory>,
     pub hook_delivery_port:
-        Arc<dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync>,
+        Arc<dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync>,
     pub source_observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
-/// One daemon-startup bundle for PR13 execution and every existing delivery
+/// One daemon-startup bundle for advisory execution and every existing delivery
 /// surface. Both members retain handles to the same feedback owner/store.
-pub struct Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC> {
-    pub advisory: Pr13AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC>,
-    pub host_delivery: Pr13AdvisoryHostDeliveryRegistrationV1,
+pub struct AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC> {
+    pub advisory: AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC>,
+    pub host_delivery: AdvisoryHostDeliveryRegistrationV1,
 }
 
-impl<GR, GA, CS, CE, PE, PC> Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>
+impl<GR, GA, CS, CE, PE, PC> AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>
 where
     GR: super::GitHubCurrentBranchRemapper + Sync,
     GA: super::GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Sync,
@@ -370,18 +365,18 @@ where
     PE: super::CanonicalProximityEvidenceAuthorityV1 + Sync,
     PC: crate::configuration::ConfigurationControlStore + Clone + Send + 'static,
 {
-    pub fn runtime(&self) -> &super::Pr13AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
+    pub fn runtime(&self) -> &super::AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
         &self.advisory.advisory
     }
 
     /// Production handoff called with the exact outcome returned by
-    /// `Pr13AdvisoryRuntime::run_once`.
+    /// `AdvisoryRuntime::run_once`.
     pub fn consume_completed_publication(
         &self,
         host: HostKindV1,
         outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
-    ) -> Result<Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
+    ) -> Result<AdvisoryCompletedDeliveryV1, AdvisoryHostDeliveryErrorV1> {
         self.host_delivery
             .consume_completed_publication(host, outcome, rollback)
     }
@@ -395,26 +390,26 @@ where
         request: AdvisoryCycleRequest,
         host: HostKindV1,
         rollback: HookFeedbackRollbackSwitchV1,
-    ) -> Result<Pr13AdvisoryRunResultV1, Pr13AdvisoryRunErrorV1> {
+    ) -> Result<AdvisoryRunResultV1, AdvisoryRunErrorV1> {
         let outcome = Box::pin(self.runtime().run_once(context, control, request)).await?;
         let delivery = if outcome.publication().is_some() {
             Some(self.consume_completed_publication(host, &outcome, rollback)?)
         } else {
             None
         };
-        Ok(Pr13AdvisoryRunResultV1 { outcome, delivery })
+        Ok(AdvisoryRunResultV1 { outcome, delivery })
     }
 }
 
-impl Pr13AdvisoryHostDeliveryRegistrationV1 {
+impl AdvisoryHostDeliveryRegistrationV1 {
     /// Returns one host's routes without assuming that an unavailable route is
     /// usable just because another host supports it.
-    pub fn host_routes(&self, host: HostKindV1) -> Vec<Pr13AdvisoryHostDeliveryRouteV1> {
+    pub fn host_routes(&self, host: HostKindV1) -> Vec<AdvisoryHostDeliveryRouteV1> {
         stock_host_registration_evidence(host)
             .into_iter()
             .map(|evidence| {
                 let capability = capability_for_registration(evidence.route);
-                Pr13AdvisoryHostDeliveryRouteV1 {
+                AdvisoryHostDeliveryRouteV1 {
                     path: path_for_registration(evidence.route),
                     capability,
                     registration: evidence.route,
@@ -424,25 +419,25 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
             .collect()
     }
 
-    /// Validates a completed advisory outcome against one canonical PR12
+    /// Validates a completed advisory outcome against one canonical feedback
     /// publication, then builds the bounded content-free Hook V2 lookup
     /// notice. The outcome exposes the publication only after the shared store
     /// committed it; this method never reconstructs, polls, or persists it.
     pub fn hook_lookup_notice(
         &self,
         outcome: &AdvisoryCycleOutcome,
-    ) -> Result<Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHostDeliveryErrorV1> {
+    ) -> Result<AdvisoryHookLookupNoticeV1, AdvisoryHostDeliveryErrorV1> {
         let AdvisoryCycleOutcome::Completed {
             cycle,
             observation_input,
             ..
         } = outcome
         else {
-            return Err(Pr13AdvisoryHostDeliveryErrorV1::AdvisoryNotCompleted);
+            return Err(AdvisoryHostDeliveryErrorV1::AdvisoryNotCompleted);
         };
         let publication = outcome
             .publication()
-            .ok_or(Pr13AdvisoryHostDeliveryErrorV1::PublicationNotRecorded)?;
+            .ok_or(AdvisoryHostDeliveryErrorV1::PublicationNotRecorded)?;
         publication.validate()?;
 
         if cycle.dedupe_key.as_ref() != Some(&publication.dedupe_key)
@@ -450,7 +445,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
             || cycle.cycle.cycle_id != publication.result.cycle_id
             || !feedback_scope_matches(&cycle.cycle.scope, &publication.result.scope)
         {
-            return Err(Pr13AdvisoryHostDeliveryErrorV1::PublicationMismatch);
+            return Err(AdvisoryHostDeliveryErrorV1::PublicationMismatch);
         }
         if !resolved_scope_matches_feedback_scope(&self.scope, &publication.result.scope)
             || !resolved_scope_matches_feedback_scope(
@@ -458,19 +453,19 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
                 &publication.result.scope,
             )
         {
-            return Err(Pr13AdvisoryHostDeliveryErrorV1::ScopeMismatch);
+            return Err(AdvisoryHostDeliveryErrorV1::ScopeMismatch);
         }
         let generation_id = publication
             .input
             .target
             .generation_id
             .clone()
-            .ok_or(Pr13AdvisoryHostDeliveryErrorV1::PublicationMismatch)?;
+            .ok_or(AdvisoryHostDeliveryErrorV1::PublicationMismatch)?;
         let FeedbackContentIdentityV1::SavedContent {
             generation_digest, ..
         } = &publication.input.request.content
         else {
-            return Err(Pr13AdvisoryHostDeliveryErrorV1::PublicationMismatch);
+            return Err(AdvisoryHostDeliveryErrorV1::PublicationMismatch);
         };
         self.source_observations.observe_source_event(
             observation_input,
@@ -489,7 +484,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
             },
         );
 
-        Ok(Pr13AdvisoryHookLookupNoticeV1 {
+        Ok(AdvisoryHookLookupNoticeV1 {
             scope: publication.result.scope.clone(),
             result_id: publication.result.result_id.clone(),
             cycle_id: publication.result.cycle_id.clone(),
@@ -509,15 +504,15 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
         outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
         port: &P,
-    ) -> Result<Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1>
+    ) -> Result<AdvisoryHookDeliveryV1, AdvisoryHostDeliveryErrorV1>
     where
-        P: HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + ?Sized,
+        P: HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + ?Sized,
     {
         let AdvisoryCycleOutcome::Completed {
             observation_input, ..
         } = outcome
         else {
-            return Err(Pr13AdvisoryHostDeliveryErrorV1::AdvisoryNotCompleted);
+            return Err(AdvisoryHostDeliveryErrorV1::AdvisoryNotCompleted);
         };
         let delivery_route = match rollback.route {
             HookFeedbackDeliveryRouteV1::HookV2 => Plan26DeliveryRouteV1::HookV2,
@@ -526,7 +521,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
         let Some(route) = self
             .host_routes(host)
             .into_iter()
-            .find(|route| route.path == Pr13AdvisoryHostDeliveryPathV1::HookV2)
+            .find(|route| route.path == AdvisoryHostDeliveryPathV1::HookV2)
         else {
             self.observe_hook_delivery(
                 observation_input,
@@ -536,7 +531,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
                 rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
                 0,
             );
-            return Ok(Pr13AdvisoryHookDeliveryV1::Unavailable(
+            return Ok(AdvisoryHookDeliveryV1::Unavailable(
                 HostCapabilityUnavailableReasonV1::HostRegistrationUnsupported,
             ));
         };
@@ -549,7 +544,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
                 rollback.route == HookFeedbackDeliveryRouteV1::Legacy,
                 0,
             );
-            return Ok(Pr13AdvisoryHookDeliveryV1::Unavailable(reason));
+            return Ok(AdvisoryHookDeliveryV1::Unavailable(reason));
         }
 
         let notice = self.hook_lookup_notice(outcome)?;
@@ -585,13 +580,13 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
         );
         match outcome {
             HookFeedbackDeliveryOutcomeV1::Delivered | HookFeedbackDeliveryOutcomeV1::Duplicate => {
-                Ok(Pr13AdvisoryHookDeliveryV1::Delivered {
+                Ok(AdvisoryHookDeliveryV1::Delivered {
                     state: route.state,
                     outcome,
                 })
             }
             HookFeedbackDeliveryOutcomeV1::Unavailable => {
-                Ok(Pr13AdvisoryHookDeliveryV1::SinkUnavailable)
+                Ok(AdvisoryHookDeliveryV1::SinkUnavailable)
             }
         }
     }
@@ -634,22 +629,22 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
         host: HostKindV1,
         outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
-    ) -> Result<Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
+    ) -> Result<AdvisoryHookDeliveryV1, AdvisoryHostDeliveryErrorV1> {
         self.deliver_hook_lookup_notice(host, outcome, rollback, self.hook_delivery_port.as_ref())
     }
 
     /// Consumes one recorded publication through both live delivery paths.
     /// Hook delivery executes immediately; the returned LSP provider bundle
-    /// reads the same PR12 publication store through its existing projection
+    /// reads the same feedback publication store through its existing projection
     /// authority and is retained by the caller/session registry.
     pub fn consume_completed_publication(
         &self,
         host: HostKindV1,
         outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
-    ) -> Result<Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
+    ) -> Result<AdvisoryCompletedDeliveryV1, AdvisoryHostDeliveryErrorV1> {
         let hook = self.deliver_registered_hook_lookup_notice(host, outcome, rollback)?;
-        Ok(Pr13AdvisoryCompletedDeliveryV1 {
+        Ok(AdvisoryCompletedDeliveryV1 {
             lsp_providers: self.lsp_session_factory.provider_bundle(),
             hook,
         })
@@ -659,15 +654,15 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
 /// Builds the concrete host-delivery registration from the advisory daemon
 /// registration's existing read owner/store. `scope` is passed explicitly
 /// because it is the startup authority that admitted the daemon registration.
-pub fn mount_pr13_advisory_host_delivery<GR, GA, CS, CE, PE, PC>(
+pub fn mount_advisory_host_delivery<GR, GA, CS, CE, PE, PC>(
     scope: ResolvedScope,
-    registration: &Pr13AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC>,
+    registration: &AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC>,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
     hook_delivery_port: Arc<
-        dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
+        dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync,
     >,
-) -> Pr13AdvisoryHostDeliveryRegistrationV1 {
-    Pr13AdvisoryHostDeliveryRegistrationV1 {
+) -> AdvisoryHostDeliveryRegistrationV1 {
+    AdvisoryHostDeliveryRegistrationV1 {
         scope,
         feedback_owner: Arc::clone(&registration.feedback_owner),
         publication_store: registration.publication_store.clone(),
@@ -679,17 +674,14 @@ pub fn mount_pr13_advisory_host_delivery<GR, GA, CS, CE, PE, PC>(
 
 /// Exact daemon-startup composition call. The provider authorities are real
 /// injected owners; this function adds no fallback fixture or duplicate store.
-pub fn register_pr13_advisory_daemon_startup<GR, GA, CS, CE, PE, PC>(
-    input: Pr13AdvisoryRuntimeOpenV1,
-    providers: Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
+pub fn register_advisory_daemon_startup<GR, GA, CS, CE, PE, PC>(
+    input: AdvisoryRuntimeOpenV1,
+    providers: AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
     lsp_session_factory: Arc<DaemonLspSessionFactory>,
     hook_delivery_port: Arc<
-        dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
+        dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync,
     >,
-) -> Result<
-    Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>,
-    Pr13AdvisoryDaemonStartupErrorV1,
->
+) -> Result<AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>, AdvisoryDaemonStartupErrorV1>
 where
     GR: super::GitHubCurrentBranchRemapper + Sync,
     GA: super::GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Sync,
@@ -699,14 +691,10 @@ where
     PC: crate::configuration::ConfigurationControlStore + Clone + Send + 'static,
 {
     let scope = input.resolved_scope.clone();
-    let advisory = open_pr13_advisory_daemon_registration(input, providers)?;
-    let host_delivery = mount_pr13_advisory_host_delivery(
-        scope,
-        &advisory,
-        lsp_session_factory,
-        hook_delivery_port,
-    );
-    Ok(Pr13AdvisoryDaemonStartupRegistrationV1 {
+    let advisory = open_advisory_daemon_registration(input, providers)?;
+    let host_delivery =
+        mount_advisory_host_delivery(scope, &advisory, lsp_session_factory, hook_delivery_port);
+    Ok(AdvisoryDaemonStartupRegistrationV1 {
         advisory,
         host_delivery,
     })
@@ -723,16 +711,16 @@ fn capability_for_registration(route: HostRegistrationRouteV1) -> HostCapability
     }
 }
 
-fn path_for_registration(route: HostRegistrationRouteV1) -> Pr13AdvisoryHostDeliveryPathV1 {
+fn path_for_registration(route: HostRegistrationRouteV1) -> AdvisoryHostDeliveryPathV1 {
     match route {
         HostRegistrationRouteV1::ClaudeConfiguredLanguageLsp
-        | HostRegistrationRouteV1::OpenCodeCustomLsp => Pr13AdvisoryHostDeliveryPathV1::CustomLsp,
+        | HostRegistrationRouteV1::OpenCodeCustomLsp => AdvisoryHostDeliveryPathV1::CustomLsp,
         HostRegistrationRouteV1::CursorNativeDiagnostics => {
-            Pr13AdvisoryHostDeliveryPathV1::CursorNativeDiagnostics
+            AdvisoryHostDeliveryPathV1::CursorNativeDiagnostics
         }
-        HostRegistrationRouteV1::Hook => Pr13AdvisoryHostDeliveryPathV1::HookV2,
-        HostRegistrationRouteV1::Mcp => Pr13AdvisoryHostDeliveryPathV1::McpFeedbackRead,
-        HostRegistrationRouteV1::Cli => Pr13AdvisoryHostDeliveryPathV1::CliFeedbackRead,
+        HostRegistrationRouteV1::Hook => AdvisoryHostDeliveryPathV1::HookV2,
+        HostRegistrationRouteV1::Mcp => AdvisoryHostDeliveryPathV1::McpFeedbackRead,
+        HostRegistrationRouteV1::Cli => AdvisoryHostDeliveryPathV1::CliFeedbackRead,
     }
 }
 
@@ -801,8 +789,8 @@ mod tests {
         }
     }
 
-    fn notice(scope: FeedbackScopeV1, suffix: &str) -> Pr13AdvisoryHookLookupNoticeV1 {
-        Pr13AdvisoryHookLookupNoticeV1 {
+    fn notice(scope: FeedbackScopeV1, suffix: &str) -> AdvisoryHookLookupNoticeV1 {
+        AdvisoryHookLookupNoticeV1 {
             scope,
             result_id: FeedbackResultId::new(format!("result.{suffix}")).unwrap(),
             cycle_id: FeedbackCycleId::new(format!("cycle.{suffix}")).unwrap(),
@@ -816,7 +804,7 @@ mod tests {
     #[test]
     fn notice_queue_retries_after_timeout_until_authenticated_acknowledgement() {
         let expected = scope("refs/heads/main");
-        let queue = Pr13AdvisoryHookNoticeQueueV1::new(expected.clone());
+        let queue = AdvisoryHookNoticeQueueV1::new(expected.clone());
         let sink = queue.sink();
         let accepted = notice(expected, "accepted");
 
@@ -854,26 +842,26 @@ mod tests {
         let project = [1; 16];
         let first_worktree = [2; 16];
         let second_worktree = [3; 16];
-        let first = Pr13AdvisoryHookNoticeQueueV1::new(scope("refs/heads/main"));
-        let conflicting = Pr13AdvisoryHookNoticeQueueV1::new(scope("refs/heads/main"));
-        let second = Pr13AdvisoryHookNoticeQueueV1::new(scope("refs/heads/other"));
+        let first = AdvisoryHookNoticeQueueV1::new(scope("refs/heads/main"));
+        let conflicting = AdvisoryHookNoticeQueueV1::new(scope("refs/heads/main"));
+        let second = AdvisoryHookNoticeQueueV1::new(scope("refs/heads/other"));
 
-        assert!(register_pr13_advisory_hook_notice_queue(
+        assert!(register_advisory_hook_notice_queue(
             project,
             first_worktree,
             &first
         ));
-        assert!(register_pr13_advisory_hook_notice_queue(
+        assert!(register_advisory_hook_notice_queue(
             project,
             first_worktree,
             &first
         ));
-        assert!(!register_pr13_advisory_hook_notice_queue(
+        assert!(!register_advisory_hook_notice_queue(
             project,
             first_worktree,
             &conflicting
         ));
-        assert!(register_pr13_advisory_hook_notice_queue(
+        assert!(register_advisory_hook_notice_queue(
             project,
             second_worktree,
             &second
@@ -890,24 +878,21 @@ mod tests {
             HookFeedbackDeliveryOutcomeV1::Delivered
         );
         assert_eq!(
-            peek_pr13_advisory_hook_notice(project, first_worktree),
+            peek_advisory_hook_notice(project, first_worktree),
             Some(first_notice.clone())
         );
         assert_eq!(
-            peek_pr13_advisory_hook_notice(project, second_worktree),
+            peek_advisory_hook_notice(project, second_worktree),
             Some(second_notice.clone())
         );
-        assert!(acknowledge_pr13_advisory_hook_notice(
+        assert!(acknowledge_advisory_hook_notice(
             project,
             first_worktree,
             &first_notice
         ));
+        assert_eq!(peek_advisory_hook_notice(project, first_worktree), None);
         assert_eq!(
-            peek_pr13_advisory_hook_notice(project, first_worktree),
-            None
-        );
-        assert_eq!(
-            peek_pr13_advisory_hook_notice(project, second_worktree),
+            peek_advisory_hook_notice(project, second_worktree),
             Some(second_notice)
         );
     }

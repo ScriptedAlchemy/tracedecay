@@ -1,5 +1,5 @@
 [package]
-name = "pr12-managed-run-fixture"
+name = "tracedecay-managed-run-fixture"
 version = "0.1.0"
 edition = "2024"
 

@@ -97,7 +97,7 @@ fn cancelled_advisory_cycle_preserves_a_typed_execution_receipt() {
         deadline,
         cancelled,
         AdvisoryCycleOutcome::Cancelled {
-            contributions: crate::application::advisory::Pr13AdvisoryContributionsV1::absent(),
+            contributions: crate::application::advisory::AdvisoryContributionsV1::absent(),
         },
     )
     .expect("typed advisory result");

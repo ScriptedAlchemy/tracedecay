@@ -29,11 +29,8 @@ use tracedecay_application::{
     OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState, PreviewId, PreviewResult,
     ReconciliationState, ReplanDependenciesCommand, RequestId, ResolvedScope,
     RetrieverContribution, ReviewProposalRequestV1, TaskHandoffGrant, TaskHandoffIssueRequest,
-    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
-    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
-    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
     WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
     WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
     WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
@@ -52,45 +49,11 @@ use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 use crate::application::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackSourceEventV1,
 };
-use crate::application::primitives::Pr12PrimitiveRequest;
+use crate::application::primitives::PrimitiveRequest;
 use crate::application_surface::{
     ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
     GitPreviewSurfaceRequest, GitReadSurfaceRequest,
 };
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(
-    tag = "attempt_operation",
-    content = "request",
-    rename_all = "snake_case"
-)]
-pub(crate) enum WorkAttemptInvocationV1 {
-    AcquireLease(Box<WorkAttemptAcquireLeaseRequestV1>),
-    RenewLease(WorkAttemptRenewLeaseRequestV1),
-    Start(WorkAttemptStartRequestV1),
-    PublishProgress(WorkAttemptPublishProgressRequestV1),
-    PublishArtifact(WorkAttemptPublishArtifactRequestV1),
-    Cancel(WorkAttemptCancelRequestV1),
-    Recover(WorkAttemptRecoverRequestV1),
-    Finish(WorkAttemptFinishRequestV1),
-    Terminalize(WorkAttemptTerminalizeRequestV1),
-}
-
-impl WorkAttemptInvocationV1 {
-    pub(crate) const fn operation_key(&self) -> &'static str {
-        match self {
-            Self::AcquireLease(_) => "attempt_acquire_lease",
-            Self::RenewLease(_) => "attempt_renew_lease",
-            Self::Start(_) => "attempt_start",
-            Self::PublishProgress(_) => "attempt_publish_progress",
-            Self::PublishArtifact(_) => "attempt_publish_artifact",
-            Self::Cancel(_) => "attempt_cancel",
-            Self::Recover(_) => "attempt_recover",
-            Self::Finish(_) => "attempt_finish",
-            Self::Terminalize(_) => "attempt_terminalize",
-        }
-    }
-}
 
 /// Request-field character rules. The contract accepts opaque handles and ids
 /// only in a shape it can echo back safely, so validation travels with the
@@ -169,7 +132,6 @@ pub(crate) enum DaemonInvocationOperation {
     WorkApplication,
     WorkflowApplication,
     HandoffApplication,
-    WorkAttempt,
     SemanticEvaluateAndPublish,
     LspOpen,
     LspFrame,
@@ -218,7 +180,6 @@ impl DaemonInvocationOperation {
             Self::WorkApplication => "work_application",
             Self::WorkflowApplication => "workflow_application",
             Self::HandoffApplication => "handoff_application",
-            Self::WorkAttempt => "work_attempt",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
             Self::LspOpen => "lsp_open",
             Self::LspFrame => "lsp_frame",
@@ -445,7 +406,7 @@ pub(crate) enum DaemonInvocationPayload {
     },
     PrimitiveRead {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: Pr12PrimitiveRequest,
+        request: PrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -514,12 +475,6 @@ pub(crate) enum DaemonInvocationPayload {
     },
     HandoffApplication {
         request: HandoffApplicationInvocationV1,
-        observed_at: UtcMicros,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-    },
-    WorkAttempt {
-        request: WorkAttemptInvocationV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -810,7 +765,7 @@ impl DaemonInvocationRequest {
     pub(crate) fn primitive(
         request_id: impl Into<String>,
         operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: Pr12PrimitiveRequest,
+        request: PrimitiveRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -818,7 +773,7 @@ impl DaemonInvocationRequest {
         let payload = match (operation, request) {
             (
                 crate::application_surface::ApplicationSurfaceOperation::FeedbackImpact,
-                Pr12PrimitiveRequest::Impact(request),
+                PrimitiveRequest::Impact(request),
             ) => DaemonInvocationPayload::PrimitiveImpact {
                 request,
                 observed_at,
@@ -827,7 +782,7 @@ impl DaemonInvocationRequest {
             },
             (
                 crate::application_surface::ApplicationSurfaceOperation::AffectedTests,
-                Pr12PrimitiveRequest::AffectedFileTests(request),
+                PrimitiveRequest::AffectedFileTests(request),
             ) => DaemonInvocationPayload::PrimitiveAffectedTests {
                 request,
                 observed_at,
@@ -836,7 +791,7 @@ impl DaemonInvocationRequest {
             },
             (
                 crate::application_surface::ApplicationSurfaceOperation::TestResults,
-                Pr12PrimitiveRequest::RecentTestResults(page),
+                PrimitiveRequest::RecentTestResults(page),
             ) => DaemonInvocationPayload::PrimitiveTestResults {
                 page,
                 observed_at,
@@ -845,55 +800,55 @@ impl DaemonInvocationRequest {
             },
             (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SessionLookup,
-                request @ Pr12PrimitiveRequest::SessionLookup(_),
+                request @ PrimitiveRequest::SessionLookup(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::QualifiedName,
-                request @ Pr12PrimitiveRequest::QualifiedName(_),
+                request @ PrimitiveRequest::QualifiedName(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::CallChain,
-                request @ Pr12PrimitiveRequest::CallChain(_),
+                request @ PrimitiveRequest::CallChain(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::FileDependents,
-                request @ Pr12PrimitiveRequest::FileDependents(_),
+                request @ PrimitiveRequest::FileDependents(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SourceLines,
-                request @ Pr12PrimitiveRequest::SourceLines(_),
+                request @ PrimitiveRequest::SourceLines(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SourceBody,
-                request @ Pr12PrimitiveRequest::SourceBody(_),
+                request @ PrimitiveRequest::SourceBody(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::SourceOutline,
-                request @ Pr12PrimitiveRequest::SourceOutline(_),
+                request @ PrimitiveRequest::SourceOutline(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::ModuleApi,
-                request @ Pr12PrimitiveRequest::ModuleApi(_),
+                request @ PrimitiveRequest::ModuleApi(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::FileMetadata,
-                request @ Pr12PrimitiveRequest::FileMetadata(_),
+                request @ PrimitiveRequest::FileMetadata(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthRead,
-                request @ Pr12PrimitiveRequest::HealthRead(_),
+                request @ PrimitiveRequest::HealthRead(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthDelta,
-                request @ Pr12PrimitiveRequest::HealthDelta(_),
+                request @ PrimitiveRequest::HealthDelta(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::StorageStatus,
-                request @ Pr12PrimitiveRequest::StorageStatus(_),
+                request @ PrimitiveRequest::StorageStatus(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::DiagnosticsRead,
-                request @ Pr12PrimitiveRequest::DiagnosticsRead(_),
+                request @ PrimitiveRequest::DiagnosticsRead(_),
             ) => {
                 DaemonInvocationPayload::PrimitiveRead {
                     surface_operation,
@@ -953,27 +908,6 @@ impl DaemonInvocationRequest {
             delivery_route: None,
             payload: DaemonInvocationPayload::ContextScout {
                 surface_operation,
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            },
-        }
-    }
-
-    pub(crate) fn work_attempt(
-        request_id: impl Into<String>,
-        request: WorkAttemptInvocationV1,
-        observed_at: UtcMicros,
-        deadline: Deadline,
-        cancellation: CancellationContext,
-    ) -> Self {
-        Self {
-            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
-            revision: DAEMON_INVOCATION_REVISION,
-            request_id: request_id.into(),
-            delivery_route: None,
-            payload: DaemonInvocationPayload::WorkAttempt {
                 request,
                 observed_at,
                 deadline,
@@ -1469,7 +1403,6 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::HandoffApplication { .. } => {
                 DaemonInvocationOperation::HandoffApplication
             }
-            DaemonInvocationPayload::WorkAttempt { .. } => DaemonInvocationOperation::WorkAttempt,
             DaemonInvocationPayload::SemanticEvaluateAndPublish { .. } => {
                 DaemonInvocationOperation::SemanticEvaluateAndPublish
             }
@@ -1517,7 +1450,6 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::WorkApplication
                 | DaemonInvocationOperation::WorkflowApplication
                 | DaemonInvocationOperation::HandoffApplication
-                | DaemonInvocationOperation::WorkAttempt
                 | DaemonInvocationOperation::SemanticEvaluateAndPublish
                 | DaemonInvocationOperation::LspOpen
         )
@@ -1652,12 +1584,6 @@ impl DaemonInvocationRequest {
                 ..
             }
             | DaemonInvocationPayload::HandoffApplication {
-                observed_at,
-                deadline,
-                cancellation,
-                ..
-            }
-            | DaemonInvocationPayload::WorkAttempt {
                 observed_at,
                 deadline,
                 cancellation,
@@ -2321,10 +2247,6 @@ pub(crate) enum DaemonInvocationOutcome {
     HandoffApplication {
         scope: ResolvedScope,
         outcome: HandoffApplicationOutcomeV1,
-    },
-    WorkAttempt {
-        scope: ResolvedScope,
-        outcome: Box<ApplicationOutcome<WorkAttemptResponseV1>>,
     },
     SemanticEvaluatedProfilePublished {
         scope: ResolvedScope,

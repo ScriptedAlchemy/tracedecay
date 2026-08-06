@@ -19,7 +19,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::database::{GitMutationDatabase, GitMutationWriteTransaction};
 
-/// Async canonical-store adapter for PR11 transaction state.
+/// Async canonical-store adapter for Git index transaction state.
 ///
 /// The adapter borrows the already-mounted registered session database; it never
 /// opens a database or derives a path. Every mutation owns one `IMMEDIATE`

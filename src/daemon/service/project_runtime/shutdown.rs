@@ -20,10 +20,11 @@ impl ProjectRuntimeRegistryV1 {
     pub(crate) async fn shut_down_all(&self) {
         self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
+        let mut shutdown_task = self.shutdown_task.lock().await;
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();
             self.shutdown_complete.send_replace(ShutdownState::Pending);
-            self.shutdown_reaper.submit(move || {
+            let task = tokio::task::spawn_blocking(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     registry.drain_all_blocking();
                 }));
@@ -35,19 +36,41 @@ impl ProjectRuntimeRegistryV1 {
                 };
                 registry.shutdown_complete.send_replace(state);
             });
+            *shutdown_task = Some(task);
         }
+        drop(shutdown_task);
         loop {
             let state = *shutdown_complete.borrow_and_update();
             match state {
-                ShutdownState::Complete => return,
-                ShutdownState::Failed => return,
+                ShutdownState::Complete | ShutdownState::Failed => {
+                    self.join_shutdown_task().await;
+                    return;
+                }
                 ShutdownState::Pending => {
                     if shutdown_complete.changed().await.is_err() {
                         self.shutdown_complete.send_replace(ShutdownState::Failed);
+                        self.join_shutdown_task().await;
                         return;
                     }
                 }
             }
+        }
+    }
+
+    async fn join_shutdown_task(&self) {
+        let result = {
+            let mut retained = self.shutdown_task.lock().await;
+            let Some(task) = retained.as_mut() else {
+                return;
+            };
+            let result = task.await;
+            retained.take();
+            result
+        };
+        if let Err(error) = result {
+            self.shutdown_started.store(false, Ordering::Release);
+            self.shutdown_complete.send_replace(ShutdownState::Failed);
+            tracing::error!(%error, "project runtime shutdown drain task failed");
         }
     }
 

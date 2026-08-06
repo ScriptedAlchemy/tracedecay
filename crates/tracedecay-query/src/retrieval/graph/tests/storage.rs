@@ -3,12 +3,12 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, NeverCancelled,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphNamespace, NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, DURABLE_GRAPH_STORE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
-    StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    BrainId, ProjectId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
 use super::*;
@@ -32,6 +32,11 @@ impl RetainedGraphStoreLeaseV1 for TestGraphLease {
     fn canonical_path(&self) -> &std::path::Path {
         &self.canonical_path
     }
+}
+
+fn graph_namespace(worktree: &str, generation: &str) -> GraphNamespace {
+    GraphNamespace::new(format!("code-scope:{worktree}:{generation}"))
+        .expect("valid exact worktree generation namespace")
 }
 
 #[test]
@@ -73,9 +78,7 @@ fn graph_projection_reopens_with_identical_ordered_output() {
         StoreIncarnationV1::new(1).expect("valid incarnation"),
         StoreAuthorityEpochV1::new(1).expect("valid epoch"),
     );
-    let durable_graph_store_root = temp.path().join(DURABLE_GRAPH_STORE_DIRECTORY);
-    std::fs::create_dir(&durable_graph_store_root).expect("create durable graph-store root");
-    let canonical_path = durable_graph_store_root.join("graph");
+    let canonical_path = temp.path().join("graph.grafeo");
     let registration = GraphDbRegistration {
         authority_lease: Arc::new(TestGraphLease {
             verified_locator: VerifiedStoreLocatorV1::new(
@@ -93,7 +96,12 @@ fn graph_projection_reopens_with_identical_ordered_output() {
     let database = registry
         .resolve(registration.clone())
         .expect("open persistent graph");
-    let store = CodeGraphProjectionStore::from_graph_db(database);
+    let namespace = graph_namespace("worktree.reopen", request.generation.as_str());
+    let store = CodeGraphProjectionStore::from_graph_db(
+        database,
+        namespace.clone(),
+        request.generation.clone(),
+    );
     publish_projection(
         &store,
         &request,
@@ -110,6 +118,8 @@ fn graph_projection_reopens_with_identical_ordered_output() {
         registry
             .reopen(registration)
             .expect("reopen persistent graph"),
+        namespace,
+        request.generation.clone(),
     );
     let after = read_projection(&reopened, &request, &cancellation);
 
@@ -125,6 +135,145 @@ fn graph_projection_reopens_with_identical_ordered_output() {
     assert_eq!(
         after.evidence_by_occurrence[&id("code-graph:symbol.target")].weakest_authority,
         EdgeAuthorityV1::HeuristicCandidate
+    );
+}
+
+#[test]
+fn linked_worktree_generations_remain_queryable_in_one_project_graph() {
+    let cancellation =
+        CancellationSignal::active("cancellation.code-graph.worktrees").expect("valid token");
+    let temp = TempDir::new().expect("temporary graph directory");
+    let registry =
+        GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).expect("valid registry");
+    let project_binding = StoreRuntimeBindingV1::new(
+        StoreShardIdV1::project(
+            BrainId::try_from("brain.query-worktrees".to_owned()).expect("valid brain"),
+            UserProfileId::try_from("profile.query-worktrees".to_owned()).expect("valid profile"),
+            ProjectId::try_from("project.query-worktrees".to_owned()).expect("valid project"),
+        ),
+        StoreIncarnationV1::new(1).expect("valid incarnation"),
+        StoreAuthorityEpochV1::new(1).expect("valid epoch"),
+    );
+    let canonical_path = temp.path().join("project.grafeo");
+    let registration = GraphDbRegistration {
+        authority_lease: Arc::new(TestGraphLease {
+            verified_locator: VerifiedStoreLocatorV1::new(
+                project_binding.shard_id.clone(),
+                project_binding.incarnation,
+                canonical_store_locator_digest(&canonical_path).expect("valid locator digest"),
+            ),
+            binding: project_binding,
+            canonical_path,
+        }),
+        cancellation: Arc::new(NeverCancelled),
+        lifecycle_cancellation: Arc::new(NeverCancelled),
+        deadline: Instant::now() + Duration::from_secs(30),
+    };
+    let database = registry
+        .resolve(registration.clone())
+        .expect("open shared project graph");
+    let primary_request = graph_request(8, 1);
+    let primary_namespace =
+        graph_namespace("worktree.primary", primary_request.generation.as_str());
+    let primary = CodeGraphProjectionStore::from_graph_db(
+        Arc::clone(&database),
+        primary_namespace.clone(),
+        primary_request.generation.clone(),
+    );
+    let primary_edge = CanonicalRelationEdgeV1 {
+        from_occurrence: id("symbol.seed"),
+        to_occurrence: id("symbol.primary"),
+        kind: RelationEdgeKindV1::Calls,
+        authority: EdgeAuthorityV1::SyntaxExact,
+        evidence_span: SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        },
+    };
+    publish_projection(
+        &primary,
+        &primary_request,
+        std::slice::from_ref(&primary_edge),
+        &["symbol.seed", "symbol.primary"],
+    );
+
+    let mut linked_request = graph_request(8, 1);
+    linked_request.generation = id("generation.linked");
+    linked_request.seed_anchors = vec![binding(&linked_request, "occ.seed", "symbol.seed")];
+    let linked_namespace = graph_namespace("worktree.linked", linked_request.generation.as_str());
+    let linked = CodeGraphProjectionStore::from_graph_db(
+        Arc::clone(&database),
+        linked_namespace.clone(),
+        linked_request.generation.clone(),
+    );
+    let linked_edge = CanonicalRelationEdgeV1 {
+        from_occurrence: id("symbol.seed"),
+        to_occurrence: id("symbol.linked"),
+        kind: RelationEdgeKindV1::Uses,
+        authority: EdgeAuthorityV1::NameResolved,
+        evidence_span: SourceSpan {
+            start_byte: 2,
+            end_byte: 3,
+        },
+    };
+    publish_projection(
+        &linked,
+        &linked_request,
+        std::slice::from_ref(&linked_edge),
+        &["symbol.seed", "symbol.linked"],
+    );
+    assert_eq!(
+        primary
+            .publish_code_graph(
+                &linked_request.generation,
+                std::slice::from_ref(&linked_edge),
+                &projection_chunks(&linked_request, &["symbol.seed", "symbol.linked"]),
+                &cancellation,
+            )
+            .unwrap_err(),
+        CodeGraphProjectionError::GenerationMismatch,
+        "a generation cannot publish through another worktree generation namespace"
+    );
+
+    result_order(
+        &read_projection(&primary, &primary_request, &cancellation),
+        &["code-graph:symbol.primary"],
+    );
+    result_order(
+        &read_projection(&linked, &linked_request, &cancellation),
+        &["code-graph:symbol.linked"],
+    );
+    drop(linked);
+    result_order(
+        &read_projection(&primary, &primary_request, &cancellation),
+        &["code-graph:symbol.primary"],
+    );
+    drop(primary);
+    drop(database);
+    registry
+        .close(&registration)
+        .expect("close shared project graph");
+
+    let reopened = registry
+        .reopen(registration)
+        .expect("reopen shared project graph");
+    let primary = CodeGraphProjectionStore::from_graph_db(
+        Arc::clone(&reopened),
+        primary_namespace,
+        primary_request.generation.clone(),
+    );
+    let linked = CodeGraphProjectionStore::from_graph_db(
+        reopened,
+        linked_namespace,
+        linked_request.generation.clone(),
+    );
+    result_order(
+        &read_projection(&primary, &primary_request, &cancellation),
+        &["code-graph:symbol.primary"],
+    );
+    result_order(
+        &read_projection(&linked, &linked_request, &cancellation),
+        &["code-graph:symbol.linked"],
     );
 }
 

@@ -1,7 +1,7 @@
 #![allow(clippy::too_many_arguments, clippy::cloned_ref_to_slice_refs)] // test builders
 //! Store-level fact merge/hydration integration tests against a real database.
 //!
-//! NEXT.md (PR7) requires provenance preservation, contradiction, supersession,
+//! NEXT.md requires provenance preservation, contradiction, supersession,
 //! as-of knowledge, denied payloads, redacted frontiers, and unknown
 //! denominators to be exercised through fact merge and hydration — end to end
 //! through the real [`DatabaseFactStore`] over a real sqlite file, not domain

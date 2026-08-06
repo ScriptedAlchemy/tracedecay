@@ -27,7 +27,7 @@ pub use work_executable_bindings::*;
 const CONFIGURATION_SNAPSHOT_ID_DOMAIN: &str = "tracedecay.configuration.snapshot.v1";
 const PROTECTED_CHANGE_DIGEST_DOMAIN: &str = "tracedecay.configuration.protected-change.v1";
 
-/// Canonical setting keys owned by the PR11 control plane.
+/// Canonical setting keys owned by the configuration control plane.
 pub const SOURCE_BINDINGS_SETTING_KEY: &str = "scope.source_bindings.v1";
 pub const ACCESS_RULES_SETTING_KEY: &str = "scope.access_rules.v1";
 pub const DEFAULT_COLLECTION_SETTING_KEY: &str = "query.default_collection.v1";

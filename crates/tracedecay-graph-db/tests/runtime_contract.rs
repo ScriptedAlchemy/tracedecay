@@ -1356,7 +1356,7 @@ fn valid_foreign_grafeo_store_requires_reset() {
     let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
     )
     .unwrap();
     raw.session().create_node(&["foreign"]);
@@ -1371,7 +1371,7 @@ fn wrong_tracedecay_format_requires_reset() {
     let path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
         grafeo_engine::Config::persistent(&path)
-            .with_storage_format(grafeo_engine::config::StorageFormat::WalDirectory),
+            .with_storage_format(grafeo_engine::config::StorageFormat::SingleFile),
     )
     .unwrap();
     raw.session()

@@ -1,4 +1,4 @@
-//! Transport-neutral application contracts for PR11 Git index transactions.
+//! Transport-neutral application contracts for Git index transactions.
 //!
 //! This module owns request admission, authority binding, receipt projection,
 //! and idempotency identity. Native Git execution, serialization, durable

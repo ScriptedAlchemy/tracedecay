@@ -48,11 +48,11 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 pub enum DiagnosticPillarV1 {
     /// `cargo check` / `clippy` output parsed by [`crate::diagnose`].
     Compiler,
-    /// PR13 GitHub review advisory findings.
+    /// GitHub review advisory findings.
     GitHubReview,
-    /// PR13 CI failure localization advisory findings.
+    /// CI failure localization advisory findings.
     CiLocalization,
-    /// PR13 proximity advisory findings.
+    /// proximity advisory findings.
     Proximity,
 }
 

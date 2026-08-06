@@ -5,6 +5,217 @@ use super::*;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum McpShutdownStatus {
+    Clean,
+    TimedOut,
+    Failed(String),
+}
+
+impl McpShutdownStatus {
+    fn is_clean(&self) -> bool {
+        matches!(self, Self::Clean)
+    }
+}
+
+pub(in crate::mcp::server) struct McpShutdownCompletion {
+    state: Arc<McpShutdownState>,
+}
+
+#[derive(Default)]
+struct McpShutdownState {
+    running: AtomicBool,
+    terminal: std::sync::Mutex<Option<McpShutdownStatus>>,
+    coordinator_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    changed: tokio::sync::Notify,
+}
+
+struct McpShutdownCoordinatorCompletion(Arc<McpShutdownState>);
+
+impl Drop for McpShutdownCoordinatorCompletion {
+    fn drop(&mut self) {
+        self.0.changed.notify_waiters();
+    }
+}
+
+impl Default for McpShutdownCompletion {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(McpShutdownState::default()),
+        }
+    }
+}
+
+impl McpShutdownCompletion {
+    async fn coordinate_until<Work>(
+        &self,
+        deadline: tokio::time::Instant,
+        work: Work,
+    ) -> McpShutdownStatus
+    where
+        Work: std::future::Future<Output = McpShutdownStatus> + Send + 'static,
+    {
+        let mut work = Some(work);
+        loop {
+            self.join_finished_coordinator().await;
+            if !self.state.running.load(Ordering::Acquire) {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+            }
+            if let Some(status) = self.terminal_status() {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return status;
+            }
+
+            let mut coordinator_task = self.state.coordinator_task.lock().await;
+            if coordinator_task.is_some() {
+                let running = self.state.running.load(Ordering::Acquire);
+                drop(coordinator_task);
+                if running {
+                    return self.wait_for_terminal_status_until(deadline).await;
+                }
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                continue;
+            }
+            if self
+                .state
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                drop(coordinator_task);
+                return self.wait_for_terminal_status_until(deadline).await;
+            }
+            if let Some(status) = self.terminal_status() {
+                self.state.running.store(false, Ordering::Release);
+                drop(coordinator_task);
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return status;
+            }
+
+            let Some(work) = work.take() else {
+                self.state.finish(McpShutdownStatus::Failed(
+                    "MCP shutdown coordinator lost its work future".to_owned(),
+                ));
+                drop(coordinator_task);
+                return McpShutdownStatus::Failed(
+                    "MCP shutdown coordinator lost its work future".to_owned(),
+                );
+            };
+            let state = Arc::clone(&self.state);
+            let task = tokio::spawn(async move {
+                let _completion = McpShutdownCoordinatorCompletion(Arc::clone(&state));
+                let runner = tokio::spawn(work);
+                let status = match runner.await {
+                    Ok(status) => status,
+                    Err(error) => McpShutdownStatus::Failed(error.to_string()),
+                };
+                state.finish(status);
+            });
+            *coordinator_task = Some(task);
+            drop(coordinator_task);
+            return self.wait_for_terminal_status_until(deadline).await;
+        }
+    }
+
+    async fn join_finished_coordinator(&self) {
+        let result = {
+            let mut coordinator_task = self.state.coordinator_task.lock().await;
+            let Some(task) = coordinator_task.as_mut() else {
+                return;
+            };
+            if !task.is_finished() {
+                return;
+            }
+            let result = task.await;
+            coordinator_task.take();
+            result
+        };
+        if let Err(error) = result {
+            tracing::error!(%error, "MCP shutdown coordinator task failed after receipt");
+            self.state
+                .finish(McpShutdownStatus::Failed(error.to_string()));
+        }
+    }
+
+    async fn wait_for_finished_coordinator(&self) {
+        loop {
+            let notified = self.state.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let finished = self
+                .state
+                .coordinator_task
+                .lock()
+                .await
+                .as_ref()
+                .is_none_or(tokio::task::JoinHandle::is_finished);
+            if finished {
+                return;
+            }
+            notified.as_mut().await;
+        }
+    }
+
+    fn terminal_status(&self) -> Option<McpShutdownStatus> {
+        self.state
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    async fn wait_for_terminal_status_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> McpShutdownStatus {
+        loop {
+            if let Some(status) = self.terminal_status() {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return status;
+            }
+            if !self.state.running.load(Ordering::Acquire) {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return McpShutdownStatus::TimedOut;
+            }
+            let notified = self.state.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(status) = self.terminal_status() {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return status;
+            }
+            if !self.state.running.load(Ordering::Acquire) {
+                self.wait_for_finished_coordinator().await;
+                self.join_finished_coordinator().await;
+                return McpShutdownStatus::TimedOut;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return McpShutdownStatus::TimedOut;
+            }
+        }
+    }
+}
+
+impl McpShutdownState {
+    fn finish(&self, status: McpShutdownStatus) {
+        if status != McpShutdownStatus::TimedOut {
+            *self
+                .terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+        }
+        self.running.store(false, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+}
+
 fn queued_cancellable_request_key(
     pending_lines: &VecDeque<String>,
     request_id: &Value,
@@ -288,7 +499,7 @@ impl McpServer {
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     pub async fn run(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
     ) -> Result<()> {
         self.run_with_shutdown_policy(transport, true, true, None, None)
@@ -299,7 +510,7 @@ impl McpServer {
     /// connection closes. Daemon-owned servers use this so the engine remains
     /// shared across independent clients.
     pub async fn run_connection(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
     ) -> Result<()> {
         self.run_with_shutdown_policy(transport, false, false, None, None)
@@ -309,7 +520,7 @@ impl McpServer {
     /// Runs one daemon client connection using connection-local timing
     /// settings. The shared server's default timing flag remains unchanged.
     pub async fn run_connection_with_timings(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
         timings_enabled: bool,
     ) -> Result<()> {
@@ -318,7 +529,7 @@ impl McpServer {
     }
 
     pub(crate) async fn run_daemon_connection_with_timings(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
         timings_enabled: bool,
         lifecycle: &crate::daemon::DaemonLifecycle,
@@ -334,7 +545,7 @@ impl McpServer {
     }
 
     pub(crate) async fn run_with_shutdown_policy(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
         shutdown_on_exit: bool,
         listen_for_process_signals: bool,
@@ -659,7 +870,7 @@ impl McpServer {
         Ok(())
     }
 
-    pub(crate) async fn shutdown_if(&self, enabled: bool) {
+    pub(crate) async fn shutdown_if(self: &Arc<Self>, enabled: bool) {
         if enabled {
             self.shutdown().await;
         }
@@ -671,13 +882,22 @@ impl McpServer {
     /// Idempotent — safe to call multiple times. `run` invokes it once when
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
-    pub async fn shutdown(&self) {
-        // Idempotency guard: only run the persistence path once.
-        if self.shutdown_done.swap(true, Ordering::SeqCst) {
-            return;
+    pub async fn shutdown(self: &Arc<Self>) {
+        let deadline = tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE;
+        let status = self.shutdown_until(deadline).await;
+        if !status.is_clean() {
+            tracing::warn!(?status, "MCP server shutdown did not complete cleanly");
         }
+    }
 
-        self.shutdown_background_tasks().await;
+    async fn shutdown_until(self: &Arc<Self>, deadline: tokio::time::Instant) -> McpShutdownStatus {
+        self.shutdown
+            .coordinate_until(deadline, Arc::clone(self).run_shutdown(deadline))
+            .await
+    }
+
+    async fn run_shutdown(self: Arc<Self>, deadline: tokio::time::Instant) -> McpShutdownStatus {
+        let mut failures = self.shutdown_background_tasks_until(deadline).await;
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
@@ -687,6 +907,7 @@ impl McpServer {
         // Persist final tokens-saved value
         if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
             tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
+            failures.push(format!("persist tokens saved: {e}"));
         }
 
         if let Some(ref gdb) = self.accounting_db {
@@ -722,21 +943,51 @@ impl McpServer {
         // Checkpoint WAL to merge it into the main database file
         if let Err(e) = cg.checkpoint().await {
             tracing::warn!(error = %e, "failed to checkpoint WAL during shutdown");
+            failures.push(format!("code graph checkpoint: {e}"));
         }
 
-        tracing::info!(
-            tool_calls,
-            tokens_saved,
-            uptime_secs = uptime.as_secs(),
-            "MCP server shutdown complete"
-        );
+        if failures.is_empty() {
+            tracing::info!(
+                tool_calls,
+                tokens_saved,
+                uptime_secs = uptime.as_secs(),
+                "MCP server shutdown complete"
+            );
+            McpShutdownStatus::Clean
+        } else {
+            McpShutdownStatus::Failed(failures.join("; "))
+        }
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) async fn shutdown_background_tasks(&self) {
+        let failures = self
+            .shutdown_background_tasks_until(
+                tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE,
+            )
+            .await;
+        if !failures.is_empty() {
+            tracing::warn!(
+                failures = failures.join("; "),
+                "MCP background shutdown did not complete cleanly"
+            );
+        }
+    }
+
+    async fn shutdown_background_tasks_until(&self, deadline: tokio::time::Instant) -> Vec<String> {
+        let mut failures = Vec::new();
+        if let Err(error) =
+            crate::mcp::tools::handlers::dashboard::shutdown_dashboard_until(deadline).await
+        {
+            failures.push(format!("dashboard shutdown: {error}"));
+        }
+        failures.extend(self.background_tasks.shutdown().await);
+        self.dispatch_authority.shutdown().await;
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }
         self.shutdown_startup_catch_up_sync().await;
+        failures
     }
 
     pub(crate) async fn replay_host_admission(
@@ -954,5 +1205,128 @@ mod cancellable_queue_tests {
         assert!(
             queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
         );
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct RetainedShutdownOwner(Arc<AtomicBool>);
+
+    impl Drop for RetainedShutdownOwner {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_shutdown_waiter_does_not_cancel_owned_work() {
+        let completion = Arc::new(McpShutdownCompletion::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, released) = tokio::sync::oneshot::channel();
+
+        let first_completion = Arc::clone(&completion);
+        let first_attempts = Arc::clone(&attempts);
+        let first_entered = Arc::clone(&entered);
+        let first = tokio::spawn(async move {
+            first_completion
+                .coordinate_until(
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                    async move {
+                        first_attempts.fetch_add(1, Ordering::AcqRel);
+                        first_entered.notify_one();
+                        let _ = released.await;
+                        McpShutdownStatus::Clean
+                    },
+                )
+                .await
+        });
+        entered.notified().await;
+        first.abort();
+        assert!(
+            first
+                .await
+                .expect_err("cancel first shutdown waiter")
+                .is_cancelled()
+        );
+
+        release.send(()).expect("release retained shutdown work");
+        let retry_attempts = Arc::clone(&attempts);
+        let retry = completion
+            .coordinate_until(
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                async move {
+                    retry_attempts.fetch_add(1, Ordering::AcqRel);
+                    panic!("retry must await the retained shutdown work");
+                },
+            )
+            .await;
+
+        assert_eq!(retry, McpShutdownStatus::Clean);
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_shutdown_retains_work_until_retry_observes_terminal_status() {
+        let completion = Arc::new(McpShutdownCompletion::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let owner_dropped = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (release, released) = tokio::sync::oneshot::channel();
+
+        let first_completion = Arc::clone(&completion);
+        let first_attempts = Arc::clone(&attempts);
+        let first_entered = Arc::clone(&entered);
+        let first_owner_dropped = Arc::clone(&owner_dropped);
+        let first = tokio::spawn(async move {
+            first_completion
+                .coordinate_until(
+                    tokio::time::Instant::now() + Duration::from_secs(1),
+                    async move {
+                        let _owner = RetainedShutdownOwner(first_owner_dropped);
+                        first_attempts.fetch_add(1, Ordering::AcqRel);
+                        first_entered.notify_one();
+                        let _ = released.await;
+                        McpShutdownStatus::Clean
+                    },
+                )
+                .await
+        });
+        entered.notified().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(
+            first.await.expect("first timed-out shutdown"),
+            McpShutdownStatus::TimedOut
+        );
+        assert!(
+            !owner_dropped.load(Ordering::Acquire),
+            "the timed-out attempt must retain its owner for a retry"
+        );
+
+        let retry_completion = Arc::clone(&completion);
+        let retry_attempts = Arc::clone(&attempts);
+        let retry = tokio::spawn(async move {
+            retry_completion
+                .coordinate_until(
+                    tokio::time::Instant::now() + Duration::from_secs(1),
+                    async move {
+                        retry_attempts.fetch_add(1, Ordering::AcqRel);
+                        panic!("retry must await the retained shutdown owner");
+                    },
+                )
+                .await
+        });
+        release.send(()).expect("release retained shutdown owner");
+
+        assert_eq!(
+            retry.await.expect("retry shutdown"),
+            McpShutdownStatus::Clean
+        );
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert!(owner_dropped.load(Ordering::Acquire));
     }
 }

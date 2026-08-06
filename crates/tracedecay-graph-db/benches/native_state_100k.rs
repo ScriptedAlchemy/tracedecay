@@ -11,9 +11,9 @@ use tracedecay_graph_db::{
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
 };
 use tracedecay_store::{
-    BrainId, DURABLE_GRAPH_STORE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
-    StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    BrainId, ProjectId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
 };
 
 const ENTITY_COUNT: usize = 100_000;
@@ -40,8 +40,7 @@ impl RetainedGraphStoreLeaseV1 for BenchmarkGraphLease {
 }
 
 fn registration(root: &std::path::Path) -> GraphDbRegistration {
-    create_durable_graph_store_root(root);
-    let canonical_path = root.join(DURABLE_GRAPH_STORE_DIRECTORY).join("graph");
+    let canonical_path = root.join("graph.grafeo");
     let binding = StoreRuntimeBindingV1::new(
         StoreShardIdV1::project(
             BrainId::try_from("brain.benchmark".to_owned()).expect("valid brain"),
@@ -64,14 +63,6 @@ fn registration(root: &std::path::Path) -> GraphDbRegistration {
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(3_600),
-    }
-}
-
-fn create_durable_graph_store_root(root: &std::path::Path) {
-    match std::fs::create_dir(root.join(DURABLE_GRAPH_STORE_DIRECTORY)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create durable graph-store root: {error}"),
     }
 }
 

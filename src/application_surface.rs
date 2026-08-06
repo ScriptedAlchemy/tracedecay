@@ -40,11 +40,8 @@ use tracedecay_application::{
     PageRequest, ProblemOwningLayer, ReplanDependenciesCommand, RequestContext, RequestId,
     ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
     RetryDirective, ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest,
-    SourceLinesRequest, StreamEvent, StreamEventKind, WorkAttemptAcquireLeaseRequestV1,
-    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
-    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
-    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
-    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    SourceLinesRequest, StreamEvent, StreamEventKind,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 pub use tracedecay_application::{
     ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
@@ -87,7 +84,7 @@ use crate::application::operation_stream::{
 };
 use crate::application::primitives::{
     CallChainPrimitiveRequest, DiagnosticsPrimitiveRequest, FileDependentsPrimitiveRequest,
-    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, Pr12PrimitiveRequest,
+    FileMetadataPrimitiveRequest, ModuleApiPrimitiveRequest, PrimitiveRequest,
     QualifiedNamePrimitiveRequest, SourceBodyPrimitiveRequest, SourceOutlinePrimitiveRequest,
     StorageStatusPrimitiveRequest,
 };
@@ -101,7 +98,7 @@ use crate::daemon_client::{
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 use crate::daemon_contract::{
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkAttemptInvocationV1,
+    WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
@@ -210,7 +207,7 @@ fn compatibility_diagnostics_request(
 
 pub type FeedbackSurfaceRequest = tracedecay_application::feedback::FeedbackHandleRequestV1;
 
-/// Canonical explicit PR13 trigger. Project/root/scope/provider identities and
+/// Canonical explicit advisory trigger. Project/root/scope/provider identities and
 /// the resulting read handle are all minted by the authenticated daemon.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -402,13 +399,13 @@ impl PrimitiveCodeSurfaceRequest {
         sanitizer_revision: SanitizerRevision,
         normalization_revision: QueryNormalizationRevision,
         page: PageRequest,
-    ) -> Result<Pr12PrimitiveRequest, ApplicationContractError> {
+    ) -> Result<PrimitiveRequest, ApplicationContractError> {
         Ok(match self {
-            Self::SymbolSearch(request) => Pr12PrimitiveRequest::SymbolSearch(
+            Self::SymbolSearch(request) => PrimitiveRequest::SymbolSearch(
                 request.into_primitive_request(sanitizer_revision, normalization_revision, page)?,
             ),
             Self::SignatureSearch(request) => {
-                Pr12PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
+                PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
                     returns: request.returns,
                     params: request.params,
                     is_async: request.is_async,
@@ -417,21 +414,21 @@ impl PrimitiveCodeSurfaceRequest {
                 })
             }
             Self::Implementations(request) => {
-                Pr12PrimitiveRequest::Implementations(ImplementationsRequest {
+                PrimitiveRequest::Implementations(ImplementationsRequest {
                     selector: request.selector,
                     scope: request.scope,
                     meta: request.meta.into_application(page),
                 })
             }
             Self::TypeHierarchy(request) => {
-                Pr12PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
+                PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
                     node_id: request.node_id,
                     maximum_depth: request.maximum_depth,
                     scope: request.scope,
                     meta: request.meta.into_application(page),
                 })
             }
-            Self::Callers(request) => Pr12PrimitiveRequest::Callers(GraphRelationRequest {
+            Self::Callers(request) => PrimitiveRequest::Callers(GraphRelationRequest {
                 node_id: request.node_id,
                 maximum_depth: request.maximum_depth,
                 resolve_trait_dispatch: request.resolve_trait_dispatch,
@@ -726,7 +723,7 @@ pub enum ApplicationSurfaceRequest {
     TestResults(TestResultsSurfaceRequest),
     CallableCode(CallableCodeSurfaceRequest),
     PrimitiveCode(PrimitiveCodeSurfaceRequest),
-    Primitive(Pr12PrimitiveRequest),
+    Primitive(PrimitiveRequest),
     Configuration(ConfigurationSurfaceRequest),
     ContextScout(ContextScoutSurfaceRequest),
 }
@@ -970,36 +967,6 @@ async fn invoke_work_operation(
         }};
     }
 
-    macro_rules! attempt {
-        ($request_ty:ty, $variant:ident) => {{
-            let Ok(decoded) = serde_json::from_value::<$request_ty>(body) else {
-                return tracedecay_api::work_invalid_request_response(request_id);
-            };
-            let invocation = crate::daemon_contract::DaemonInvocationRequest::work_attempt(
-                request_id.as_str(),
-                WorkAttemptInvocationV1::$variant(decoded.into()),
-                crate::daemon_client::invocation_now_micros(),
-                controls.deadline.clone(),
-                controls.cancellation.context(),
-            );
-            invoke_registered_http::<WorkAttemptResponseV1, _>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                invocation,
-                |outcome| match outcome {
-                    crate::daemon_contract::DaemonInvocationOutcome::WorkAttempt {
-                        scope,
-                        outcome,
-                    } => Some((scope, *outcome)),
-                    _ => None,
-                },
-            )
-            .await
-        }};
-    }
-
     match operation {
         WorkOperation::Snapshot => core!(
             WorkProjectionSnapshotRequestV1,
@@ -1030,21 +997,6 @@ async fn invoke_work_operation(
             WorkProjection
         ),
         WorkOperation::AcceptTask => core!(AcceptTaskCommand, AcceptTask, WorkProjection),
-        WorkOperation::AttemptAcquireLease => {
-            attempt!(WorkAttemptAcquireLeaseRequestV1, AcquireLease)
-        }
-        WorkOperation::AttemptRenewLease => attempt!(WorkAttemptRenewLeaseRequestV1, RenewLease),
-        WorkOperation::AttemptStart => attempt!(WorkAttemptStartRequestV1, Start),
-        WorkOperation::AttemptPublishProgress => {
-            attempt!(WorkAttemptPublishProgressRequestV1, PublishProgress)
-        }
-        WorkOperation::AttemptPublishArtifact => {
-            attempt!(WorkAttemptPublishArtifactRequestV1, PublishArtifact)
-        }
-        WorkOperation::AttemptCancel => attempt!(WorkAttemptCancelRequestV1, Cancel),
-        WorkOperation::AttemptRecover => attempt!(WorkAttemptRecoverRequestV1, Recover),
-        WorkOperation::AttemptFinish => attempt!(WorkAttemptFinishRequestV1, Finish),
-        WorkOperation::AttemptTerminalize => attempt!(WorkAttemptTerminalizeRequestV1, Terminalize),
     }
 }
 
@@ -2499,55 +2451,55 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::CodeCallers
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::SessionLookup(_)),
+                    Self::Primitive(PrimitiveRequest::SessionLookup(_)),
                     ApplicationSurfaceOperation::SessionLookup
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::QualifiedName(_)),
+                    Self::Primitive(PrimitiveRequest::QualifiedName(_)),
                     ApplicationSurfaceOperation::QualifiedName
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::CallChain(_)),
+                    Self::Primitive(PrimitiveRequest::CallChain(_)),
                     ApplicationSurfaceOperation::CallChain
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::FileDependents(_)),
+                    Self::Primitive(PrimitiveRequest::FileDependents(_)),
                     ApplicationSurfaceOperation::FileDependents
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::SourceLines(_)),
+                    Self::Primitive(PrimitiveRequest::SourceLines(_)),
                     ApplicationSurfaceOperation::SourceLines
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::SourceBody(_)),
+                    Self::Primitive(PrimitiveRequest::SourceBody(_)),
                     ApplicationSurfaceOperation::SourceBody
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::SourceOutline(_)),
+                    Self::Primitive(PrimitiveRequest::SourceOutline(_)),
                     ApplicationSurfaceOperation::SourceOutline
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::ModuleApi(_)),
+                    Self::Primitive(PrimitiveRequest::ModuleApi(_)),
                     ApplicationSurfaceOperation::ModuleApi
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::FileMetadata(_)),
+                    Self::Primitive(PrimitiveRequest::FileMetadata(_)),
                     ApplicationSurfaceOperation::FileMetadata
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::HealthRead(_)),
+                    Self::Primitive(PrimitiveRequest::HealthRead(_)),
                     ApplicationSurfaceOperation::HealthRead
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::HealthDelta(_)),
+                    Self::Primitive(PrimitiveRequest::HealthDelta(_)),
                     ApplicationSurfaceOperation::HealthDelta
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::StorageStatus(_)),
+                    Self::Primitive(PrimitiveRequest::StorageStatus(_)),
                     ApplicationSurfaceOperation::StorageStatus
                 )
                 | (
-                    Self::Primitive(Pr12PrimitiveRequest::DiagnosticsRead(_)),
+                    Self::Primitive(PrimitiveRequest::DiagnosticsRead(_)),
                     ApplicationSurfaceOperation::DiagnosticsRead
                 )
                 | (
@@ -2901,79 +2853,79 @@ pub fn parse_application_surface_request(
         }
         ApplicationSurfaceOperation::SessionLookup => {
             serde_json::from_value::<SessionLookupRequest>(value)
-                .map(Pr12PrimitiveRequest::SessionLookup)
+                .map(PrimitiveRequest::SessionLookup)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::QualifiedName => {
             serde_json::from_value::<QualifiedNamePrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::QualifiedName)
+                .map(PrimitiveRequest::QualifiedName)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::CallChain => {
             serde_json::from_value::<CallChainPrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::CallChain)
+                .map(PrimitiveRequest::CallChain)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::FileDependents => {
             serde_json::from_value::<FileDependentsPrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::FileDependents)
+                .map(PrimitiveRequest::FileDependents)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::SourceLines => {
             serde_json::from_value::<SourceLinesRequest>(value)
-                .map(Pr12PrimitiveRequest::SourceLines)
+                .map(PrimitiveRequest::SourceLines)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::SourceBody => {
             serde_json::from_value::<SourceBodyPrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::SourceBody)
+                .map(PrimitiveRequest::SourceBody)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::SourceOutline => {
             serde_json::from_value::<SourceOutlinePrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::SourceOutline)
+                .map(PrimitiveRequest::SourceOutline)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::ModuleApi => {
             serde_json::from_value::<ModuleApiPrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::ModuleApi)
+                .map(PrimitiveRequest::ModuleApi)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::FileMetadata => {
             serde_json::from_value::<FileMetadataPrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::FileMetadata)
+                .map(PrimitiveRequest::FileMetadata)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::HealthRead => {
             serde_json::from_value::<HealthReadRequest>(value)
-                .map(Pr12PrimitiveRequest::HealthRead)
+                .map(PrimitiveRequest::HealthRead)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::HealthDelta => {
             serde_json::from_value::<HealthDeltaRequest>(value)
-                .map(Pr12PrimitiveRequest::HealthDelta)
+                .map(PrimitiveRequest::HealthDelta)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::StorageStatus => {
             serde_json::from_value::<StorageStatusPrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::StorageStatus)
+                .map(PrimitiveRequest::StorageStatus)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
         ApplicationSurfaceOperation::DiagnosticsRead => {
             serde_json::from_value::<DiagnosticsPrimitiveRequest>(value)
-                .map(Pr12PrimitiveRequest::DiagnosticsRead)
+                .map(PrimitiveRequest::DiagnosticsRead)
                 .map(ApplicationSurfaceRequest::Primitive)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
@@ -3265,7 +3217,7 @@ pub async fn execute_application_surface(
             crate::daemon_contract::DaemonInvocationRequest::primitive(
                 request_id.as_str(),
                 operation,
-                crate::application::primitives::Pr12PrimitiveRequest::RecentTestResults(
+                crate::application::primitives::PrimitiveRequest::RecentTestResults(
                     invocation.page,
                 ),
                 observed_at,

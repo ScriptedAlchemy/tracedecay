@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use tracedecay_domain::CodeGenerationId;
 use tracedecay_store::RetainedGraphStoreLeaseV1;
 
 use super::super::*;
@@ -14,7 +15,6 @@ async fn exact_graph_scopes_publish_without_a_physical_runtime() {
         project_request("project.graph-scope", &pin),
         project_sessions_request("project.graph-sessions", &pin),
         profile_sessions_request(&pin),
-        code_request("worktree.graph-scope", &pin),
     ];
 
     let mut leases = Vec::new();
@@ -29,14 +29,88 @@ async fn exact_graph_scopes_publish_without_a_physical_runtime() {
         leases.push(lease);
     }
 
-    assert_eq!(resolver.graph_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(resolver.graph_calls.load(Ordering::SeqCst), 3);
     assert_eq!(
         publisher.calls.load(Ordering::SeqCst),
         1,
         "only the profile pin may open a physical runtime"
     );
-    assert_eq!(registry.retained_graph_publications_for_test(), 4);
+    assert_eq!(registry.retained_graph_publications_for_test(), 3);
     drop(leases);
+    assert_eq!(registry.retained_graph_publications_for_test(), 0);
+}
+
+#[tokio::test]
+async fn linked_worktree_code_scopes_share_one_project_graph_lease() {
+    let (registry, resolver, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    let project_key = project_request("project.registry", &pin).key().clone();
+    let primary_scope = code_request("worktree.primary", &pin)
+        .key()
+        .shard_id()
+        .clone();
+    let linked_scope = code_request("worktree.linked", &pin)
+        .key()
+        .shard_id()
+        .clone();
+    let primary_generation: CodeGenerationId = id("generation.primary");
+    let linked_generation: CodeGenerationId = id("generation.linked");
+
+    let primary = registry
+        .retain_code_graph_store(
+            project_key.clone(),
+            primary_scope.clone(),
+            primary_generation.clone(),
+        )
+        .await
+        .unwrap();
+    let linked = registry
+        .retain_code_graph_store(
+            project_key.clone(),
+            linked_scope.clone(),
+            linked_generation.clone(),
+        )
+        .await
+        .unwrap();
+    let primary_next = registry
+        .retain_code_graph_store(
+            project_key,
+            primary_scope.clone(),
+            id("generation.primary-next"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(primary.binding(), linked.binding());
+    assert_eq!(
+        primary.binding().shard_id.scope,
+        StoreShardScopeV1::Project {
+            project_id: id("project.registry"),
+        }
+    );
+    assert_eq!(primary.canonical_path(), linked.canonical_path());
+    assert_eq!(primary.code_shard_id(), &primary_scope);
+    assert_eq!(linked.code_shard_id(), &linked_scope);
+    assert_eq!(primary.generation_id(), &primary_generation);
+    assert_eq!(linked.generation_id(), &linked_generation);
+    assert_ne!(primary.namespace(), linked.namespace());
+    assert_ne!(primary.namespace(), primary_next.namespace());
+    assert_eq!(resolver.graph_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        publisher.calls.load(Ordering::SeqCst),
+        1,
+        "only the profile pin may open a relational runtime"
+    );
+    assert_eq!(registry.retained_graph_publications_for_test(), 1);
+
+    drop(linked);
+    drop(primary_next);
+    assert_eq!(
+        registry.retained_graph_publications_for_test(),
+        1,
+        "retiring one linked worktree scope must retain the shared project graph"
+    );
+    drop(primary);
     assert_eq!(registry.retained_graph_publications_for_test(), 0);
 }
 
@@ -61,7 +135,7 @@ async fn graph_and_relational_publications_share_one_exact_binding() {
     let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
 
-    let graph_first_request = code_request("worktree.graph-first", &pin);
+    let graph_first_request = project_request("project.graph-first", &pin);
     let graph_first = registry
         .retain_graph_store(graph_first_request.key().clone())
         .await
@@ -69,7 +143,7 @@ async fn graph_and_relational_publications_share_one_exact_binding() {
     let relational_after = open_published(&registry, graph_first_request).await;
     assert_eq!(graph_first.binding(), relational_after.binding());
 
-    let relational_first_request = code_request("worktree.relational-first", &pin);
+    let relational_first_request = project_request("project.relational-first", &pin);
     let relational_first = open_published(&registry, relational_first_request.clone()).await;
     let graph_after = registry
         .retain_graph_store(relational_first_request.key().clone())
@@ -83,7 +157,7 @@ async fn concurrent_relational_open_reuses_its_reserved_binding_for_graph() {
     let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
     publisher.block.store(true, Ordering::SeqCst);
-    let request = code_request("worktree.opening", &pin);
+    let request = project_request("project.opening", &pin);
     let opening = registry.begin_or_join_open(&request);
     wait_for_calls(&publisher.calls, 2).await;
 
@@ -106,7 +180,7 @@ async fn concurrent_relational_open_reuses_its_reserved_binding_for_graph() {
 async fn graph_lease_drop_is_counted_and_epoch_compare_and_swap_safe() {
     let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
-    let key = code_request("worktree.graph-cas", &pin).key().clone();
+    let key = project_request("project.graph-cas", &pin).key().clone();
 
     let first = registry.retain_graph_store(key.clone()).await.unwrap();
     let peer = registry.retain_graph_store(key.clone()).await.unwrap();

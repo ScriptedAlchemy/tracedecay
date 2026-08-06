@@ -1,4 +1,4 @@
-//! PR13 read-only/advisory feedback ingress contracts.
+//! Read-only advisory feedback ingress contracts.
 //!
 //! The ports in this module preserve source-owned evidence only. They expose
 //! neither generic network operations nor CI execution, scheduling, locking,

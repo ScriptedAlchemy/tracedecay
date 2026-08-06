@@ -1,4 +1,4 @@
-//! Concrete PR12 feedback runtime over existing project-store authorities.
+//! Concrete feedback runtime over existing project-store authorities.
 //!
 //! Durable publications use the project database's existing transactional
 //! metadata lane. Request and continuation handles use the existing
@@ -73,14 +73,14 @@ const MAX_STORED_OBSERVATION_BOOTS: usize = 256;
 const MAX_OBSERVATION_LEDGER_BYTES: usize = 8 * 1_024 * 1_024;
 const OBSERVATION_QUEUE_CAPACITY: usize = 1_024;
 
-pub type ConcretePr12FeedbackOwner = DaemonFeedbackReadOwnerV1<
+pub type ConcreteFeedbackOwner = DaemonFeedbackReadOwnerV1<
     ProjectFeedbackRequestAuthority,
     CanonicalFeedbackReadOwnerV1<ProjectFeedbackStore>,
     ProjectFeedbackRouteAuthorization,
 >;
 
 #[derive(Debug, Error)]
-pub enum Pr12FeedbackRuntimeError {
+pub enum FeedbackRuntimeError {
     #[error("feedback runtime contract is invalid")]
     Contract(#[from] ApplicationContractError),
     #[error("feedback runtime route access is denied")]
@@ -125,8 +125,8 @@ impl ProjectFeedbackRouteAuthorization {
     }
 }
 
-pub struct Pr12FeedbackRuntime {
-    owner: Arc<ConcretePr12FeedbackOwner>,
+pub struct FeedbackRuntime {
+    owner: Arc<ConcreteFeedbackOwner>,
     requests: ProjectFeedbackRequestAuthority,
     publications: ProjectFeedbackStore,
     access: ProjectSourceAccessSnapshot,
@@ -174,17 +174,17 @@ struct ProjectFeedbackObservationSinkV1 {
 }
 
 impl ProjectFeedbackObservationSinkV1 {
-    async fn start(database: Database) -> Result<Self, Pr12FeedbackRuntimeError> {
+    async fn start(database: Database) -> Result<Self, FeedbackRuntimeError> {
         static BOOT_NONCE: AtomicU64 = AtomicU64::new(0);
         let runtime =
-            tokio::runtime::Handle::try_current().map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            tokio::runtime::Handle::try_current().map_err(|_| FeedbackRuntimeError::Store)?;
         let boot_id = canonical_sha256(&(
             "tracedecay.feedback.producer-boot.v1",
             std::process::id(),
             now_micros(),
             BOOT_NONCE.fetch_add(1, Ordering::Relaxed),
         ))
-        .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+        .map_err(|_| FeedbackRuntimeError::Corrupt)?;
         persist_feedback_producer_boot(&database, boot_id.clone()).await?;
         let (sender, mut receiver) = mpsc::channel(OBSERVATION_QUEUE_CAPACITY);
         let (control_sender, mut control_receiver) = mpsc::channel(1);
@@ -335,25 +335,25 @@ struct StoredFeedbackRequestV1 {
 
 /// Concrete factory central daemon integration mounts for one admitted
 /// project root.
-pub async fn open_pr12_feedback_runtime(
+pub async fn open_feedback_runtime(
     database: Database,
     project_root: impl Into<PathBuf>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
-) -> Result<Pr12FeedbackRuntime, Pr12FeedbackRuntimeError> {
-    Pr12FeedbackRuntime::open(database, project_root, scope, access).await
+) -> Result<FeedbackRuntime, FeedbackRuntimeError> {
+    FeedbackRuntime::open(database, project_root, scope, access).await
 }
 
-impl Pr12FeedbackRuntime {
+impl FeedbackRuntime {
     pub async fn open(
         database: Database,
         project_root: impl Into<PathBuf>,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
-    ) -> Result<Self, Pr12FeedbackRuntimeError> {
+    ) -> Result<Self, FeedbackRuntimeError> {
         scope.validate()?;
         if access.scope != scope {
-            return Err(Pr12FeedbackRuntimeError::AccessDenied);
+            return Err(FeedbackRuntimeError::AccessDenied);
         }
         let project_root = project_root.into();
         let requester = access.requester.clone();
@@ -394,7 +394,7 @@ impl Pr12FeedbackRuntime {
         })
     }
 
-    pub fn owner(&self) -> Arc<ConcretePr12FeedbackOwner> {
+    pub fn owner(&self) -> Arc<ConcreteFeedbackOwner> {
         Arc::clone(&self.owner)
     }
 
@@ -430,7 +430,7 @@ impl Pr12FeedbackRuntime {
     pub fn request_expiry_at(
         &self,
         observed_at: UtcMicros,
-    ) -> Result<UtcMicros, Pr12FeedbackRuntimeError> {
+    ) -> Result<UtcMicros, FeedbackRuntimeError> {
         self.requests.expiry_at(observed_at)
     }
 
@@ -439,7 +439,7 @@ impl Pr12FeedbackRuntime {
         request_id: impl Into<String>,
         request: FeedbackReadRequestV1,
         observed_at: UtcMicros,
-    ) -> Result<String, Pr12FeedbackRuntimeError> {
+    ) -> Result<String, FeedbackRuntimeError> {
         self.requests.mint(request_id, request, observed_at)
     }
 
@@ -448,7 +448,7 @@ impl Pr12FeedbackRuntime {
         request_id: impl Into<String>,
         request: FeedbackDiagnosticsReadRequestV1,
         observed_at: UtcMicros,
-    ) -> Result<String, Pr12FeedbackRuntimeError> {
+    ) -> Result<String, FeedbackRuntimeError> {
         self.mint_request(
             request_id,
             FeedbackReadRequestV1::Diagnostics(request),
@@ -462,7 +462,7 @@ impl Pr12FeedbackRuntime {
         head_commit_id: Option<tracedecay_domain::CommitId>,
         page_size: u32,
         observed_at: UtcMicros,
-    ) -> Result<String, Pr12FeedbackRuntimeError> {
+    ) -> Result<String, FeedbackRuntimeError> {
         let page = PageRequest::first(page_size)?;
         self.mint_request(
             request_id,
@@ -479,7 +479,7 @@ impl Pr12FeedbackRuntime {
         request_id: impl Into<String>,
         finding_id: FeedbackFindingId,
         observed_at: UtcMicros,
-    ) -> Result<String, Pr12FeedbackRuntimeError> {
+    ) -> Result<String, FeedbackRuntimeError> {
         self.mint_request(
             request_id,
             FeedbackReadRequestV1::Get(FeedbackGetRequestV1 { finding_id }),
@@ -492,7 +492,7 @@ impl Pr12FeedbackRuntime {
         request_id: impl Into<String>,
         request: FeedbackExpandRequestV1,
         observed_at: UtcMicros,
-    ) -> Result<String, Pr12FeedbackRuntimeError> {
+    ) -> Result<String, FeedbackRuntimeError> {
         self.mint_request(
             request_id,
             FeedbackReadRequestV1::Expand(request),
@@ -502,7 +502,7 @@ impl Pr12FeedbackRuntime {
 }
 
 impl ProjectFeedbackRequestAuthority {
-    fn expiry_at(&self, observed_at: UtcMicros) -> Result<UtcMicros, Pr12FeedbackRuntimeError> {
+    fn expiry_at(&self, observed_at: UtcMicros) -> Result<UtcMicros, FeedbackRuntimeError> {
         let expires_at = UtcMicros(
             observed_at
                 .0
@@ -511,7 +511,7 @@ impl ProjectFeedbackRequestAuthority {
         );
         (expires_at > observed_at)
             .then_some(expires_at)
-            .ok_or(Pr12FeedbackRuntimeError::AccessDenied)
+            .ok_or(FeedbackRuntimeError::AccessDenied)
     }
 
     pub fn mint(
@@ -519,7 +519,7 @@ impl ProjectFeedbackRequestAuthority {
         request_id: impl Into<String>,
         request: FeedbackReadRequestV1,
         observed_at: UtcMicros,
-    ) -> Result<String, Pr12FeedbackRuntimeError> {
+    ) -> Result<String, FeedbackRuntimeError> {
         validate_request(&request)?;
         let request_id = request_id.into();
         RequestId::new(request_id.clone())?;
@@ -760,7 +760,7 @@ impl FeedbackCycleDedupePort for ProjectFeedbackStore {
     }
 }
 
-impl FeedbackCompletedPublicationReadPort for Pr12FeedbackRuntime {
+impl FeedbackCompletedPublicationReadPort for FeedbackRuntime {
     fn latest_committed<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -1084,7 +1084,7 @@ impl DurableFeedbackReadStoreV1 for ProjectFeedbackStore {
 impl ProjectFeedbackStore {
     pub async fn observation_read_model(
         &self,
-    ) -> Result<FeedbackObservationReadModelV1, Pr12FeedbackRuntimeError> {
+    ) -> Result<FeedbackObservationReadModelV1, FeedbackRuntimeError> {
         plan26_feedback_observation_read_model(&self.database).await
     }
 
@@ -1120,17 +1120,17 @@ impl ProjectFeedbackStore {
 
     async fn load_publications(
         &self,
-    ) -> Result<Vec<FeedbackCompletedPublicationV1>, Pr12FeedbackRuntimeError> {
+    ) -> Result<Vec<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
         let Some(encoded) = self
             .database
             .get_metadata(PUBLICATION_LEDGER_METADATA_KEY)
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?
+            .map_err(|_| FeedbackRuntimeError::Store)?
         else {
             return Ok(Vec::new());
         };
         if encoded.len() > MAX_PUBLICATION_LEDGER_BYTES {
-            return Err(Pr12FeedbackRuntimeError::Corrupt);
+            return Err(FeedbackRuntimeError::Corrupt);
         }
         decode_ledger(&encoded)
     }
@@ -1138,7 +1138,7 @@ impl ProjectFeedbackStore {
     async fn scoped_publications(
         &self,
         context: &RequestContext,
-    ) -> Result<Vec<FeedbackCompletedPublicationV1>, Pr12FeedbackRuntimeError> {
+    ) -> Result<Vec<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
         let publications = self.load_publications().await?;
         Ok(publications
             .into_iter()
@@ -1152,7 +1152,7 @@ impl ProjectFeedbackStore {
     pub async fn doctor_latest_publication(
         &self,
         context: &RequestContext,
-    ) -> Result<Option<FeedbackCompletedPublicationV1>, Pr12FeedbackRuntimeError> {
+    ) -> Result<Option<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
         let publication = self
             .scoped_publications(context)
             .await?
@@ -1161,7 +1161,7 @@ impl ProjectFeedbackStore {
         if let Some(publication) = &publication {
             publication
                 .validate()
-                .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+                .map_err(|_| FeedbackRuntimeError::Corrupt)?;
         }
         Ok(publication)
     }
@@ -1169,29 +1169,29 @@ impl ProjectFeedbackStore {
     async fn record_publication(
         &self,
         publication: FeedbackCompletedPublicationV1,
-    ) -> Result<bool, Pr12FeedbackRuntimeError> {
+    ) -> Result<bool, FeedbackRuntimeError> {
         publication
             .validate()
-            .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+            .map_err(|_| FeedbackRuntimeError::Corrupt)?;
         let transaction = self
             .database
             .begin_write_transaction("record feedback completed publication")
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            .map_err(|_| FeedbackRuntimeError::Store)?;
         let mut rows = transaction
             .query_engine(
                 "SELECT value FROM metadata WHERE key = ?1",
                 params![PUBLICATION_LEDGER_METADATA_KEY],
             )
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            .map_err(|_| FeedbackRuntimeError::Store)?;
         let encoded = rows
             .next()
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?
+            .map_err(|_| FeedbackRuntimeError::Store)?
             .map(|row| row.get::<String>(0))
             .transpose()
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            .map_err(|_| FeedbackRuntimeError::Store)?;
         drop(rows);
         let mut publications = encoded
             .as_deref()
@@ -1205,15 +1205,15 @@ impl ProjectFeedbackStore {
             transaction
                 .rollback()
                 .await
-                .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+                .map_err(|_| FeedbackRuntimeError::Store)?;
             return Ok(false);
         }
         if publications.len() >= MAX_STORED_PUBLICATIONS {
             transaction
                 .rollback()
                 .await
-                .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
-            return Err(Pr12FeedbackRuntimeError::Store);
+                .map_err(|_| FeedbackRuntimeError::Store)?;
+            return Err(FeedbackRuntimeError::Store);
         }
         publications.push(publication);
         publications.sort_by(|left, right| {
@@ -1226,22 +1226,22 @@ impl ProjectFeedbackStore {
             schema_version: PUBLICATION_LEDGER_SCHEMA_VERSION,
             publications,
         })
-        .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+        .map_err(|_| FeedbackRuntimeError::Corrupt)?;
         if encoded.len() > MAX_PUBLICATION_LEDGER_BYTES {
             transaction
                 .rollback()
                 .await
-                .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
-            return Err(Pr12FeedbackRuntimeError::Store);
+                .map_err(|_| FeedbackRuntimeError::Store)?;
+            return Err(FeedbackRuntimeError::Store);
         }
         self.database
             .set_metadata_unguarded(&transaction, PUBLICATION_LEDGER_METADATA_KEY, &encoded)
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            .map_err(|_| FeedbackRuntimeError::Store)?;
         transaction
             .commit()
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            .map_err(|_| FeedbackRuntimeError::Store)?;
         Ok(true)
     }
 
@@ -1251,7 +1251,7 @@ impl ProjectFeedbackStore {
         publication: &FeedbackCompletedPublicationV1,
         finding: &FeedbackFindingV1,
         observed_at: UtcMicros,
-    ) -> Result<FeedbackFindingReadV1, Pr12FeedbackRuntimeError> {
+    ) -> Result<FeedbackFindingReadV1, FeedbackRuntimeError> {
         let get_handle = store_request_handle(
             &self.project_root,
             request_record(
@@ -1303,7 +1303,7 @@ impl ProjectFeedbackStore {
         request: &FeedbackListRequestV1,
         records: &[(FeedbackFindingId, (usize, FeedbackFindingV1))],
         observed_at: UtcMicros,
-    ) -> Result<usize, Pr12FeedbackRuntimeError> {
+    ) -> Result<usize, FeedbackRuntimeError> {
         let Some(cursor) = request.page.cursor.as_ref() else {
             return Ok(0);
         };
@@ -1312,12 +1312,12 @@ impl ProjectFeedbackStore {
             cursor.as_str(),
             observed_at,
         )
-        .map_err(|_| Pr12FeedbackRuntimeError::Handle)?;
+        .map_err(|_| FeedbackRuntimeError::Handle)?;
         let FeedbackReadRequestV1::List(stored_request) = &stored.request else {
-            return Err(Pr12FeedbackRuntimeError::Handle);
+            return Err(FeedbackRuntimeError::Handle);
         };
         let Some(after_finding_id) = stored.after_finding_id.as_ref() else {
-            return Err(Pr12FeedbackRuntimeError::Handle);
+            return Err(FeedbackRuntimeError::Handle);
         };
         if stored.schema_version != REQUEST_HANDLE_SCHEMA_VERSION
             || stored.operation != FeedbackReadOperationV1::List
@@ -1326,7 +1326,7 @@ impl ProjectFeedbackStore {
             || stored_request.page.page_size != request.page.page_size
             || observed_at >= stored.expires_at
         {
-            return Err(Pr12FeedbackRuntimeError::Handle);
+            return Err(FeedbackRuntimeError::Handle);
         }
         Ok(records.partition_point(|(finding_id, _)| finding_id <= after_finding_id))
     }
@@ -1337,7 +1337,7 @@ impl ProjectFeedbackStore {
         request: &FeedbackListRequestV1,
         after_finding_id: &FeedbackFindingId,
         observed_at: UtcMicros,
-    ) -> Result<(OpaqueCursor, UtcMicros), Pr12FeedbackRuntimeError> {
+    ) -> Result<(OpaqueCursor, UtcMicros), FeedbackRuntimeError> {
         let expires_at = context.deadline().expires_at;
         let mut next_request = request_record(
             context,
@@ -1357,16 +1357,16 @@ impl ProjectFeedbackStore {
 /// deriving a second telemetry model.
 pub async fn plan26_feedback_observation_read_model(
     database: &Database,
-) -> Result<FeedbackObservationReadModelV1, Pr12FeedbackRuntimeError> {
+) -> Result<FeedbackObservationReadModelV1, FeedbackRuntimeError> {
     let ledger = match database
         .get_metadata(OBSERVATION_LEDGER_METADATA_KEY)
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?
+        .map_err(|_| FeedbackRuntimeError::Store)?
     {
         Some(encoded) if encoded.len() <= MAX_OBSERVATION_LEDGER_BYTES => {
             decode_observation_ledger(&encoded)?
         }
-        Some(_) => return Err(Pr12FeedbackRuntimeError::Corrupt),
+        Some(_) => return Err(FeedbackRuntimeError::Corrupt),
         None => StoredFeedbackObservationLedgerV1 {
             schema_version: OBSERVATION_LEDGER_SCHEMA_VERSION,
             observations: Vec::new(),
@@ -1380,7 +1380,7 @@ pub async fn plan26_feedback_observation_read_model(
 
 fn project_observation_ledger(
     ledger: &StoredFeedbackObservationLedgerV1,
-) -> Result<FeedbackObservationReadModelV1, Pr12FeedbackRuntimeError> {
+) -> Result<FeedbackObservationReadModelV1, FeedbackRuntimeError> {
     let latest_boot = ledger.producer_boots.last().map(|boot| &boot.boot_id);
     let incomplete_boots = ledger
         .producer_boots
@@ -1395,7 +1395,7 @@ fn project_observation_ledger(
         ledger.retention_dropped,
         incomplete_boots,
     )
-    .ok_or(Pr12FeedbackRuntimeError::Corrupt)?;
+    .ok_or(FeedbackRuntimeError::Corrupt)?;
     if let Some(boot) = ledger.producer_boots.last() {
         model.watermark.producer_boot_id = Some(boot.boot_id.clone());
         model.watermark.producer_sequence = (boot.last_sequence > 0).then_some(boot.last_sequence);
@@ -1428,10 +1428,10 @@ fn store_request_handle(
     project_root: &Path,
     record: StoredFeedbackRequestV1,
     observed_at: UtcMicros,
-) -> Result<String, Pr12FeedbackRuntimeError> {
-    let content = serde_json::to_string(&record).map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+) -> Result<String, FeedbackRuntimeError> {
+    let content = serde_json::to_string(&record).map_err(|_| FeedbackRuntimeError::Corrupt)?;
     let stored = store_response_handle(project_root, &content, micros_to_seconds(observed_at))
-        .map_err(|_| Pr12FeedbackRuntimeError::Handle)?;
+        .map_err(|_| FeedbackRuntimeError::Handle)?;
     Ok(stored.handle)
 }
 
@@ -1459,9 +1459,9 @@ where
 
 fn decode_ledger(
     encoded: &str,
-) -> Result<Vec<FeedbackCompletedPublicationV1>, Pr12FeedbackRuntimeError> {
+) -> Result<Vec<FeedbackCompletedPublicationV1>, FeedbackRuntimeError> {
     let ledger: StoredPublicationLedgerV1 =
-        serde_json::from_str(encoded).map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+        serde_json::from_str(encoded).map_err(|_| FeedbackRuntimeError::Corrupt)?;
     if ledger.schema_version != PUBLICATION_LEDGER_SCHEMA_VERSION
         || ledger.publications.len() > MAX_STORED_PUBLICATIONS
         || ledger
@@ -1469,7 +1469,7 @@ fn decode_ledger(
             .iter()
             .any(|publication| publication.validate().is_err())
     {
-        return Err(Pr12FeedbackRuntimeError::Corrupt);
+        return Err(FeedbackRuntimeError::Corrupt);
     }
     Ok(ledger.publications)
 }
@@ -1488,14 +1488,14 @@ fn interruption_outcome(
 async fn persist_feedback_observation(
     database: &Database,
     envelope: FeedbackObservationEnvelopeV1,
-) -> Result<(), Pr12FeedbackRuntimeError> {
+) -> Result<(), FeedbackRuntimeError> {
     if envelope.validate().is_none() {
-        return Err(Pr12FeedbackRuntimeError::Corrupt);
+        return Err(FeedbackRuntimeError::Corrupt);
     }
     let transaction = database
         .begin_write_transaction("record plan26 feedback observation")
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        .map_err(|_| FeedbackRuntimeError::Store)?;
     let mut ledger = load_observation_ledger(&transaction).await?;
     if ledger
         .observations
@@ -1505,16 +1505,16 @@ async fn persist_feedback_observation(
         transaction
             .rollback()
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            .map_err(|_| FeedbackRuntimeError::Store)?;
         return Ok(());
     }
     let boot_id = envelope
         .producer_boot_id
         .clone()
-        .ok_or(Pr12FeedbackRuntimeError::Corrupt)?;
+        .ok_or(FeedbackRuntimeError::Corrupt)?;
     let producer_sequence = envelope
         .producer_sequence
-        .ok_or(Pr12FeedbackRuntimeError::Corrupt)?;
+        .ok_or(FeedbackRuntimeError::Corrupt)?;
     let terminal = matches!(
         envelope.source_event.as_ref(),
         Some(Plan26FeedbackSourceEventV1::TelemetryDropObserved { terminal: true, .. })
@@ -1529,8 +1529,8 @@ async fn persist_feedback_observation(
                 transaction
                     .rollback()
                     .await
-                    .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
-                return Err(Pr12FeedbackRuntimeError::Corrupt);
+                    .map_err(|_| FeedbackRuntimeError::Store)?;
+                return Err(FeedbackRuntimeError::Corrupt);
             }
             boot.last_sequence = producer_sequence;
             boot.terminal |= terminal;
@@ -1559,24 +1559,24 @@ async fn persist_feedback_observation(
     database
         .set_metadata_unguarded(&transaction, OBSERVATION_LEDGER_METADATA_KEY, &encoded)
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        .map_err(|_| FeedbackRuntimeError::Store)?;
     transaction
         .commit()
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)
+        .map_err(|_| FeedbackRuntimeError::Store)
 }
 
 async fn persist_feedback_producer_boot(
     database: &Database,
     boot_id: ManifestDigest,
-) -> Result<(), Pr12FeedbackRuntimeError> {
+) -> Result<(), FeedbackRuntimeError> {
     boot_id
         .validate()
-        .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+        .map_err(|_| FeedbackRuntimeError::Corrupt)?;
     let transaction = database
         .begin_write_transaction("record plan26 feedback producer boot")
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        .map_err(|_| FeedbackRuntimeError::Store)?;
     let mut ledger = load_observation_ledger(&transaction).await?;
     if ledger
         .producer_boots
@@ -1586,7 +1586,7 @@ async fn persist_feedback_producer_boot(
         transaction
             .rollback()
             .await
-            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+            .map_err(|_| FeedbackRuntimeError::Store)?;
         return Ok(());
     }
     ledger.producer_boots.push(StoredFeedbackProducerBootV1 {
@@ -1605,30 +1605,30 @@ async fn persist_feedback_producer_boot(
     database
         .set_metadata_unguarded(&transaction, OBSERVATION_LEDGER_METADATA_KEY, &encoded)
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        .map_err(|_| FeedbackRuntimeError::Store)?;
     transaction
         .commit()
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)
+        .map_err(|_| FeedbackRuntimeError::Store)
 }
 
 async fn load_observation_ledger(
     transaction: &DatabaseWriteTransaction<'_>,
-) -> Result<StoredFeedbackObservationLedgerV1, Pr12FeedbackRuntimeError> {
+) -> Result<StoredFeedbackObservationLedgerV1, FeedbackRuntimeError> {
     let mut rows = transaction
         .query_engine(
             "SELECT value FROM metadata WHERE key = ?1",
             params![OBSERVATION_LEDGER_METADATA_KEY],
         )
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        .map_err(|_| FeedbackRuntimeError::Store)?;
     let encoded = rows
         .next()
         .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?
+        .map_err(|_| FeedbackRuntimeError::Store)?
         .map(|row| row.get::<String>(0))
         .transpose()
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        .map_err(|_| FeedbackRuntimeError::Store)?;
     drop(rows);
     encoded
         .as_deref()
@@ -1647,9 +1647,9 @@ async fn load_observation_ledger(
 
 fn decode_observation_ledger(
     encoded: &str,
-) -> Result<StoredFeedbackObservationLedgerV1, Pr12FeedbackRuntimeError> {
+) -> Result<StoredFeedbackObservationLedgerV1, FeedbackRuntimeError> {
     let ledger: StoredFeedbackObservationLedgerV1 =
-        serde_json::from_str(encoded).map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+        serde_json::from_str(encoded).map_err(|_| FeedbackRuntimeError::Corrupt)?;
     if !matches!(
         ledger.schema_version,
         1 | 2 | OBSERVATION_LEDGER_SCHEMA_VERSION
@@ -1670,7 +1670,7 @@ fn decode_observation_ledger(
                         .any(|prior| prior.boot_id == boot.boot_id)
             })
     {
-        return Err(Pr12FeedbackRuntimeError::Corrupt);
+        return Err(FeedbackRuntimeError::Corrupt);
     }
     Ok(ledger)
 }
@@ -1680,7 +1680,7 @@ fn encode_bounded_observation_ledger(
     max_observations: usize,
     max_boots: usize,
     max_bytes: usize,
-) -> Result<String, Pr12FeedbackRuntimeError> {
+) -> Result<String, FeedbackRuntimeError> {
     while ledger.observations.len() > max_observations {
         ledger.observations.remove(0);
         ledger.retention_dropped = ledger.retention_dropped.saturating_add(1);
@@ -1689,8 +1689,7 @@ fn encode_bounded_observation_ledger(
         retain_removed_boot_accounting(ledger, 0);
     }
     loop {
-        let encoded =
-            serde_json::to_string(ledger).map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+        let encoded = serde_json::to_string(ledger).map_err(|_| FeedbackRuntimeError::Corrupt)?;
         if encoded.len() <= max_bytes {
             return Ok(encoded);
         }
@@ -1700,7 +1699,7 @@ fn encode_bounded_observation_ledger(
         } else if ledger.producer_boots.len() > 1 {
             retain_removed_boot_accounting(ledger, 0);
         } else {
-            return Err(Pr12FeedbackRuntimeError::Store);
+            return Err(FeedbackRuntimeError::Store);
         }
     }
 }

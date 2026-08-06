@@ -245,17 +245,17 @@ impl ScopeResolutionPort for DaemonConfigurationScopeResolution {
 
 #[derive(Debug, Error)]
 pub(crate) enum DaemonFeedbackRuntimeRegistrationError {
-    #[error("a PR12 feedback runtime is already mounted for this project database")]
+    #[error("a feedback runtime is already mounted for this project database")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
-    #[error("the PR12 feedback runtime must be mounted before its cycle")]
+    #[error("the feedback runtime must be mounted before its cycle")]
     MissingRuntime,
-    #[error("the PR12 feedback runtime could not be opened")]
-    Runtime(#[from] Pr12FeedbackRuntimeError),
-    #[error("the PR12 feedback cycle runtime could not be opened")]
-    Cycle(#[from] Pr12FeedbackCycleRuntimeError),
-    #[error("the PR11 policy evaluator composition is invalid")]
+    #[error("the feedback runtime could not be opened")]
+    Runtime(#[from] FeedbackRuntimeError),
+    #[error("the feedback cycle runtime could not be opened")]
+    Cycle(#[from] FeedbackCycleRuntimeError),
+    #[error("the policy evaluator composition is invalid")]
     Policy(#[from] ApplicationContractError),
 }
 
@@ -398,7 +398,7 @@ impl DaemonFeedbackRuntimeRegistrar {
                 #[cfg(test)]
                 producer_constructions.fetch_add(1, Ordering::SeqCst);
                 let runtime = Arc::new(
-                    open_pr12_feedback_runtime(
+                    open_feedback_runtime(
                         database,
                         runtime_root.clone(),
                         scope.clone(),
@@ -450,9 +450,9 @@ impl DaemonFeedbackRuntimeRegistrar {
         operation: ApplicationOperation,
         graph_operation: ApplicationOperation,
         tests_operation: ApplicationOperation,
-        lsp_input: Pr12FeedbackCycleLspInput,
+        lsp_input: FeedbackCycleLspInput,
         proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
-    ) -> Result<Arc<Pr12FeedbackCycleRuntime>, DaemonFeedbackRuntimeRegistrationError> {
+    ) -> Result<Arc<FeedbackCycleRuntime>, DaemonFeedbackRuntimeRegistrationError> {
         let policy = PolicyEvaluatorCompositionV1::from_application_catalog()?;
         let correlation_state = evidence_horizon.routing_state();
         let correlation_availability = match correlation_state {
@@ -496,7 +496,7 @@ impl DaemonFeedbackRuntimeRegistrar {
             .ok_or(DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
         let observations = feedback.observation_port();
         let production_lsp_input = Arc::clone(&lsp_input);
-        let runtime = open_pr12_feedback_cycle_runtime(
+        let runtime = open_feedback_cycle_runtime(
             database,
             feedback,
             runtime_state,
@@ -844,7 +844,7 @@ impl DaemonLspOwnerRegistrar {
             .feedback_runtime(Some(&project_root))
             .await
             .ok_or_else(|| TraceDecayError::Config {
-                message: "PR12 feedback runtime is not registered for the project".to_owned(),
+                message: "feedback runtime is not registered for the project".to_owned(),
             })?;
         let feedback_cycle_input = self
             .service
@@ -910,14 +910,14 @@ pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
-    #[error("the shared PR12 feedback readers must be registered before PR13")]
+    #[error("the shared feedback readers must be registered before the advisory runtime")]
     MissingFeedbackRuntime,
-    #[error("the PR13 Hook orchestration registry is unavailable")]
+    #[error("the hook orchestration registry is unavailable")]
     HookOrchestrationUnavailable,
-    #[error("the PR13 production authorities could not be opened")]
-    Production(#[from] Pr13AdvisoryProductionOpenErrorV1),
+    #[error("the advisory production authorities could not be opened")]
+    Production(#[from] AdvisoryProductionOpenErrorV1),
     #[error(transparent)]
-    Startup(#[from] Pr13AdvisoryDaemonStartupErrorV1),
+    Startup(#[from] AdvisoryDaemonStartupErrorV1),
 }
 
 impl From<ProjectRuntimeRegistryError> for DaemonAdvisoryRuntimeRegistrationError {
@@ -956,14 +956,14 @@ impl DaemonAdvisoryRuntimeRegistrar {
     pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(
         &self,
         project_root: PathBuf,
-        input: Pr13AdvisoryRuntimeOpenV1,
-        providers: Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
+        input: AdvisoryRuntimeOpenV1,
+        providers: AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
         lsp_session_factory: Arc<DaemonLspSessionFactory>,
         hook_delivery_port: Arc<
-            dyn HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + Send + Sync,
+            dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync,
         >,
     ) -> Result<
-        Arc<Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>>,
+        Arc<AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>>,
         DaemonAdvisoryRuntimeRegistrationError,
     >
     where
@@ -994,7 +994,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         {
             return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
         }
-        let registration = Arc::new(register_pr13_advisory_daemon_startup(
+        let registration = Arc::new(register_advisory_daemon_startup(
             input,
             providers,
             lsp_session_factory.clone(),
@@ -1020,14 +1020,14 @@ impl DaemonAdvisoryRuntimeRegistrar {
     pub(crate) async fn register_production(
         &self,
         project_root: PathBuf,
-        input: Pr13AdvisoryRuntimeOpenV1,
-        production: Pr13AdvisoryProductionOpenV1,
+        input: AdvisoryRuntimeOpenV1,
+        production: AdvisoryProductionOpenV1,
         lsp_session_factory: Arc<DaemonLspSessionFactory>,
     ) -> Result<
-        Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
+        Arc<AdvisoryProductionStartupRegistrationV1>,
         DaemonAdvisoryRuntimeRegistrationError,
     > {
-        let authorities = open_pr13_advisory_production_authorities(production)?;
+        let authorities = open_advisory_production_authorities(production)?;
         let (providers, hook_delivery_port) = authorities.into_registrar_parts();
         self.register(
             project_root,
@@ -1044,7 +1044,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         project_root: PathBuf,
         project_id: [u8; 16],
         worktree_id: [u8; 16],
-        runtime: Arc<dyn Pr13HookOrchestrationPortV1>,
+        runtime: Arc<dyn HookOrchestrationPortV1>,
     ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
         if project_id == [0; 16]
             || worktree_id == [0; 16]
@@ -1061,8 +1061,8 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .register(project_root.clone(), Arc::clone(&runtime))
             .await
             .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        let runtime_weak: Weak<dyn Pr13HookOrchestrationPortV1> = Arc::downgrade(&runtime);
-        let registered = match pr13_hook_orchestration_registry().lock() {
+        let runtime_weak: Weak<dyn HookOrchestrationPortV1> = Arc::downgrade(&runtime);
+        let registered = match hook_orchestration_registry().lock() {
             Ok(mut registry) => {
                 registry.retain(|_, runtime| runtime.strong_count() > 0);
                 let key = (project_id, worktree_id);
@@ -1084,7 +1084,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         } else {
             self.service
                 .project_runtimes
-                .withdraw::<Arc<dyn Pr13HookOrchestrationPortV1>>(&project_root)
+                .withdraw::<Arc<dyn HookOrchestrationPortV1>>(&project_root)
                 .await;
             Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
         }

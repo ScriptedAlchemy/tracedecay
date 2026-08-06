@@ -294,7 +294,7 @@ pub struct FeedbackCycleExecutionResult {
     pub publication: Option<FeedbackCompletedPublicationV1>,
 }
 
-/// One-shot application service for PR11 feedback. Every external dependency
+/// One-shot application service for post-edit feedback. Every external dependency
 /// is a narrow port; the service neither schedules work nor persists a
 /// feedback/dedupe/observation store of its own.
 pub struct FeedbackCycleService<R, D, I, K, O, A> {

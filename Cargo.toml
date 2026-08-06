@@ -59,7 +59,7 @@ edition = "2024"
 grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
 grafeo-common = { version = "=0.5.42", default-features = false }
 grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
-grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "vector-index"] }
+grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "gql", "algos", "wal", "grafeo-file", "vector-index"] }
 
 [package]
 name = "tracedecay"
@@ -289,6 +289,7 @@ tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
 tracedecay-jsonrpc = { path = "crates/tracedecay-jsonrpc", version = "0.1.0" }
 tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0" }
+tracedecay-graph-db = { path = "crates/tracedecay-graph-db", version = "0.1.0" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }

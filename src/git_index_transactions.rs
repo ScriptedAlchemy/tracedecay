@@ -1,4 +1,4 @@
-//! Fixed native Git mechanics for PR11 index transactions.
+//! Fixed native Git mechanics for Git index transactions.
 //!
 //! The native surface only stages and unstages preview-bound index changes. It
 //! never accepts a generic Git subcommand, flags, ref, or

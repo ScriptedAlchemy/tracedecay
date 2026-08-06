@@ -18,10 +18,9 @@ use tracedecay_runtime_core::store_runtime::resolver::{
     LocalStoreRuntimeResolverV1,
 };
 use tracedecay_store::{
-    BrainId, CodeShardScopeV1, DURABLE_GRAPH_STORE_DIRECTORY, LocatorDigest, ProjectId,
-    RepositoryId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, WorktreeId,
-    canonical_store_locator_digest,
+    BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, RetainedGraphStoreLeaseV1,
+    StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    UserProfileId, VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest,
 };
 
 #[derive(Debug)]
@@ -141,7 +140,6 @@ fn registration(
     binding: StoreRuntimeBindingV1,
     store_root: &std::path::Path,
 ) -> GraphDbRegistration {
-    create_durable_graph_store_root(store_root);
     let canonical_path = graph_path(store_root);
     let verified_locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
@@ -162,15 +160,13 @@ fn registration(
 }
 
 fn graph_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join(DURABLE_GRAPH_STORE_DIRECTORY).join("graph")
+    root.join("graph.grafeo")
 }
 
-fn create_durable_graph_store_root(root: &std::path::Path) {
-    match std::fs::create_dir(root.join(DURABLE_GRAPH_STORE_DIRECTORY)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create durable graph-store root: {error}"),
-    }
+fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".wal");
+    std::path::PathBuf::from(sidecar)
 }
 
 #[test]
@@ -193,7 +189,6 @@ fn canonical_runtime_resolver_locator_opens_through_graph_registry() {
     .unwrap();
     let store_root = storage::profile_sharded_data_root(&profile_root, "project-a");
     std::fs::create_dir_all(&store_root).unwrap();
-    storage::ensure_durable_graph_store_root(&store_root).unwrap();
 
     let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
         binding.shard_id.brain_id.clone(),
@@ -213,6 +208,14 @@ fn canonical_runtime_resolver_locator_opens_through_graph_registry() {
             panic!("expected canonical graph locator: {unavailable:?}")
         }
     };
+    assert_eq!(
+        resolved.locator().path().parent(),
+        Some(store_root.as_path())
+    );
+    assert_eq!(
+        resolved.locator().path().extension(),
+        Some(std::ffi::OsStr::new("grafeo"))
+    );
 
     let registration = GraphDbRegistration {
         authority_lease: Arc::new(TestGraphLease {
@@ -275,7 +278,7 @@ fn exact_project_profile_identity_reuses_one_persistent_handle() {
             .unwrap(),
         Some(GraphDbRegistryStatus::Ready)
     );
-    assert!(graph_path(temp.path()).is_dir());
+    assert!(graph_path(temp.path()).is_file());
 }
 
 #[test]
@@ -506,15 +509,14 @@ fn symlinked_graph_directory_is_rejected_before_open() {
 
 #[cfg(unix)]
 #[test]
-fn symlinked_graph_store_directory_is_rejected_before_open() {
+fn symlinked_graph_database_file_is_rejected_before_open() {
     use std::os::unix::fs::symlink;
 
     let store = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
-    let target_directory = target.path().join("target-graph-store");
-    std::fs::create_dir(&target_directory).unwrap();
-    create_durable_graph_store_root(store.path());
-    symlink(&target_directory, graph_path(store.path())).unwrap();
+    let target_file = target.path().join("target.grafeo");
+    std::fs::write(&target_file, b"not a Grafeo database").unwrap();
+    symlink(&target_file, graph_path(store.path())).unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
 
     assert!(matches!(
@@ -527,7 +529,7 @@ fn symlinked_graph_store_directory_is_rejected_before_open() {
 }
 
 #[test]
-fn wal_directory_reopens_with_identical_traversal() {
+fn single_file_reopens_with_identical_traversal() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 2 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
@@ -558,11 +560,13 @@ fn wal_directory_reopens_with_identical_traversal() {
             ],
         ))
         .unwrap();
+    assert!(graph_path(temp.path()).is_file());
+    assert!(sidecar_wal_path(&graph_path(temp.path())).is_dir());
     drop(database);
 
     assert!(registry.close(&request).unwrap());
-    assert!(graph_path(temp.path()).is_dir());
-    assert!(graph_path(temp.path()).join("wal").is_dir());
+    assert!(graph_path(temp.path()).is_file());
+    assert!(!sidecar_wal_path(&graph_path(temp.path())).exists());
     let reopened = registry.reopen(request).unwrap();
     let result = reopened
         .traverse(TraversalRequest {
@@ -697,7 +701,7 @@ fn cancelled_open_does_not_create_or_register_a_store() {
 }
 
 #[test]
-fn lifecycle_cancellation_before_directory_creation_is_typed() {
+fn lifecycle_cancellation_before_database_file_creation_is_typed() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
@@ -714,7 +718,7 @@ fn lifecycle_cancellation_before_directory_creation_is_typed() {
     );
     assert!(
         cancellation.polls.load(Ordering::SeqCst) >= cancellation.cancel_on,
-        "lifecycle cancellation must be sampled before directory creation"
+        "lifecycle cancellation must be sampled before database file creation"
     );
     assert_eq!(
         registry
@@ -756,7 +760,7 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
 }
 
 #[test]
-fn cancellation_after_directory_creation_finishes_format_before_retry() {
+fn cancellation_after_database_file_creation_finishes_format_before_retry() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
@@ -773,7 +777,7 @@ fn cancellation_after_directory_creation_finishes_format_before_retry() {
     );
     assert!(
         cancellation.polls.load(Ordering::SeqCst) >= cancellation.cancel_on,
-        "the request must be observed after the created directory is initialized"
+        "the request must be observed after the created database file is initialized"
     );
     assert_eq!(
         registry
@@ -781,7 +785,7 @@ fn cancellation_after_directory_creation_finishes_format_before_retry() {
             .unwrap(),
         None
     );
-    assert!(graph_path(temp.path()).is_dir());
+    assert!(graph_path(temp.path()).is_file());
     assert!(
         registry
             .resolve(registration(store_identity.clone(), temp.path()))
@@ -821,10 +825,9 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
     use grafeo_engine::config::StorageFormat;
 
     let temp = TempDir::new().unwrap();
-    create_durable_graph_store_root(temp.path());
     let graph_path = graph_path(temp.path());
     let raw = grafeo_engine::GrafeoDB::with_config(
-        Config::persistent(&graph_path).with_storage_format(StorageFormat::WalDirectory),
+        Config::persistent(&graph_path).with_storage_format(StorageFormat::SingleFile),
     )
     .unwrap();
     raw.create_node(&["Foreign"]);
@@ -844,22 +847,21 @@ fn reset_required_is_retained_until_an_explicit_reopen() {
         Some(GraphDbRegistryStatus::ResetRequired)
     );
 
-    std::fs::remove_dir_all(&graph_path).unwrap();
+    std::fs::remove_file(&graph_path).unwrap();
     let reopened = registry.reopen(request).unwrap();
     assert!(reopened.snapshot().is_ok());
 }
 
 #[test]
-fn preexisting_empty_graph_directory_requires_explicit_reset() {
+fn preexisting_empty_graph_file_is_corrupt() {
     let temp = TempDir::new().unwrap();
-    create_durable_graph_store_root(temp.path());
-    std::fs::create_dir(graph_path(temp.path())).unwrap();
+    std::fs::File::create(graph_path(temp.path())).unwrap();
 
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let request = registration(identity("profile-a", "project-a"), temp.path());
 
     assert!(matches!(
         registry.resolve(request),
-        Err(GraphDbError::ResetRequired { .. })
+        Err(GraphDbError::Corrupt { .. })
     ));
 }

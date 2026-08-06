@@ -199,7 +199,7 @@ impl RevisionDigest {
     }
 }
 
-/// Complete PR11 canonical provider-result identity tuple.
+/// Complete canonical provider-result identity tuple.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticProviderIdentityParts {

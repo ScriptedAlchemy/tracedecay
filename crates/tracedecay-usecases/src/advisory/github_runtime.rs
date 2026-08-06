@@ -81,7 +81,7 @@ pub use store::ProjectGitHubReviewStoreV1;
 /// put into a checkpoint, an ingress result, or this transport's receipt.
 pub const MAX_GITHUB_READ_RESPONSE_BYTES_V1: usize = 1024 * 1024;
 const MAX_GITHUB_REFRESH_SCAN_PAGES_V1: usize = 20;
-const GITHUB_REVIEW_SCAN_TOKEN_DOMAIN_V1: &str = "tracedecay.pr13.github.scan-token.v1";
+const GITHUB_REVIEW_SCAN_TOKEN_DOMAIN_V1: &str = "tracedecay.advisory.github.scan-token.v1";
 const MAX_GITHUB_REFRESH_ATTEMPT_RECEIPTS_V1: usize = 64;
 
 /// Cache, pagination, and rate-limit state loaded from the injected durable
@@ -560,7 +560,7 @@ fn network_status_matches(
     }
 }
 
-const GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1: &str = "tracedecay.pr13.github.refresh-state.v1";
+const GITHUB_REVIEW_REFRESH_STATE_DOMAIN_V1: &str = "tracedecay.advisory.github.refresh-state.v1";
 
 fn github_review_refresh_revision(
     last_complete: Option<&GitHubReviewReadResponseV1>,

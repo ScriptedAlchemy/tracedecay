@@ -235,7 +235,7 @@ fn forget_hook_v2_admission_ledger_for_test(data_root: &Path, host: tracedecay_h
 /// idempotency record.
 pub(crate) enum HookV2AdmissionOutcomeV1 {
     Admitted {
-        orchestration: crate::daemon::Pr13HookOrchestrationAdmissionV1,
+        orchestration: crate::daemon::HookOrchestrationAdmissionV1,
         ready_guidance: Value,
         feedback_notice: Value,
     },
@@ -406,7 +406,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         },
         _ => Value::Null,
     };
-    let orchestration = crate::daemon::admit_registered_pr13_hook_orchestration(
+    let orchestration = crate::daemon::admit_registered_hook_orchestration(
         envelope.clone(),
         snapshot.binding.clone(),
         lifecycle,
@@ -415,7 +415,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         completion,
     );
     let feedback_notice = if first_admission {
-        crate::application::advisory::peek_pr13_advisory_hook_notice(
+        crate::application::advisory::peek_advisory_hook_notice(
             envelope.project_id,
             envelope.worktree_id,
         )

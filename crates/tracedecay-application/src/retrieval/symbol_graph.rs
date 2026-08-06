@@ -432,7 +432,7 @@ pub struct SymbolGraphPortContext<'a> {
     pub observed_at: UtcMicros,
 }
 
-/// Production async port for the PR12 symbol and graph primitive family.
+/// Production async port for the symbol and graph primitive family.
 /// Implementations delegate to the owning query/graph kernels.
 pub trait SymbolGraphPrimitivePort {
     fn symbol_search<'a>(
