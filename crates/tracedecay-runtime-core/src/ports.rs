@@ -1,8 +1,8 @@
 //! Injection points for subsystems that stay above the kernel.
 //!
 //! The one-shot crate split moved the runtime kernel down but left some
-//! collaborators above it: the registered global database, the daemon session
-//! registry, and branch-admin recovery. Each is expressed here as a port the
+//! collaborators above it: the registered global database and the daemon
+//! session registry. Each is expressed here as a port the
 //! root crate registers into, so the kernel never names an upward module path.
 //!
 //! The store-runtime registry is no longer one of them. `StoreRuntimeSource`
@@ -16,41 +16,6 @@
 //! `crates/tracedecay-runtime-core/SEAMS.md` tracks which registration sites
 //! the landing still owes.
 
-/// Gate that refuses a branch-add lock while a branch-admin mutation is still
-/// pending recovery.
-///
-/// The journal reader lives in the root crate's `branch::admin::transaction`
-/// module, which did not move. Until the root registers, the gate is a no-op:
-/// locking still serializes correctly, it just does not refuse a lock during
-/// an unfinished admin mutation.
-pub mod branch_admin_recovery {
-    use std::path::Path;
-    use std::sync::OnceLock;
-
-    use crate::errors::Result;
-
-    /// Signature of the pending-recovery gate.
-    pub type Gate = fn(&Path) -> Result<()>;
-
-    static GATE: OnceLock<Gate> = OnceLock::new();
-
-    /// Registers the root crate's pending branch-admin recovery gate.
-    ///
-    /// Idempotent: the first registration wins and later ones are ignored, so
-    /// concurrent daemon and CLI initialisation cannot fight over it.
-    pub fn register(gate: Gate) {
-        let _ = GATE.set(gate);
-    }
-
-    /// Runs the registered gate, or succeeds when none is registered.
-    pub fn ensure_no_pending_recovery(tracedecay_dir: &Path) -> Result<()> {
-        match GATE.get() {
-            Some(gate) => gate(tracedecay_dir),
-            None => Ok(()),
-        }
-    }
-}
-
 /// Installer for the registered global/session schema.
 ///
 /// `store_runtime::registry` initialises a freshly created profile- or
@@ -59,9 +24,9 @@ pub mod branch_admin_recovery {
 /// `tracedecay-global-db`, which already depends on `tracedecay-migrate`, which
 /// depends on this crate — so the kernel cannot name it without a Cargo cycle.
 ///
-/// Unlike [`branch_admin_recovery`], this port **fails closed**: an
-/// uninitialised profile or session store is not safe to publish, so an
-/// unregistered installer refuses the open instead of pretending it converged.
+/// This port **fails closed**: an uninitialised profile or session store is
+/// not safe to publish, so an unregistered installer refuses the open instead
+/// of pretending it converged.
 pub mod registered_schema {
     use std::future::Future;
     use std::pin::Pin;

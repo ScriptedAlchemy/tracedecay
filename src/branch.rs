@@ -10,30 +10,13 @@ pub use admin::{
     BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
     prepare_branch_admin_mutation, remove_tracked_branch_store_checked,
 };
-pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_admin_recovery};
-
-/// Installs the root-owned pending branch-admin recovery gate into the kernel
-/// lock primitives.
-///
-/// The gate reads `branch::admin::transaction`'s journal, which stayed in this
-/// crate, so the kernel calls back through
-/// `tracedecay_runtime_core::ports::branch_admin_recovery`. Idempotent; every
-/// process entry point that can take a branch lock must call it before doing
-/// so.
-pub fn register_branch_admin_recovery_gate() {
-    tracedecay_runtime_core::ports::branch_admin_recovery::register(
-        admin::ensure_no_pending_branch_admin_recovery,
-    );
-}
-
 /// The shared branch-add lock, its retry policy, and the current-branch read
 /// moved into `tracedecay_runtime_core::branch`: `branch_meta` and `worktree`
 /// depend on them and now live in that crate. Re-exported so every historical
 /// `crate::branch::<item>` path keeps resolving.
 pub use tracedecay_runtime_core::branch::{
     BRANCH_LOCK_RETRY_ATTEMPTS, BRANCH_LOCK_RETRY_INTERVAL, BranchMemo,
-    acquire_branch_add_lock_blocking_raw, acquire_branch_lock_blocking, current_branch,
-    try_acquire_branch_add_lock, try_acquire_branch_add_lock_raw,
+    acquire_branch_lock_blocking, current_branch, try_acquire_branch_add_lock,
 };
 
 /// Default-branch detection, branch-name sanitisation, and branch DB-path
@@ -595,14 +578,14 @@ fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
     let persisted = crate::branch_meta::load_branch_meta(data_dir).unwrap();
     assert!(persisted.is_tracked("feature"));
     assert!(
-        error.to_string().contains("branch metadata"),
+        error.to_string().contains("cannot retire failed branch"),
         "unexpected rollback error: {error}"
     );
 }
 
 #[cfg(test)]
 #[test]
-fn rollback_quarantines_complete_database_family() {
+fn rollback_retires_metadata_and_leaves_database_family_for_collection() {
     let temp = tempfile::tempdir().unwrap();
     let data_dir = temp.path();
     let branches_dir = data_dir.join("branches");
@@ -622,15 +605,14 @@ fn rollback_quarantines_complete_database_family() {
 
     rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path).unwrap();
 
-    assert!(!db_path.exists());
-    assert!(!db_path.with_extension("db-wal").exists());
-    assert!(!db_path.with_extension("db-shm").exists());
+    assert!(db_path.exists());
+    assert!(db_path.with_extension("db-wal").exists());
+    assert!(db_path.with_extension("db-shm").exists());
     assert!(
         !crate::branch_meta::load_branch_meta(data_dir)
             .unwrap()
             .is_tracked("feature")
     );
-    assert!(!data_dir.join(".branch-delete-transaction.json").exists());
 }
 
 pub fn finalize_prepared_branch_tracking(tracedecay_dir: &Path, prepared: &PreparedBranchTracking) {
