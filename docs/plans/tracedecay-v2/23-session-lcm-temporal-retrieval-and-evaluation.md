@@ -1,20 +1,18 @@
 # TraceDecay V2 Session and LCM Temporal Retrieval
 
-**Delivery:** PR 8
-
-**Status:** completed PR8 product delivery and retained temporal retrieval authority.
-**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). PR8 implements against explicitly resolved current-project/single-root scope and address contracts available by then; the [multi-root scope plan](16-cross-project-repository-worktree-scope.md) later composes this same retrieval kernel with canonical cross-project/repository/worktree resolution and is not a PR8 implementation prerequisite.
+**Status:** completed temporal-retrieval product delivery and retained temporal retrieval authority.
+**Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). The temporal retrieval kernel implements against explicitly resolved current-project/single-root scope and address contracts available by then; the [multi-root scope plan](16-cross-project-repository-worktree-scope.md) later composes this same retrieval kernel with canonical cross-project/repository/worktree resolution and is not an implementation prerequisite.
 
 **Retention ownership correction (2026-07-26).** Plan 23 owns retrieval-time
 retention-expiry rechecks and truthful `RetentionWithheld` coverage reporting.
 Plan 38 owns raw LCM offload/drop, projected-copy dedupe, observation-evidence
 release, and any future `source_cursor_advances` reclamation. Missing retention
-writers or immutable-table changes are not unfinished PR8 work.
+writers or immutable-table changes are not unfinished temporal-retrieval work.
 
 Plan 23 remains the owner of the behavior in this document. Plans 15, 24, and
 37 and the application/public-surface plans are later consumers. They must
- reuse PR8's accepted behavior; they do not have
-to recreate PR8's original module tree, Rust type spellings, schema names,
+ reuse the accepted temporal-retrieval behavior; they do not have
+to recreate the original module tree, Rust type spellings, schema names,
 suite registration, fixture filenames, benchmark scripts, or command list.
 
 The session-temporal schema versions 2 and 3 were introduced on this integration
@@ -27,7 +25,7 @@ not upgrade sources.
 
 ## Outcome
 
-PR 8 replaces fragmented message search and LCM lookup with one temporally correct retrieval path for messages, Turns, sessions, threads, agents, and summaries. It returns the smallest useful context while preserving exact text, history, provenance, privacy, and stable anchors.
+This delivery replaces fragmented message search and LCM lookup with one temporally correct retrieval path for messages, Turns, sessions, threads, agents, and summaries. It returns the smallest useful context while preserving exact text, history, provenance, privacy, and stable anchors.
 
 This is product retrieval work. It does not implement task filtering, plan execution, a benchmark bureaucracy, or a Search Quality Lab.
 
@@ -87,7 +85,7 @@ a later implementation.
 
 ## Immutable derived evidence spans and bursts
 
-PR8 adds actionable evidence spans and bursts as immutable, generation-scoped,
+The temporal retrieval kernel adds actionable evidence spans and bursts as immutable, generation-scoped,
 rebuildable derived projections over consecutive message and tool-call
 occurrences:
 
@@ -159,10 +157,10 @@ hydrate payloads, apply semantic filters after ranking, or encode a second LCM
 cursor. Workflow recovery consumes session evidence through this kernel; the
 executable-work product owns all other workflow semantics.
 
-PR8 accepts exactly one already-resolved `ResolvedSessionIdentity` and one
+The retrieval kernel accepts exactly one already-resolved `ResolvedSessionIdentity` and one
 `SessionRetrievalScope::{Session, AllSessionsInAuthorizedRoot}` per request.
 `AllSessionsInAuthorizedRoot` means authorized sessions in that identity's
-existing store/root. PR8 performs no registry enumeration, CWD-derived store
+existing store/root. It performs no registry enumeration, CWD-derived store
 selection, `all_registered` fan-out, cross-project composition, or store
 switching.
 
@@ -320,19 +318,19 @@ diagnostic, Git, code-generation, review, artifact, and runtime evidence
 resolves through Plan 13 anchors and its owning stores; no task evidence is
 copied into LCM.
 
-The PR8 kernel stays task-agnostic. Executable-work application composition
-supplies the authorized selector and reuses PR8's scope, temporal, hydration,
-cursor, coverage, and expansion contracts without changing PR8 storage or
+The temporal retrieval kernel stays task-agnostic. Executable-work application composition
+supplies the authorized selector and reuses its scope, temporal, hydration,
+cursor, coverage, and expansion contracts without changing kernel storage or
 sequencing.
 A handoff-oriented assembly profile returns coverage and unresolved gaps first,
 compact task-linked narrative second, and exact chronology only by authorized
 expansion. Summaries accelerate retrieval but cannot replace raw messages or
 external anchored evidence.
 
-No PR8 domain record, store port, SQL table, schema-admission receipt, refresh key,
+No temporal-retrieval domain record, store port, SQL table, schema-admission receipt, refresh key,
 cursor, query request, or application request contains `TaskId`. The
 executable-work application translates an authorized `TaskId` into an ordinary
-PR8 request without changing PR8 storage, sequencing, authority, or scope.
+retrieval request without changing kernel storage, sequencing, authority, or scope.
 
 ## Side-effect-free reads and freshness
 
@@ -407,10 +405,10 @@ coverage, and continuation anchors. It never dumps a transcript or unrelated
 agent activity. Expansion from a span, burst, or summary is lossless to every
 authorized occurrence and preserves unavailable members by ordinal.
 
-## PR8 implementation sketch (non-normative)
+## Implementation sketch (non-normative)
 
 The paths, type names, schema objects, and adapter locations below record how
-PR8's design divided ownership. They are not a request to recreate an obsolete
+the original delivery divided ownership. They are not a request to recreate an obsolete
 module tree or database shape. The maintained requirement is the authority
 boundary and callable behavior described above. Refactors may move, rename, or
 replace these artifacts when direct regressions continue to prove one temporal
@@ -556,7 +554,7 @@ Developer resource measurements may report rebuild, replay, ranking, hydration,
 and expansion cost from a simple Linux run. They are diagnostic evidence, not a
 machine-independent threshold or separate acceptance artifact.
 
-## PR8 behavioral acceptance
+## Behavioral acceptance
 
 - Immutable occurrence, logical-copy, Turn/thread, temporal-assertion,
   evidence-span/burst, ordered-member, and summary-lineage contracts exist with
@@ -584,7 +582,7 @@ machine-independent threshold or separate acceptance artifact.
 - LCM, summary, and derived payloads remain session-narrative projections only;
   GitHub, CI, diagnostic, Git, receipt, task, and `rh_` evidence stays on Plan
   13 anchors and in owning stores.
-- PR8 remains task-agnostic and single-root. The scope plan owns cross-project
+- Temporal retrieval remains task-agnostic and single-root. The scope plan owns cross-project
   composition, Plan 24 owns TaskId composition, and the dashboard journey owns
   its binding; explicit reset/recreation leaves no physical legacy table path.
 - Current direct regressions exercise every behavior above through the

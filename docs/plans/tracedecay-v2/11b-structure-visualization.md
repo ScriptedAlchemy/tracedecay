@@ -3,8 +3,8 @@
 Status: user direction captured and agent concept/mockup exploration complete
 (2026-07-25); the concepts are not themselves user-approved specifications.
 Delivery timing is an **open owner question**. The user raised topography and
-"kinestetic synastisya" while PR14 was active and never agreed to defer them
-until after PR14. The current roadmap sequencing is therefore a plan proposal,
+"kinestetic synastisya" while the core dashboard delivery was active and never agreed to defer them
+until after it. The current roadmap sequencing is therefore a plan proposal,
 not a user decision. Historical mockups live on branch
 `worktree-agent-ac56015e63cbf0f86` under `mockups/structure-viz/` (three
 self-contained HTML pages, dark+light shots, per-concept notes).
@@ -182,7 +182,7 @@ hand-rolled canvas/WebGL, game-engine techniques, physics engine) is approved
 where a library falls short.
 
 Decision frame:
-- Shipped PR14 surfaces stay on Sigma — they work, they're gated, no churn.
+- Shipped core-dashboard surfaces stay on Sigma — they work, they're gated, no churn.
 - The topography/trace surfaces target a CUSTOM renderer from the start:
   - Physics: hand-rolled Verlet/spring integrator first (≤250-node subgraph cap
     makes this trivial, zero deps, exact control of the weight/tension feel).

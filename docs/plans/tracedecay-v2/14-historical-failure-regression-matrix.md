@@ -3,7 +3,7 @@
 ## Status and role
 
 This is the active historical regression and observable-behavior contract for
-PR5–PR20. It preserves failures learned from V1 and pre-V2 development while product
+the complete V2 capability sequence. It preserves failures learned from V1 and pre-V2 development while product
 plans replace and optimize implementation. It is not a numbered failure
 ledger, exact fixture inventory, compatibility catalog, Doctor kernel, plan
 parser, generated gate, or requirement that PR descriptions reference this
@@ -39,7 +39,7 @@ semantic search is disabled by an invalid configuration snapshot, incremental
 index cadence is suspect, and the full suite has not completed. Plan 09 owns
 Doctor composition, Plan 27 owns host component lifecycle, Plans 20/31 own
 semantic configuration/activation, Plan 25 owns index freshness, and the active
-PR12/PR13 slice owns aggregate test stabilization.
+surface/host-feedback slice owns aggregate test stabilization.
 
 Concrete fixture names, record counts, files, and harness layout remain test
 implementation details owned beside the callable DTOs and product tests. Tests
@@ -69,7 +69,7 @@ below.
 
 ## Delivery-first regression journeys
 
-### PR14 finding to verified remediation
+### Dashboard finding to verified remediation
 
 A direct product test begins with a canonical finding from Brain, Explorer,
 Loom, Code, or Observatory; preserves exact scope, provider state, provenance,
@@ -121,7 +121,7 @@ Dispatch, preview, confirmation, or a successful HTTP response is not verified
 recovery. The journey re-observes the owning state and keeps native Git,
 configuration, runtime, tests, CI, policy, and measurement authority separate.
 
-### PR17 work to independently reviewed outcome
+### Work to independently reviewed outcome
 
 A direct product test begins with one canonical Plan 24 Work item, preserves
 TaskId and graph version across Kanban, DAG, timeline, causal, workload,
@@ -167,37 +167,37 @@ Codex app-server and policy-eligible CLI fallback remain distinct. Provider
 terminal text, dashboard state, or a successful check cannot synthesize graph
 acceptance, effect success, or an independent outcome.
 
-## Regression ownership by delivery slice
+## Regression ownership by capability
 
-- **PR5:** partial, malformed, duplicated, truncated, reset, or replaced
+- **Sanitized capture:** partial, malformed, duplicated, truncated, reset, or replaced
   provider input never advances beyond a complete sanitized frame; restart
   resumes without gaps.
-- **PR6:** provider-native identity/order, projection replay, partial input,
+- **Provider capture:** provider-native identity/order, projection replay, partial input,
   relation preservation, and backpressure never duplicate, skip, corrupt, or
   overclaim observations.
-- **PR7:** project/profile ownership, facts, memory, anchors, copied prompts,
+- **Memory, facts, and anchors:** project/profile ownership, facts, memory, anchors, copied prompts,
   correction, redaction, deletion, and provenance never cross authority or
   lose safe lineage.
-- **PR8:** temporal/LCM copies, summaries, supersession, cursors, stale shards,
+- **Temporal/LCM retrieval:** temporal/LCM copies, summaries, supersession, cursors, stale shards,
   current/as-of/evolution reads, and no-result states remain truthful and never
   repair storage during a read.
-- **PR9:** deterministic code generations, typed edge/coverage authority,
+- **Code intelligence:** deterministic code generations, typed edge/coverage authority,
   protected exact identifiers/phrases, parse/lineage abstention, affected-test
   semantics, and dirty/stale diagnostic suppression survive restart and
   partial language support.
-- **PR10:** semantic search never substitutes models, crosses project scope,
+- **Semantic search:** semantic search never substitutes models, crosses project scope,
   recomputes unchanged documents, demotes protected exact results, hides tail
   failure, or changes lexical fallback bytes/order after model failure.
-- **PR11:** policy, application, configuration, catalog, analyzer, edit/Git
+- **Policy, application, and Git transactions:** policy, application, configuration, catalog, analyzer, edit/Git
   transactions, and branch-aware feedback remain authorized, deterministic,
   idempotent, receipt-backed, and free of surface-local business
   logic or guessed clean outcomes.
-- **PR12:** CLI, MCP, HTTP, output, catalog, and LSP agree on lifecycle,
+- **Delivery surfaces:** CLI, MCP, HTTP, output, catalog, and LSP agree on lifecycle,
   framing, negotiated capabilities/versions, cancellation, stable problems and
   retry directives, schemas, paging, rendering, diagnostics/impact readers,
   the TraceDecay context extension, and explicit unavailable state. Rename,
   arbitrary forwarding, and code actions cannot self-apply.
-- **PR13:** synchronous hooks stay bounded and return only receipt/already-ready
+- **Host feedback:** synchronous hooks stay bounded and return only receipt/already-ready
   guidance; model/GitHub/feedback work is asynchronous. Saved-content feedback,
   CI localization, read-only GitHub lifecycle, proximity, host capability,
   Kimi Code manifest/global `PostToolUse`/`Stop`, OpenCode local-plugin edit/
@@ -205,29 +205,29 @@ acceptance, effect success, or an independent outcome.
   cross-platform official lifecycle validation, competing-extension/interruption/
   host rollback, and the feedback rollback switch retain capture redaction, no-write,
   restart, truthful coverage, and all previously supported host features.
-- **PR14:** the direct Doctor/dashboard journey above retains canonical state,
+- **Dashboard and Doctor:** the direct Doctor/dashboard journey above retains canonical state,
   evidence, accessibility, renderer, observability, configuration, and legal
   remediation behavior without a second kernel.
-- **PR15:** explicit multi-root/worktree/ref/collection/stack scope never falls
+- **Multi-root and native integration:** explicit multi-root/worktree/ref/collection/stack scope never falls
   back to ambient identity; per-root query/LSP/feedback coverage remains
   visible; stack fanout obeys debounce, preflight concurrency, batch,
   overflow, watermark, restart, and circuit-breaker contracts; Git apply is
   exact, approved, mechanical, and receipt-backed.
-- **PR16:** remote fencing, offline replay, cache verification, backup,
+- **Remote shared authority:** remote fencing, offline replay, cache verification, backup,
   restore, failover, retention, and deletion never admit two writers or move
   unsaved overlays/analyzers/proximity into durable or remote state.
-- **PR17:** canonical work identity, readiness, proposals, task intelligence,
+- **Work and workflow execution:** canonical work identity, readiness, proposals, task intelligence,
   separate ephemeral expertise, provider/runtime authority, execution
   topology, review, outcomes, handoff, replanning, and Git integration retain
   explicit versions, consent, lifecycle, receipts, and no auto-apply.
-- **PR18:** every supported public operation has Rust and TypeScript
+- **Public SDKs:** every supported public operation has Rust and TypeScript
   behavioral/lifecycle conformance, including paging, streams, cancellation,
   retry directives, reconnect/resume, cross-version behavior, and the
   diagnostic handoff-token journey.
-- **PR19:** exact-final persisted-state admission retains one writer and the
+- **Final-store admission:** exact-final persisted-state admission retains one writer and the
   canonical route; every other shape returns `ResetRequired` for explicit
   reset/recreation, and superseded storage paths are deleted.
-- **PR20:** accepted production comparisons cannot weaken semantics,
+- **Measured performance:** accepted production comparisons cannot weaken semantics,
   authority, project isolation, ordering, coverage, durability, crash/restart
   correctness, or hide tail/resource regressions behind averages.
 
@@ -244,7 +244,7 @@ acceptance, effect success, or an independent outcome.
   graph-only/analyzer-only coverage, OpenCode custom-LSP registration without
   duplicate analyzers, negotiated context-extension envelopes and expansion
   handles, version-monotone clear/republish, and no edit authority.
-- PR13 host conformance and lifecycle tests exercise Kimi Code and OpenCode
+- Host conformance and lifecycle tests exercise Kimi Code and OpenCode
   alongside every previously supported host on each supported platform,
   including install/update/repair/uninstall, real edit and stop feedback,
   competing registration, interruption, ownership-preserving rollback, and
@@ -258,7 +258,7 @@ acceptance, effect success, or an independent outcome.
   preserve coverage and owner-specific actions, execute remediation only
   through its owner, resume the receipt, and independently verify the result.
   Plan 11 rendering and this plan contain no health formula.
-- PR14 and PR17 product journeys execute the observable classes listed above
+- Dashboard and Work product journeys execute the observable classes listed above
   with nonzero cases/samples and report failures by product behavior. Exact
   fixture IDs, every-record execution, checked-in file inventories, generated
   matrices, PR-description references, and placeholder benchmark packets are

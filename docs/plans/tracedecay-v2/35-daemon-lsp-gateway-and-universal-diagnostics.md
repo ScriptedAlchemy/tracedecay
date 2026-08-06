@@ -24,7 +24,7 @@ require a version bump.
 
 The daemon gateway/session/broker and the application LSP runtime are the
 canonical implementation path. Existing structs, files, protocol fixtures, and
-compile packets are evidence, not a contract spine to recreate. PR13 must make
+compile packets are evidence, not a contract spine to recreate. The host-feedback delivery must make
 that gateway a real host-feedback surface: Claude Code packaging
 and protocol conformance, OpenCode custom LSP configuration and conformance,
 Cursor desktop native diagnostics, duplicate-analyzer handling, Plan 37
@@ -39,7 +39,7 @@ for a top-level `src/lsp/` module, global `--no-lsp`, `TRACEDECAY_LSP`,
 `TRACEDECAY_LSP_TIMEOUT`, or a generic `[lsp]` configuration block did not
 ship and is not a missing requirement of this plan.
 
-## PR13 user outcome
+## Host feedback user outcome
 
 A user editing in an LSP-capable host receives current analyzer and TraceDecay
 diagnostics, semantic navigation, post-edit impact, read-only GitHub review
@@ -59,7 +59,7 @@ emulating LSP.
 1. The host launches the thin stdio bridge, which authenticates and forwards
    LSP JSON-RPC to one daemon session. The bridge opens no store, starts no
    analyzer, and owns no routing policy.
-2. The daemon resolves one authorized PR13 workspace root, negotiates client,
+2. The daemon resolves one authorized workspace root, negotiates client,
    protocol, catalog, analyzer, and configuration revisions, then accepts
    document content.
 3. Incremental open/change/save/close events maintain a versioned document
@@ -105,13 +105,13 @@ emulating LSP.
 
 ### Cross-worktree advisory feedback
 
-PR13 subscribes its explicitly admitted root to the daemon-owned Plan 07
+The gateway subscribes its explicitly admitted root to the daemon-owned Plan 07
 projection. It can publish current affected-symbol, conflict, and stale-epoch
 cues. The gateway never reads hook spools, accepts hook events over LSP, or
 connects to peer hooks, agents, or worktrees. Plan 24/36/37 calculate task,
 Git, readiness, conflict, and proximity state before projection.
 
-## Retained PR12 gateway capabilities
+## Retained core gateway capabilities
 
 - Extend the current daemon gateway implementation in place rather than
   creating a parallel protocol model or conversion layer. Preserve negotiated
@@ -153,7 +153,7 @@ Git, readiness, conflict, and proximity state before projection.
   unavailable unless their owning plans later ship a callable, conforming
   operation.
 
-### PR12 TraceDecay context extension
+### TraceDecay context extension
 
 The gateway owns one versioned TraceDecay context extension over standard
 LSP/JSON-RPC framing. `initialize` advertises it only through explicit
@@ -162,7 +162,7 @@ projection kinds, limits, and opaque-expansion support. An unnegotiated or
 incompatible request returns typed unavailable; the gateway never guesses
 client support.
 
-PR12 serves real compact diagnostics, impact, affected-test, and test-result
+The gateway serves real compact diagnostics, impact, affected-test, and test-result
 projections from the same canonical application reads as CLI/MCP/HTTP. Each
 envelope binds authorized project/root/document scope, content and graph
 generation, request/result revision, producer state, coverage, omissions,
@@ -171,13 +171,13 @@ references that reauthorize through Plan 21; they never replace finding/test/
 anchor identity or grant access by possession.
 
 The provider extension point accepts only a typed Plan 08 contribution whose
-application handler is callable. PR13 adds GitHub review, CI localization, and
+application handler is callable. Advisory feedback adds GitHub review, CI localization, and
 proximity contributions through that point; absent or ineligible providers
-remain typed unavailable and do not alter the PR12 reader transport. The
+remain typed unavailable and do not alter the core reader transport. The
 gateway forwards no arbitrary method/payload and owns no graph, test, feedback,
 review, CI, proximity, or evidence data.
 
-## PR13 product delivery
+## Host feedback product delivery
 
 ### Prove real host protocol behavior
 
@@ -214,7 +214,7 @@ review, CI, proximity, or evidence data.
   Cursor cloud, Codex, and Kimi Code remain hook/MCP/CLI paths unless a real
   conforming editor protocol becomes available.
 
-### Project the complete PR13 feedback result
+### Project the complete feedback result
 
 - Publish current post-edit diagnostics and impact plus remapped GitHub, CI,
   and proximity findings with conservative severity, authorized safe URLs,
@@ -276,7 +276,7 @@ review, CI, proximity, or evidence data.
   name with actual independent public release evidence delegates to the daemon
   gateway or returns an actionable negotiated upgrade. Pure source-only and
   branch-era callable names are replaced in place.
-- Remove reserved future fields and predeclared PR17/PR18 variants from PR13
+- Remove reserved future fields and predeclared task-handoff/SDK variants from feedback
   writer schemas. Later callable features revise the current writer shape.
   An actually independently released public protocol may negotiate its
   documented revision at the transport boundary; persisted diagnostics never
@@ -340,23 +340,23 @@ review, CI, proximity, or evidence data.
 
 ## Later callable extensions
 
-- **PR14:** Dashboard and Doctor call the shipped gateway engine/status and
+- **Dashboard and Doctor:** call the shipped gateway engine/status and
   lifecycle evidence. They do not redefine analyzer or host repair behavior.
-- **PR15:** Enable callable multi-root admission and
+- **Multi-root:** Enable callable multi-root admission and
   `workspace/didChangeWorkspaceFolders` after Plan 16 resolves every folder.
   Preserve independent roots, overlays, epochs, generations, diagnostics,
   coverage, authorization, and hidden-root isolation. Project current Plan 37
   stack/PR capability and drift findings through the same bounded diagnostics
   or root-notification path, with standard Git/other-forge fallback when the
   optional GitHub preview is unavailable.
-- **PR16:** Keep live overlays and analyzers on the enrolled workspace node.
+- **Remote authority:** Keep live overlays and analyzers on the enrolled workspace node.
   Route durable clean evidence through Plan 28's fenced authority; failover
   cannot spool, replicate, or silently move unsaved content.
-- **PR17:** Add an optional authorized task join and ready-commit cue only
+- **Task handoff:** Add an optional authorized task join and ready-commit cue only
   through shipped Plan 24/32/36 application reads. LSP remains a bounded
   projection; it cannot retrieve task history, mutate work, admit execution,
   or apply integration.
-- **PR18:** Plan 17 owns two public token-consumption operations plus their
+- **Public SDK:** Plan 17 owns two public token-consumption operations plus their
   Rust/TypeScript SDK and compatibility contracts; this plan owns only
   negotiated LSP production/projection of their actions. A
   feedback/diagnostic cue produces an opaque
@@ -366,7 +366,7 @@ review, CI, proximity, or evidence data.
   24 task identity/version/context semantics.
 
   Each action carries one 60-second, single-use, kind/destination/session/
-  project/root/cue-or-task-version/authorization/policy/local-or-PR16-authority
+  project/root/cue-or-task-version/authorization/policy/local-or-remote-authority
   bound token. The owning public application operation reauthenticates and
   reauthorizes scope, expiry, use state, authority, and current owner version
   on consumption. Wrong kind, destination, scope, version, authority, expiry,
@@ -382,9 +382,9 @@ review, CI, proximity, or evidence data.
   Git, mutate work, invoke a tool, schedule an agent, or call
   `workspace/applyEdit`.
 
-  **PR18 direct acceptance.** Real negotiated clients produce both action/token
+  **Public SDK direct acceptance.** Real negotiated clients produce both action/token
   kinds and consume each through Rust and TypeScript against a local
-  daemon and a PR16-enrolled remote authority. The investigation token opens
+  daemon and an enrolled remote authority. The investigation token opens
   only the owning investigation surface and the task token only the owning task
   surface, with identical application semantics/error taxonomy across local
   and remote. Wrong-scope, wrong-kind/destination, expired, replayed,
