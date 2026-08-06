@@ -92,6 +92,22 @@ pub(crate) fn mark_semantic_tool_error(result: &mut ToolResult) {
     }
 }
 
+/// Canonical wire problem kind for reason codes minted inside this crate's
+/// MCP dispatch and application-surface layers. The boundary owns this
+/// translation so clients (and the catalog sweep) can read a truthful
+/// `kind` alongside the machine `code` instead of inferring from prose.
+fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
+    match reason_code {
+        "tool_dispatch_deadline_exceeded" => Some("deadline_exceeded"),
+        "tool_dispatch_cancelled" => Some("cancelled"),
+        "tool_dispatch_shutdown"
+        | "mcp_dispatch_effect_journey_unverified"
+        | "application_surface_unavailable" => Some("unavailable"),
+        "application_surface_not_found_or_not_authorized" => Some("denied"),
+        _ => None,
+    }
+}
+
 /// Map response-handle failures onto actionable JSON-RPC errors at the MCP
 /// boundary so clients can distinguish bad input from cache/runtime problems.
 pub(crate) fn tool_error_response(
@@ -105,16 +121,23 @@ pub(crate) fn tool_error_response(
         } else {
             ErrorCode::InvalidParams
         };
+        let mut data = json!({
+            "tool": tool_name,
+            "reason_code": reason_code,
+            "retryable": retryable,
+            "detail": detail,
+        });
+        if let (Some(kind), Some(object)) =
+            (project_route_problem_kind(reason_code), data.as_object_mut())
+        {
+            object.insert("kind".to_string(), json!(kind));
+            object.insert("code".to_string(), json!(reason_code));
+        }
         return JsonRpcResponse::error_with_data(
             id,
             code,
             format!("tool project route failed: {detail}"),
-            Some(json!({
-                "tool": tool_name,
-                "reason_code": reason_code,
-                "retryable": retryable,
-                "detail": detail,
-            })),
+            Some(data),
         );
     }
     if tool_name == "tracedecay_hook_runtime"
@@ -193,6 +216,31 @@ pub(crate) fn tool_error_response(
                 );
             }
             _ => {}
+        }
+    }
+    if let TraceDecayError::Config { message } = error {
+        // Handler-authored argument and lookup failures follow two message
+        // conventions; surface them as typed invalid-params data instead of
+        // an untyped internal error.
+        let reason_code = if message.starts_with("missing required parameter") {
+            Some("missing_required_parameter")
+        } else if message.contains("not found") {
+            Some("not_found")
+        } else {
+            None
+        };
+        if let Some(reason_code) = reason_code {
+            return JsonRpcResponse::error_with_data(
+                id,
+                ErrorCode::InvalidParams,
+                message.clone(),
+                Some(json!({
+                    "tool": tool_name,
+                    "reason_code": reason_code,
+                    "retryable": false,
+                    "detail": message,
+                })),
+            );
         }
     }
 
