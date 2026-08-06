@@ -5,7 +5,18 @@ assigns the canonical graph, core Work projections, proposal review, separate
 admission/accept-reject-replan operations, and minimal real-provider
 [Plan 32](32-dynamic-workflow-runtime-and-sdk.md) runtime to the core Work
 delivery. The advanced workflow delivery extends
-those authorities with advanced workflow behavior. The public SDK delivery stabilizes public SDK
+those authorities with advanced workflow behavior.
+
+The core Work read/command/SSE path is delivery-current on the integration tip
+(2026-08-06 mount audit): all nine `operation.work.*` operations are mounted
+daemon → dashboard-api HTTP → SDK registries → dashboard Work workspace, with
+the stage-grouped board, TaskId deep links, `task_activity` SSE, snapshot/delta
+reads, and seven command surfaces. The DAG/critical-path, timeline, causal, and
+workload projections are not yet built; they remain committed in-scope V2
+deliverables — not descoped — whose data dependency is attempt/execution
+evidence owned by the Plan 32 workflow runtime (the attempt family was
+deliberately deleted in the Work restore and returns with Plan 32 execution
+evidence). The public SDK delivery stabilizes public SDK
 names for accepted operations; it does not add missing semantics.
 
 Earlier task-schema names, operation registries, fixture catalogs, packet
