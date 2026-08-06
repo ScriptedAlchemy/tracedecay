@@ -27,57 +27,6 @@ use super::recovery::active_graph_layout;
 use super::{TraceDecay, TraceDecayOpenOptions};
 
 impl TraceDecay {
-    /// Mirrors automatic branch tracking for a daemon-owned project open.
-    ///
-    /// The ordinary branch helper reopens through the public standalone API,
-    /// which intentionally has no configuration authority. A registered open
-    /// must retain its exact registered project session while preparing and
-    /// syncing the branch instead.
-    pub(super) async fn auto_track_active_branch_with_registered_configuration(
-        project_root: &Path,
-        tracedecay_dir: &Path,
-        active_branch: Option<&str>,
-        open_options: TraceDecayOpenOptions,
-        store_layout: &StoreLayout,
-        configuration_database: &Arc<RegisteredGlobalDb>,
-        profile_database: &Arc<RegisteredGlobalDb>,
-        runtime_registry: &Arc<DaemonSessionRuntimeRegistryV1>,
-    ) -> Result<()> {
-        let Some(branch_name) = active_branch else {
-            return Ok(());
-        };
-        let prepared =
-            branch::prepare_branch_tracking_in_layout(project_root, branch_name, tracedecay_dir)
-                .await?;
-        let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
-            return Ok(());
-        };
-        let sync_result = Self::sync_new_branch_with_registered_configuration(
-            project_root,
-            branch_name,
-            open_options,
-            store_layout.clone(),
-            Arc::clone(configuration_database),
-            Arc::clone(profile_database),
-            Arc::clone(runtime_registry),
-        )
-        .await;
-        if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
-            return Ok(());
-        } else if let Err(error) = sync_result {
-            return match branch::rollback_prepared_branch_tracking(tracedecay_dir, &prepared) {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(TraceDecayError::Config {
-                    message: format!(
-                        "branch sync failed: {error}; published branch rollback also failed: {rollback_error}"
-                    ),
-                }),
-            };
-        }
-        branch::finalize_prepared_branch_tracking(tracedecay_dir, &prepared);
-        Ok(())
-    }
-
     pub(crate) async fn track_worktree_branch(
         &self,
         worktree_root: &Path,
@@ -101,7 +50,7 @@ impl TraceDecay {
         };
 
         let sync_result = self
-            .sync_retained_worktree_branch(worktree_root, branch_name, prepared.database_path())
+            .sync_retained_worktree_branch(worktree_root, branch_name)
             .await;
         if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
             return Ok(branch::BranchAddOutcome::Deferred);
@@ -128,15 +77,13 @@ impl TraceDecay {
         &self,
         worktree_root: &Path,
         branch_name: &str,
-        database_path: &Path,
     ) -> Result<Self> {
+        let database_path = &self.store_layout.graph_db_path;
         let db = self
             .store_runtime_registry
-            .code_graph_branch_registered(
-                worktree_root,
+            .project_graph_registered(
                 Self::registered_project_id(&self.store_layout)?,
-                branch_name,
-                database_path.to_path_buf(),
+                database_path.clone(),
                 DatabaseAccessMode::ReadWrite,
             )
             .await?;
@@ -182,12 +129,7 @@ impl TraceDecay {
             }
         };
         drop(branch_graph);
-        Err(Self::retire_branch_runtime_after_failed_sync(
-            &self.store_runtime_registry,
-            database_path,
-            sync_error,
-        )
-        .await)
+        Err(sync_error)
     }
 
     /// Silently bootstraps/maintains tracedecay branch tracking for `branch_name`.
@@ -353,7 +295,6 @@ impl TraceDecay {
                 false,
             )
             .await?;
-            let branch_database_path = graph.db_path();
             let sync_result = graph.sync().await;
             drop(graph);
             match sync_result {
@@ -362,49 +303,8 @@ impl TraceDecay {
                     attempts += 1;
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
-                Err(error) => {
-                    return Err(Self::retire_branch_runtime_after_failed_sync(
-                        &runtime_registry,
-                        &branch_database_path,
-                        error,
-                    )
-                    .await);
-                }
+                Err(error) => return Err(error),
             }
-        }
-    }
-
-    /// Retires the registered runtime for a branch store whose sync failed, so
-    /// the caller can roll the published branch back in this same process.
-    ///
-    /// A branch sync mounts the new branch database through the process-wide
-    /// store runtime registry, and the registry keeps that mount — and the
-    /// database authority lease behind it — alive after the failed
-    /// [`TraceDecay`] handle is dropped. Rollback quarantines the same
-    /// `SQLite` family behind a deletion fence, and a deletion fence refuses
-    /// any database this process still holds an authority for. Without this
-    /// retirement the failure handler reported "this process already holds an
-    /// incompatible database authority or deletion fence" and left the failed
-    /// branch published until some other process cleaned it up.
-    ///
-    /// Retirement failures are folded into the returned error: the caller must
-    /// not attempt a rollback that is still fenced.
-    async fn retire_branch_runtime_after_failed_sync(
-        runtime_registry: &DaemonSessionRuntimeRegistryV1,
-        branch_database_path: &Path,
-        sync_error: TraceDecayError,
-    ) -> TraceDecayError {
-        match runtime_registry
-            .close_code_graph_paths([branch_database_path.to_path_buf()])
-            .await
-        {
-            Ok(()) => sync_error,
-            Err(close_error) => TraceDecayError::Config {
-                message: format!(
-                    "branch sync failed: {sync_error}; the published branch runtime could not be \
-                     retired before rollback: {close_error}"
-                ),
-            },
         }
     }
 
@@ -469,9 +369,10 @@ impl TraceDecay {
         )
     }
 
-    /// Opens a specific branch's DB.
+    /// Opens the canonical project graph with an exact branch provenance scope.
     ///
-    /// Returns an error if the branch is not tracked or the DB doesn't exist.
+    /// Returns an error if the branch is not tracked or the project DB does
+    /// not exist.
     pub async fn open_branch(project_root: &Path, branch_name: &str) -> Result<Self> {
         Self::open_branch_with_options(project_root, branch_name, TraceDecayOpenOptions::default())
             .await
@@ -598,27 +499,27 @@ impl TraceDecay {
             }
         })?;
 
-        let db_path = branch::resolve_branch_db_path(&store_layout.data_root, branch_name, &meta)
-            .ok_or_else(|| TraceDecayError::Config {
-            message: format!("branch '{branch_name}' is not tracked"),
-        })?;
+        branch::resolve_branch_db_path(&store_layout.data_root, branch_name, &meta).ok_or_else(
+            || TraceDecayError::Config {
+                message: format!("branch '{branch_name}' is not tracked"),
+            },
+        )?;
+        let db_path = store_layout.graph_db_path.clone();
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
                 message: format!(
-                    "DB for branch '{branch_name}' not found at '{}'",
+                    "project database for branch provenance '{branch_name}' not found at '{}'",
                     db_path.display()
                 ),
             });
         }
 
-        let db = Self::mount_worktree_graph(
+        let db = Self::mount_project_graph(
             runtime_registry.as_ref(),
             project_root,
             &store_layout,
-            &db_path,
-            Some(branch_name),
             operation,
             access_mode,
         )

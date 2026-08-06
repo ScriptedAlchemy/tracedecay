@@ -1,5 +1,51 @@
+use std::path::Path;
+
 use super::bootstrap::run_git;
 use super::*;
+
+async fn notify_workspace_open(
+    server: &crate::mcp::McpServer,
+    session_id: &str,
+    workspace_root: &Path,
+) {
+    let notification = crate::mcp::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: None,
+        method: "tracedecay/hookEvent".to_owned(),
+        params: Some(serde_json::json!({
+            "agent": "codex",
+            "event": "workspaceOpen",
+            "cwd": workspace_root,
+            "route": {
+                "session_id": session_id,
+                "cwd": workspace_root,
+                "worktree": workspace_root,
+            }
+        })),
+    };
+    assert!(server.handle_request(&notification).await.is_none());
+}
+
+async fn files_for_session(
+    server: &crate::mcp::McpServer,
+    session_id: &str,
+) -> crate::mcp::JsonRpcResponse {
+    let request = crate::mcp::JsonRpcRequest {
+        jsonrpc: "2.0".to_owned(),
+        id: Some(serde_json::json!(1)),
+        method: "tools/call".to_owned(),
+        params: Some(serde_json::json!({
+            "name": "tracedecay_files",
+            "arguments": {
+                "session_id": session_id,
+            },
+        })),
+    };
+    server
+        .handle_request(&request)
+        .await
+        .expect("files response")
+}
 
 #[cfg(unix)]
 #[tokio::test]
@@ -19,14 +65,30 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         &[
             "worktree",
             "add",
-            "--force",
+            "-b",
+            "linked-route",
             linked.to_str().expect("utf-8 linked path"),
-            "main",
         ],
     );
+    std::fs::remove_file(linked.join("README.md")).expect("remove primary-only source");
+    std::fs::write(
+        linked.join("linked.rs"),
+        "pub fn linked_snapshot_only() -> u8 { 2 }\n",
+    )
+    .expect("linked-only source");
 
     let client_identity = test_client_identity_for(profile_root.clone());
-    initialize_test_project(&primary, &client_identity).await;
+    let layout = initialize_test_project(&primary, &client_identity).await;
+    save_scheduled_automation(&layout.dashboard_root, true).await;
+    let stale_project_id = "proj_stale_linked_worktree";
+    crate::storage::write_enrollment_marker(
+        &linked,
+        &crate::storage::EnrollmentMarker {
+            project_id: stale_project_id.to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("write stale linked-worktree marker");
     let _database_scope =
         enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
     let engine = test_daemon_engine_for_profile(&profile_root);
@@ -96,6 +158,50 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         ),
         "the mutable graph writer must be owned by project identity; worktree identity is snapshot provenance"
     );
+    assert_eq!(
+        primary_graph.store_layout().graph_db_path,
+        linked_graph.store_layout().graph_db_path,
+        "both exact worktree views must derive their database authority from the canonical layout locator"
+    );
+    assert!(
+        !profile_root
+            .join("projects")
+            .join(stale_project_id)
+            .exists(),
+        "a stale worktree-local marker must never create or open a second project store"
+    );
+    let branch_store_exists = std::fs::read_dir(layout.data_root.join("branches"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .any(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "db")
+        });
+    assert!(
+        !branch_store_exists,
+        "opening a linked worktree must not create a branch database"
+    );
+
+    let session_id = "session.linked-worktree-follow-up";
+    notify_workspace_open(linked_server.as_ref(), session_id, &linked).await;
+    let routed = files_for_session(primary_server.as_ref(), session_id).await;
+    assert!(
+        routed.error.is_none(),
+        "a follow-up on another daemon server must retain the linked route: {routed:?}"
+    );
+    let routed_text = routed
+        .result
+        .as_ref()
+        .and_then(|result| result["content"].as_array())
+        .and_then(|content| content.first())
+        .and_then(|item| item["text"].as_str())
+        .unwrap_or_else(|| panic!("files response must contain text: {routed:?}"));
+    assert!(routed_text.contains("linked.rs"), "{routed_text}");
+    assert!(!routed_text.contains("README.md"), "{routed_text}");
 
     primary_graph
         .db()
@@ -152,6 +258,76 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         .expect("commit after queued cancellation");
     let primary_key =
         ProjectServerKey::from_open_project(&primary_graph, &primary_handshake).unwrap();
+    let linked_key = ProjectServerKey::from_open_project(&linked_graph, &linked_handshake).unwrap();
+    assert_eq!(
+        primary_key.owner, linked_key.owner,
+        "runtime and automation owners must derive from the canonical StoreLayout locator"
+    );
+    assert!(super::super::scheduler::same_scheduler_owner(
+        &primary_key,
+        &linked_key
+    ));
+    engine
+        .automation_configured_override
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let primary_automation = engine
+        .reconcile_automation_scheduler_locked(
+            primary_key.clone(),
+            primary.clone(),
+            primary_handshake.clone(),
+        )
+        .await;
+    assert!(matches!(
+        primary_automation,
+        crate::dashboard::AutomationSchedulerReconcileOutcome::Started
+            | crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
+    ));
+    let linked_automation = engine
+        .reconcile_automation_scheduler_locked(
+            linked_key.clone(),
+            linked.clone(),
+            linked_handshake.clone(),
+        )
+        .await;
+    assert!(matches!(
+        linked_automation,
+        crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
+            | crate::dashboard::AutomationSchedulerReconcileOutcome::Exiting
+    ));
+    assert_eq!(
+        engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await
+            .len(),
+        1,
+        "linked worktrees must share one project-wide automation owner"
+    );
+
+    {
+        let mut servers = engine.store_administration.project_servers().lock().await;
+        assert!(servers.remove(&linked_key).is_some());
+    }
+    drop(linked_server);
+    let reopened_linked_server = engine
+        .project_server(&linked_handshake)
+        .await
+        .expect("linked worktree must reopen through the retained canonical runtime");
+    let reopened_linked_graph = reopened_linked_server.cg().await;
+    assert_eq!(
+        reopened_linked_graph
+            .db()
+            .retained_runtime()
+            .publication()
+            .publication_id,
+        primary_graph
+            .db()
+            .retained_runtime()
+            .publication()
+            .publication_id,
+        "reopening an exact linked route must not publish a second database owner"
+    );
     {
         let mut servers = engine.store_administration.project_servers().lock().await;
         assert_eq!(servers.servers.len(), 2);
@@ -167,19 +343,14 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
                 primary_handshake.clone(),
             )
             .await,
-        crate::dashboard::AutomationSchedulerReconcileOutcome::OwnerUnavailable
-    ));
-    assert!(matches!(
-        engine
-            .start_memory_repair_scheduler(primary_key, primary, primary_handshake)
-            .await,
-        super::super::memory_repair_scheduler::MemoryRepairSchedulerReconcileOutcome::LifecycleInactive
+        crate::dashboard::AutomationSchedulerReconcileOutcome::RunningNotified
+            | crate::dashboard::AutomationSchedulerReconcileOutcome::Exiting
     ));
     assert!(
         crate::storage::read_enrollment_marker(&linked)
             .expect("read linked marker")
-            .is_none(),
-        "linked route must not acquire a second enrollment marker"
+            .is_some_and(|marker| marker.project_id == stale_project_id),
+        "routing must ignore, not rewrite, a stale worktree-local marker"
     );
     tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
         .await

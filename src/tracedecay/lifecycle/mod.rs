@@ -96,10 +96,9 @@ impl TraceDecay {
         {
             return Err(configuration_runtime_unavailable());
         }
-        let project_id = storage::read_enrollment_marker(project_root)?.map_or_else(
-            || storage::default_profile_project_id(project_root),
-            |marker| marker.project_id,
-        );
+        let project_id = storage::resolve_persisted_layout(project_root, &profile_root)?
+            .and_then(|layout| layout.identity.project_id)
+            .unwrap_or_else(|| storage::default_profile_project_id(project_root));
         let project_id = ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
             message: format!("invalid standalone test project identity: {error}"),
         })?;
@@ -112,51 +111,30 @@ impl TraceDecay {
         .map(Arc::new)
     }
 
-    pub(super) async fn mount_worktree_graph(
+    pub(super) async fn mount_project_graph(
         runtime_registry: &DaemonSessionRuntimeRegistryV1,
         project_root: &Path,
         store_layout: &StoreLayout,
-        db_path: &Path,
-        branch_name: Option<&str>,
         operation: &'static str,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
         let project_id = Self::registered_project_id(store_layout)?;
-        if let Some(branch_name) = branch_name {
-            if matches!(access, DatabaseAccessMode::ReadOnly) {
-                return runtime_registry
-                    .code_graph_branch_registered(
-                        project_root,
-                        project_id,
-                        branch_name,
-                        db_path.to_path_buf(),
-                        access,
-                    )
-                    .await;
-            }
-            let authority = DatabaseAuthority::for_runtime(db_path, operation)?;
-            runtime_registry
-                .code_graph_branch(
-                    project_root,
-                    project_id,
-                    branch_name,
-                    db_path.to_path_buf(),
-                    authority,
-                    access,
-                )
-                .await
-        } else {
-            let authority = DatabaseAuthority::for_runtime(db_path, operation)?;
-            runtime_registry
-                .code_graph_worktree(
-                    project_root,
-                    project_id,
-                    db_path.to_path_buf(),
-                    authority,
-                    access,
-                )
-                .await
+        let canonical_database_path = &store_layout.graph_db_path;
+        if matches!(access, DatabaseAccessMode::ReadOnly) {
+            return runtime_registry
+                .project_graph_registered(project_id, canonical_database_path.clone(), access)
+                .await;
         }
+        let authority = DatabaseAuthority::for_runtime(canonical_database_path, operation)?;
+        runtime_registry
+            .project_graph(
+                project_root,
+                project_id,
+                canonical_database_path.clone(),
+                authority,
+                access,
+            )
+            .await
     }
 
     /// Initializes a new `TraceDecay` project at the given root.
@@ -231,8 +209,10 @@ impl TraceDecay {
         )
         .await?;
         let project_id = Self::registered_project_id(&store_layout)?;
+        let enrollment_root = crate::worktree::repository_identity_root(project_root)
+            .unwrap_or_else(|| project_root.to_path_buf());
         crate::storage::write_enrollment_marker(
-            project_root,
+            &enrollment_root,
             &crate::storage::EnrollmentMarker {
                 project_id: project_id.as_str().to_owned(),
                 storage_mode: crate::storage::StorageMode::ProfileSharded,
@@ -297,12 +277,10 @@ impl TraceDecay {
         // Computed once and reused below (for `active_branch`) instead of
         // calling `branch::current_branch` twice for the same project root.
         let active_branch = branch::current_branch(project_root);
-        let db = Self::mount_worktree_graph(
+        let db = Self::mount_project_graph(
             runtime_registry.as_ref(),
             project_root,
             &store_layout,
-            &store_layout.graph_db_path,
-            active_branch.as_deref(),
             "init",
             DatabaseAccessMode::ReadWrite,
         )
@@ -562,7 +540,6 @@ impl TraceDecay {
             configuration_database,
             profile_database,
             runtime_registry,
-            true,
             false,
         )
         .await
@@ -584,7 +561,6 @@ impl TraceDecay {
             profile_database,
             runtime_registry,
             true,
-            true,
         )
         .await
     }
@@ -596,45 +572,13 @@ impl TraceDecay {
         configuration_database: Arc<RegisteredGlobalDb>,
         profile_database: Arc<RegisteredGlobalDb>,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-        allow_corrupt_branch_repair: bool,
         defer_post_open_health: bool,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
-        let graph_scope = active_branch
-            .clone()
-            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
-        Self::auto_track_active_branch_with_registered_configuration(
-            project_root,
-            &store_layout.data_root,
-            graph_scope.as_deref(),
-            open_options.clone(),
-            &store_layout,
-            &configuration_database,
-            &profile_database,
-            &runtime_registry,
-        )
-        .await?;
-
-        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
-            project_root,
-            &store_layout.data_root,
-            graph_scope.as_deref(),
-        );
-        let serving_branch = if active_branch.is_none() && graph_scope.is_some() {
-            None
-        } else {
-            mounted_graph_scope.clone()
-        };
-
-        // Sync state belongs to the concrete graph DB, not the repository-wide
-        // store root. Different tracked branches have independent databases
-        // and must never clear or inherit one another's dirty marker or lock.
+        let db_path = store_layout.graph_db_path.clone();
+        let serving_branch = None;
+        let fallback_warning = None;
         let active_graph_layout = active_graph_layout(&db_path);
-        let repair_corrupt_branch = allow_corrupt_branch_repair
-            && active_branch.is_some()
-            && active_branch == serving_branch
-            && db_path != store_layout.graph_db_path
-            && db_path.parent() == Some(store_layout.data_root.join("branches").as_path());
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -650,15 +594,10 @@ impl TraceDecay {
         // markers enter recovery and contend for the writer's lock.
         let db = match Self::run_open_health_recovery(
             project_root,
-            open_options.clone(),
             &store_layout,
             &db_path,
-            mounted_graph_scope.as_deref(),
             &active_graph_layout,
-            repair_corrupt_branch,
             defer_post_open_health,
-            Arc::clone(&configuration_database),
-            Arc::clone(&profile_database),
             Arc::clone(&runtime_registry),
         )
         .await?
@@ -821,20 +760,9 @@ impl TraceDecay {
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
-        let graph_scope = active_branch
-            .clone()
-            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
-
-        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
-            project_root,
-            &store_layout.data_root,
-            graph_scope.as_deref(),
-        );
-        let serving_branch = if active_branch.is_none() && graph_scope.is_some() {
-            None
-        } else {
-            mounted_graph_scope.clone()
-        };
+        let db_path = store_layout.graph_db_path.clone();
+        let serving_branch = None;
+        let fallback_warning = None;
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
@@ -846,12 +774,10 @@ impl TraceDecay {
             });
         }
 
-        let db = Self::mount_worktree_graph(
+        let db = Self::mount_project_graph(
             runtime_registry.as_ref(),
             project_root,
             &store_layout,
-            &db_path,
-            mounted_graph_scope.as_deref(),
             "open project store read-only",
             DatabaseAccessMode::ReadOnly,
         )

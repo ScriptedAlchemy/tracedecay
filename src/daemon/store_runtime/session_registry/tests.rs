@@ -641,16 +641,19 @@ async fn worktree_graph_mount_does_not_require_git() {
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
-    let database = registry
-        .project_memory(project_id.clone(), [project_root.clone()])
+    registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
         .await
-        .expect("mount project graph without Git");
-    let database_path = database.database_path().to_path_buf();
-    let authority = DatabaseAuthority::acquire_test(&database_path, "non-git worktree graph mount")
+        .expect("register non-git project authority");
+    let project_store_root = profile_root.join("projects/project.non-git-worktree");
+    let database_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    std::fs::create_dir_all(database_path.parent().expect("database parent"))
+        .expect("database directory");
+    let authority = DatabaseAuthority::for_runtime(&database_path, "non-git project graph mount")
         .expect("database authority");
 
     let database = registry
-        .code_graph_worktree(
+        .project_graph(
             &project_root,
             project_id,
             database_path.clone(),
@@ -737,73 +740,7 @@ async fn linked_worktree_generations_share_the_project_graph_runtime() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_database_replacement_rebinds_after_runtime_retirement() {
-    let temporary = tempfile::tempdir().expect("temporary project parent");
-    let root = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
-    let profile_root = root.join("profile");
-    let project_root = root.join("project");
-    std::fs::create_dir_all(&project_root).expect("project root");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("durable profile identity");
-    let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 12, "code replacement")
-            .expect("daemon database scope");
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    let database_path = profile_root.join("stores/replaced-worktree.db");
-    std::fs::create_dir_all(database_path.parent().expect("database parent"))
-        .expect("database directory");
-    let project_id = ProjectId::new("project.replaced-worktree").expect("project id");
-    let authority =
-        DatabaseAuthority::for_runtime(&database_path, "publish original code database")
-            .expect("original database authority");
-    let database = registry
-        .code_graph_worktree(
-            &project_root,
-            project_id.clone(),
-            database_path.clone(),
-            authority,
-            DatabaseAccessMode::ReadWrite,
-        )
-        .await
-        .expect("original code database");
-    database
-        .checkpoint()
-        .await
-        .expect("checkpoint original database");
-    drop(database);
-
-    registry
-        .close_code_graph_paths([database_path.clone()])
-        .await
-        .expect("retire original code runtime before replacement");
-    let preserved_path = database_path.with_extension("db.preserved");
-    std::fs::rename(&database_path, &preserved_path).expect("preserve original database");
-    rusqlite::Connection::open(&database_path)
-        .expect("create replacement database")
-        .execute_batch("CREATE TABLE replacement(value INTEGER);")
-        .expect("seed replacement database");
-
-    let rebound = registry
-        .code_graph_worktree(
-            &project_root,
-            project_id,
-            database_path.clone(),
-            DatabaseAuthority::for_runtime(&database_path, "publish replacement after retirement")
-                .expect("rebound database authority"),
-            DatabaseAccessMode::ReadWrite,
-        )
-        .await
-        .expect("replacement code database must publish after retirement");
-    assert_eq!(rebound.database_path(), database_path);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
+async fn read_only_project_graph_reuses_daemon_publication_without_write_authority() {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
         .path()
@@ -816,54 +753,64 @@ async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
     let database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 11, "branch publication")
+        crate::db::enter_daemon_database_scope(&profile_root, 11, "project graph publication")
             .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
-    let project_id = ProjectId::new("project.branch-publication").expect("project id");
-    let branch_root = profile_root.join("projects/project.branch-publication/branches");
-    std::fs::create_dir_all(&branch_root).expect("branch database directory");
-    let main_path = branch_root.join("main.db");
-    let unpublished_path = branch_root.join("unpublished.db");
+    let project_id = ProjectId::new("project.graph-publication").expect("project id");
+    crate::storage::write_enrollment_marker(
+        &project_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("project enrollment");
+    registry
+        .project_sessions(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("register project authority");
+    let project_store_root = profile_root.join("projects/project.graph-publication");
+    std::fs::create_dir_all(&project_store_root).expect("project store directory");
+    let main_path = project_store_root.join(crate::config::db_filename(&project_store_root));
+    let unpublished_path = project_store_root.join("unpublished.db");
     rusqlite::Connection::open(&unpublished_path)
         .expect("seed unpublished branch database")
         .execute_batch("CREATE TABLE seed(value INTEGER);")
         .expect("seed unpublished branch schema");
 
-    let main_authority = DatabaseAuthority::for_runtime(&main_path, "publish daemon-owned branch")
-        .expect("daemon branch authority");
+    let main_authority =
+        DatabaseAuthority::for_runtime(&main_path, "publish daemon-owned project graph")
+            .expect("daemon project graph authority");
     assert_eq!(
         main_authority.role(),
         crate::db::DatabaseAuthorityRole::Daemon
     );
     let main = registry
-        .code_graph_branch(
+        .project_graph(
             &project_root,
             project_id.clone(),
-            "main",
             main_path.clone(),
             main_authority,
             DatabaseAccessMode::ReadWrite,
         )
         .await
-        .expect("daemon-owned branch publication");
+        .expect("daemon-owned project graph publication");
     let publication_id = main.retained_runtime().publication().publication_id.clone();
     let unpublished_authority =
-        DatabaseAuthority::for_runtime(&unpublished_path, "reserve unpublished branch")
-            .expect("unpublished daemon branch authority");
+        DatabaseAuthority::for_runtime(&unpublished_path, "reserve unpublished project store")
+            .expect("unpublished daemon project-store authority");
     drop(database_scope);
 
     let read_only = registry
-        .code_graph_branch_registered(
-            &project_root,
+        .project_graph_registered(
             project_id.clone(),
-            "main",
             main_path.clone(),
             DatabaseAccessMode::ReadOnly,
         )
         .await
-        .expect("read-only facade over retained daemon publication");
+        .expect("read-only facade over retained project graph publication");
     assert_eq!(read_only.database_path(), main_path);
     assert_eq!(
         read_only.retained_runtime().publication().publication_id,
@@ -871,10 +818,10 @@ async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
         "read-only publication must reuse the exact retained runtime"
     );
     let write_error = match read_only
-        .begin_write_transaction("write through read-only branch facade")
+        .begin_write_transaction("write through read-only project graph facade")
         .await
     {
-        Ok(_) => panic!("read-only branch facade unexpectedly admitted a write"),
+        Ok(_) => panic!("read-only project graph facade unexpectedly admitted a write"),
         Err(error) => error,
     };
     assert!(
@@ -883,23 +830,17 @@ async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
     );
 
     let unpublished_error = match registry
-        .code_graph_branch_registered(
-            &project_root,
-            project_id,
-            "unpublished",
-            unpublished_path,
-            DatabaseAccessMode::ReadOnly,
-        )
+        .project_graph_registered(project_id, unpublished_path, DatabaseAccessMode::ReadOnly)
         .await
     {
-        Ok(_) => panic!("unpublished branch inherited synthetic write authority"),
+        Ok(_) => panic!("unpublished project store inherited synthetic write authority"),
         Err(error) => error,
     };
     assert!(
         unpublished_error
             .to_string()
-            .contains("managed-daemon or exclusive-maintenance authority"),
-        "unexpected unpublished branch denial: {unpublished_error}"
+            .contains("differs from retained canonical locator"),
+        "unexpected unpublished project store denial: {unpublished_error}"
     );
     drop(unpublished_authority);
 }
@@ -933,7 +874,7 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
         DatabaseAuthority::acquire_test(&database_path, "read-only deletion race")
             .expect("database authority");
     let result = registry
-        .code_graph_worktree(
+        .project_graph(
             &project_root,
             ProjectId::new("project.read-only-race").expect("project id"),
             database_path.clone(),

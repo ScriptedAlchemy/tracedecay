@@ -186,16 +186,17 @@ impl TraceDecay {
         std::sync::Arc::clone(&self.store_runtime_registry)
     }
 
-    async fn project_memory_mount(&self) -> Result<(tracedecay_domain::ProjectId, Vec<PathBuf>)> {
-        let project_id = Self::registered_project_id(&self.store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
-            &self.project_root,
-            &self.store_layout,
-            &project_id,
-            self.profile_database.as_ref(),
-        )
-        .await?;
-        Ok((project_id, enrollment_roots))
+    pub(crate) fn retained_project_store_db(&self) -> Result<Database> {
+        if self.db.canonical_database_path() != self.store_layout.graph_db_path {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "mounted project database '{}' differs from canonical StoreLayout locator '{}'",
+                    self.db.canonical_database_path().display(),
+                    self.store_layout.graph_db_path.display()
+                ),
+            });
+        }
+        Ok(self.db.clone())
     }
 
     pub async fn open_project_store_db(&self) -> Result<Database> {
@@ -205,28 +206,16 @@ impl TraceDecay {
                     .to_string(),
             });
         }
-        if self.db_path() == self.store_layout.graph_db_path {
-            return Ok(self.db.clone());
-        }
-        let (project_id, enrollment_roots) = self.project_memory_mount().await?;
-        self.store_runtime_registry
-            .project_memory(project_id, enrollment_roots)
-            .await
-            .map(|database| database.as_ref().clone())
+        self.retained_project_store_db()
     }
 
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
-        if self.db_path() == self.store_layout.graph_db_path {
-            return Database::publish_runtime(
-                self.db.retained_runtime().clone(),
-                DatabaseAccessMode::ReadOnly,
-            )
-            .await;
-        }
-        let (project_id, enrollment_roots) = self.project_memory_mount().await?;
-        self.store_runtime_registry
-            .project_memory_read_only(project_id, enrollment_roots)
-            .await
+        let database = self.retained_project_store_db()?;
+        Database::publish_runtime(
+            database.retained_runtime().clone(),
+            DatabaseAccessMode::ReadOnly,
+        )
+        .await
     }
 
     fn build_branch_diagnostics(

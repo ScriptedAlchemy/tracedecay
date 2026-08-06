@@ -691,11 +691,14 @@ async fn run_combined_review_for_retrieval(
     }
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let sessions_db = project_automation_sessions(cg).await?;
-    let memory =
-        MemoryApplication::new(cg.project_memory_owner()?, DatabaseFactStore::new(cg.db()))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("could not initialize combined review memory authority: {error}"),
-            })?;
+    let project_memory_db = cg.open_project_store_db().await?;
+    let memory = MemoryApplication::new(
+        cg.project_memory_owner()?,
+        DatabaseFactStore::new(&project_memory_db),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("could not initialize combined review memory authority: {error}"),
+    })?;
     let started_at = current_timestamp().to_string();
 
     let reflector_bundle =

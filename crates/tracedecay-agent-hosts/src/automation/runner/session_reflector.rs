@@ -578,13 +578,16 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
     let sessions_db = super::project_automation_sessions(cg).await?;
-    let memory =
-        MemoryApplication::new(cg.project_memory_owner()?, DatabaseFactStore::new(cg.db()))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!(
-                    "could not initialize project session reflector memory authority: {error}"
-                ),
-            })?;
+    let project_memory_db = cg.open_project_store_db().await?;
+    let memory = MemoryApplication::new(
+        cg.project_memory_owner()?,
+        DatabaseFactStore::new(&project_memory_db),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "could not initialize project session reflector memory authority: {error}"
+        ),
+    })?;
     run_session_reflector_for_store(
         cg.store_layout().dashboard_root.clone(),
         sessions_db,
