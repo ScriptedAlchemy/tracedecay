@@ -1162,11 +1162,24 @@ pub(super) async fn handle_node(cg: &TraceDecay, args: Value) -> Result<ToolResu
             });
             Ok(generic_tool_result(cg, &args, &output, touched_files))
         }
-        None => Ok(text_tool_result(
-            &format!("Node not found: {node_id}"),
-            vec![],
-        )),
+        None => node_not_found_result(node_id),
     }
+}
+
+/// Typed not-found result for node lookups: a structured `status`/`reason_code`
+/// payload marked as a semantic failure, never a success-framed text blob.
+fn node_not_found_result(node_id: &str) -> Result<ToolResult> {
+    let output = json!({
+        "status": "not_found",
+        "reason_code": "node_not_found",
+        "node_id": node_id,
+        "message": format!("Node not found: {node_id}"),
+    });
+    Ok(
+        text_tool_result(&serde_json::to_string_pretty(&output)?, vec![])
+            .with_semantic_error(true)
+            .with_failure_message(format!("node not found: {node_id}")),
+    )
 }
 
 /// Handles `tracedecay_similar` tool calls.
@@ -1317,10 +1330,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
     let new_name = args.get("new_name").and_then(Value::as_str);
 
     let Some(node) = cg.get_node(node_id).await? else {
-        return Ok(text_tool_result(
-            &format!("Node not found: {node_id}"),
-            vec![],
-        ));
+        return node_not_found_result(node_id);
     };
     let symbol_name = node.name.clone();
 
@@ -1399,7 +1409,7 @@ pub(super) async fn handle_rename_preview(cg: &TraceDecay, args: Value) -> Resul
 
     let output = json!({
         "read_only": true,
-        "note": "Preview only — no files are edited. 'references' are graph reference \
+        "note": "Preview only — nothing is edited. 'references' are graph reference \
                  sites (the declaration is reported separately in 'node'); \
                  'text_only_matches' are literal name occurrences NOT backed by a graph \
                  edge (comments, strings, dynamic dispatch, unresolved refs) and must be \
@@ -1663,7 +1673,7 @@ pub(super) async fn handle_implementations(
 
     if trait_name.is_none() && method_name.is_none() {
         return Err(TraceDecayError::Config {
-            message: "tracedecay_implementations requires either 'trait' or 'method'".to_string(),
+            message: "missing required parameter: 'trait' or 'method'".to_string(),
         });
     }
     if trait_name.is_some() && method_name.is_some() {

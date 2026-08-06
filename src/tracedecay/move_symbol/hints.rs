@@ -12,6 +12,9 @@ use super::use_parsing::parse_use_statements;
 pub(super) struct DependencyAnalysis {
     /// `use` lines to auto-insert at the destination (unambiguous, visible).
     pub(super) auto_imports: Vec<String>,
+    /// Single-leaf source `use` lines only the moved body needed; the move
+    /// removes them from the source so it does not leave dead imports behind.
+    pub(super) orphaned_source_imports: Vec<String>,
     /// Findings that need caller attention.
     pub(super) hints: Vec<MoveHint>,
 }

@@ -21,7 +21,11 @@ pub(super) fn def_test_map() -> ToolDefinition {
                     "type": "string",
                     "description": "Specific node ID to find test coverage for (alternative to file)"
                 }
-            }
+            },
+            "anyOf": [
+                { "required": ["file"] },
+                { "required": ["node_id"] }
+            ]
         }),
     )
 }
