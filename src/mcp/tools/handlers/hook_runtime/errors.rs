@@ -35,9 +35,10 @@ pub(crate) fn structured_hook_error_data(error: &TraceDecayError) -> Option<Valu
 fn hook_admission_error_status(reason_code: &str) -> HostAdmissionStatus {
     match reason_code {
         "unknown_provider" => HostAdmissionStatus::Unknown,
-        "authority_unavailable" | "authority_write_failed" | "observation_storage_failed" => {
-            HostAdmissionStatus::Unavailable
-        }
+        "authority_unavailable"
+        | "authority_write_failed"
+        | "observation_storage_failed"
+        | "temporal_refresh_unavailable" => HostAdmissionStatus::Unavailable,
         "cursor_conflict" | "observation_cursor_conflict" | "observation_cancelled" => {
             HostAdmissionStatus::Backpressured
         }
