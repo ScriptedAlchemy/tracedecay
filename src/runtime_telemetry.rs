@@ -348,7 +348,11 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
             d.runtime_registry.aggregate.writer_transaction_micros,
             d.runtime_registry.aggregate.committed_batches,
         ),
-        runtime_wal = bytes_human(d.runtime_registry.aggregate.wal_bytes),
+        runtime_wal = d
+            .runtime_registry
+            .aggregate
+            .wal_bytes
+            .map_or_else(|| "unknown".to_owned(), bytes_human),
     )
 }
 

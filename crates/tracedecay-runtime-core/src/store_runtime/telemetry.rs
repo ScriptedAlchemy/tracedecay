@@ -104,9 +104,9 @@ pub struct ShardRuntimeTelemetry {
     pub leases: ShardRuntimeLeaseCounts,
     pub writer_busy_events: u64,
     pub writer: Option<PhysicalWriterRuntimeSnapshot>,
-    pub wal_bytes: u64,
+    pub wal_bytes: Option<u64>,
     pub wal_budget: WalBudgetV1,
-    pub memory_estimate_bytes: u64,
+    pub memory_estimate_bytes: Option<u64>,
     pub health: ShardRuntimeHealth,
     pub pinned_profile: bool,
     pub idle_for_ms: u64,
@@ -201,8 +201,10 @@ pub struct RuntimeTelemetryAggregate {
     pub scheduler_leases: u64,
     pub client_leases: u64,
     pub total_leases: u64,
-    pub wal_bytes: u64,
-    pub memory_estimate_bytes: u64,
+    /// Sum of current WAL samples, present only when every observed shard was sampled.
+    pub wal_bytes: Option<u64>,
+    /// Sum of current memory estimates, present only when every observed shard was sampled.
+    pub memory_estimate_bytes: Option<u64>,
     /// Current global admission usage, when the owning authority exposes it.
     pub global_queued_bytes: Option<u64>,
 }
@@ -300,10 +302,11 @@ impl RuntimeTelemetryAggregate {
             .saturating_add(u64::from(health.scheduler_leases))
             .saturating_add(u64::from(health.client_leases));
         self.total_leases = self.total_leases.saturating_add(lease_total);
-        self.wal_bytes = self.wal_bytes.saturating_add(health.wal_bytes);
-        self.memory_estimate_bytes = self
-            .memory_estimate_bytes
-            .saturating_add(health.memory_estimate_bytes);
+        self.wal_bytes = sum_complete_sample(self.wal_bytes, entry.physical.wal_bytes);
+        self.memory_estimate_bytes = sum_complete_sample(
+            self.memory_estimate_bytes,
+            entry.physical.memory_estimate_bytes,
+        );
     }
 }
 
@@ -342,10 +345,16 @@ fn project_runtime_telemetry_with_limit(
         returned_shards: bounded_count(returned_len),
         omitted_shards: bounded_count(inventory_len.saturating_sub(returned_len)),
         global_queued_bytes: inventory.global_queued_bytes,
+        wal_bytes: Some(0),
+        memory_estimate_bytes: Some(0),
         ..RuntimeTelemetryAggregate::default()
     };
     aggregate.states.opening = inventory.opening_shards;
     aggregate.health.unknown = inventory.opening_shards;
+    if inventory.opening_shards > 0 {
+        aggregate.wal_bytes = None;
+        aggregate.memory_estimate_bytes = None;
+    }
     for entry in &entries {
         aggregate.observe(entry);
     }
@@ -386,9 +395,9 @@ fn project_shard(
         leases: ShardRuntimeLeaseCounts::from_health(health),
         writer_busy_events: entry.physical.writer_busy_events,
         writer: entry.physical.writer,
-        wal_bytes: health.wal_bytes,
+        wal_bytes: entry.physical.wal_bytes,
         wal_budget: admission.wal.clone(),
-        memory_estimate_bytes: health.memory_estimate_bytes,
+        memory_estimate_bytes: entry.physical.memory_estimate_bytes,
         health: health.health,
         pinned_profile: health.pinned_profile,
         idle_for_ms: duration_millis(entry.eviction.idle_for),
@@ -406,6 +415,10 @@ fn compare_binding(left: &StoreRuntimeBindingV1, right: &StoreRuntimeBindingV1) 
 
 fn bounded_count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn sum_complete_sample(total: Option<u64>, sample: Option<u64>) -> Option<u64> {
+    Some(total?.saturating_add(sample?))
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -477,13 +490,18 @@ mod tests {
         health: ShardRuntimeHealthSnapshot,
         blockers: Vec<ShardRuntimeEvictionBlocker>,
     ) -> RuntimeRegistryInventoryEntry {
+        let physical = PhysicalRuntimeSnapshot {
+            wal_bytes: Some(health.wal_bytes),
+            memory_estimate_bytes: Some(health.memory_estimate_bytes),
+            ..PhysicalRuntimeSnapshot::default()
+        };
         RuntimeRegistryInventoryEntry {
             eviction: ShardRuntimeEvictionEligibility {
                 idle_for: health.idle_for,
                 blockers,
             },
             health,
-            physical: PhysicalRuntimeSnapshot::default(),
+            physical,
         }
     }
 
@@ -528,8 +546,8 @@ mod tests {
         assert_eq!(projection.aggregate.queued_operations, 9);
         assert_eq!(projection.aggregate.queued_bytes, 2_304);
         assert_eq!(projection.aggregate.total_leases, 21);
-        assert_eq!(projection.aggregate.wal_bytes, 24_576);
-        assert_eq!(projection.aggregate.memory_estimate_bytes, 49_152);
+        assert_eq!(projection.aggregate.wal_bytes, Some(24_576));
+        assert_eq!(projection.aggregate.memory_estimate_bytes, Some(49_152));
         assert_eq!(projection.aggregate.global_queued_bytes, Some(2_048));
         assert_eq!(
             projection.per_shard_queue_budget,
@@ -620,6 +638,8 @@ mod tests {
         assert_eq!(projection.aggregate.omitted_shards, 2);
         assert_eq!(projection.aggregate.states.opening, 2);
         assert_eq!(projection.aggregate.health.unknown, 2);
+        assert_eq!(projection.aggregate.wal_bytes, None);
+        assert_eq!(projection.aggregate.memory_estimate_bytes, None);
     }
 
     #[test]
@@ -630,6 +650,22 @@ mod tests {
         let projection = project_runtime_telemetry(&inventory);
 
         assert_eq!(projection.aggregate.global_queued_bytes, None);
+    }
+
+    #[test]
+    fn projection_does_not_fabricate_missing_physical_usage_samples() {
+        let health = fixture_health("project.unknown-usage", 1, RuntimeMaintenanceStateV1::Ready);
+        let mut entry = entry(health, vec![]);
+        entry.physical.wal_bytes = None;
+        entry.physical.memory_estimate_bytes = None;
+
+        let projection = project_runtime_telemetry(&inventory(vec![entry]));
+        let shard = projection.shards.first().unwrap();
+
+        assert_eq!(shard.wal_bytes, None);
+        assert_eq!(shard.memory_estimate_bytes, None);
+        assert_eq!(projection.aggregate.wal_bytes, None);
+        assert_eq!(projection.aggregate.memory_estimate_bytes, None);
     }
 
     #[test]
@@ -677,8 +713,8 @@ mod tests {
         assert_eq!(shard.queued_operations, 4);
         assert_eq!(shard.queued_bytes, 1_024);
         assert_eq!(shard.leases.general_readers, 1);
-        assert_eq!(shard.wal_bytes, 65_536);
-        assert_eq!(shard.memory_estimate_bytes, 131_072);
+        assert_eq!(shard.wal_bytes, None);
+        assert_eq!(shard.memory_estimate_bytes, None);
         assert_eq!(shard.health, ShardRuntimeHealth::Degraded);
         assert!(shard.pinned_profile);
         assert!(!shard.eviction_eligible);
