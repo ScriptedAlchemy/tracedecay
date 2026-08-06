@@ -15,7 +15,7 @@ use super::{
 use crate::advisory::context_allows_feedback_operation;
 use tracedecay_runtime_core::db::Database;
 
-const STORE_KEY_DOMAIN_V1: &str = "tracedecay.pr13.github.store-key.v1";
+const STORE_KEY_DOMAIN_V1: &str = "tracedecay.advisory.github.store-key.v1";
 const STORE_KEY_PREFIX_V1: &str = "feedback.github-review.refresh.v1.";
 const MAX_STORED_REFRESH_BYTES_V1: usize = 4 * 1024 * 1024;
 

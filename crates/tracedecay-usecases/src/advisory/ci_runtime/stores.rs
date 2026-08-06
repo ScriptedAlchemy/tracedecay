@@ -28,7 +28,7 @@ use crate::advisory::context_allows_feedback_operation;
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 
-const RETAINED_KEY_DOMAIN_V1: &str = "tracedecay.pr13.ci.retained-key.v1";
+const RETAINED_KEY_DOMAIN_V1: &str = "tracedecay.advisory.ci.retained-key.v1";
 const RETAINED_KEY_PREFIX_V1: &str = "feedback.ci-failure.retained.v1.";
 const MAX_RETAINED_BYTES_V1: usize = 4 * 1024 * 1024;
 
@@ -61,7 +61,7 @@ impl ProjectCiRetainedObservationStoreV1 {
         record: &GitHubCiProviderRecordV1,
     ) -> Option<CiRetainedProviderObservationV1> {
         let digest = canonical_sha256(&(
-            "tracedecay.pr13.ci.retained-observation.v1",
+            "tracedecay.advisory.ci.retained-observation.v1",
             &request.scope,
             &request.run,
             record.run_identity(),
@@ -71,7 +71,7 @@ impl ProjectCiRetainedObservationStoreV1 {
         let failure_anchor = match record.failed_annotation() {
             Some(annotation) => {
                 let anchor_digest = canonical_sha256(&(
-                    "tracedecay.pr13.ci.failure-anchor.v1",
+                    "tracedecay.advisory.ci.failure-anchor.v1",
                     &annotation.path,
                     annotation.start_line,
                     annotation.end_line,
@@ -86,7 +86,7 @@ impl ProjectCiRetainedObservationStoreV1 {
             }
             None => {
                 let anchor_digest = canonical_sha256(&(
-                    "tracedecay.pr13.ci.failure-anchor.job.v1",
+                    "tracedecay.advisory.ci.failure-anchor.job.v1",
                     &request.run,
                     record.failed_step().map(|step| step.number),
                 ))
@@ -391,7 +391,7 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
                 .collect::<Vec<_>>();
             generation_edges.sort_unstable();
             let Ok(generation_digest) = canonical_sha256(&(
-                "tracedecay.pr13.ci.graph-generation.v1",
+                "tracedecay.advisory.ci.graph-generation.v1",
                 &request.scope.project_id,
                 &request.scope.worktree_id,
                 &request.scope.head_commit_id,

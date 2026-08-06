@@ -44,7 +44,7 @@ parameters). The bundled `using-the-cli` skill and always-applied rule use
 that CLI fallback when MCP transport errors or times out, instead of querying
 `.tracedecay` databases.
 
-## PR13 desktop native diagnostics
+## Desktop native diagnostics
 
 Cursor desktop installs the unpacked `tracedecay.cursor-native` VS Code
 extension through TraceDecay's receipt-backed host-component lifecycle. Reload
@@ -70,7 +70,7 @@ starting a toolchain. Use `tracedecay_diagnostics` only when fresh structured
 diagnostics are needed; it runs the relevant type checker, so respect Cursor's
 approval/run mode even though the tool does not edit the workspace.
 
-`tracedecay lsp servers [--json]` is the separate PR12 CLI discovery command
+`tracedecay lsp servers [--json]` is the separate CLI discovery command
 for supported local language servers and install hints. It is informational:
 it does not install or start a server. It is **not** an MCP tool, so do not add
 it (or a wildcard) to `mcpAllowlist`.

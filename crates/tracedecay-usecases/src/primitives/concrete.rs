@@ -350,7 +350,7 @@ mod tests {
     fn authenticated_cursor_rechecks_query_snapshot_bindings() {
         let (scope, context, _) = application_context("symbol-graph");
         let key = SignedCursorKeyRefV1 {
-            key_id: SessionCursorKeyIdV1::new("cursor.pr12").expect("key id"),
+            key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key id"),
             version: SessionCursorVersionV1::new(1).expect("key version"),
         };
         let authenticator =
@@ -380,7 +380,7 @@ mod tests {
                 &scope,
                 &context,
                 SignedCursorKeyRefV1 {
-                    key_id: SessionCursorKeyIdV1::new("cursor.pr12").expect("key id"),
+                    key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key id"),
                     version: SessionCursorVersionV1::new(1).expect("key version"),
                 },
                 12,
@@ -411,7 +411,7 @@ mod tests {
         watermark: u64,
     ) -> TemporalExecutionSnapshot {
         let request = TemporalSnapshotRequest::new(
-            SessionId::new("session.pr12.symbol-graph").expect("session"),
+            SessionId::new("session.symbol-graph").expect("session"),
             scope.scope_digest.as_str(),
             format!("sha256:{}", "d".repeat(64)),
             context.grant().digest.as_str(),

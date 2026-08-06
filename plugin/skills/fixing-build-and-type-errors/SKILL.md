@@ -22,7 +22,7 @@ Announce: "Using tracedecay:fixing-build-and-type-errors."
 Always prefer the free row. Respect the host's approval/run-mode before
 running fresh toolchain checks.
 
-## PR12 LSP discovery
+## LSP server discovery
 
 When an editor-language-server availability question is material to the
 diagnosis, run `tracedecay lsp servers --json`. This is a CLI-only,

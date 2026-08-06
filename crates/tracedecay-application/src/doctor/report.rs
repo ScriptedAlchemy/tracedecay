@@ -1,4 +1,4 @@
-//! Doctor report composition (Plan 09 §PR14, Plan 11 finding journey).
+//! Doctor report composition.
 //!
 //! [`DoctorReportComposerV1`] is the one entry point that gathers findings across
 //! every [`DoctorFindingFamilyV1`] from the narrow source ports in
@@ -418,7 +418,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         self
     }
 
-    /// Wire the canonical durable Plan-26 read model (Observability family).
+    /// Wire the canonical durable feedback read model (Observability family).
     #[must_use]
     pub fn with_observability(mut self, port: &'a dyn ObservabilityDoctorPort) -> Self {
         self.observability = Some(port);

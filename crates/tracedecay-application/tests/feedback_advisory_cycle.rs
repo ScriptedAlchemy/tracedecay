@@ -45,22 +45,22 @@ fn finding(id: &str, retrieval_anchor_id: RetrievalAnchorId) -> FeedbackFindingV
 #[test]
 fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
     let scope = scope();
-    let file = FileOccurrenceId::new("file.pr13.fixture").unwrap();
-    let symbol = SymbolOccurrenceId::new("symbol.pr13.fixture").unwrap();
-    let caller = SymbolOccurrenceId::new("symbol.pr13.caller").unwrap();
-    let test_symbol = SymbolOccurrenceId::new("symbol.pr13.test").unwrap();
-    let generation = CodeGenerationId::new("generation.pr13.fixture").unwrap();
+    let file = FileOccurrenceId::new("file.feedback-cycle.fixture").unwrap();
+    let symbol = SymbolOccurrenceId::new("symbol.feedback-cycle.fixture").unwrap();
+    let caller = SymbolOccurrenceId::new("symbol.feedback-cycle.caller").unwrap();
+    let test_symbol = SymbolOccurrenceId::new("symbol.feedback-cycle.test").unwrap();
+    let generation = CodeGenerationId::new("generation.feedback-cycle.fixture").unwrap();
     let span = SourceSpan {
         start_byte: 10,
         end_byte: 20,
     };
-    let post_edit_anchor = anchor("anchor.pr13.post-edit");
-    let ci_anchor = anchor("anchor.pr13.ci");
-    let github_anchor = anchor("anchor.pr13.github");
-    let proximity_anchor = anchor("anchor.pr13.proximity");
+    let post_edit_anchor = anchor("anchor.feedback-cycle.post-edit");
+    let ci_anchor = anchor("anchor.feedback-cycle.ci");
+    let github_anchor = anchor("anchor.feedback-cycle.github");
+    let proximity_anchor = anchor("anchor.feedback-cycle.proximity");
 
     let request = FeedbackCycleRequestV1::new(
-        FeedbackCycleId::new("cycle.pr13.fixture").unwrap(),
+        FeedbackCycleId::new("cycle.feedback-cycle.fixture").unwrap(),
         scope.clone(),
         FeedbackContentIdentityV1::SavedContent {
             generation_digest: digest(SHA_A),
@@ -73,10 +73,10 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
     )
     .unwrap();
     let findings = vec![
-        finding("finding.pr13.post-edit", post_edit_anchor.clone()),
-        finding("finding.pr13.ci", ci_anchor.clone()),
-        finding("finding.pr13.github", github_anchor.clone()),
-        finding("finding.pr13.proximity", proximity_anchor.clone()),
+        finding("finding.feedback-cycle.post-edit", post_edit_anchor.clone()),
+        finding("finding.feedback-cycle.ci", ci_anchor.clone()),
+        finding("finding.feedback-cycle.github", github_anchor.clone()),
+        finding("finding.feedback-cycle.proximity", proximity_anchor.clone()),
     ];
     let impact = FeedbackImpactV1 {
         target: FeedbackTargetV1 {
@@ -138,26 +138,26 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
         },
         generation: Some(CiFailureGenerationEvidenceV1 {
             generation_id: generation.clone(),
-            retrieval_anchor_id: anchor("anchor.pr13.ci-generation"),
+            retrieval_anchor_id: anchor("anchor.feedback-cycle.ci-generation"),
         }),
         symbol: Some(CiFailureSymbolEvidenceV1 {
-            retrieval_anchor_id: anchor("anchor.pr13.ci-symbol"),
+            retrieval_anchor_id: anchor("anchor.feedback-cycle.ci-symbol"),
             file: file.clone(),
             span,
             symbol: symbol.clone(),
         }),
         callers: vec![CiFailureCallerEvidenceV1 {
-            retrieval_anchor_id: anchor("anchor.pr13.ci-caller"),
+            retrieval_anchor_id: anchor("anchor.feedback-cycle.ci-caller"),
             caller_symbol: caller,
             relation: CiCallerRelationV1::DirectCall,
         }],
         tests: vec![CiFailureTestEvidenceV1 {
-            retrieval_anchor_id: anchor("anchor.pr13.ci-test"),
+            retrieval_anchor_id: anchor("anchor.feedback-cycle.ci-test"),
             test_symbol,
         }],
         rerun_hints: vec![CiInertRerunHintV1 {
             target: CiInertRerunTargetV1::Test,
-            retrieval_anchor_id: Some(anchor("anchor.pr13.ci-rerun-hint")),
+            retrieval_anchor_id: Some(anchor("anchor.feedback-cycle.ci-rerun-hint")),
         }],
         observed_at: UtcMicros(1),
     };
@@ -178,9 +178,9 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
         provider: provider.clone(),
         scope: scope.clone(),
         pull_request_id: pull_request_id.clone(),
-        provider_base_commit_id: CommitId::new("commit.pr13.base").unwrap(),
+        provider_base_commit_id: CommitId::new("commit.feedback-cycle.base").unwrap(),
         provider_head_commit_id: scope.head_commit_id.clone(),
-        merge_base_commit_id: CommitId::new("commit.pr13.merge-base").unwrap(),
+        merge_base_commit_id: CommitId::new("commit.feedback-cycle.merge-base").unwrap(),
         operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
         outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
         coverage: GitHubReviewCoverageV1::Complete,
@@ -193,12 +193,12 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
             comment_id: GitHubReviewCommentIdV1::new("comment.1").unwrap(),
             reply_to_comment_id: None,
             version_digest: digest(SHA_A),
-            author_anchor: anchor("anchor.pr13.github-author"),
+            author_anchor: anchor("anchor.feedback-cycle.github-author"),
             author_class: GitHubReviewAuthorClassV1::Maintainer,
             review_state: GitHubReviewStateV1::Commented,
             body_digest: digest(SHA_B),
             body_anchor: github_anchor.clone(),
-            safe_url_anchor: Some(anchor("anchor.pr13.github-url")),
+            safe_url_anchor: Some(anchor("anchor.feedback-cycle.github-url")),
             safe_url: Some(
                 "https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1".to_owned(),
             ),
@@ -254,7 +254,9 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
         GitHubReviewReadResponseV1 {
             ingress: github.clone(),
             checkpoint: GitHubReviewReadCheckpointV1 {
-                next_cursor: Some(GitHubReviewCursorV1::new("cursor.pr13.fixture").unwrap()),
+                next_cursor: Some(
+                    GitHubReviewCursorV1::new("cursor.feedback-cycle.fixture").unwrap(),
+                ),
                 ..empty_checkpoint
             },
         }
@@ -263,7 +265,8 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
         "complete coverage cannot retain a continuation cursor"
     );
     let mut stale_github = github.clone();
-    stale_github.provider_head_commit_id = CommitId::new("commit.pr13.stale-head").unwrap();
+    stale_github.provider_head_commit_id =
+        CommitId::new("commit.feedback-cycle.stale-head").unwrap();
     stale_github.outcome = GitHubReviewIngressProviderOutcomeV1::Stale;
     stale_github.coverage = GitHubReviewCoverageV1::Stale;
     stale_github.items[0].provider_outcome = GitHubReviewIngressProviderOutcomeV1::Stale;

@@ -158,7 +158,7 @@ fn github_source_locator(repository_owner: &str, repository_name: &str) -> Optio
         return None;
     }
     let digest = canonical_sha256(&(
-        "tracedecay.pr13.github.source-locator.v1",
+        "tracedecay.advisory.github.source-locator.v1",
         repository_owner,
         repository_name,
     ))

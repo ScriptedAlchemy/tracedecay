@@ -97,7 +97,7 @@ impl RegisteredGlobalDb {
     }
 }
 
-/// Transitional PR8 rendering adapter over one registry-owned session shard.
+/// Registry-backed rendering adapter over one session shard.
 pub struct RegisteredGlobalDbSessionTemporalExecution<'db> {
     db: &'db RegisteredGlobalDb,
 }
