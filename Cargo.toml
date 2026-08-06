@@ -119,7 +119,7 @@ include = [
     "/plugin/cursor-native-extension/package.json",
     "/plugin/cursor-native-extension/README.md",
     "/plugin/cursor-native-extension/LICENSE",
-    "/plugin/cursor-native-extension/dist/extension.js",
+    "/plugin/cursor-native-extension/embedded/extension.js",
     "/vendor/**",
     "/dashboard/app-dist/**",
     "/dashboard/hermes-wrapper/manifest.json",
