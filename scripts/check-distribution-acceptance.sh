@@ -484,6 +484,7 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   --release \
   --features semantic-fastembed \
   --lib \
+  --run-ignored all \
   --config "$patch_config" \
   --no-tests=fail
 
