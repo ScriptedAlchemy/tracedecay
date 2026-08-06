@@ -31,6 +31,8 @@ export interface PageOptions {
 export interface OperationRequestOptions {
   page?: PageOptions;
   signal?: AbortSignal;
+  /** Absolute UTC deadline in microseconds, forwarded to daemon admission. */
+  deadlineMicros?: number;
 }
 
 export type OperationMethod<Name extends OperationName> = (
@@ -836,6 +838,20 @@ export class TraceDecayClient {
     }
     const headers = this.headers("application/json");
     headers.set("content-type", "application/json");
+    if (options.deadlineMicros !== undefined) {
+      if (
+        !Number.isSafeInteger(options.deadlineMicros) ||
+        options.deadlineMicros <= 0
+      ) {
+        throw new TraceDecayProtocolError(
+          "deadlineMicros must be a positive safe integer",
+        );
+      }
+      headers.set(
+        "x-tracedecay-deadline-micros",
+        String(options.deadlineMicros),
+      );
+    }
     const response = await this.fetchResponse(
       url,
       {

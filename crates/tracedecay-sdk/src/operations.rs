@@ -1,7 +1,15 @@
 //! Generated typed public operation descriptors. DO NOT EDIT.
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracedecay_tool_catalog::{EffectClass, IdempotencyContract};
+use tracedecay_tool_catalog::{
+    DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
+};
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnavailableOperationCapability {
+    pub operation: &'static str,
+    pub operation_id: &'static str,
+    pub disposition: ExecutableUnavailableDispositionV1,
+}
 pub trait TypedOperation {
     type Request: Serialize;
     type Result: DeserializeOwned;
@@ -10,13 +18,16 @@ pub trait TypedOperation {
     const BINDING_ID: &'static str;
     const EFFECT: EffectClass;
     const IDEMPOTENCY: IdempotencyContract;
+    const MAXIMUM_DEADLINE_MILLIS: u64;
+    const DEADLINE_BEHAVIOR: DeadlineBehavior;
     const RESULT_SCHEMA_ID: &'static str;
     const RESULT_SCHEMA_REVISION: u32;
 }
 macro_rules! typed_operation {
     (
         $name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal,
-        $effect:expr, $idempotency:expr, $schema:literal, $revision:literal
+        $effect:expr, $idempotency:expr, $maximum_deadline:literal,
+        $deadline_behavior:expr, $schema:literal, $revision:literal
     ) => {
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
         pub struct $name;
@@ -28,11 +39,480 @@ macro_rules! typed_operation {
             const BINDING_ID: &'static str = $binding;
             const EFFECT: EffectClass = $effect;
             const IDEMPOTENCY: IdempotencyContract = $idempotency;
+            const MAXIMUM_DEADLINE_MILLIS: u64 = $maximum_deadline;
+            const DEADLINE_BEHAVIOR: DeadlineBehavior = $deadline_behavior;
             const RESULT_SCHEMA_ID: &'static str = $schema;
             const RESULT_SCHEMA_REVISION: u32 = $revision;
         }
     };
 }
+pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[
+    UnavailableOperationCapability {
+        operation: "application_affected_tests",
+        operation_id: "operation.application.affected_tests",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_api_migration_apply",
+        operation_id: "operation.application.api_migration_apply",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_api_migration_plan",
+        operation_id: "operation.application.api_migration_plan",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_ast_grep_rewrite",
+        operation_id: "operation.application.ast_grep_rewrite",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_call_chain",
+        operation_id: "operation.application.call_chain",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_callees",
+        operation_id: "operation.application.code_callees",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_callers",
+        operation_id: "operation.application.code_callers",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_declaration",
+        operation_id: "operation.application.code_declaration",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_definition",
+        operation_id: "operation.application.code_definition",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_exact_occurrence",
+        operation_id: "operation.application.code_exact_occurrence",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_facets",
+        operation_id: "operation.application.code_facets",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_implementations",
+        operation_id: "operation.application.code_implementations",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_phrase_search",
+        operation_id: "operation.application.code_phrase_search",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_references",
+        operation_id: "operation.application.code_references",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_signature_search",
+        operation_id: "operation.application.code_signature_search",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_symbol_search",
+        operation_id: "operation.application.code_symbol_search",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_timeline",
+        operation_id: "operation.application.code_timeline",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_type_definition",
+        operation_id: "operation.application.code_type_definition",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_code_type_hierarchy",
+        operation_id: "operation.application.code_type_hierarchy",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_audit",
+        operation_id: "operation.application.configuration_audit",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_batch",
+        operation_id: "operation.application.configuration_batch",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_explain",
+        operation_id: "operation.application.configuration_explain",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_get",
+        operation_id: "operation.application.configuration_get",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_list",
+        operation_id: "operation.application.configuration_list",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_observed_state",
+        operation_id: "operation.application.configuration_observed_state",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_protected_apply",
+        operation_id: "operation.application.configuration_protected_apply",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_protected_preview",
+        operation_id: "operation.application.configuration_protected_preview",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_rollback_apply",
+        operation_id: "operation.application.configuration_rollback_apply",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_rollback_preview",
+        operation_id: "operation.application.configuration_rollback_preview",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_set",
+        operation_id: "operation.application.configuration_set",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_unset",
+        operation_id: "operation.application.configuration_unset",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_configuration_write_credential",
+        operation_id: "operation.application.configuration_write_credential",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_budget",
+        operation_id: "operation.application.context_scout_budget",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_cancel",
+        operation_id: "operation.application.context_scout_cancel",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_capability",
+        operation_id: "operation.application.context_scout_capability",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_claim",
+        operation_id: "operation.application.context_scout_claim",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_delivery",
+        operation_id: "operation.application.context_scout_delivery",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_explain",
+        operation_id: "operation.application.context_scout_explain",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_feedback",
+        operation_id: "operation.application.context_scout_feedback",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_pause",
+        operation_id: "operation.application.context_scout_pause",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_recent",
+        operation_id: "operation.application.context_scout_recent",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_resume",
+        operation_id: "operation.application.context_scout_resume",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context_scout_status",
+        operation_id: "operation.application.context_scout_status",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_diagnostics_read",
+        operation_id: "operation.application.diagnostics_read",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_fact_feedback",
+        operation_id: "operation.application.fact_feedback",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_fact_store",
+        operation_id: "operation.application.fact_store",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_feedback_advisory_cycle",
+        operation_id: "operation.application.feedback_advisory_cycle",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_feedback_diagnostics",
+        operation_id: "operation.application.feedback_diagnostics",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_feedback_expand",
+        operation_id: "operation.application.feedback_expand",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_feedback_get",
+        operation_id: "operation.application.feedback_get",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_feedback_impact",
+        operation_id: "operation.application.feedback_impact",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_feedback_list",
+        operation_id: "operation.application.feedback_list",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_file_dependents",
+        operation_id: "operation.application.file_dependents",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_file_metadata",
+        operation_id: "operation.application.file_metadata",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_git_apply",
+        operation_id: "operation.application.git_apply",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_git_blame",
+        operation_id: "operation.application.git_blame",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_git_diff",
+        operation_id: "operation.application.git_diff",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_git_history",
+        operation_id: "operation.application.git_history",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_git_hunks",
+        operation_id: "operation.application.git_hunks",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_git_preview",
+        operation_id: "operation.application.git_preview",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_git_status",
+        operation_id: "operation.application.git_status",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_health_delta",
+        operation_id: "operation.application.health_delta",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_health_read",
+        operation_id: "operation.application.health_read",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_insert_at",
+        operation_id: "operation.application.insert_at",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_insert_at_symbol",
+        operation_id: "operation.application.insert_at_symbol",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_compress",
+        operation_id: "operation.application.lcm_compress",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_describe",
+        operation_id: "operation.application.lcm_describe",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_doctor",
+        operation_id: "operation.application.lcm_doctor",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_expand",
+        operation_id: "operation.application.lcm_expand",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_expand_query",
+        operation_id: "operation.application.lcm_expand_query",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_grep",
+        operation_id: "operation.application.lcm_grep",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_load_session",
+        operation_id: "operation.application.lcm_load_session",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_preflight",
+        operation_id: "operation.application.lcm_preflight",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_session_boundary",
+        operation_id: "operation.application.lcm_session_boundary",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_lcm_status",
+        operation_id: "operation.application.lcm_status",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_memory_status",
+        operation_id: "operation.application.memory_status",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_message_search",
+        operation_id: "operation.application.message_search",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_module_api",
+        operation_id: "operation.application.module_api",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_move_symbol",
+        operation_id: "operation.application.move_symbol",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_multi_str_replace",
+        operation_id: "operation.application.multi_str_replace",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_qualified_name",
+        operation_id: "operation.application.qualified_name",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_replace_symbol",
+        operation_id: "operation.application.replace_symbol",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_session_lookup",
+        operation_id: "operation.application.session_lookup",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_session_refresh",
+        operation_id: "operation.application.session_refresh",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_sessions_for",
+        operation_id: "operation.application.sessions_for",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_source_body",
+        operation_id: "operation.application.source_body",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_source_edit_reconcile",
+        operation_id: "operation.application.source_edit_reconcile",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_source_lines",
+        operation_id: "operation.application.source_lines",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_source_outline",
+        operation_id: "operation.application.source_outline",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_storage_status",
+        operation_id: "operation.application.storage_status",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_str_replace",
+        operation_id: "operation.application.str_replace",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_test_results",
+        operation_id: "operation.application.test_results",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_workflows",
+        operation_id: "operation.application.workflows",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+];
 #[allow(clippy::all)]
 pub mod work_accept_proposal {
     pub mod request {
@@ -1010,6 +1490,8 @@ typed_operation!(
     "binding.http.work.accept_proposal",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.accept_proposal.result",
     1
 );
@@ -1854,6 +2336,8 @@ typed_operation!(
     "binding.http.work.accept_task",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.accept_task.result",
     1
 );
@@ -2698,6 +3182,8 @@ typed_operation!(
     "binding.http.work.admit_execution",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.admit_execution.result",
     1
 );
@@ -3683,6 +4169,8 @@ typed_operation!(
     "binding.http.work.attach_runtime_evidence",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attach_runtime_evidence.result",
     1
 );
@@ -7915,6 +8403,8 @@ typed_operation!(
     "binding.http.work.attempt_acquire_lease",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_acquire_lease.result",
     1
 );
@@ -10772,6 +11262,8 @@ typed_operation!(
     "binding.http.work.attempt_cancel",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_cancel.result",
     1
 );
@@ -13555,6 +14047,8 @@ typed_operation!(
     "binding.http.work.attempt_finish",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_finish.result",
     1
 );
@@ -16416,6 +16910,8 @@ typed_operation!(
     "binding.http.work.attempt_publish_artifact",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_publish_artifact.result",
     1
 );
@@ -19172,6 +19668,8 @@ typed_operation!(
     "binding.http.work.attempt_publish_progress",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_publish_progress.result",
     1
 );
@@ -21977,6 +22475,8 @@ typed_operation!(
     "binding.http.work.attempt_recover",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_recover.result",
     1
 );
@@ -24700,6 +25200,8 @@ typed_operation!(
     "binding.http.work.attempt_renew_lease",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_renew_lease.result",
     1
 );
@@ -27766,6 +28268,8 @@ typed_operation!(
     "binding.http.work.attempt_start",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_start.result",
     1
 );
@@ -30709,6 +31213,8 @@ typed_operation!(
     "binding.http.work.attempt_terminalize",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.attempt_terminalize.result",
     1
 );
@@ -31567,6 +32073,8 @@ typed_operation!(
     "binding.http.work.create",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.create.result",
     1
 );
@@ -32663,6 +33171,8 @@ typed_operation!(
     "binding.http.work.delta",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
     "schema.work.delta.result",
     1
 );
@@ -33523,6 +34033,8 @@ typed_operation!(
     "binding.http.work.replan_dependencies",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.replan_dependencies.result",
     1
 );
@@ -34583,6 +35095,8 @@ typed_operation!(
     "binding.http.work.review_proposal",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.work.review_proposal.result",
     1
 );
@@ -35582,6 +36096,8 @@ typed_operation!(
     "binding.http.work.snapshot",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
     "schema.work.snapshot.result",
     1
 );
@@ -35831,6 +36347,8 @@ typed_operation!(
     "binding.http.workflow.activate_definition",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.workflow.activate_definition.result",
     1
 );
@@ -38170,6 +38688,8 @@ typed_operation!(
     "binding.http.workflow.execute_fan_out",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.workflow.execute_fan_out.result",
     1
 );
@@ -39560,6 +40080,8 @@ typed_operation!(
     "binding.http.workflow.handoff_issue",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.workflow.handoff_issue.result",
     1
 );
@@ -40824,6 +41346,8 @@ typed_operation!(
     "binding.http.workflow.handoff_redeem",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.workflow.handoff_redeem.result",
     1
 );
@@ -41895,6 +42419,8 @@ typed_operation!(
     "binding.http.workflow.register_definition",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
     "schema.workflow.register_definition.result",
     1
 );
