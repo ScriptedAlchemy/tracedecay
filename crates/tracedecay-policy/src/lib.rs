@@ -16,6 +16,7 @@ pub mod hint_delivery;
 pub mod replay;
 pub mod retrieval_selection;
 pub mod routing;
+pub mod work_loop;
 
 pub use analyzer::*;
 pub use authorization::*;
@@ -26,3 +27,4 @@ pub use hint_delivery::*;
 pub use replay::*;
 pub use retrieval_selection::*;
 pub use routing::*;
+pub use work_loop::*;
