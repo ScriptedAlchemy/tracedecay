@@ -835,19 +835,30 @@ impl DaemonEngine {
         // Fence Git mutation admission and join every transaction store actor
         // before project servers close, so no native Git work outlives the
         // stores it journals into.
-        if let Err(error) = self
+        match self
             .store_administration
             .git_index_transaction_services()
             .shutdown()
             .await
         {
-            log_daemon_event(
+            Ok(receipt) => log_daemon_event(
+                "daemon_shutdown",
+                &[
+                    ("outcome", "git_transactions_joined".to_string()),
+                    ("services_closed", receipt.services_closed.to_string()),
+                    (
+                        "store_actors_joined",
+                        receipt.store_actors_joined.to_string(),
+                    ),
+                ],
+            ),
+            Err(error) => log_daemon_event(
                 "daemon_shutdown",
                 &[
                     ("outcome", "git_transaction_shutdown_failed".to_string()),
                     ("error", format!("{error:?}")),
                 ],
-            );
+            ),
         }
         shutdown_project_servers(&self.store_administration).await;
     }
