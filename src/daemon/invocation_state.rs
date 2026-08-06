@@ -231,6 +231,16 @@ impl DaemonInvocationState {
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
             .map(
                 |((((handle, database), lifecycle), resources), worktree_id)| {
+                    let graph: Arc<
+                        dyn crate::application::semantic_runtime::SemanticVectorGraphProviderV1,
+                    > = Arc::new(
+                        code_index_scheduler::semantic_vector_graph::DaemonSemanticVectorGraphProviderV1::new(
+                            project_id.clone(),
+                            canonical_project_root.clone(),
+                            self.code_index_schedulers.clone(),
+                            Arc::clone(&graph_runtime),
+                        ),
+                    );
                     crate::application::semantic_runtime::production_saved_generation_schedule_hook(
                         crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
                             project_root: project_root.to_path_buf(),
@@ -238,6 +248,7 @@ impl DaemonInvocationState {
                             worktree_id,
                             handle: handle.clone(),
                             database,
+                            graph,
                             lifecycle,
                             resources,
                             fair_scheduler: self.semantic_projection_scheduler.clone(),

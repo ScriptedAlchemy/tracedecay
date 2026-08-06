@@ -485,19 +485,32 @@ pub(super) fn read_state_metadata(
     snapshot: &GraphSnapshot,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<NativeStateMetadataV1, VectorGenerationStoreErrorV1> {
+    read_optional_state_metadata(snapshot, cancellation)?.ok_or_else(|| {
+        VectorGenerationStoreErrorV1::Unavailable(
+            "semantic vector graph projection is missing".to_owned(),
+        )
+    })
+}
+
+/// Like [`read_state_metadata`], but a graph that has never installed the
+/// semantic-vector projection reads as `None` ("no vectors exist") instead of
+/// an unavailability error. Read paths that admit an empty store use this;
+/// mutation paths keep requiring the installed projection.
+pub(super) fn read_optional_state_metadata(
+    snapshot: &GraphSnapshot,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<Option<NativeStateMetadataV1>, VectorGenerationStoreErrorV1> {
     let namespace = graph_namespace()?;
-    let telemetry = snapshot
+    let Some(telemetry) = snapshot
         .projection_telemetry(GraphProjectionTelemetryRequest {
             namespace: namespace.clone(),
             projection: graph_projection()?,
             cancellation: Arc::clone(&cancellation),
         })
         .map_err(map_graph_error)?
-        .ok_or_else(|| {
-            VectorGenerationStoreErrorV1::Unavailable(
-                "semantic vector graph projection is missing".to_owned(),
-            )
-        })?;
+    else {
+        return Ok(None);
+    };
     let control = snapshot
         .entity(
             &namespace,
@@ -523,12 +536,12 @@ pub(super) fn read_state_metadata(
             .and_then(|row| required_u64(&row, ROW_COUNT))?,
         None => 0,
     };
-    Ok(NativeStateMetadataV1 {
+    Ok(Some(NativeStateMetadataV1 {
         watermark: telemetry.watermark,
         revision: required_u64(&control, REVISION)?,
         active_generation,
         active_row_count,
-    })
+    }))
 }
 
 pub(super) fn read_generation_metadata(

@@ -25,7 +25,7 @@ pub use reclaim::VectorGenerationReclaimReceiptV1;
 
 use native_records::{
     read_build_records, read_cataloged_generation_records, read_generation_metadata,
-    read_state_metadata,
+    read_optional_state_metadata, read_state_metadata,
 };
 use persistence::{
     check_cancelled, generation_label, graph_namespace, graph_projection, map_graph_error,
@@ -200,6 +200,14 @@ impl GraphVectorGenerationStoreV1 {
         Ok(store)
     }
 
+    /// Read-only handle over an already-resolved graph runtime. Unlike
+    /// [`Self::open`] this never installs or verifies the projection: a graph
+    /// that has never published a semantic-vector generation reads as "no
+    /// vectors" on the identity-filtered read surface.
+    pub fn read_only(graph: Arc<GraphDb>) -> Self {
+        Self { graph }
+    }
+
     fn verify_existing_state(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
@@ -298,7 +306,8 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
         let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        read_state_metadata(&snapshot, cancellation).map(|metadata| metadata.active_generation)
+        read_optional_state_metadata(&snapshot, cancellation)
+            .map(|metadata| metadata.and_then(|metadata| metadata.active_generation))
     }
 
     /// Read the active immutable generation together with the monotonic
@@ -312,7 +321,10 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<ActiveGraphVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
         let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
+        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
+        else {
+            return Ok(None);
+        };
         let Some(active) = metadata.active_generation.as_ref() else {
             return Ok(None);
         };
@@ -364,9 +376,12 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, VectorGenerationStoreErrorV1> {
         let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let metadata = read_state_metadata(&snapshot, cancellation)?;
-        Ok(metadata.revision == revision
-            && metadata.active_generation.as_ref() == Some(generation_id))
+        Ok(
+            read_optional_state_metadata(&snapshot, cancellation)?.is_some_and(|metadata| {
+                metadata.revision == revision
+                    && metadata.active_generation.as_ref() == Some(generation_id)
+            }),
+        )
     }
 
     pub async fn staged_checkpoint(
@@ -384,7 +399,10 @@ impl GraphVectorGenerationStoreV1 {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<super::PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
         let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
+        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
+        else {
+            return Ok(None);
+        };
         metadata
             .active_generation
             .as_ref()
