@@ -600,11 +600,25 @@ impl GitHubReadOnlyCredentialV1 {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::advisory::github_runtime) fn authorization_header_for(
         &self,
         permission: GitHubReadPermissionV1,
     ) -> Result<Option<Zeroizing<String>>, ()> {
         match self.authorization_for_stored_repository(permission) {
+            GitHubCredentialAuthorizationV1::Private(header) => Ok(Some(header)),
+            GitHubCredentialAuthorizationV1::Anonymous => Ok(None),
+            GitHubCredentialAuthorizationV1::Denied => Err(()),
+        }
+    }
+
+    pub(in crate::advisory::github_runtime) fn authorization_header_for_repository(
+        &self,
+        owner: &str,
+        repository: &str,
+        permission: GitHubReadPermissionV1,
+    ) -> Result<Option<Zeroizing<String>>, ()> {
+        match self.authorization_for_repository(owner, repository, permission) {
             GitHubCredentialAuthorizationV1::Private(header) => Ok(Some(header)),
             GitHubCredentialAuthorizationV1::Anonymous => Ok(None),
             GitHubCredentialAuthorizationV1::Denied => Err(()),

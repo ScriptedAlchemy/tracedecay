@@ -109,10 +109,11 @@ pub use credential::{
 };
 pub use model::{GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubRepositoryTargetV1};
 pub use review::GitHubReadOnlyClientV1;
+pub use transport::GitHubHttpReadClientV1;
+pub(in crate::advisory::github_runtime) use transport::HttpResponseV1;
 use transport::{
-    HttpResponseV1, decode_ureq_response, merge_rate_limit, network_failure, page_from_cursor,
-    parse_bounded, request_context_admitted, valid_ci_page, valid_full_commit_id,
-    valid_path_segment, wait_for_read,
+    merge_rate_limit, network_failure, page_from_cursor, parse_bounded, request_context_admitted,
+    valid_ci_page, valid_full_commit_id, valid_path_segment,
 };
 
 #[cfg(test)]

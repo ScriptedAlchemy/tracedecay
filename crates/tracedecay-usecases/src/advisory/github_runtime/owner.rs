@@ -9,10 +9,7 @@ use super::decoder::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubOfficialResponseDecoderV1,
     GitHubReviewProviderIdentityV1,
 };
-use super::network::{
-    GitHubHttpReadConfigV1, GitHubReadOnlyClientV1, GitHubReadOnlyCredentialV1,
-    GitHubRepositoryTargetV1,
-};
+use super::network::GitHubReadOnlyClientV1;
 use super::store::ProjectGitHubReviewStoreV1;
 use super::{
     GitHubReadOnlyRuntimeTransportV1, GitHubReviewBodyEvidenceAuthorityV1,
@@ -29,9 +26,7 @@ pub struct GitHubReviewRuntimeOwnerConfigV1 {
     pub database: Database,
     pub resolved_scope: ResolvedScope,
     pub feedback_scope: FeedbackScopeV1,
-    pub target: GitHubRepositoryTargetV1,
-    pub credential: GitHubReadOnlyCredentialV1,
-    pub http: GitHubHttpReadConfigV1,
+    pub client: GitHubReadOnlyClientV1,
     pub identity: GitHubReviewProviderIdentityV1,
 }
 
@@ -110,11 +105,10 @@ where
     .map_err(map_admission_error)?;
     let store = ProjectGitHubReviewStoreV1::new(config.database, config.feedback_scope)
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::StoreUnavailable)?;
-    let client = GitHubReadOnlyClientV1::new(config.target, config.credential, config.http)
-        .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidNetworkConfiguration)?;
     let decoder = GitHubOfficialResponseDecoderV1::new(config.identity, anchors.clone())
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidDecoderConfiguration)?;
-    let transport = GitHubReadOnlyRuntimeTransportV1::new(store.clone(), client.clone(), decoder);
+    let transport =
+        GitHubReadOnlyRuntimeTransportV1::new(store.clone(), config.client.clone(), decoder);
     let connector = GitHubReadOnlyConnector::new(descriptors, transport, remapper)
         .map_err(map_admission_error)?;
     Ok(GitHubReviewRuntimeOwnerV1 {

@@ -1,6 +1,114 @@
 use super::*;
+use futures_util::StreamExt;
+use reqwest::header::HeaderMap;
+use zeroize::Zeroizing;
 
-pub(super) enum HttpResponseV1 {
+const GITHUB_HTTP_READ_CONCURRENCY_V1: usize = 4;
+
+#[derive(Clone)]
+pub struct GitHubHttpReadClientV1 {
+    pub(super) client: reqwest::Client,
+    pub(super) permits: Arc<tokio::sync::Semaphore>,
+    pub(in crate::advisory::github_runtime) config: GitHubHttpReadConfigV1,
+}
+
+impl GitHubHttpReadClientV1 {
+    pub fn new(config: GitHubHttpReadConfigV1) -> Option<Self> {
+        config
+            .validate()
+            .then(|| Self::build(config, true))
+            .flatten()
+    }
+
+    pub(super) fn build(config: GitHubHttpReadConfigV1, https_only: bool) -> Option<Self> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(config.connect_timeout)
+            .read_timeout(config.socket_timeout)
+            .timeout(config.request_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(https_only)
+            .build()
+            .ok()?;
+        Some(Self {
+            client,
+            permits: Arc::new(tokio::sync::Semaphore::new(GITHUB_HTTP_READ_CONCURRENCY_V1)),
+            config,
+        })
+    }
+
+    pub(in crate::advisory::github_runtime) async fn execute<F>(
+        &self,
+        context: Option<&RequestContext>,
+        maximum: usize,
+        authorize: F,
+        build: impl FnOnce(&reqwest::Client) -> reqwest::RequestBuilder,
+    ) -> HttpResponseV1
+    where
+        F: Fn() -> Result<Option<Zeroizing<String>>, ()>,
+    {
+        if context.is_some_and(|context| !request_context_admitted(context)) || authorize().is_err()
+        {
+            return HttpResponseV1::Denied;
+        }
+        let permit = match wait_for_context(context, self.permits.acquire()).await {
+            Some(Ok(permit)) => permit,
+            _ => return HttpResponseV1::Unavailable,
+        };
+        let authorization = match authorize() {
+            Ok(authorization) => authorization,
+            Err(()) => return HttpResponseV1::Denied,
+        };
+        let mut request = build(&self.client);
+        if let Some(authorization) = authorization.as_ref() {
+            request = request.header("Authorization", authorization.as_str());
+        }
+        let response = match wait_for_context(context, request.send()).await {
+            Some(Ok(response)) => response,
+            _ => return HttpResponseV1::Unavailable,
+        };
+        let status = response.status();
+        let headers = response.headers().clone();
+        if response
+            .content_length()
+            .is_some_and(|length| length > maximum as u64)
+        {
+            return HttpResponseV1::Unavailable;
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        loop {
+            let next = match wait_for_context(context, stream.next()).await {
+                Some(next) => next,
+                None => return HttpResponseV1::Unavailable,
+            };
+            let Some(chunk) = next else {
+                break;
+            };
+            let Ok(chunk) = chunk else {
+                return HttpResponseV1::Unavailable;
+            };
+            if body.len().saturating_add(chunk.len()) > maximum {
+                return HttpResponseV1::Unavailable;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if context.is_some_and(|context| !request_context_admitted(context)) {
+            return HttpResponseV1::Unavailable;
+        }
+        if authorize().is_err() {
+            return HttpResponseV1::Denied;
+        }
+        drop(permit);
+        decode_http_response(status, &headers, body)
+    }
+
+    #[cfg(test)]
+    pub(super) fn available_permits(&self) -> usize {
+        self.permits.available_permits()
+    }
+}
+
+pub(in crate::advisory::github_runtime) enum HttpResponseV1 {
     Ok {
         body: Vec<u8>,
         etag: Option<GitHubReviewEtagV1>,
@@ -15,6 +123,7 @@ pub(super) enum HttpResponseV1 {
         checkpoint: Option<GitHubReviewRateLimitCheckpointV1>,
         retry_at: Option<UtcMicros>,
     },
+    NotFound,
     Denied,
     Unavailable,
 }
@@ -39,27 +148,17 @@ pub(super) fn network_failure(failure: HttpResponseV1) -> GitHubReadNetworkOutco
     }
 }
 
-pub(super) fn decode_ureq_response(
-    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-    maximum: usize,
+pub(super) fn decode_http_response(
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    body: Vec<u8>,
 ) -> HttpResponseV1 {
-    let Ok(mut response) = response else {
-        return HttpResponseV1::Unavailable;
-    };
-    let rate_limit = rate_limit_checkpoint(response.headers());
-    match response.status().as_u16() {
+    let rate_limit = rate_limit_checkpoint(headers);
+    match status.as_u16() {
         200 => {
-            let etag = header(response.headers(), "etag")
-                .and_then(|value| GitHubReviewEtagV1::new(value).ok());
-            let next_page = next_page(response.headers());
-            let Ok(body) = response
-                .body_mut()
-                .with_config()
-                .limit(maximum as u64)
-                .read_to_vec()
-            else {
-                return HttpResponseV1::Unavailable;
-            };
+            let etag =
+                header(headers, "etag").and_then(|value| GitHubReviewEtagV1::new(value).ok());
+            let next_page = next_page(headers);
             HttpResponseV1::Ok {
                 body,
                 etag,
@@ -68,13 +167,13 @@ pub(super) fn decode_ureq_response(
             }
         }
         304 => HttpResponseV1::NotModified {
-            etag: header(response.headers(), "etag")
-                .and_then(|value| GitHubReviewEtagV1::new(value).ok()),
+            etag: header(headers, "etag").and_then(|value| GitHubReviewEtagV1::new(value).ok()),
             rate_limit,
         },
         401 => HttpResponseV1::Denied,
+        404 => HttpResponseV1::NotFound,
         403 | 429 => {
-            let retry_at = retry_after_at(response.headers());
+            let retry_at = retry_after_at(headers);
             let checkpoint = retry_after_checkpoint(rate_limit.as_ref(), retry_at)
                 .or_else(|| rate_limit.filter(|limit| limit.remaining == 0));
             if checkpoint.is_some() || retry_at.is_some() {
@@ -90,13 +189,18 @@ pub(super) fn decode_ureq_response(
     }
 }
 
-pub(super) async fn wait_for_read<T: Send + 'static>(
-    context: &RequestContext,
-    task: tokio::task::JoinHandle<T>,
+async fn wait_for_context<T>(
+    context: Option<&RequestContext>,
+    future: impl std::future::Future<Output = T>,
 ) -> Option<T> {
-    tokio::select! {
-        result = task => result.ok(),
-        () = wait_for_interruption(context) => None,
+    match context {
+        Some(context) => {
+            tokio::select! {
+                result = future => Some(result),
+                () = wait_for_interruption(context) => None,
+            }
+        }
+        None => Some(future.await),
     }
 }
 
@@ -130,7 +234,7 @@ pub(super) fn page_from_cursor(cursor: Option<&GitHubReviewCursorV1>) -> Option<
     }
 }
 
-pub(super) fn next_page(headers: &ureq::http::HeaderMap) -> Option<u32> {
+pub(super) fn next_page(headers: &HeaderMap) -> Option<u32> {
     let link = header(headers, "link")?;
     let next = link
         .split(',')
@@ -143,7 +247,7 @@ pub(super) fn next_page(headers: &ureq::http::HeaderMap) -> Option<u32> {
 }
 
 pub(super) fn rate_limit_checkpoint(
-    headers: &ureq::http::HeaderMap,
+    headers: &HeaderMap,
 ) -> Option<GitHubReviewRateLimitCheckpointV1> {
     let checkpoint = GitHubReviewRateLimitCheckpointV1 {
         limit: header(headers, "x-ratelimit-limit")?.parse().ok()?,
@@ -172,7 +276,7 @@ pub(super) fn retry_after_checkpoint(
     checkpoint.validate().is_ok().then_some(checkpoint)
 }
 
-pub(super) fn retry_after_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
+pub(super) fn retry_after_at(headers: &HeaderMap) -> Option<UtcMicros> {
     const MAX_RETRY_AFTER_SECONDS_V1: i64 = 24 * 60 * 60;
     let delay_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
     if !(0..=MAX_RETRY_AFTER_SECONDS_V1).contains(&delay_seconds) {
@@ -207,7 +311,7 @@ pub(super) fn parse_bounded<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .flatten()
 }
 
-pub(super) fn header(headers: &ureq::http::HeaderMap, name: &str) -> Option<String> {
+pub(super) fn header(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())

@@ -22,8 +22,11 @@ use super::super::github_runtime::{
     GitHubActionsCheckRunV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
     GitHubActionsWorkflowJobV1, GitHubActionsWorkflowRunV1, GitHubActionsWorkflowStepV1,
     GitHubCheckAnnotationV1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
-    GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,
-    GitHubReadOnlyCredentialV1,
+    GitHubCiTransportOutcomeV1,
+};
+#[cfg(test)]
+use super::super::github_runtime::{
+    GitHubHttpReadClientV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
 };
 use super::{
     CiExactEvidenceAuthorityV1, CiProviderReadResultV1, CiReadOnlyProviderArchiveV1,
@@ -46,6 +49,9 @@ pub use provider::{
     unavailable_production_ci_provider_authorities_v1,
 };
 
+#[cfg(test)]
+#[path = "production/tests/concurrency.rs"]
+mod concurrency_tests;
 #[cfg(test)]
 #[path = "production/tests/discovery.rs"]
 mod discovery_tests;

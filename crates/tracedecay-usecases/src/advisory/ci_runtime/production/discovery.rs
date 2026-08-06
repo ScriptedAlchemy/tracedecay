@@ -1,13 +1,15 @@
 use super::provider::context_admitted_for_ci_discovery;
 use super::*;
+use std::collections::BTreeMap;
+
+use futures_util::{StreamExt, stream};
 
 #[derive(Clone)]
 pub struct ProductionCiProviderConfigV1 {
     pub provider: ProviderId,
     pub parser: CiFailureParserIdentityV1,
     pub target: GitHubCiRepositoryTargetV1,
-    pub credential: GitHubReadOnlyCredentialV1,
-    pub http: GitHubHttpReadConfigV1,
+    pub client: GitHubCiReadOnlyClientV1,
     pub source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 }
 
@@ -146,14 +148,7 @@ pub async fn discover_production_ci_failure_request_v1(
     if !production_ci_discovery_configuration_is_valid(config, scope) {
         return ProductionCiFailureDiscoveryOutcomeV1::Unavailable;
     }
-    let Some(client) = GitHubReadOnlyClientV1::new_for_ci(
-        config.target.clone(),
-        config.credential.clone(),
-        config.http.clone(),
-    ) else {
-        return ProductionCiFailureDiscoveryOutcomeV1::Unavailable;
-    };
-    discover_production_ci_failure_request_with_v1(context, config, scope, &client).await
+    discover_production_ci_failure_request_with_v1(context, config, scope, &config.client).await
 }
 
 pub(super) async fn discover_production_ci_failure_request_with_v1(
@@ -195,17 +190,18 @@ pub(super) async fn discover_production_ci_failure_request_scan_v1(
         Ok(run) => run,
         Err(outcome) => return outcome,
     };
-    let workflow_jobs =
-        match collect_workflow_jobs(context, config, scope, client, workflow_run.id).await {
-            Ok(records) => records,
-            Err(outcome) => return outcome,
-        };
-    let check_runs =
-        match collect_check_runs(context, config, scope, client, workflow_run.check_suite_id).await
-        {
-            Ok(records) => records,
-            Err(outcome) => return outcome,
-        };
+    let (workflow_jobs, check_runs) = tokio::join!(
+        collect_workflow_jobs(context, config, scope, client, workflow_run.id),
+        collect_check_runs(context, config, scope, client, workflow_run.check_suite_id)
+    );
+    let workflow_jobs = match workflow_jobs {
+        Ok(records) => records,
+        Err(outcome) => return outcome,
+    };
+    let check_runs = match check_runs {
+        Ok(records) => records,
+        Err(outcome) => return outcome,
+    };
     select_production_ci_failure_request_v1(
         &config.provider,
         &config.target,
@@ -259,29 +255,78 @@ pub(super) async fn collect_workflow_runs(
     scope: &FeedbackScopeV1,
     client: &dyn ProductionCiDiscoveryReadPortV1,
 ) -> Result<Vec<GitHubActionsWorkflowRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
+    authorize_ci_source(context, config, scope).await?;
+    let body = discovery_response_body(
+        client
+            .read_workflow_runs_for_head(context, scope.head_commit_id.as_str(), 1)
+            .await,
+    )?;
+    authorize_ci_source(context, config, scope).await?;
+    let first = serde_json::from_slice::<GitHubActionsWorkflowRunsPageV1>(&body)
+        .map_err(discovery_decode_failure)?;
     let mut records = Vec::new();
     let mut expected_total = None;
-    for page_number in 1..=MAX_CI_DISCOVERY_PAGES_V1 {
-        authorize_ci_source(context, config, scope).await?;
-        let body = discovery_response_body(
-            client
-                .read_workflow_runs_for_head(context, scope.head_commit_id.as_str(), page_number)
-                .await,
-        )?;
-        authorize_ci_source(context, config, scope).await?;
-        let page = serde_json::from_slice::<GitHubActionsWorkflowRunsPageV1>(&body)
-            .map_err(discovery_decode_failure)?;
-        if append_discovery_page(
+    if append_discovery_page(
+        &mut records,
+        &mut expected_total,
+        first.total_count,
+        first.workflow_runs,
+        |record| record.id,
+    )? {
+        return Ok(records);
+    }
+    let page_count = discovery_page_count(expected_total)?;
+    let mut reads = stream::iter(2..=page_count)
+        .map(|page_number| async move {
+            let result = async {
+                authorize_ci_source(context, config, scope).await?;
+                let body = discovery_response_body(
+                    client
+                        .read_workflow_runs_for_head(
+                            context,
+                            scope.head_commit_id.as_str(),
+                            page_number,
+                        )
+                        .await,
+                )?;
+                authorize_ci_source(context, config, scope).await?;
+                serde_json::from_slice::<GitHubActionsWorkflowRunsPageV1>(&body)
+                    .map_err(discovery_decode_failure)
+            }
+            .await;
+            (page_number, result)
+        })
+        .buffer_unordered(4);
+    let mut pages = BTreeMap::new();
+    while let Some((page_number, result)) = reads.next().await {
+        if result
+            .as_ref()
+            .is_err_and(|outcome| terminal_discovery_outcome(outcome))
+        {
+            return Err(result
+                .err()
+                .unwrap_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable));
+        }
+        pages.insert(page_number, result);
+    }
+    for page_number in 2..=page_count {
+        let page = pages
+            .remove(&page_number)
+            .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)??;
+        let complete = append_discovery_page(
             &mut records,
             &mut expected_total,
             page.total_count,
             page.workflow_runs,
             |record| record.id,
-        )? {
-            return Ok(records);
+        )?;
+        if complete != (page_number == page_count) {
+            return Err(ProductionCiFailureDiscoveryOutcomeV1::Failed(
+                CiFailureSourceFailureV1::Schema,
+            ));
         }
     }
-    Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
+    Ok(records)
 }
 
 pub(super) async fn collect_workflow_jobs(
@@ -291,29 +336,70 @@ pub(super) async fn collect_workflow_jobs(
     client: &dyn ProductionCiDiscoveryReadPortV1,
     run_id: u64,
 ) -> Result<Vec<GitHubActionsWorkflowJobV1>, ProductionCiFailureDiscoveryOutcomeV1> {
+    authorize_ci_source(context, config, scope).await?;
+    let body = discovery_response_body(client.read_workflow_jobs(context, run_id, 1).await)?;
+    authorize_ci_source(context, config, scope).await?;
+    let first = serde_json::from_slice::<GitHubActionsWorkflowJobsPageV1>(&body)
+        .map_err(discovery_decode_failure)?;
     let mut records = Vec::new();
     let mut expected_total = None;
-    for page_number in 1..=MAX_CI_DISCOVERY_PAGES_V1 {
-        authorize_ci_source(context, config, scope).await?;
-        let body = discovery_response_body(
-            client
-                .read_workflow_jobs(context, run_id, page_number)
-                .await,
-        )?;
-        authorize_ci_source(context, config, scope).await?;
-        let page = serde_json::from_slice::<GitHubActionsWorkflowJobsPageV1>(&body)
-            .map_err(discovery_decode_failure)?;
-        if append_discovery_page(
+    if append_discovery_page(
+        &mut records,
+        &mut expected_total,
+        first.total_count,
+        first.jobs,
+        |record| record.id,
+    )? {
+        return Ok(records);
+    }
+    let page_count = discovery_page_count(expected_total)?;
+    let mut reads = stream::iter(2..=page_count)
+        .map(|page_number| async move {
+            let result = async {
+                authorize_ci_source(context, config, scope).await?;
+                let body = discovery_response_body(
+                    client
+                        .read_workflow_jobs(context, run_id, page_number)
+                        .await,
+                )?;
+                authorize_ci_source(context, config, scope).await?;
+                serde_json::from_slice::<GitHubActionsWorkflowJobsPageV1>(&body)
+                    .map_err(discovery_decode_failure)
+            }
+            .await;
+            (page_number, result)
+        })
+        .buffer_unordered(4);
+    let mut pages = BTreeMap::new();
+    while let Some((page_number, result)) = reads.next().await {
+        if result
+            .as_ref()
+            .is_err_and(|outcome| terminal_discovery_outcome(outcome))
+        {
+            return Err(result
+                .err()
+                .unwrap_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable));
+        }
+        pages.insert(page_number, result);
+    }
+    for page_number in 2..=page_count {
+        let page = pages
+            .remove(&page_number)
+            .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)??;
+        let complete = append_discovery_page(
             &mut records,
             &mut expected_total,
             page.total_count,
             page.jobs,
             |record| record.id,
-        )? {
-            return Ok(records);
+        )?;
+        if complete != (page_number == page_count) {
+            return Err(ProductionCiFailureDiscoveryOutcomeV1::Failed(
+                CiFailureSourceFailureV1::Schema,
+            ));
         }
     }
-    Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
+    Ok(records)
 }
 
 pub(super) async fn collect_check_runs(
@@ -323,29 +409,89 @@ pub(super) async fn collect_check_runs(
     client: &dyn ProductionCiDiscoveryReadPortV1,
     check_suite_id: u64,
 ) -> Result<Vec<GitHubActionsCheckRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
+    authorize_ci_source(context, config, scope).await?;
+    let body = discovery_response_body(client.read_check_runs(context, check_suite_id, 1).await)?;
+    authorize_ci_source(context, config, scope).await?;
+    let first = serde_json::from_slice::<GitHubActionsCheckRunsPageV1>(&body)
+        .map_err(discovery_decode_failure)?;
     let mut records = Vec::new();
     let mut expected_total = None;
-    for page_number in 1..=MAX_CI_DISCOVERY_PAGES_V1 {
-        authorize_ci_source(context, config, scope).await?;
-        let body = discovery_response_body(
-            client
-                .read_check_runs(context, check_suite_id, page_number)
-                .await,
-        )?;
-        authorize_ci_source(context, config, scope).await?;
-        let page = serde_json::from_slice::<GitHubActionsCheckRunsPageV1>(&body)
-            .map_err(discovery_decode_failure)?;
-        if append_discovery_page(
+    if append_discovery_page(
+        &mut records,
+        &mut expected_total,
+        first.total_count,
+        first.check_runs,
+        |record| record.id,
+    )? {
+        return Ok(records);
+    }
+    let page_count = discovery_page_count(expected_total)?;
+    let mut reads = stream::iter(2..=page_count)
+        .map(|page_number| async move {
+            let result = async {
+                authorize_ci_source(context, config, scope).await?;
+                let body = discovery_response_body(
+                    client
+                        .read_check_runs(context, check_suite_id, page_number)
+                        .await,
+                )?;
+                authorize_ci_source(context, config, scope).await?;
+                serde_json::from_slice::<GitHubActionsCheckRunsPageV1>(&body)
+                    .map_err(discovery_decode_failure)
+            }
+            .await;
+            (page_number, result)
+        })
+        .buffer_unordered(4);
+    let mut pages = BTreeMap::new();
+    while let Some((page_number, result)) = reads.next().await {
+        if result
+            .as_ref()
+            .is_err_and(|outcome| terminal_discovery_outcome(outcome))
+        {
+            return Err(result
+                .err()
+                .unwrap_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable));
+        }
+        pages.insert(page_number, result);
+    }
+    for page_number in 2..=page_count {
+        let page = pages
+            .remove(&page_number)
+            .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)??;
+        let complete = append_discovery_page(
             &mut records,
             &mut expected_total,
             page.total_count,
             page.check_runs,
             |record| record.id,
-        )? {
-            return Ok(records);
+        )?;
+        if complete != (page_number == page_count) {
+            return Err(ProductionCiFailureDiscoveryOutcomeV1::Failed(
+                CiFailureSourceFailureV1::Schema,
+            ));
         }
     }
-    Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
+    Ok(records)
+}
+
+fn discovery_page_count(
+    expected_total: Option<usize>,
+) -> Result<u32, ProductionCiFailureDiscoveryOutcomeV1> {
+    let total = expected_total.ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)?;
+    let pages = total.div_ceil(CI_DISCOVERY_PAGE_SIZE_V1);
+    u32::try_from(pages)
+        .ok()
+        .filter(|pages| (1..=MAX_CI_DISCOVERY_PAGES_V1).contains(pages))
+        .ok_or(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
+}
+
+fn terminal_discovery_outcome(outcome: &ProductionCiFailureDiscoveryOutcomeV1) -> bool {
+    matches!(
+        outcome,
+        ProductionCiFailureDiscoveryOutcomeV1::Denied
+            | ProductionCiFailureDiscoveryOutcomeV1::Stale
+    )
 }
 
 pub(super) fn append_discovery_page<T>(

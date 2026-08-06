@@ -68,7 +68,8 @@ use crate::application::advisory::github_runtime::{
     resolve_registered_github_read_only_credential_v1,
 };
 use crate::application::advisory::{
-    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
+    CiSourceAccessAuthorityV1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
+    GitHubHttpReadClientV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,
     GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
     GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryCycleControlV1,
     Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
@@ -2222,9 +2223,10 @@ fn hash16(value: &[u8]) -> [u8; 16] {
 fn production_ci_provider_configuration(
     target: GitHubCiRepositoryTargetV1,
     credential: GitHubReadOnlyCredentialV1,
-    http: GitHubHttpReadConfigV1,
+    transport: GitHubHttpReadClientV1,
     source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 ) -> Option<ProductionCiProviderConfigV1> {
+    let client = GitHubCiReadOnlyClientV1::new(target.clone(), credential, transport)?;
     Some(ProductionCiProviderConfigV1 {
         provider: ProviderId::new("provider.github-actions").ok()?,
         parser: CiFailureParserIdentityV1 {
@@ -2232,8 +2234,7 @@ fn production_ci_provider_configuration(
             parser_version: "1".to_owned(),
         },
         target,
-        credential,
-        http,
+        client,
         source_access,
     })
 }
@@ -2305,6 +2306,7 @@ async fn resolve_production_github_provider_config(
     )?);
     let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = configured_source_access.clone();
     let ci_source_access: Arc<dyn CiSourceAccessAuthorityV1> = configured_source_access;
+    let transport = GitHubHttpReadClientV1::new(GitHubHttpReadConfigV1::default())?;
     let ci = (credential.permits(GitHubReadPermissionV1::Actions)
         && credential.permits(GitHubReadPermissionV1::Checks))
     .then(|| {
@@ -2314,7 +2316,7 @@ async fn resolve_production_github_provider_config(
                 repository: repository.clone(),
             },
             credential.clone(),
-            GitHubHttpReadConfigV1::default(),
+            transport.clone(),
             ci_source_access,
         )
     })
@@ -2323,21 +2325,21 @@ async fn resolve_production_github_provider_config(
         github_discovery_authorization_context(project_source_access, &feedback_scope)
             .zip(github_discovery_source_access_request(&feedback_scope));
     let head_commit_id = feedback_scope.head_commit_id.clone();
-    let http = GitHubHttpReadConfigV1::default();
-    let discovery_http = http.clone();
+    let discovery_transport = transport.clone();
     let discovery_credential = credential.clone();
     let discovery = match review_discovery_authority.as_ref() {
         Some((authorization_context, discovery_request)) => {
             discover_github_pull_request_after_authorization(
                 || source_access.authorize(authorization_context, discovery_request),
-                move || {
+                move || async move {
                     discover_exact_commit_pull_request_v1(
                         &owner,
                         &repository,
                         &head_commit_id,
-                        &discovery_http,
+                        &discovery_transport,
                         &discovery_credential,
                     )
+                    .await
                 },
             )
             .await
@@ -2363,14 +2365,15 @@ async fn resolve_production_github_provider_config(
                 None
             } else {
                 resolve_production_github_identity(project_root, &feedback_scope, &target, pull)
-                    .map(|identity| GitHubReviewRuntimeOwnerConfigV1 {
-                        database,
-                        resolved_scope,
-                        feedback_scope,
-                        target,
-                        credential,
-                        http,
-                        identity,
+                    .and_then(|identity| {
+                        let client = GitHubReadOnlyClientV1::new(target, credential, transport)?;
+                        Some(GitHubReviewRuntimeOwnerConfigV1 {
+                            database,
+                            resolved_scope,
+                            feedback_scope,
+                            client,
+                            identity,
+                        })
                     })
             }
         }
@@ -2383,19 +2386,20 @@ async fn resolve_production_github_provider_config(
     })
 }
 
-async fn discover_github_pull_request_after_authorization<A, AF, F>(
+async fn discover_github_pull_request_after_authorization<A, AF, F, DF>(
     authorize: A,
     discover: F,
 ) -> Option<GitHubExactCommitDiscoveryOutcomeV1>
 where
     A: FnOnce() -> AF,
     AF: std::future::Future<Output = GitHubProviderLifecycleV1>,
-    F: FnOnce() -> GitHubExactCommitDiscoveryOutcomeV1 + Send + 'static,
+    F: FnOnce() -> DF,
+    DF: std::future::Future<Output = GitHubExactCommitDiscoveryOutcomeV1>,
 {
     if authorize().await != GitHubProviderLifecycleV1::Ready {
         return None;
     }
-    tokio::task::spawn_blocking(discover).await.ok()
+    Some(discover().await)
 }
 
 fn github_discovery_source_access_request(
