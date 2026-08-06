@@ -52,7 +52,7 @@ pub struct ParsedExtraction {
 
 impl ParsedExtraction {
     pub fn complete(
-        result: ExtractionResult,
+        mut result: ExtractionResult,
         scope: ParsedExtractionScope<'_>,
         metrics: ParsedTraversalMetrics,
     ) -> Self {
@@ -60,6 +60,7 @@ impl ParsedExtraction {
             ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
             ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
         };
+        result.canonicalize_order();
         Self {
             result,
             disposition,
@@ -68,10 +69,11 @@ impl ParsedExtraction {
     }
 
     pub fn reset(
-        result: ExtractionResult,
+        mut result: ExtractionResult,
         reason: ParsedExtractionResetReason,
         source_bytes: usize,
     ) -> Self {
+        result.canonicalize_order();
         Self {
             result,
             disposition: ParsedExtractionDisposition::Reset { reason },
@@ -194,16 +196,8 @@ pub(crate) fn merge_changed_extraction(
     merged.unresolved_refs.append(&mut delta.unresolved_refs);
     merged.errors.append(&mut delta.errors);
     merged.duration_ms = delta.duration_ms;
-    merged.nodes.sort_by(|left, right| {
-        let left_is_file = left.kind == NodeKind::File;
-        let right_is_file = right.kind == NodeKind::File;
-        right_is_file
-            .cmp(&left_is_file)
-            .then_with(|| left.start_line.cmp(&right.start_line))
-            .then_with(|| left.start_column.cmp(&right.start_column))
-            .then_with(|| right.end_line.cmp(&left.end_line))
-            .then_with(|| right.end_column.cmp(&left.end_column))
-    });
+    // `ParsedExtraction::complete` canonicalizes row order for every
+    // extraction path, so the merge only restores set membership here.
     merged.sanitize();
     Some(merged)
 }
