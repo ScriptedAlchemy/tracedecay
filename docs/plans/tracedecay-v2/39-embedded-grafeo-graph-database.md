@@ -10,24 +10,40 @@ types. Each datum has exactly one authority: durable graph-shaped state lives
 in Grafeo, rebuildable projections are recreated from canonical
 manifests/events, and SQLite does not dual-write or shadow the same graph.
 
-**Tech Stack:** Rust 2024, one exact reviewed embedded Grafeo revision derived
-from `0.5.42`, TraceDecay domain/store ports, Tokio cancellation, Criterion,
-and cargo-nextest.
+**Tech Stack:** Rust 2024, the published Grafeo `=0.5.42` crates from
+crates.io, TraceDecay domain/store ports, Tokio cancellation, Criterion, and
+cargo-nextest.
 
 ## Global Constraints
 
-- Use Grafeo embedded in-process. No server, sidecar, network transport, or separately managed database process.
+- Use Grafeo embedded in-process. No server, sidecar process, network
+  transport, or separately managed database process.
+- Open Grafeo through its public path/configuration API using the standard
+  persistent multi-file directory layout and WAL. The daemon registry assigns
+  that directory from the canonical project/profile identity. Do not use the
+  single-file `.grafeo` format, inject an already-open file, replace Grafeo's
+  storage engine, or add a private-file adapter.
+- Depend on the exact published `=0.5.42` release. Do not pin an unpublished Git
+  revision, maintain a TraceDecay fork, vendor Grafeo, or reimplement its
+  storage, WAL, checkpoint, or recovery machinery.
 - `tracedecay-graph-db` is the sole production direct `grafeo-*` dependency.
 - Do not introduce another persisted/query graph or vector database. A bounded
   in-memory algorithm is not a storage authority, but should use the standard
   library when it does not need graph persistence or traversal.
-- V2 is a breaking fresh-profile cutover: no V1 reader, migration, backfill, compatibility table, dual-write, fallback, or cutover receipt.
+- V2 is a breaking fresh-profile cutover: no V1 database reader, migration,
+  database-format backfill, compatibility table, dual-write, fallback, or
+  cutover receipt. Native ingestion of older host transcripts, repositories,
+  and other source material remains a required ordinary V2 journey.
 - One datum has one authority. A rebuildable Grafeo projection records its source generation/watermark and never becomes a second canonical copy.
 - Event-sourced domains use one crash-safe publication protocol: commit the canonical event and an idempotent graph outbox record in SQLite, apply the graph batch, then advance the graph watermark. No caller reads past the acknowledged watermark, and replay never invents a second event.
 - Durable facts remain project-wide. Branches and worktrees never own, copy, merge, or retire facts.
 - Preserve typed TraceDecay IDs at every boundary; Grafeo node and edge IDs are storage-local handles only.
 - Preserve typed cancellation, staleness, denial, unavailable, reset-required, corruption, and budget-exhaustion outcomes.
-- Validation and pre-commit mutation failures leave the prior graph readable. A Grafeo post-commit WAL/checkpoint failure is reported as typed `DurabilityUncertain`, permanently closes that handle, and permits no further reads until exact reopen/recovery validates the store.
+- Validation and pre-commit mutation failures leave the prior graph readable.
+  A Grafeo post-commit WAL/checkpoint failure is reported as typed
+  `DurabilityUncertain`, closes that runtime instance, and permits no further
+  reads from it until reopening the same directory completes Grafeo recovery
+  and TraceDecay validates the logical store identity and watermark.
 - Preserve deterministic ordering, pagination, authorization, coverage, and exact source hydration above the storage layer.
 - Never install, run, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
 
@@ -37,6 +53,7 @@ Official implementation references:
 - [Embedded Rust API](https://grafeo.dev/user-guide/rust/)
 - [Vector and hybrid search](https://grafeo.dev/user-guide/vector-search/)
 - [Published Rust API for `0.5.42`](https://docs.rs/grafeo/0.5.42/grafeo/)
+- [Persistent directory storage and WAL](https://grafeo.dev/user-guide/persistence/persistent/)
 
 ---
 
@@ -104,7 +121,7 @@ Keep in SQLite:
 - `crates/tracedecay-query/src/retrieval/graph/tests/scale.rs`
 
 **Interfaces:**
-- Consumes: `CanonicalRelationEdgeV1`, `CodeSearchChunkV1`, `GraphLaneRequest`.
+- Consumes: `CanonicalRelationEdge`, `CodeSearchChunk`, `GraphLaneRequest`.
 - Produces: behavior-preserving Grafeo traversal through the `tracedecay-code-index` graph reader.
 
 - [ ] Prove deterministic traversal, bounded depth and candidate budgets,
@@ -180,7 +197,11 @@ impl GraphDb {
 
 - [ ] **Step 1: Write failing runtime-boundary tests**
 
-Cover in-memory and persistent open, exact-final format validation, atomic batch rollback, snapshot isolation, deterministic traversal, cancellation, vector dimension/metric rejection, reopen durability, corruption, and foreign-shape `ResetRequired`.
+Cover in-memory and standard persistent-directory open, canonical
+project/profile directory resolution, exact logical store identity, atomic
+batch rollback, snapshot isolation, deterministic traversal, cancellation,
+vector dimension/metric rejection, WAL recovery and reopen durability,
+corruption, and foreign-shape `ResetRequired`.
 
 Run:
 
@@ -192,10 +213,10 @@ Expected: fail because the crate and interfaces do not exist.
 
 - [ ] **Step 2: Add the workspace crate and centralize Grafeo dependencies**
 
-Use one exact reviewed Grafeo revision in the new crate.
-Add `tracedecay-graph-db` to `[workspace].members` and centralize the exact
+Use the exact published Grafeo `=0.5.42` crates in the new crate. Add
+`tracedecay-graph-db` to `[workspace].members` and centralize those exact
 versions in `[workspace.dependencies]`. No other workspace crate directly
-depends on Grafeo.
+depends on Grafeo, and no Grafeo dependency uses a Git source.
 
 - [ ] **Step 3: Implement typed open, snapshot, batch, traversal, and vector adapters**
 
@@ -217,7 +238,18 @@ pub struct GraphRelation {
 }
 ```
 
-All validation occurs before mutation. Validation and transaction failures leave the prior generation readable. Grafeo `0.5.42` surfaces some WAL/checkpoint failures after its in-memory commit; those failures poison the handle as `DurabilityUncertain` instead of falsely claiming rollback or serving uncertain state. `GraphPublication` carries the canonical event/generation identity, idempotency key, expected graph watermark, replacement batch, and resulting watermark; same-key/same-input replay returns the original commit while changed input conflicts.
+Open persistent databases by directory with Grafeo's public configuration API
+and WAL enabled; Grafeo owns the files below that directory. All validation
+occurs before mutation. Validation and transaction failures leave the prior
+generation readable. Grafeo `0.5.42` surfaces some WAL/checkpoint failures
+after its in-memory commit; those failures close the runtime instance as
+`DurabilityUncertain` instead of falsely claiming rollback or serving
+uncertain state. Reopen uses the same canonical directory, lets Grafeo perform
+WAL recovery, and validates the TraceDecay identity and watermark before
+serving. `GraphPublication` carries the canonical event/generation identity,
+idempotency key, expected graph watermark, replacement batch, and resulting
+watermark; same-key/same-input replay returns the original commit while
+changed input conflicts.
 
 - [ ] **Step 4: Verify boundary isolation**
 
@@ -266,8 +298,8 @@ pub trait CodeGraphProjectionPublisher {
     fn publish_code_graph(
         &self,
         generation: &CodeGenerationId,
-        edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
+        edges: &[CanonicalRelationEdge],
+        chunks: &[CodeSearchChunk],
         cancellation: &CancellationToken,
     ) -> Result<GraphWatermark, RetrievalPortError>;
 }
@@ -323,14 +355,15 @@ git commit -am "refactor(code-graph): route Grafeo through graph-db"
 - Delete: SQLite vector payload/state tables superseded by graph-db
 
 **Interfaces:**
-- Consumes: `EmbeddingProjectionKeyV1`, verified `EmbeddingVectorV1`, source generation, model/artifact digest, metric, dimensions, and normalization.
+- Consumes: `EmbeddingProjectionKey`, verified `EmbeddingVector`, source
+  generation, model/artifact digest, metric, dimensions, and normalization.
 - Produces: atomic vector-generation publication and bounded exact Grafeo similarity/hybrid search with deterministic score normalization.
 
 ```rust
 pub trait SemanticVectorStore {
     fn publish_generation(
         &self,
-        generation: &VectorGenerationIdV1,
+        generation: &VectorGenerationId,
         vectors: Vec<AdmittedSemanticVector>,
         cancellation: &CancellationToken,
     ) -> Result<GraphWatermark, SemanticStoreError>;
@@ -545,7 +578,7 @@ git commit -am "refactor(memory): move graph and vectors to graph-db"
 pub trait WorkTopologyStore {
     fn project(
         &self,
-        event: &WorkEventV1,
+        event: &WorkEvent,
         expected: WorkGraphVersion,
     ) -> Result<WorkGraphVersion, WorkStoreError>;
 
@@ -593,7 +626,7 @@ git commit -am "refactor(work): move task topology to graph-db"
 pub trait WorkflowTopologyStore {
     fn publish_definition(
         &self,
-        definition: &WorkflowDefinitionV1,
+        definition: &WorkflowDefinition,
     ) -> Result<GraphWatermark, WorkflowStoreError>;
 
     fn read(
@@ -684,7 +717,7 @@ cargo nextest run --workspace --all-features --no-fail-fast
 git commit -am "feat(graph-db): wire embedded graph journeys"
 ```
 
-## Task 11: Delete superseded SQL, compatibility, parity, and sidecar residue
+## Task 11: Delete superseded SQL, compatibility, parity, and external-service residue
 
 **Files:**
 - Delete/modify: `crates/tracedecay-runtime-core/src/db/migrations.rs`
@@ -714,17 +747,18 @@ help locate residue, but source-shape scans are not acceptance evidence.
 - [ ] **Step 2: Delete complete obsolete boundaries**
 
 Delete SQLite graph/vector fixtures and protocols, graph branch cloning,
-old-store graph and memory conversion/backfill readers, compatibility writers,
-feature flags, aliases, and unused dependencies. Remove a dependency with its
-last production caller. Preserve native historical host-data acquisition,
-same-final-format recovery, and bounded derivative rebuilds.
+old-store graph and memory database conversion/backfill readers, compatibility
+writers, feature flags, aliases, and unused dependencies. Remove a dependency
+with its last production caller. Preserve native historical host-data
+acquisition, same-final-format recovery, and bounded derivative rebuilds.
 
 - [x] **Step 3: Verify documentation authority**
 
 The active V2 plan set names Grafeo and `tracedecay-graph-db` as the sole graph
 authority. It contains no instruction to introduce a second graph library,
-sidecar, branch-fact store, dual-write, old graph-SQL authority, or data-format
-migration path.
+external graph service, branch-fact store, dual-write, old graph-SQL
+authority, custom Grafeo storage adapter, unpublished Grafeo revision, or
+data-format migration path.
 
 - [ ] **Step 4: Verify**
 
