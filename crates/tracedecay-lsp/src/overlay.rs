@@ -31,6 +31,9 @@ use workspace_diagnostics::{WorkspaceDiagnosticAdapter, diagnostic_refresh_is_pa
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
+/// Aggregate text retained by one session, including the temporary copy needed
+/// to apply one atomic ordered edit batch.
+pub const MAX_TOTAL_OVERLAY_BYTES: usize = 16 * 1024 * 1024;
 /// A session cannot accumulate an unbounded number of individually bounded
 /// documents.
 pub const MAX_OPEN_DOCUMENTS: usize = 128;
@@ -60,37 +63,99 @@ pub struct OverlaySnapshot {
     pub uri: String,
     pub language_id: String,
     pub version: i64,
-    pub text: String,
+    pub content_digest: ContentDigest,
+    pub text: Arc<str>,
     pub ephemeral: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OverlayLimits {
+    pub max_document_bytes: usize,
+    pub max_total_bytes: usize,
+    pub max_documents: usize,
+}
+
+impl Default for OverlayLimits {
+    fn default() -> Self {
+        Self {
+            max_document_bytes: MAX_OVERLAY_BYTES,
+            max_total_bytes: MAX_TOTAL_OVERLAY_BYTES,
+            max_documents: MAX_OPEN_DOCUMENTS,
+        }
+    }
 }
 
 /// Failure while admitting or applying an overlay update.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OverlayError {
+    InvalidLimits,
     AlreadyOpen,
     NotOpen,
-    InvalidVersion { current: i64, received: i64 },
+    InvalidVersion {
+        current: i64,
+        received: i64,
+    },
     InvalidRange(PositionError),
-    InvalidRangeLength { expected: u32, received: u32 },
+    InvalidRangeLength {
+        expected: u32,
+        received: u32,
+    },
     RangeLengthWithoutRange,
-    TooManyDocuments { limit: usize },
-    TooLarge { size: usize, limit: usize },
+    TooManyDocuments {
+        limit: usize,
+    },
+    TooLarge {
+        size: usize,
+        limit: usize,
+    },
+    AggregateTooLarge {
+        retained: usize,
+        candidate: usize,
+        limit: usize,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DocumentOverlay {
     language_id: String,
     version: i64,
-    text: String,
+    content_digest: ContentDigest,
+    text: Arc<str>,
 }
 
 /// In-memory overlays owned by exactly one LSP client session.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct OverlayStore {
     documents: BTreeMap<String, DocumentOverlay>,
+    limits: OverlayLimits,
+    retained_bytes: usize,
+}
+
+impl Default for OverlayStore {
+    fn default() -> Self {
+        Self {
+            documents: BTreeMap::new(),
+            limits: OverlayLimits::default(),
+            retained_bytes: 0,
+        }
+    }
 }
 
 impl OverlayStore {
+    pub fn with_limits(limits: OverlayLimits) -> Result<Self, OverlayError> {
+        if limits.max_document_bytes == 0
+            || limits.max_total_bytes < limits.max_document_bytes
+            || limits.max_documents == 0
+        {
+            return Err(OverlayError::InvalidLimits);
+        }
+        Ok(Self {
+            documents: BTreeMap::new(),
+            limits,
+            retained_bytes: 0,
+        })
+    }
+
     pub fn open(
         &mut self,
         uri: impl Into<String>,
@@ -102,19 +167,24 @@ impl OverlayStore {
         if self.documents.contains_key(&uri) {
             return Err(OverlayError::AlreadyOpen);
         }
-        if self.documents.len() >= MAX_OPEN_DOCUMENTS {
+        if self.documents.len() >= self.limits.max_documents {
             return Err(OverlayError::TooManyDocuments {
-                limit: MAX_OPEN_DOCUMENTS,
+                limit: self.limits.max_documents,
             });
         }
         let text = text.into();
-        ensure_size(&text)?;
+        ensure_size(&text, self.limits.max_document_bytes)?;
+        ensure_aggregate(self.retained_bytes, text.len(), self.limits.max_total_bytes)?;
+        let content_digest = ContentDigest::of_bytes(text.as_bytes());
+        let text: Arc<str> = text.into();
         let document = DocumentOverlay {
             language_id: language_id.into(),
             version,
+            content_digest,
             text,
         };
         let snapshot = snapshot(&uri, &document);
+        self.retained_bytes = self.retained_bytes.saturating_add(document.text.len());
         self.documents.insert(uri, document);
         Ok(snapshot)
     }
@@ -127,7 +197,7 @@ impl OverlayStore {
         version: i64,
         changes: &[OverlayChange],
     ) -> Result<OverlaySnapshot, OverlayError> {
-        let Some(document) = self.documents.get_mut(uri) else {
+        let Some(document) = self.documents.get(uri) else {
             return Err(OverlayError::NotOpen);
         };
         if version <= document.version {
@@ -136,16 +206,28 @@ impl OverlayStore {
                 received: version,
             });
         }
+        let prior_len = document.text.len();
+        ensure_aggregate(self.retained_bytes, prior_len, self.limits.max_total_bytes)?;
 
         // Apply to a temporary value so an invalid later edit cannot leave a
         // partially modified overlay behind.
-        let mut text = document.text.clone();
+        let mut text = document.text.to_string();
         for change in changes {
             apply_change(&mut text, change)?;
-            ensure_size(&text)?;
+            ensure_size(&text, self.limits.max_document_bytes)?;
+            ensure_aggregate(self.retained_bytes, text.len(), self.limits.max_total_bytes)?;
         }
+        let next_retained_bytes = self
+            .retained_bytes
+            .saturating_sub(prior_len)
+            .saturating_add(text.len());
+        let content_digest = ContentDigest::of_bytes(text.as_bytes());
+        let text: Arc<str> = text.into();
+        let document = self.documents.get_mut(uri).ok_or(OverlayError::NotOpen)?;
         document.version = version;
+        document.content_digest = content_digest;
         document.text = text;
+        self.retained_bytes = next_retained_bytes;
         Ok(snapshot(uri, document))
     }
 
@@ -153,6 +235,7 @@ impl OverlayStore {
         let Some(document) = self.documents.remove(uri) else {
             return Err(OverlayError::NotOpen);
         };
+        self.retained_bytes = self.retained_bytes.saturating_sub(document.text.len());
         Ok(snapshot(uri, &document))
     }
 
@@ -182,10 +265,15 @@ impl OverlayStore {
             .collect()
     }
 
+    pub const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
     /// Releases every unsaved value. This is called by the session lifecycle
     /// owner; no close event is persisted or synthesized.
     pub fn clear(&mut self) {
         self.documents.clear();
+        self.retained_bytes = 0;
     }
 }
 
@@ -194,6 +282,7 @@ fn snapshot(uri: &str, document: &DocumentOverlay) -> OverlaySnapshot {
         uri: uri.to_owned(),
         language_id: document.language_id.clone(),
         version: document.version,
+        content_digest: document.content_digest.clone(),
         text: document.text.clone(),
         ephemeral: true,
     }
@@ -225,11 +314,25 @@ fn apply_change(text: &mut String, change: &OverlayChange) -> Result<(), Overlay
     Ok(())
 }
 
-fn ensure_size(text: &str) -> Result<(), OverlayError> {
-    if text.len() > MAX_OVERLAY_BYTES {
+fn ensure_size(text: &str, limit: usize) -> Result<(), OverlayError> {
+    if text.len() > limit {
         return Err(OverlayError::TooLarge {
             size: text.len(),
-            limit: MAX_OVERLAY_BYTES,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_aggregate(retained: usize, candidate: usize, limit: usize) -> Result<(), OverlayError> {
+    if retained
+        .checked_add(candidate)
+        .is_none_or(|required| required > limit)
+    {
+        return Err(OverlayError::AggregateTooLarge {
+            retained,
+            candidate,
+            limit,
         });
     }
     Ok(())
@@ -285,7 +388,7 @@ impl DiagnosticSnapshotAdapter {
             document_uri: document_uri.to_owned(),
             overlay_version: overlay.map_or(0, |overlay| overlay.version),
             overlay_language_id: overlay.map(|overlay| overlay.language_id.clone()),
-            overlay_digest: overlay.map(|overlay| ContentDigest::of_bytes(overlay.text.as_bytes())),
+            overlay_digest: overlay.map(|overlay| overlay.content_digest.clone()),
         }
     }
 }
@@ -584,6 +687,10 @@ mod tests {
             .open("file:///root/a.rs", "rust", 3, "a🦀b")
             .unwrap();
         assert!(opened.ephemeral);
+        assert_eq!(
+            opened.content_digest,
+            ContentDigest::of_bytes("a🦀b".as_bytes())
+        );
         let changed = overlays
             .change(
                 "file:///root/a.rs",
@@ -595,7 +702,7 @@ mod tests {
                 }],
             )
             .unwrap();
-        assert_eq!(changed.text, "acatb");
+        assert_eq!(&*changed.text, "acatb");
         assert_eq!(
             overlays.change("file:///root/a.rs", 7, &[]),
             Err(OverlayError::InvalidVersion {
@@ -605,6 +712,66 @@ mod tests {
         );
         assert_eq!(overlays.close("file:///root/a.rs").unwrap().version, 7);
         assert!(overlays.snapshot("file:///root/a.rs").is_none());
+    }
+
+    #[test]
+    fn aggregate_budget_counts_retained_text_and_transient_update_bytes() {
+        let mut overlays = OverlayStore::with_limits(OverlayLimits {
+            max_document_bytes: 8,
+            max_total_bytes: 16,
+            max_documents: 3,
+        })
+        .expect("valid overlay limits");
+        let first = overlays
+            .open("file:///root/a.rs", "rust", 1, "12345678")
+            .expect("first overlay");
+        let first_clone = first.clone();
+        assert!(Arc::ptr_eq(&first.text, &first_clone.text));
+        overlays
+            .open("file:///root/b.rs", "rust", 1, "abcd")
+            .expect("second overlay");
+
+        let rejected = overlays.change(
+            "file:///root/a.rs",
+            2,
+            &[OverlayChange {
+                range: None,
+                range_length: None,
+                text: "abcdefgh".to_owned(),
+            }],
+        );
+        assert_eq!(
+            rejected,
+            Err(OverlayError::AggregateTooLarge {
+                retained: 12,
+                candidate: 8,
+                limit: 16,
+            })
+        );
+        assert_eq!(
+            overlays
+                .snapshot("file:///root/a.rs")
+                .expect("unchanged first overlay")
+                .version,
+            1
+        );
+
+        overlays
+            .close("file:///root/b.rs")
+            .expect("release aggregate budget");
+        let changed = overlays
+            .change(
+                "file:///root/a.rs",
+                2,
+                &[OverlayChange {
+                    range: None,
+                    range_length: None,
+                    text: "abcdefgh".to_owned(),
+                }],
+            )
+            .expect("update fits retained plus transient budget");
+        assert_eq!(changed.version, 2);
+        assert_eq!(overlays.retained_bytes(), 8);
     }
 
     #[test]
@@ -630,7 +797,10 @@ mod tests {
             ],
         );
         assert!(matches!(result, Err(OverlayError::InvalidRange(_))));
-        assert_eq!(overlays.snapshot("file:///root/a.rs").unwrap().text, "abc");
+        assert_eq!(
+            &*overlays.snapshot("file:///root/a.rs").unwrap().text,
+            "abc"
+        );
     }
 
     #[test]
@@ -651,7 +821,10 @@ mod tests {
             ),
             Err(OverlayError::RangeLengthWithoutRange)
         );
-        assert_eq!(overlays.snapshot("file:///root/a.rs").unwrap().text, "abc");
+        assert_eq!(
+            &*overlays.snapshot("file:///root/a.rs").unwrap().text,
+            "abc"
+        );
     }
 
     #[test]
@@ -782,7 +955,8 @@ mod tests {
             uri: "file:///root/a.rs".to_owned(),
             language_id: "rust".to_owned(),
             version: 3,
-            text: "fn main() {}".to_owned(),
+            content_digest: ContentDigest::of_bytes(b"fn main() {}"),
+            text: Arc::from("fn main() {}"),
             ephemeral: true,
         };
         assert_eq!(

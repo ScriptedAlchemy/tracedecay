@@ -17,18 +17,38 @@ use tracedecay_store::{
 };
 
 use crate::diagnostics_store::DiagnosticsStore;
+use crate::lsp_runtime::LspFeedbackDiagnosticRecordPort;
 use tracedecay_runtime_core::db::Database;
 
 /// Owned adapter that lets long-lived feedback runtimes reuse the canonical
 /// diagnostics store without retaining a borrowed database connection.
 #[derive(Clone)]
-pub(super) struct DatabaseDiagnosticStore {
+pub struct DatabaseDiagnosticStore {
     database: Database,
 }
 
 impl DatabaseDiagnosticStore {
-    pub(super) fn new(database: Database) -> Self {
+    pub fn new(database: Database) -> Self {
         Self { database }
+    }
+}
+
+impl LspFeedbackDiagnosticRecordPort for DatabaseDiagnosticStore {
+    fn diagnostic_by_anchor(
+        &self,
+        anchor: RetrievalAnchorId,
+    ) -> tracedecay_lsp::LspRuntimeFuture<
+        Result<Option<GenerationDiagnosticV1>, tracedecay_lsp::LspRuntimeFailure>,
+    > {
+        let database = self.database.clone();
+        Box::pin(async move {
+            DiagnosticsStore::new(database.conn())
+                .diagnostic_by_anchor(&anchor)
+                .await
+                .map_err(|_| {
+                    tracedecay_lsp::LspRuntimeFailure::new("diagnostic-anchor-read-failed")
+                })
+        })
     }
 }
 

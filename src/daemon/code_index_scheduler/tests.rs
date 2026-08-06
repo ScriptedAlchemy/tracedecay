@@ -5319,7 +5319,11 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .expect("root uri")
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
-        database.clone(),
+        Arc::new(
+            crate::application::feedback::diagnostics::DatabaseDiagnosticStore::new(
+                database.clone(),
+            ),
+        ),
         Arc::new(FixedDocument(source.to_owned())),
     );
     let published = projection

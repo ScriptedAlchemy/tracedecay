@@ -17,7 +17,7 @@ use std::{
 };
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
-use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
+use tracedecay_lsp::LspRuntimeFailure;
 
 use super::{
     CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
@@ -27,6 +27,8 @@ use super::{
     DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
     PendingHintsV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
+
+mod lsp_projection;
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
@@ -2093,53 +2095,6 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
         crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
             authority, generation,
         )
-    }
-}
-
-impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
-    for CodeIndexSchedulerRegistryV1
-{
-    fn current_identity(
-        &self,
-        project_root: PathBuf,
-        document_relative_path: Option<String>,
-    ) -> LspRuntimeFuture<
-        Result<crate::application::lsp_runtime::LspCodeIndexProjectionIdentity, LspRuntimeFailure>,
-    > {
-        let registry = self.clone();
-        Box::pin(async move {
-            let root = project_root
-                .canonicalize()
-                .map_err(|_| LspRuntimeFailure::new("lsp-code-index-root-unavailable"))?;
-            let current = registry
-                .latest_complete_ready(&root)
-                .await
-                .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
-            let generation = &current.generation;
-            let document_content_digest = document_relative_path
-                .map(|path| path.replace('\\', "/"))
-                .map(|logical_path| {
-                    generation
-                        .snapshot()
-                        .files
-                        .iter()
-                        .find(|file| file.logical_path == logical_path)
-                        .map(|file| file.content_digest.clone())
-                        .ok_or_else(|| {
-                            LspRuntimeFailure::new("lsp-code-index-document-unavailable")
-                        })
-                })
-                .transpose()?;
-            Ok(
-                crate::application::lsp_runtime::LspCodeIndexProjectionIdentity {
-                    code_generation_id: generation.manifest().generation_id.clone(),
-                    snapshot_digest: generation.manifest().snapshot_digest.clone(),
-                    invalidation_digest: generation.manifest().invalidation_digest.clone(),
-                    snapshot_content_digest: generation.snapshot().content_identity.clone(),
-                    document_content_digest,
-                },
-            )
-        })
     }
 }
 
