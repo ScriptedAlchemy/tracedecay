@@ -27,7 +27,24 @@ The full `cargo nextest run --workspace --all-features` suite has not yet had a
 clean end-to-end run in this checkout. Run it and read the failures rather than
 assuming a green baseline; treat new failures in code you touched as yours.
 
-## Project Structure
+## Final V2 storage
+
+Read [the V2 operating-model summary](docs/V2-OPERATING-MODEL.md) before
+changing storage, retrieval, or host ingestion, then follow the linked
+authoritative roadmap plans. `tracedecay-graph-db` is the sole final Grafeo
+boundary; SQLite is relational only. V2 persisted data is reset or recreated
+when incompatible—do not add a prior-store reader, conversion, backfill,
+shadow path, or dual write.
+
+Tests and local validation must use isolated temporary home, profile, project,
+and socket paths. Never start, install, or test a V2 daemon against an
+installed `master` profile.
+
+## Source tree reference
+
+This tree map is for source orientation only. The
+[V2 roadmap](docs/plans/tracedecay-v2/00-plan-set-index.md) owns product
+precedence and acceptance.
 
 ```
 src/
@@ -83,12 +100,12 @@ cargo nextest run --no-default-features --features lite
    cargo clippy --workspace --all-targets
    ```
 
-### Rebrand compatibility changes
+### Public wire compatibility changes
 
-For changes touching naming, legacy env vars, storage paths, generated agent
-config, plugin paths, or cleanup behavior, follow
-[`docs/REBRAND-COMPATIBILITY-POLICY.md`](docs/REBRAND-COMPATIBILITY-POLICY.md).
-Update compatibility warnings, migration cleanup, and docs together.
+For a public name or wire protocol, retain compatibility only with evidence
+that the external contract shipped. Persisted V2 storage has no compatibility
+conversion. Keep compatibility work out of storage; document the retained
+external boundary alongside its behavior.
 
 ### Clippy policy
 

@@ -9,6 +9,11 @@ remote sources and authorities are separate, policy-bound effects; see
 [Privacy and Network](#privacy-and-network) before assuming an offline-only
 deployment.
 
+> **Final V2:** `tracedecay-graph-db` is the sole Grafeo boundary. Incompatible
+> persisted data returns `ResetRequired` and requires explicit reset or
+> recreation. Storage, scope, and lossless retrieval rules are in the [V2
+> operating model](V2-OPERATING-MODEL.md).
+
 ---
 
 ## Table of Contents

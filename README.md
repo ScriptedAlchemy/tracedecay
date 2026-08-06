@@ -43,6 +43,13 @@ The installer defaults to `~/.local/bin`. Set `TRACEDECAY_INSTALL_DIR` to
 choose another directory. Prebuilt archives are available on the
 [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest).
 
+## Final V2 storage model
+
+`tracedecay-graph-db` is the sole Grafeo dependency boundary. Final V2 accepts
+only its exact persisted shape: an incompatible store returns `ResetRequired`
+and requires explicit reset or recreation, never conversion. See [the V2
+operating model](docs/V2-OPERATING-MODEL.md).
+
 ## Quick Start
 
 ```bash
