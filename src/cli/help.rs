@@ -282,7 +282,7 @@ Examples:
   tracedecay daemon start                        Start the installed service
   tracedecay daemon stop                         Stop the installed service
   tracedecay daemon restart                      Restart after a version mismatch
-  tracedecay daemon run --socket /tmp/td.sock    Foreground run (debugging)
+  tracedecay daemon run --socket \"$XDG_RUNTIME_DIR/tracedecay/td.sock\"    Foreground run (debugging)
   tracedecay daemon run --profile-root <path>    Foreground run for one profile
 
 Related: tracedecay doctor (detects daemon problems), tracedecay serve.";
