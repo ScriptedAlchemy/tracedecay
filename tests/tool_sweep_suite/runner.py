@@ -451,7 +451,13 @@ def create_fixture(binary: Path, parent: Path) -> tuple[Path, dict[str, str]]:
         root,
         "fixture Codex SessionStart producer",
         timeout_s=60,
-        input_text=json.dumps({"cwd": str(root), "session_id": session_id}),
+        input_text=json.dumps(
+            {
+                "hook_event_name": "SessionStart",
+                "cwd": str(root),
+                "session_id": session_id,
+            }
+        ),
     )
     return root, {
         "file": "src/lib.rs",
