@@ -9,6 +9,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    mem::size_of,
     path::Path,
     sync::{Arc, Mutex, Weak},
 };
@@ -35,8 +36,12 @@ use tracedecay_semantic::projector::{
     PreparedVectorGenerationV1, ProjectedChunkVectorV1, SemanticProjectionErrorV1,
 };
 
+mod graph_adapter;
+pub use graph_adapter::*;
+
 const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-build.v1";
 const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
+const VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN: &str = "tracedecay.vector-committed-batch.v1";
 const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-reuse.v1";
 const VECTOR_GENERATION_STATE_OPERATION: &str = "persist semantic vector generations";
 const VECTOR_GENERATION_STATE_SCHEMA_V1: &str = "
@@ -539,12 +544,51 @@ impl<'de> Deserialize<'de> for VectorRowMapV1 {
     }
 }
 
-/// The committed prepared batches of one staged build, floats elided.
-#[derive(Clone, Debug, Default, PartialEq)]
-struct PreparedBatchesV1(Vec<PreparedVectorGenerationV1>);
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CommittedVectorBatchV1 {
+    request_digest: ManifestDigest,
+    prepared_digest: ManifestDigest,
+    receipt: ProjectionBatchReceiptV1,
+}
+
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+struct PreparedBatchesV1(Vec<CommittedVectorBatchV1>);
+
+impl<'de> Deserialize<'de> for PreparedBatchesV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum PersistedBatchV1 {
+            Committed(CommittedVectorBatchV1),
+            LegacyPrepared(PreparedVectorGenerationV1),
+        }
+
+        Vec::<PersistedBatchV1>::deserialize(deserializer)?
+            .into_iter()
+            .map(|batch| match batch {
+                PersistedBatchV1::Committed(batch) => Ok(batch),
+                PersistedBatchV1::LegacyPrepared(prepared) => {
+                    let prepared_digest =
+                        canonical_sha256(&(VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN, &prepared))
+                            .map_err(serde::de::Error::custom)?;
+                    Ok(CommittedVectorBatchV1 {
+                        request_digest: prepared.request.request_digest,
+                        prepared_digest,
+                        receipt: prepared.receipt,
+                    })
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+    }
+}
 
 impl std::ops::Deref for PreparedBatchesV1 {
-    type Target = Vec<PreparedVectorGenerationV1>;
+    type Target = Vec<CommittedVectorBatchV1>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -554,24 +598,6 @@ impl std::ops::Deref for PreparedBatchesV1 {
 impl std::ops::DerefMut for PreparedBatchesV1 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
-    }
-}
-
-impl Serialize for PreparedBatchesV1 {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        externalized_vectors::prepared_batches::serialize(&self.0, serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for PreparedBatchesV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        externalized_vectors::prepared_batches::deserialize(deserializer).map(Self)
     }
 }
 
@@ -792,10 +818,6 @@ mod externalized_vectors {
         ProjectedChunkVectorV1, ProjectionKeyV1,
     };
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use tracedecay_domain::{
-        AdmittedEmbeddingProjectionKeyV1, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    };
-    use tracedecay_semantic::projector::{PreparedVectorGenerationV1, VectorTombstoneV1};
 
     #[derive(Serialize)]
     struct VectorRowRefV1<'row> {
@@ -849,17 +871,6 @@ mod externalized_vectors {
         }
     }
 
-    struct VectorSliceRefV1<'row>(&'row [ProjectedChunkVectorV1]);
-
-    impl Serialize for VectorSliceRefV1<'_> {
-        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            serializer.collect_seq(self.0.iter().map(VectorRowRefV1::from))
-        }
-    }
-
     pub(super) mod vector_map {
         use super::{
             BTreeMap, CodeSearchChunkId, Deserialize, Deserializer, ProjectedChunkVectorV1,
@@ -892,67 +903,6 @@ mod externalized_vectors {
                     .map(|(chunk_id, row)| (chunk_id, row.into()))
                     .collect(),
             )
-        }
-    }
-
-    pub(super) mod prepared_batches {
-        use super::{
-            AdmittedEmbeddingProjectionKeyV1, Deserialize, Deserializer,
-            PreparedVectorGenerationV1, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-            Serialize, Serializer, VectorRowV1, VectorSliceRefV1, VectorTombstoneV1,
-        };
-
-        #[derive(Serialize)]
-        struct PreparedRefV1<'batch> {
-            embedding_key: &'batch AdmittedEmbeddingProjectionKeyV1,
-            request: &'batch ProjectionBatchRequestV1,
-            receipt: &'batch ProjectionBatchReceiptV1,
-            vectors: VectorSliceRefV1<'batch>,
-            tombstones: &'batch [VectorTombstoneV1],
-        }
-
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct PreparedRowV1 {
-            embedding_key: AdmittedEmbeddingProjectionKeyV1,
-            request: ProjectionBatchRequestV1,
-            receipt: ProjectionBatchReceiptV1,
-            vectors: Vec<VectorRowV1>,
-            tombstones: Vec<VectorTombstoneV1>,
-        }
-
-        pub(in super::super) fn serialize<S>(
-            batches: &[PreparedVectorGenerationV1],
-            serializer: S,
-        ) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            serializer.collect_seq(batches.iter().map(|batch| PreparedRefV1 {
-                embedding_key: &batch.embedding_key,
-                request: &batch.request,
-                receipt: &batch.receipt,
-                vectors: VectorSliceRefV1(&batch.vectors),
-                tombstones: &batch.tombstones,
-            }))
-        }
-
-        pub(in super::super) fn deserialize<'de, D>(
-            deserializer: D,
-        ) -> Result<Vec<PreparedVectorGenerationV1>, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            Ok(Vec::<PreparedRowV1>::deserialize(deserializer)?
-                .into_iter()
-                .map(|row| PreparedVectorGenerationV1 {
-                    embedding_key: row.embedding_key,
-                    request: row.request,
-                    receipt: row.receipt,
-                    vectors: row.vectors.into_iter().map(Into::into).collect(),
-                    tombstones: row.tombstones,
-                })
-                .collect())
         }
     }
 }
@@ -1098,6 +1048,18 @@ pub struct VectorGenerationPublicationV1 {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum VectorGenerationStoreErrorV1 {
+    #[error("semantic vector graph operation was cancelled")]
+    Cancelled,
+    #[error("semantic vector graph operation exceeded its deadline")]
+    DeadlineExceeded,
+    #[error("semantic vector graph reset is required: {0}")]
+    ResetRequired(String),
+    #[error("semantic vector graph is corrupt: {0}")]
+    Corrupt(String),
+    #[error("semantic vector graph is unavailable: {0}")]
+    Unavailable(String),
+    #[error("semantic vector graph durability is uncertain: {0}")]
+    DurabilityUncertain(String),
     #[error("vector generation plan is invalid: {0}")]
     InvalidPlan(String),
     #[error("unknown vector generation build")]
@@ -1165,11 +1127,11 @@ struct PublishedStateV1 {
         BTreeMap<VectorGenerationIdV1, ExternalV1<BTreeMap<CodeSearchChunkId, ManifestDigest>>>,
 }
 
-/// Deterministic state machine used directly by focused tests and persisted by
-/// [`DatabaseVectorGenerationStoreV1`].
+/// Deterministic transition authority shared by the SQL store and native graph
+/// record adapter.
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FakeVectorGenerationStoreV1 {
+pub struct VectorGenerationStateMachineV1 {
     staged: BTreeMap<VectorGenerationBuildIdV1, StagedVectorGenerationV1>,
     published: PublishedStateV1,
     #[serde(skip, default)]
@@ -1178,7 +1140,7 @@ pub struct FakeVectorGenerationStoreV1 {
     fail_before_publication_swap: bool,
 }
 
-impl FakeVectorGenerationStoreV1 {
+impl VectorGenerationStateMachineV1 {
     pub fn new() -> Self {
         Self::default()
     }
@@ -1292,12 +1254,14 @@ impl FakeVectorGenerationStoreV1 {
             .get(build_id)
             .cloned()
             .ok_or(VectorGenerationStoreErrorV1::UnknownBuild)?;
+        let prepared_digest = canonical_sha256(&(VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN, prepared))
+            .map_err(storage_error)?;
         if let Some(existing) = current
             .batches
             .iter()
-            .find(|batch| batch.request.request_digest == prepared.request.request_digest)
+            .find(|batch| batch.request_digest == prepared.request.request_digest)
         {
-            if existing == prepared {
+            if existing.prepared_digest == prepared_digest {
                 return Ok(current.checkpoint);
             }
             return Err(VectorGenerationStoreErrorV1::ConflictingBatchReplay);
@@ -1421,7 +1385,11 @@ impl FakeVectorGenerationStoreV1 {
         next.checkpoint.completed_batches += 1;
         next.checkpoint.last_request_digest = Some(prepared.request.request_digest.clone());
         next.checkpoint.last_publication_digest = Some(prepared.receipt.publication_digest.clone());
-        next.batches.push(prepared.clone());
+        next.batches.push(CommittedVectorBatchV1 {
+            request_digest: prepared.request.request_digest.clone(),
+            prepared_digest,
+            receipt: prepared.receipt.clone(),
+        });
         let checkpoint = next.checkpoint.clone();
         self.staged.insert(build_id.clone(), next);
         Ok(checkpoint)
@@ -1864,7 +1832,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
             )
             .await
             .map_err(storage_error)?;
-        let initial_state = serde_json::to_string(&FakeVectorGenerationStoreV1::default())
+        let initial_state = serde_json::to_string(&VectorGenerationStateMachineV1::default())
             .map_err(storage_error)?;
         database
             .execute_write_engine(
@@ -2287,7 +2255,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     async fn mutate_state<ResultValue>(
         &self,
         mutation: impl FnMut(
-            &mut FakeVectorGenerationStoreV1,
+            &mut VectorGenerationStateMachineV1,
         ) -> Result<ResultValue, VectorGenerationStoreErrorV1>,
     ) -> Result<ResultValue, VectorGenerationStoreErrorV1> {
         self.mutate_state_with_reclamation(false, mutation).await
@@ -2299,7 +2267,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     async fn mutate_retiring_state<ResultValue>(
         &self,
         mutation: impl FnMut(
-            &mut FakeVectorGenerationStoreV1,
+            &mut VectorGenerationStateMachineV1,
         ) -> Result<ResultValue, VectorGenerationStoreErrorV1>,
     ) -> Result<ResultValue, VectorGenerationStoreErrorV1> {
         self.mutate_state_with_reclamation(true, mutation).await
@@ -2309,7 +2277,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         &self,
         reclaim_unreferenced: bool,
         mut mutation: impl FnMut(
-            &mut FakeVectorGenerationStoreV1,
+            &mut VectorGenerationStateMachineV1,
         ) -> Result<ResultValue, VectorGenerationStoreErrorV1>,
     ) -> Result<ResultValue, VectorGenerationStoreErrorV1> {
         for _ in 0..MAX_STATE_CAS_RETRIES {
@@ -2356,8 +2324,10 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
 
     async fn load_state(
         &self,
-    ) -> Result<(i64, FakeVectorGenerationStoreV1, VectorPayloadLoadV1), VectorGenerationStoreErrorV1>
-    {
+    ) -> Result<
+        (i64, VectorGenerationStateMachineV1, VectorPayloadLoadV1),
+        VectorGenerationStoreErrorV1,
+    > {
         let mut rows = self
             .database
             .engine_conn()
@@ -2377,7 +2347,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let revision = row.get::<i64>(0).map_err(storage_error)?;
         let state_json = row.get::<String>(1).map_err(storage_error)?;
         drop(rows);
-        let mut state: FakeVectorGenerationStoreV1 =
+        let mut state: VectorGenerationStateMachineV1 =
             serde_json::from_str(&state_json).map_err(storage_error)?;
         drop(state_json);
         let (durable_slices, _) =
@@ -2427,7 +2397,7 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
             )
             .await
             .map_err(storage_error)?;
-        let initial_state = serde_json::to_string(&FakeVectorGenerationStoreV1::default())
+        let initial_state = serde_json::to_string(&VectorGenerationStateMachineV1::default())
             .map_err(storage_error)?;
         let inserted = database
             .execute_write_engine(
@@ -2550,7 +2520,7 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
     async fn mutate_state<ResultValue>(
         &self,
         mut mutation: impl FnMut(
-            &mut FakeVectorGenerationStoreV1,
+            &mut VectorGenerationStateMachineV1,
         ) -> Result<ResultValue, VectorGenerationStoreErrorV1>,
     ) -> Result<ResultValue, VectorGenerationStoreErrorV1> {
         for _ in 0..MAX_STATE_CAS_RETRIES {
@@ -2596,8 +2566,10 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
 
     async fn load_state(
         &self,
-    ) -> Result<(i64, FakeVectorGenerationStoreV1, VectorPayloadLoadV1), VectorGenerationStoreErrorV1>
-    {
+    ) -> Result<
+        (i64, VectorGenerationStateMachineV1, VectorPayloadLoadV1),
+        VectorGenerationStoreErrorV1,
+    > {
         let mut rows = self
             .database
             .engine_conn()
@@ -2617,7 +2589,7 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
         let revision = row.get::<i64>(0).map_err(storage_error)?;
         let state_json = row.get::<String>(1).map_err(storage_error)?;
         drop(rows);
-        let mut state: FakeVectorGenerationStoreV1 =
+        let mut state: VectorGenerationStateMachineV1 =
             serde_json::from_str(&state_json).map_err(storage_error)?;
         drop(state_json);
         let (durable_slices, _) = hydrate_external_state(
@@ -2639,7 +2611,7 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
     }
 }
 
-impl FakeVectorGenerationStoreV1 {
+impl VectorGenerationStateMachineV1 {
     /// Rebuild the derived physical-byte index for every published generation.
     ///
     /// The generation map is moved aside rather than cloned: interning only
@@ -2747,7 +2719,7 @@ fn intern_generation_vectors(
 }
 
 fn validate_loaded_state(
-    state: &FakeVectorGenerationStoreV1,
+    state: &VectorGenerationStateMachineV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     if let Some(active) = &state.published.active_generation
         && !state.published.generations.contains_key(active)
@@ -2989,7 +2961,7 @@ fn decode_vector_payload(
         .collect())
 }
 
-impl FakeVectorGenerationStoreV1 {
+impl VectorGenerationStateMachineV1 {
     fn visit_vectors<'state>(&'state self, visit: &mut impl FnMut(&'state ProjectedChunkVectorV1)) {
         for generation in self.published.generations.values() {
             for vector in generation.vectors.values() {
@@ -2999,11 +2971,6 @@ impl FakeVectorGenerationStoreV1 {
         for staged in self.staged.values() {
             for vector in staged.vectors.values() {
                 visit(vector);
-            }
-            for batch in staged.batches.iter() {
-                for vector in &batch.vectors {
-                    visit(vector);
-                }
             }
         }
     }
@@ -3023,11 +2990,6 @@ impl FakeVectorGenerationStoreV1 {
             for vector in staged.vectors.elided_mut().values_mut() {
                 visit(vector);
             }
-            for batch in staged.batches.elided_mut().iter_mut() {
-                for vector in &mut batch.vectors {
-                    visit(vector);
-                }
-            }
         }
     }
 }
@@ -3040,7 +3002,7 @@ impl FakeVectorGenerationStoreV1 {
 async fn hydrate_vector_payloads(
     database: &Database,
     payload_table: &str,
-    state: &mut FakeVectorGenerationStoreV1,
+    state: &mut VectorGenerationStateMachineV1,
 ) -> Result<VectorPayloadLoadV1, VectorGenerationStoreErrorV1> {
     let mut load = VectorPayloadLoadV1::default();
     let mut wanted = BTreeSet::new();
@@ -3080,7 +3042,7 @@ async fn hydrate_vector_payloads(
 /// build state directly go through here instead.
 #[cfg(test)]
 fn seal_test_state(
-    state: &mut FakeVectorGenerationStoreV1,
+    state: &mut VectorGenerationStateMachineV1,
 ) -> BTreeMap<ContentDigest, Vec<Vec<u8>>> {
     seal_external_state(state, &BTreeSet::new()).expect("seal externalized state")
 }
@@ -3090,7 +3052,7 @@ fn seal_test_state(
 async fn install_test_state_slices(
     database: &Database,
     slice_table: &str,
-    state: &mut FakeVectorGenerationStoreV1,
+    state: &mut VectorGenerationStateMachineV1,
 ) {
     let pending = seal_test_state(state);
     let transaction = database
@@ -3106,10 +3068,12 @@ async fn install_test_state_slices(
 /// Round-trip the state document the way a restart does, standing in for the
 /// slice and payload tables with the reference state still in memory.
 #[cfg(test)]
-fn restart_round_trip(state: &mut FakeVectorGenerationStoreV1) -> FakeVectorGenerationStoreV1 {
+fn restart_round_trip(
+    state: &mut VectorGenerationStateMachineV1,
+) -> VectorGenerationStateMachineV1 {
     let sealed = seal_test_state(state);
     let encoded = serde_json::to_string(&*state).expect("serialize vector state");
-    let mut restarted: FakeVectorGenerationStoreV1 =
+    let mut restarted: VectorGenerationStateMachineV1 =
         serde_json::from_str(&encoded).expect("deserialize vector state");
     fill_from_sealed(&mut restarted, &sealed);
     restarted.hydrate_from(state);
@@ -3118,7 +3082,7 @@ fn restart_round_trip(state: &mut FakeVectorGenerationStoreV1) -> FakeVectorGene
 
 #[cfg(test)]
 fn fill_from_sealed(
-    state: &mut FakeVectorGenerationStoreV1,
+    state: &mut VectorGenerationStateMachineV1,
     sealed: &BTreeMap<ContentDigest, Vec<Vec<u8>>>,
 ) {
     state
@@ -3137,7 +3101,7 @@ fn fill_from_sealed(
 async fn install_test_vector_payloads(
     database: &Database,
     payload_table: &str,
-    state: &FakeVectorGenerationStoreV1,
+    state: &VectorGenerationStateMachineV1,
 ) {
     let transaction = database
         .begin_write_transaction("install test vector payloads")
@@ -3234,7 +3198,7 @@ async fn read_vector_payloads(
 async fn write_vector_payloads(
     transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
     payload_table: &str,
-    state: &FakeVectorGenerationStoreV1,
+    state: &VectorGenerationStateMachineV1,
     durable: &BTreeSet<ContentDigest>,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     let mut pending: BTreeMap<ContentDigest, &[f32]> = BTreeMap::new();
@@ -3284,7 +3248,7 @@ async fn write_vector_payloads(
     Ok(())
 }
 
-fn referenced_payload_addresses(state: &FakeVectorGenerationStoreV1) -> BTreeSet<ContentDigest> {
+fn referenced_payload_addresses(state: &VectorGenerationStateMachineV1) -> BTreeSet<ContentDigest> {
     let mut referenced = BTreeSet::new();
     state.visit_vectors(&mut |vector| {
         referenced.insert(vector.output_digest.clone());
@@ -3300,7 +3264,7 @@ fn referenced_payload_addresses(state: &FakeVectorGenerationStoreV1) -> BTreeSet
 async fn prune_unreferenced_vector_payloads(
     transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
     payload_table: &str,
-    state: &FakeVectorGenerationStoreV1,
+    state: &VectorGenerationStateMachineV1,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     let scratch_table = format!("temp.{payload_table}_referenced");
     transaction
@@ -3373,7 +3337,7 @@ impl PublishedVectorGenerationV1 {
     }
 }
 
-impl FakeVectorGenerationStoreV1 {
+impl VectorGenerationStateMachineV1 {
     /// Every externalized collection in the state document, in a stable order.
     fn visit_external_slots(
         &mut self,
@@ -3404,7 +3368,7 @@ impl FakeVectorGenerationStoreV1 {
 /// free — the staged collections and the published ones they become hash to
 /// the same addresses, which are durable by then.
 fn seal_external_state(
-    state: &mut FakeVectorGenerationStoreV1,
+    state: &mut VectorGenerationStateMachineV1,
     durable: &BTreeSet<ContentDigest>,
 ) -> Result<BTreeMap<ContentDigest, Vec<Vec<u8>>>, VectorGenerationStoreErrorV1> {
     let mut pending: BTreeMap<ContentDigest, Vec<Vec<u8>>> = BTreeMap::new();
@@ -3421,7 +3385,7 @@ fn seal_external_state(
 
 /// Address every externalized collection the committed state still references.
 fn referenced_state_addresses(
-    state: &mut FakeVectorGenerationStoreV1,
+    state: &mut VectorGenerationStateMachineV1,
 ) -> Result<BTreeSet<ContentDigest>, VectorGenerationStoreErrorV1> {
     let mut referenced = BTreeSet::new();
     state.visit_external_slots(&mut |slot| {
@@ -3441,7 +3405,7 @@ fn referenced_state_addresses(
 async fn hydrate_external_state(
     database: &Database,
     slice_table: &str,
-    state: &mut FakeVectorGenerationStoreV1,
+    state: &mut VectorGenerationStateMachineV1,
 ) -> Result<(BTreeSet<ContentDigest>, bool), VectorGenerationStoreErrorV1> {
     let mut wanted = BTreeSet::new();
     let mut inline = false;
@@ -3835,6 +3799,12 @@ fn validate_base_digest(
     }
     Ok(())
 }
+
+#[cfg(test)]
+pub type FakeVectorGenerationStoreV1 = VectorGenerationStateMachineV1;
+
+#[cfg(test)]
+mod graph_adapter_tests;
 
 #[cfg(test)]
 mod tests {

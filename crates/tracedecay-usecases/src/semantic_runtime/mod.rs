@@ -15,6 +15,7 @@ mod ports;
 mod production;
 mod publish_failure_memo;
 mod redundancy;
+mod retention;
 
 pub(crate) use accepted_profile_authority::SemanticAcceptedProfileAuthorityPortV1;
 pub use accepted_profile_authority::{
@@ -85,6 +86,7 @@ pub(crate) use redundancy::{
     register_project_semantic_redundancy_generation,
     unregister_project_semantic_redundancy_generation,
 };
+pub use retention::SemanticRetainedVectorGenerationsV1;
 
 #[cfg(test)]
 mod tests;
