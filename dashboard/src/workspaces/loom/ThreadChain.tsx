@@ -122,10 +122,7 @@ export function ThreadChain({
             }
             const summary = summarizeChain(
               data.messages ?? [],
-              {
-                message_count: data.counts.message_count,
-                token_estimate_total: data.counts.token_estimate_total ?? undefined,
-              },
+              { message_count: data.counts.message_count },
               data.next_cursor != null,
             );
             if (summary.steps.length === 0) {
@@ -240,6 +237,9 @@ export function ThreadChain({
                             </span>
                           ) : null}
                         </span>
+                        <span className="shrink-0 whitespace-nowrap text-3xs text-text-muted tabular">
+                          {chainStepTokenLabel(step)}
+                        </span>
                       </li>
                     ))}
                   </ol>
@@ -258,6 +258,15 @@ export function ThreadChain({
       </div>
     </Panel>
   );
+}
+
+function chainStepTokenLabel(
+  step: ReturnType<typeof summarizeChain>['steps'][number],
+): string {
+  if (step.tokenCount == null || step.tokenCountProvenance == null) {
+    return 'tokens unknown';
+  }
+  return `~${step.tokenCount.toLocaleString()} tokens · o200k approximate`;
 }
 
 /** Durable causal rows attached to the selected provider-qualified session.

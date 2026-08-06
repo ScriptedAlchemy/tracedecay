@@ -119,17 +119,17 @@ pub fn counting_available() -> bool {
 /// embedded vocabularies lazily, so the first call pays the init cost and
 /// builds without the feature never do.
 #[cfg(feature = "token-counting")]
-pub fn count_text_tokens(text: &str, model: &str) -> i64 {
+pub fn count_text_tokens(text: &str, model: &str) -> Option<i64> {
     let bpe = match encoder_for_model(model).name {
         CL100K => cl100k_base_singleton(),
         _ => o200k_base_singleton(),
     };
-    bpe.encode_ordinary(text).len() as i64
+    i64::try_from(bpe.encode_ordinary(text).len()).ok()
 }
 
 #[cfg(not(feature = "token-counting"))]
-pub fn count_text_tokens(_text: &str, _model: &str) -> i64 {
-    0
+pub fn count_text_tokens(_text: &str, _model: &str) -> Option<i64> {
+    None
 }
 
 /// Legacy chars/4 estimate, matching the SQL `(LENGTH(text)+3)/4`.
@@ -390,14 +390,14 @@ async fn count_and_store(
         let counted = tokio::task::spawn_blocking(move || {
             batch
                 .into_iter()
-                .map(
-                    |(provider, message_id, model, len, text)| ComputedTokenCount {
-                        token_count: count_text_tokens(&text, &model),
+                .filter_map(|(provider, message_id, model, len, text)| {
+                    count_text_tokens(&text, &model).map(|token_count| ComputedTokenCount {
+                        token_count,
                         provider,
                         message_id,
                         text_len: len,
-                    },
-                )
+                    })
+                })
                 .collect::<Vec<_>>()
         })
         .await
@@ -498,7 +498,7 @@ mod tests {
     #[test]
     fn bpe_counts_diverge_from_chars4() {
         let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let bpe = count_text_tokens(text, "gpt-5");
+        let bpe = count_text_tokens(text, "gpt-5").expect("token counting is compiled in");
         assert!(bpe > 0);
         // Code-heavy text tokenizes denser than chars/4 predicts; the exact
         // value is vocabulary-dependent, so only sanity-bound it.
@@ -509,9 +509,15 @@ mod tests {
     #[test]
     fn bpe_counts_use_cl100k_for_legacy_models() {
         let text = "fn main() { println!(\"hello tokenizer world\"); }";
-        let cl = count_text_tokens(text, "gpt-4");
+        let cl = count_text_tokens(text, "gpt-4").expect("token counting is compiled in");
         assert!(cl > 0);
         assert!(cl <= text.len() as i64);
+    }
+
+    #[cfg(not(feature = "token-counting"))]
+    #[test]
+    fn a_compiled_out_tokenizer_is_unavailable_instead_of_zero() {
+        assert_eq!(count_text_tokens("visible content", ""), None);
     }
 
     #[tokio::test]

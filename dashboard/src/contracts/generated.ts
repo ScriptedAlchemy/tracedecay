@@ -1211,9 +1211,9 @@ export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
 
 export const LcmCompressionSummaryV1Schema = z.object({
   node_count: z.number().int(),
-  ratio: z.number(),
-  source_token_count: z.number().int(),
-  token_count: z.number().int(),
+  ratio: z.number().nullable(),
+  source_token_count: z.number().int().nullable(),
+  token_count: z.number().int().nullable(),
 });
 export type LcmCompressionSummaryV1 = z.infer<typeof LcmCompressionSummaryV1Schema>;
 
@@ -1251,7 +1251,8 @@ export const LcmMessageV1Schema = z.object({
   store_id: z.number().int().nullable(),
   summary_node_ids: z.array(z.string()),
   timestamp: z.number().int().nullable(),
-  token_estimate: z.number().int().nullable(),
+  token_count: z.number().int().nullable(),
+  token_count_provenance: z.union([z.lazy(() => LcmTokenCountProvenanceV1Schema), z.null()]),
   tool_name: z.string().nullable(),
 });
 export type LcmMessageV1 = z.infer<typeof LcmMessageV1Schema>;
@@ -1329,7 +1330,6 @@ export const LcmSessionCountsV1Schema = z.object({
   source_token_count: z.number().int().nullable(),
   summary_node_count: z.number().int(),
   summary_token_count: z.number().int().nullable(),
-  token_estimate_total: z.number().int().nullable(),
 });
 export type LcmSessionCountsV1 = z.infer<typeof LcmSessionCountsV1Schema>;
 
@@ -1375,7 +1375,10 @@ export type LcmSummaryNodeV1 = z.infer<typeof LcmSummaryNodeV1Schema>;
 export const LcmTimelineBucketV1Schema = z.object({
   bucket: z.string(),
   count: z.number().int(),
-  token_estimate: z.number().int(),
+  known_message_count: z.number().int(),
+  token_count: z.number().int().nullable(),
+  token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
+  unknown_message_count: z.number().int(),
 });
 export type LcmTimelineBucketV1 = z.infer<typeof LcmTimelineBucketV1Schema>;
 
@@ -1410,9 +1413,15 @@ export type LcmTimelinePayloadV1 = z.infer<typeof LcmTimelinePayloadV1Schema>;
 
 export const LcmTimelineUndatedV1Schema = z.object({
   count: z.number().int(),
-  token_estimate: z.number().int(),
+  known_message_count: z.number().int(),
+  token_count: z.number().int().nullable(),
+  token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
+  unknown_message_count: z.number().int(),
 });
 export type LcmTimelineUndatedV1 = z.infer<typeof LcmTimelineUndatedV1Schema>;
+
+export const LcmTokenCountProvenanceV1Schema = z.enum(["o200k_approximate", "unavailable"]);
+export type LcmTokenCountProvenanceV1 = z.infer<typeof LcmTokenCountProvenanceV1Schema>;
 
 export const LoomBranchSpanV1Schema = z.object({
   branch: z.string().nullable(),

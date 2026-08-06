@@ -85,9 +85,10 @@ mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
 pub use lcm_api::{
-    DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
-    DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1,
-    DashboardLcmReadPortV1, DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
+    DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
+    DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1,
+    DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
+    DashboardLcmReadStateV1, DashboardLcmTimelineBucketV1,
 };
 mod loom_api;
 mod memory_analysis;
@@ -1692,6 +1693,8 @@ mod authority_tests {
         ) -> DashboardLcmReadFutureV1<'_> {
             Box::pin(async move {
                 let next_cursor = match request {
+                    DashboardLcmReadRequestV1::Overview { .. }
+                    | DashboardLcmReadRequestV1::Timeline { .. } => None,
                     DashboardLcmReadRequestV1::Search { .. } => {
                         Some("opaque-search-cursor".to_owned())
                     }
@@ -1712,6 +1715,7 @@ mod authority_tests {
                         tool_names: None,
                     }],
                     summary_nodes: Vec::new(),
+                    overview_matches: None,
                     stats: DashboardLcmCanonicalStatsV1 {
                         message_count: 1,
                         ..DashboardLcmCanonicalStatsV1::default()
@@ -2321,7 +2325,7 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn lcm_aggregate_reads_stay_typed_unavailable() {
+    async fn lcm_aggregate_reads_use_the_mounted_daemon_authority() {
         let mut fixture = DashboardStateFixture::open("project.dashboard-lcm-aggregate").await;
         fixture.state.lcm_read_authority = Some(Arc::new(FakeDashboardLcmRead));
         let app = router_with_active_application(fixture.state, None, Router::new());
@@ -2345,12 +2349,9 @@ mod authority_tests {
                 .expect("LCM aggregate body");
             let value: Value = serde_json::from_slice(&body).expect("LCM aggregate json");
 
-            assert_eq!(value["domain_state"], "unknown", "{uri}");
-            assert_eq!(
-                value["coverage"]["omission_reasons"],
-                serde_json::json!(["lcm_aggregate_cursor_contract_unavailable"]),
-                "{uri}"
-            );
+            assert_eq!(value["domain_state"], "ready", "{uri}");
+            assert_eq!(value["coverage"]["complete"], true, "{uri}");
+            assert_eq!(value["payload"]["exists"], true, "{uri}");
         }
     }
 

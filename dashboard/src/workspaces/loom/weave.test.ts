@@ -203,14 +203,16 @@ describe('composeWeave', () => {
 });
 
 describe('summarizeChain', () => {
-  const message = (over: Record<string, unknown> = {}) => ({
+  type ChainMessage = Parameters<typeof summarizeChain>[0][number];
+  const message = (over: Partial<ChainMessage> = {}): ChainMessage => ({
     message_id: 'm1',
     role: 'assistant',
     content: 'hello',
     ordinal: 0,
     timestamp: null,
     tool_name: null,
-    token_estimate: 4,
+    token_count: 4,
+    token_count_provenance: 'o200k_approximate',
     ...over,
   });
 
@@ -263,6 +265,30 @@ describe('summarizeChain', () => {
     expect(summary.messageCount).toBe(998);
     expect(summary.steps).toHaveLength(1);
     expect(summary.truncated).toBe(true);
+  });
+
+  it('preserves per-message token provenance without inventing an aggregate zero', () => {
+    const summary = summarizeChain([
+      message({
+        message_id: 'recorded',
+        token_count: 13,
+        token_count_provenance: 'o200k_approximate',
+      }),
+      message({
+        message_id: 'unknown',
+        token_count: null,
+        token_count_provenance: null,
+      }),
+    ]);
+
+    expect(summary.steps[0]).toMatchObject({
+      tokenCount: 13,
+      tokenCountProvenance: 'o200k_approximate',
+    });
+    expect(summary.steps[1]).toMatchObject({
+      tokenCount: null,
+      tokenCountProvenance: null,
+    });
   });
 
   it('collapses whitespace and truncates an excerpt', () => {
