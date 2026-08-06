@@ -28,7 +28,10 @@ use tracedecay_domain::{
 };
 
 #[cfg(feature = "semantic-fastembed")]
-use crate::application::semantic_runtime::{ProductionSemanticRuntimeV1, current_query_factory};
+use crate::application::semantic_runtime::{
+    ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
+    SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1, current_query_factory,
+};
 #[cfg(feature = "semantic-fastembed")]
 use crate::config::SemanticResourceCeilings;
 #[cfg(feature = "semantic-fastembed")]
@@ -40,7 +43,15 @@ use crate::semantic_code::{
     production_fastembed_catalog,
 };
 #[cfg(feature = "semantic-fastembed")]
-use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
+use crate::store::vector_generations::GraphVectorGenerationStoreV1;
+#[cfg(feature = "semantic-fastembed")]
+use tracedecay_graph_db::{GraphDb, GraphDbOwner, NeverCancelled};
+#[cfg(feature = "semantic-fastembed")]
+use tracedecay_store::{
+    BrainId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
+};
 
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
@@ -3226,6 +3237,96 @@ async fn poisoned_scheduler_lock_does_not_retire_the_background_worker() {
     registry.shutdown().await;
 }
 
+/// In-process semantic-vector graph fixture: one shared memory graph stands
+/// in for the daemon-retained code-graph runtime, so publish/restore flows
+/// exercise the same graph store the production provider resolves.
+#[cfg(feature = "semantic-fastembed")]
+struct MemorySemanticVectorGraphFixtureV1 {
+    graph: Arc<GraphDb>,
+    authority: Arc<dyn RetainedGraphStoreLeaseV1>,
+}
+
+#[cfg(feature = "semantic-fastembed")]
+#[derive(Debug)]
+struct MemorySemanticVectorGraphLeaseV1 {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    canonical_path: PathBuf,
+}
+
+#[cfg(feature = "semantic-fastembed")]
+impl RetainedGraphStoreLeaseV1 for MemorySemanticVectorGraphLeaseV1 {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+}
+
+#[cfg(feature = "semantic-fastembed")]
+impl MemorySemanticVectorGraphFixtureV1 {
+    fn new(store_root: &Path) -> Arc<Self> {
+        let binding = StoreRuntimeBindingV1::new(
+            StoreShardIdV1::project(
+                BrainId::try_from("brain-semantic-vector-test".to_owned()).expect("brain id"),
+                UserProfileId::try_from("profile-semantic-vector-test".to_owned())
+                    .expect("profile id"),
+                ProjectId::try_from("project-semantic-vector-test".to_owned())
+                    .expect("project id"),
+            ),
+            StoreIncarnationV1::new(1).expect("incarnation"),
+            StoreAuthorityEpochV1::new(1).expect("epoch"),
+        );
+        let canonical_path = store_root.join("graph.grafeo");
+        let authority: Arc<dyn RetainedGraphStoreLeaseV1> =
+            Arc::new(MemorySemanticVectorGraphLeaseV1 {
+                verified_locator: VerifiedStoreLocatorV1::new(
+                    binding.shard_id.clone(),
+                    binding.incarnation,
+                    canonical_store_locator_digest(&canonical_path).expect("locator digest"),
+                ),
+                binding,
+                canonical_path,
+            });
+        let graph = GraphDbOwner::memory(Arc::new(NeverCancelled))
+            .expect("memory graph")
+            .handle();
+        Arc::new(Self { graph, authority })
+    }
+
+    fn retained(&self) -> RetainedSemanticVectorGraphV1 {
+        RetainedSemanticVectorGraphV1::new(
+            Arc::clone(&self.graph),
+            Arc::new(NeverCancelled),
+            Arc::clone(&self.authority),
+        )
+    }
+}
+
+#[cfg(feature = "semantic-fastembed")]
+impl SemanticVectorGraphProviderV1 for MemorySemanticVectorGraphFixtureV1 {
+    fn graph_for_generation<'a>(
+        &'a self,
+        _generation: &'a tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    ) -> SemanticRuntimeFuture<'a, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
+    {
+        Box::pin(async move { Ok(self.retained()) })
+    }
+
+    fn graph_for_current(
+        &self,
+    ) -> SemanticRuntimeFuture<'_, Result<RetainedSemanticVectorGraphV1, SemanticVectorGraphErrorV1>>
+    {
+        Box::pin(async move { Ok(self.retained()) })
+    }
+}
+
 #[cfg(feature = "semantic-fastembed")]
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() {
@@ -3308,9 +3409,11 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
         .0,
     );
     let handle = DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("semantic handle");
+    let vector_graph = MemorySemanticVectorGraphFixtureV1::new(database_root.path());
     let runtime = ProductionSemanticRuntimeV1::new(
         handle.clone(),
         Arc::clone(&database),
+        Arc::clone(&vector_graph) as Arc<dyn SemanticVectorGraphProviderV1>,
         Arc::clone(&lifecycle),
         SemanticResourceCeilings {
             max_model_bytes: 1024 * 1024 * 1024,
@@ -3337,11 +3440,12 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     .expect("Jina projection became atomically current");
     let current = handle.current().expect("current semantic pointer");
     assert!(current_query_factory(&handle).is_some());
-    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
-        .await
-        .expect("vector store");
+    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(&vector_graph.graph));
     assert_eq!(
-        store.active_generation_id().await.expect("active vector"),
+        store
+            .active_generation_id(Arc::new(NeverCancelled))
+            .await
+            .expect("active vector"),
         Some(current.generation.clone())
     );
 
@@ -3350,6 +3454,7 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     let restarted = ProductionSemanticRuntimeV1::new(
         restarted_handle.clone(),
         database,
+        Arc::clone(&vector_graph) as Arc<dyn SemanticVectorGraphProviderV1>,
         lifecycle,
         SemanticResourceCeilings {
             max_model_bytes: 1024 * 1024 * 1024,
