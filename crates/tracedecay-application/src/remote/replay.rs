@@ -676,8 +676,13 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                         failure,
                     )
                 });
-                RemoteProtocolResponseV1::new(request_id, authority, result)
-                    .expect("replay adapter preserves validated response identities")
+                RemoteProtocolResponseV1::new_or_unavailable(
+                    request_id,
+                    authority,
+                    result,
+                    remote_replay_result_contract_v1(),
+                    observed_at,
+                )
             }
             Err(error) => {
                 let authority = match &error {
@@ -688,7 +693,7 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                     _ => fallback_authority,
                 };
                 let failure = replay_protocol_failure(error);
-                RemoteProtocolResponseV1::new(
+                RemoteProtocolResponseV1::new_or_unavailable(
                     request_id.clone(),
                     authority,
                     Err(remote_protocol_problem(
@@ -696,8 +701,9 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                         request_id,
                         failure,
                     )),
+                    remote_replay_result_contract_v1(),
+                    observed_at,
                 )
-                .expect("replay adapter preserves validated problem identities")
             }
         }
     }

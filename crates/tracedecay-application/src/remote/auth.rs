@@ -602,15 +602,16 @@ where
                 enrollment_protocol_failure(error),
             )),
         };
-        RemoteProtocolResponseV1::new(
+        RemoteProtocolResponseV1::new_or_unavailable(
             request_id,
             CurrentRemoteAuthorityStateV1::Unavailable {
                 reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
                 observed_at,
             },
             result,
+            remote_enrollment_result_contract_v1(),
+            observed_at,
         )
-        .expect("validated enrollment response identities are preserved")
     }
 }
 

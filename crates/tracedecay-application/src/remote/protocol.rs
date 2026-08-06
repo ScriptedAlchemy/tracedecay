@@ -291,6 +291,34 @@ impl<T> RemoteProtocolResponseV1<T> {
             result,
         })
     }
+
+    /// Preserve a typed remote failure when an adapter returns internally
+    /// inconsistent authority or request evidence.
+    pub fn new_or_unavailable(
+        request_id: RequestId,
+        authority: CurrentRemoteAuthorityStateV1,
+        result: ApplicationResult<T>,
+        contract: ResultContractRef,
+        observed_at: UtcMicros,
+    ) -> Self {
+        let fallback_request_id = request_id.clone();
+        match Self::new(request_id, authority, result) {
+            Ok(response) => response,
+            Err(_) => Self {
+                protocol_version: REMOTE_PROTOCOL_VERSION_V1,
+                request_id: fallback_request_id.clone(),
+                authority: CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                    observed_at,
+                },
+                result: Err(remote_protocol_problem(
+                    contract,
+                    fallback_request_id,
+                    RemoteProtocolFailureV1::AuthorityUnavailable,
+                )),
+            },
+        }
+    }
 }
 
 /// Exact shard placement requested during current-authority discovery.
@@ -630,6 +658,39 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(response.request_id.as_str(), "request.remote");
+    }
+
+    #[test]
+    fn inconsistent_adapter_response_becomes_typed_unavailable() {
+        let request_id = RequestId::new("request.remote").unwrap();
+        let contract = ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1).unwrap();
+        let response = RemoteProtocolResponseV1::<()>::new_or_unavailable(
+            request_id.clone(),
+            CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                observed_at: UtcMicros(20),
+            },
+            Err(remote_protocol_problem(
+                contract.clone(),
+                RequestId::new("request.foreign").unwrap(),
+                RemoteProtocolFailureV1::AuthorityUnavailable,
+            )),
+            contract,
+            UtcMicros(20),
+        );
+
+        assert_eq!(response.request_id, request_id);
+        assert!(matches!(
+            response.authority,
+            CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                observed_at: UtcMicros(20),
+            }
+        ));
+        let Err(problem) = response.result else {
+            panic!("inconsistent response must not report success");
+        };
+        assert_eq!(problem.request_id, request_id);
     }
 
     #[test]
