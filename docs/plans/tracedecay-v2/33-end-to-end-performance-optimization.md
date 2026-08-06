@@ -1,8 +1,8 @@
-# PR20: End-to-End Performance Optimization
+# End-to-End Performance Optimization
 
 ## Status and authority
 
-PR20 follows V2 convergence. It optimizes demonstrated bottlenecks in shipped
+Measured performance optimization follows V2 convergence. It optimizes demonstrated bottlenecks in shipped
 product journeys and retains only changes that improve the same journey on the
 same host without changing semantics, safety, or recovery.
 
@@ -121,7 +121,7 @@ instrumentation nor a reproducible local comparison. Keep the ordinary
 operational measurements needed to diagnose product health and explain a
 truthful failed or pending outcome.
 
-## Not in PR20
+## Not in this plan
 
 - New product semantics or benchmark-only APIs.
 - A telemetry database, benchmark daemon, leaderboard, acceptance packet, or
