@@ -622,7 +622,6 @@ pub(super) async fn production_project_server(
         ],
     );
     if cancellation.is_cancelled() {
-        core_candidate.cancel_startup_transcript_ingest();
         core_candidate.shutdown().await;
         return Err(project_open_cancellation_error());
     }
@@ -652,7 +651,6 @@ pub(super) async fn production_project_server(
         route_registered.store(false, Ordering::Release);
     } else {
         if cancellation.is_cancelled() {
-            resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
         }
         if !invocation
@@ -660,7 +658,6 @@ pub(super) async fn production_project_server(
             .register_activation(&code_search_scope, &code_index_activation)
         {
             route_registered.store(false, Ordering::Release);
-            resolved.cancel_startup_transcript_ingest();
             return Err(TraceDecayError::Config {
                 message: "code-index activation scope does not match the project route".to_owned(),
             });
@@ -792,6 +789,61 @@ pub(super) async fn production_project_server(
                     Arc::clone(&user_session_db),
                 )
                 .await;
+            let session_sync_owner = store_administration.session_sync_service();
+            session_sync_owner
+                .register_project(crate::daemon::session_sync::DaemonSessionSyncConfig {
+                    brain_id: profile_identity.brain_id().clone(),
+                    profile_id: profile_identity.profile_id().clone(),
+                    project_id: code_search_project_id.clone(),
+                    profile_root: profile_identity.profile_root().to_path_buf(),
+                    project_root: canonical_project_path.to_path_buf(),
+                    transcript_source_home: transcript_source_home.clone(),
+                    project_sessions: Arc::clone(&session_db),
+                    user_sessions: Arc::clone(&user_session_db),
+                    registry: Arc::clone(&registry_db),
+                    startup_import: cg.get_config().sync.session_start_sync,
+                    project_refresh: project_session_refresh_wake.clone(),
+                    user_refresh: user_session_refresh_wake.clone(),
+                })
+                .await?;
+            let session_sync_port: Arc<
+                dyn tracedecay_application::session_sync::SessionSyncServicePort,
+            > = session_sync_owner;
+            let session_sync_service = Arc::downgrade(&session_sync_port);
+            let store_telemetry_sampling = store_administration.store_telemetry_sampling();
+            let record_telemetry_registration = |path: &Path, registered: bool| {
+                if !registered {
+                    log_daemon_event(
+                        "store_telemetry_registration",
+                        &[
+                            ("store", path.display().to_string()),
+                            ("outcome", "unavailable".to_owned()),
+                        ],
+                    );
+                }
+            };
+            record_telemetry_registration(
+                cg.db().database_path(),
+                store_telemetry_sampling.register_port(
+                    cg.db().database_path(),
+                    &code_search_scope,
+                    || cg.storage_telemetry_handle(),
+                ),
+            );
+            for database in [
+                registry_db.as_ref(),
+                user_session_db.as_ref(),
+                session_db.as_ref(),
+            ] {
+                record_telemetry_registration(
+                    database.db_path(),
+                    store_telemetry_sampling.register_port(
+                        database.db_path(),
+                        &code_search_scope,
+                        || database.storage_telemetry_handle(),
+                    ),
+                );
+            }
             let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
                 canonical_project_path.to_path_buf(),
                 code_search_project_id.clone(),
@@ -807,32 +859,8 @@ pub(super) async fn production_project_server(
                 invocation.code_index_schedulers.clone(),
                 Arc::clone(&diagnostic_broker),
                 invocation.feedback_runtime_registrar(),
+                store_telemetry_sampling,
             );
-            let doctor_remediation_dispatcher =
-                doctor_kernel::production_doctor_remediation_dispatcher(
-                    doctor_kernel::ProductionDoctorRemediationOwnersV1 {
-                        project_root: canonical_project_path.to_path_buf(),
-                        project_id: code_search_project_id.clone(),
-                        layout: cg.store_layout().clone(),
-                        registry: Arc::clone(&registry_db),
-                        profile_sessions: Arc::clone(&user_session_db),
-                        project_sessions: Arc::clone(&session_db),
-                        profile_root: profile_identity.profile_root().to_path_buf(),
-                        config: cg.get_config().clone(),
-                        global_retention: crate::user_config::UserConfig::load()
-                            .automation
-                            .retention,
-                        store_administration: store_administration.clone(),
-                        invocation: invocation.clone(),
-                        code_index_store_root: code_index_store_root.clone(),
-                        semantic_runtime: semantic_runtime.clone(),
-                        semantic_database: Arc::clone(&semantic_database),
-                        semantic_lifecycle: semantic_lifecycle.clone(),
-                        semantic_resources: *semantic_resources,
-                        route_registered: Arc::clone(&route_registered),
-                    },
-                    Arc::clone(&doctor_report_reader),
-                );
             let mut full_context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
                 Arc::clone(&cg),
                 handshake.scope_prefix.clone(),
@@ -850,6 +878,7 @@ pub(super) async fn production_project_server(
                     host_admission_broker,
                     project_session_refresh_wake,
                     user_session_refresh_wake,
+                    session_sync_service,
                     database_owner_reconciler,
                     project_routes: store_administration.project_routes(),
                     writers: crate::mcp::server::McpServerWriters::daemon_owned(
@@ -860,7 +889,6 @@ pub(super) async fn production_project_server(
                 },
             )
             .with_dashboard_doctor_report_reader(doctor_report_reader)
-            .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
             .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
             .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
             .with_diagnostics_lsp(diagnostic_broker)
@@ -890,7 +918,6 @@ pub(super) async fn production_project_server(
                 ],
             );
             if *current_key.lock().await != key {
-                full_candidate.cancel_startup_transcript_ingest();
                 full_candidate.shutdown().await;
                 return Err(TraceDecayError::Config {
                     message: "project changed branch during full capability admission".to_owned(),
@@ -904,7 +931,6 @@ pub(super) async fn production_project_server(
                     Arc::ptr_eq(current, &resolved)
                 });
             if !upgraded {
-                full_candidate.cancel_startup_transcript_ingest();
                 full_candidate.shutdown().await;
                 return Err(TraceDecayError::Config {
                     message: "project server changed during session capability upgrade".to_owned(),
@@ -1025,7 +1051,6 @@ pub(super) async fn production_project_server(
             // requests may finish while dependent owners warm, then the
             // displaced server is drained without closing the shared graph.
             resolved.revoke_project_server_responses();
-            resolved.cancel_startup_transcript_ingest();
             schedule_project_server_retirement(
                 store_administration,
                 vec![Arc::clone(&resolved)],
@@ -1084,7 +1109,6 @@ pub(super) async fn production_project_server(
                 if core_retained {
                     if let Some(failed_full_server) = failed_full_server {
                         failed_full_server.revoke_project_server_responses();
-                        failed_full_server.cancel_startup_transcript_ingest();
                         schedule_project_server_retirement(
                             store_administration,
                             vec![failed_full_server],
@@ -1120,7 +1144,6 @@ pub(super) async fn production_project_server(
                     }
                     for server in &removed {
                         server.revoke_project_server_responses();
-                        server.cancel_startup_transcript_ingest();
                     }
                     debug_assert!(
                         !removed.is_empty(),

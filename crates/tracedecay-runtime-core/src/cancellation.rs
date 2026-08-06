@@ -6,8 +6,10 @@
 //! store-runtime move. The root re-exports both from their historical path.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+use tokio_util::sync::CancellationToken as TokioCancellationToken;
 
 /// A deadline expressed on the monotonic clock.
 ///
@@ -37,16 +39,14 @@ impl MonotonicDeadline {
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     token_id: Option<Arc<str>>,
-    cancelled: Arc<AtomicBool>,
-    notify: Arc<tokio::sync::Notify>,
+    inner: TokioCancellationToken,
 }
 
 impl Default for CancellationToken {
     fn default() -> Self {
         Self {
             token_id: None,
-            cancelled: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(tokio::sync::Notify::new()),
+            inner: TokioCancellationToken::new(),
         }
     }
 }
@@ -77,31 +77,67 @@ impl CancellationToken {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        self.notify.notify_waiters();
+        self.inner.cancel();
     }
 
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.inner.is_cancelled()
     }
 
     /// Whether two handles observe the same underlying cancellation state.
     #[must_use]
     pub fn is_same_token(&self, other: &Self) -> bool {
-        self.token_id == other.token_id
-            && Arc::ptr_eq(&self.cancelled, &other.cancelled)
-            && Arc::ptr_eq(&self.notify, &other.notify)
+        self.token_id == other.token_id && self.inner == other.inner
     }
 
     /// Resolves once the token is cancelled.
     pub async fn cancelled(&self) {
-        loop {
-            let notified = self.notify.notified();
-            if self.is_cancelled() {
-                return;
-            }
-            notified.await;
-        }
+        self.inner.cancelled().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::CancellationToken;
+
+    #[test]
+    fn application_identity_is_stable_only_across_clones() {
+        let token = CancellationToken::for_application_request("request-7");
+        let clone = token.clone();
+        let independent = CancellationToken::for_application_request("request-7");
+
+        assert_eq!(token.application_token_id(), clone.application_token_id());
+        assert!(token.is_same_token(&clone));
+        assert_ne!(
+            token.application_token_id(),
+            independent.application_token_id()
+        );
+        assert!(!token.is_same_token(&independent));
+    }
+
+    #[tokio::test]
+    async fn cancellation_wakes_current_and_future_clone_waiters() {
+        let token = CancellationToken::new();
+        let first = token.clone();
+        let second = token.clone();
+        let first_waiter = tokio::spawn(async move { first.cancelled().await });
+        let second_waiter = tokio::spawn(async move { second.cancelled().await });
+
+        token.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), first_waiter)
+            .await
+            .expect("first waiter should wake")
+            .expect("first waiter should finish");
+        tokio::time::timeout(Duration::from_secs(1), second_waiter)
+            .await
+            .expect("second waiter should wake")
+            .expect("second waiter should finish");
+        tokio::time::timeout(Duration::from_secs(1), token.cancelled())
+            .await
+            .expect("future waiter should complete");
     }
 }

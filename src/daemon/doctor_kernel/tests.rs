@@ -7,8 +7,7 @@ use tracedecay_application::doctor::{
     ConfigurationDriftV1, DoctorCoverageCompletenessV1, DoctorCoverageStatementV1,
     DoctorEvidenceRefV1, DoctorEvidenceReferenceV1, DoctorEvidenceStateV1,
     DoctorFamilyConsultationV1, DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1,
-    DoctorFindingV1, DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
-    DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
+    DoctorFindingV1, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
     HostConformanceV1, HostIntegrationReadV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1, RuntimeHealthReadV1, RuntimeLivenessV1,
 };
@@ -68,59 +67,14 @@ fn orphan_storage_finding() -> DoctorStorageFindingV1 {
         "orphan store identity no longer resolves",
     )
     .unwrap();
-    let remediation = DoctorRemediationRefV1::new(
-        DoctorOwningOperationRefV1::new("use-case.application.storage.collect-orphan-store")
-            .unwrap(),
-        DoctorRemediationKindV1::Action,
-    );
     let finding = DoctorFindingV1::new(
         DoctorFindingFamilyV1::Storage,
         DoctorEvidenceStateV1::Degraded,
         vec![evidence],
         coverage,
-        Some(remediation),
     )
     .unwrap();
     DoctorStorageFindingV1::new(DoctorStorageFindingKindV1::OrphanStore, finding).unwrap()
-}
-
-// --- Configuration authority mapper -----------------------------------------
-
-#[test]
-fn configuration_signal_maps_each_variant_honestly() {
-    assert_eq!(
-        configuration_read(ConfigurationAuthoritySignalV1::Pinned),
-        ConfigurationAuthorityReadV1::Resolved {
-            drift: ConfigurationDriftV1::InSync,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        }
-    );
-    assert_eq!(
-        configuration_read(ConfigurationAuthoritySignalV1::Drifted),
-        ConfigurationAuthorityReadV1::Resolved {
-            drift: ConfigurationDriftV1::Drifted,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        }
-    );
-    assert_eq!(
-        configuration_read(ConfigurationAuthoritySignalV1::PinUnavailable),
-        ConfigurationAuthorityReadV1::Resolved {
-            drift: ConfigurationDriftV1::PinUnavailable,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        }
-    );
-    assert_eq!(
-        configuration_read(ConfigurationAuthoritySignalV1::Missing),
-        ConfigurationAuthorityReadV1::Absent
-    );
-    assert_eq!(
-        configuration_read(ConfigurationAuthoritySignalV1::Denied),
-        ConfigurationAuthorityReadV1::Denied
-    );
-    assert_eq!(
-        configuration_read(ConfigurationAuthoritySignalV1::Unknown),
-        ConfigurationAuthorityReadV1::Unknown
-    );
 }
 
 #[test]
@@ -227,72 +181,6 @@ async fn runtime_adapter_returns_seeded_read() {
     assert_eq!(adapter.runtime_health(&ctx).await, read);
 }
 
-// --- Host integration mapper ------------------------------------------------
-
-#[test]
-fn host_conformance_maps_conformant_drift_and_absent() {
-    let conformant = HostConformanceSummaryV1 {
-        probed: 3,
-        accepted: 3,
-        executable_present: true,
-    };
-    assert_eq!(
-        host_conformance_read(&conformant),
-        HostIntegrationReadV1::Observed {
-            conformance: HostConformanceV1::Conformant,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        }
-    );
-    let mixed = HostConformanceSummaryV1 {
-        probed: 3,
-        accepted: 1,
-        executable_present: true,
-    };
-    assert!(matches!(
-        host_conformance_read(&mixed),
-        HostIntegrationReadV1::Observed {
-            conformance: HostConformanceV1::Drifted,
-            ..
-        }
-    ));
-    let all_rejected = HostConformanceSummaryV1 {
-        probed: 2,
-        accepted: 0,
-        executable_present: true,
-    };
-    assert!(matches!(
-        host_conformance_read(&all_rejected),
-        HostIntegrationReadV1::Observed {
-            conformance: HostConformanceV1::ProtocolDrift,
-            ..
-        }
-    ));
-    let no_exe = HostConformanceSummaryV1 {
-        probed: 1,
-        accepted: 0,
-        executable_present: false,
-    };
-    assert!(matches!(
-        host_conformance_read(&no_exe),
-        HostIntegrationReadV1::Observed {
-            conformance: HostConformanceV1::ExecutableAbsent,
-            ..
-        }
-    ));
-    let none = HostConformanceSummaryV1::default();
-    assert_eq!(host_conformance_read(&none), HostIntegrationReadV1::Absent);
-}
-
-#[test]
-fn host_conformance_summary_counts_real_verifier_outcomes() {
-    let installed = ["good-a", "bad", "good-b"];
-    let summary =
-        host_conformance_summary(&installed, true, |manifest| manifest.starts_with("good"));
-    assert_eq!(summary.probed, 3);
-    assert_eq!(summary.accepted, 2);
-    assert!(summary.executable_present);
-}
-
 #[test]
 fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
     let checked_in = crate::agents::host_bundle_v2::HostBundleDoctorReportV1::default();
@@ -333,40 +221,6 @@ async fn host_adapter_returns_seeded_read() {
     };
     let adapter = HostIntegrationDoctorAdapterV1::from_read(read.clone());
     assert_eq!(adapter.host_conformance(&ctx).await, read);
-}
-
-// --- Code-index mount mapper ------------------------------------------------
-
-#[test]
-fn code_index_signal_maps_each_state() {
-    assert_eq!(
-        code_index_read(CodeIndexMountSignalV1::MountedFresh),
-        CodeIndexMountReadV1::Observed {
-            state: CodeIndexMountStateV1::Mounted,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        }
-    );
-    assert!(matches!(
-        code_index_read(CodeIndexMountSignalV1::Indexing),
-        CodeIndexMountReadV1::Observed {
-            state: CodeIndexMountStateV1::Indexing,
-            ..
-        }
-    ));
-    assert!(matches!(
-        code_index_read(CodeIndexMountSignalV1::Unmounted),
-        CodeIndexMountReadV1::Observed {
-            state: CodeIndexMountStateV1::Unmounted,
-            ..
-        }
-    ));
-    assert!(matches!(
-        code_index_read(CodeIndexMountSignalV1::Incompatible),
-        CodeIndexMountReadV1::Observed {
-            state: CodeIndexMountStateV1::Incompatible,
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -550,10 +404,44 @@ fn storage_family_read_observed_when_findings_present() {
 #[tokio::test]
 async fn storage_adapter_returns_seeded_read() {
     let ctx = context();
-    let adapter = StorageDoctorAdapterV1::from_findings(vec![orphan_storage_finding()]);
+    let adapter =
+        StorageDoctorAdapterV1::from_read(storage_family_read(vec![orphan_storage_finding()]));
     match adapter.storage_findings(&ctx).await {
         DoctorStorageFamilyReadV1::Observed { findings } => assert_eq!(findings.len(), 1),
         other => panic!("expected observed, got {other:?}"),
+    }
+}
+
+#[test]
+fn unresolved_storage_producers_preserve_findings_and_weaken_coverage() {
+    for (unresolved, expected_reason) in [
+        (
+            DoctorStorageFamilyReadV1::Unsupported,
+            DoctorStorageIncompleteReasonV1::Unsupported,
+        ),
+        (
+            DoctorStorageFamilyReadV1::Denied,
+            DoctorStorageIncompleteReasonV1::Denied,
+        ),
+        (
+            DoctorStorageFamilyReadV1::Unknown,
+            DoctorStorageIncompleteReasonV1::Unknown,
+        ),
+    ] {
+        let observed = storage_family_read(vec![orphan_storage_finding()]);
+        for merged in [
+            merge_storage_reads(observed.clone(), unresolved.clone()),
+            merge_storage_reads(unresolved, observed),
+        ] {
+            match merged {
+                DoctorStorageFamilyReadV1::ObservedIncomplete { findings, reason } => {
+                    assert_eq!(reason, expected_reason);
+                    assert_eq!(findings.len(), 1);
+                    assert_eq!(findings[0].kind(), DoctorStorageFindingKindV1::OrphanStore);
+                }
+                other => panic!("expected incomplete observations, got {other:?}"),
+            }
+        }
     }
 }
 
@@ -565,7 +453,10 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
     let inputs = DoctorKernelInputsV1 {
         // Healthy configuration, degraded runtime, denied host, mounted index,
         // observed storage problem: a genuinely mixed report.
-        configuration: configuration_read(ConfigurationAuthoritySignalV1::Pinned),
+        configuration: ConfigurationAuthorityReadV1::Resolved {
+            drift: ConfigurationDriftV1::InSync,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
         runtime: runtime_health_read(&DaemonRuntimeHealthSignalV1 {
             serving: true,
             startup_converged: false,
@@ -581,14 +472,20 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             state: LanguageServerStateV1::Ready,
             coverage: DoctorCoverageCompletenessV1::Complete,
         },
-        code_index: code_index_read(CodeIndexMountSignalV1::MountedFresh),
+        code_index: CodeIndexMountReadV1::Observed {
+            state: CodeIndexMountStateV1::Mounted,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
         observability: ObservabilityReadV1::Observed {
             state: ObservabilityStateV1::Current,
             total_count: 7,
             last_observed_at_micros: Some(42),
             coverage: DoctorCoverageCompletenessV1::Partial,
         },
-        storage: storage_family_read(vec![orphan_storage_finding()]),
+        storage: merge_storage_reads(
+            storage_family_read(vec![orphan_storage_finding()]),
+            DoctorStorageFamilyReadV1::Unknown,
+        ),
     };
 
     let report = compose_doctor_report(&ctx, &inputs).await.expect("report");
@@ -668,114 +565,10 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         consultation(DoctorFindingFamilyV1::Configuration),
         Some(DoctorFamilyConsultationV1::Consulted)
     );
-}
-
-#[tokio::test]
-async fn all_unknown_inputs_compose_a_truthful_unavailable_report() {
-    let ctx = context();
-    let report = compose_doctor_report(&ctx, &DoctorKernelInputsV1::all_unknown())
-        .await
-        .expect("report");
-    assert!(!report.is_healthy_complete());
-    // No family asserts health when every source is undetermined.
-    assert!(
-        report
-            .findings()
-            .all(|finding| !finding.state().is_healthy_complete())
-    );
-}
-
-fn remediation_operation() -> crate::dashboard::DoctorRemediationOperationV1 {
-    crate::dashboard::DoctorRemediationOperationV1 {
-        operation_id: crate::application::operation_stream::OperationId::from_request(
-            RequestId::new("request.doctor-remediation-observation").unwrap(),
-        ),
-        owning_operation: DoctorOwningOperationRefV1::new(
-            tracedecay_application::doctor::operations::CONFIGURATION_PROTECTED_APPLY,
-        )
-        .unwrap(),
-        phase: crate::dashboard::DoctorRemediationOperationPhaseV1::Partial,
-        preview_id: None,
-        execution: None,
-        effect_receipt: None,
-        owner_effect_receipt: None,
-        owner_result_digest: None,
-        verification: crate::dashboard::DoctorRemediationVerificationV1::Pending,
-    }
-}
-
-#[tokio::test]
-async fn remediation_reobservation_uses_fresh_doctor_evidence_not_dispatch_success() {
-    let ctx = context();
-    let mut before = DoctorKernelInputsV1::all_unknown();
-    before.configuration = ConfigurationAuthorityReadV1::Resolved {
-        drift: ConfigurationDriftV1::Drifted,
-        coverage: DoctorCoverageCompletenessV1::Complete,
-    };
-    let finding_report = compose_doctor_report(&ctx, &before).await.unwrap();
-    let finding = finding_report
-        .entries()
-        .iter()
-        .find(|entry| entry.finding().family() == DoctorFindingFamilyV1::Configuration)
-        .unwrap()
-        .finding();
-    assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
     assert_eq!(
-        finding.remediation().unwrap().owning_operation().as_str(),
-        tracedecay_application::doctor::operations::CONFIGURATION_PROTECTED_APPLY
-    );
-    assert!(matches!(
-        verify_doctor_remediation_observation(&finding_report, &remediation_operation()).unwrap(),
-        crate::dashboard::DoctorRemediationVerificationV1::Failed { .. }
-    ));
-
-    let mut after = DoctorKernelInputsV1::all_unknown();
-    after.configuration = ConfigurationAuthorityReadV1::Resolved {
-        drift: ConfigurationDriftV1::InSync,
-        coverage: DoctorCoverageCompletenessV1::Complete,
-    };
-    let recovered_report = compose_doctor_report(&ctx, &after).await.unwrap();
-    assert!(matches!(
-        verify_doctor_remediation_observation(&recovered_report, &remediation_operation()).unwrap(),
-        crate::dashboard::DoctorRemediationVerificationV1::Verified { .. }
-    ));
-}
-
-#[tokio::test]
-async fn remediation_reobservation_preserves_partial_denied_and_unavailable_truth() {
-    let ctx = context();
-    let operation = remediation_operation();
-
-    let mut partial = DoctorKernelInputsV1::all_unknown();
-    partial.configuration = ConfigurationAuthorityReadV1::Resolved {
-        drift: ConfigurationDriftV1::InSync,
-        coverage: DoctorCoverageCompletenessV1::Partial,
-    };
-    assert!(matches!(
-        verify_doctor_remediation_observation(
-            &compose_doctor_report(&ctx, &partial).await.unwrap(),
-            &operation,
-        )
-        .unwrap(),
-        crate::dashboard::DoctorRemediationVerificationV1::Partial { .. }
-    ));
-
-    let mut denied = DoctorKernelInputsV1::all_unknown();
-    denied.configuration = ConfigurationAuthorityReadV1::Denied;
-    assert_eq!(
-        verify_doctor_remediation_observation(
-            &compose_doctor_report(&ctx, &denied).await.unwrap(),
-            &operation,
-        )
-        .unwrap(),
-        crate::dashboard::DoctorRemediationVerificationV1::Denied
-    );
-
-    let unavailable = compose_doctor_report(&ctx, &DoctorKernelInputsV1::all_unknown())
-        .await
-        .unwrap();
-    assert_eq!(
-        verify_doctor_remediation_observation(&unavailable, &operation).unwrap(),
-        crate::dashboard::DoctorRemediationVerificationV1::Unavailable
+        consultation(DoctorFindingFamilyV1::Storage),
+        Some(DoctorFamilyConsultationV1::Unavailable {
+            reason: DoctorFamilyUnavailableReasonV1::Unknown,
+        })
     );
 }

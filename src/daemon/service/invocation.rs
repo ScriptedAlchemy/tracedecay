@@ -8,8 +8,6 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -17,12 +15,11 @@ use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::{Mutex, Semaphore};
-use tracedecay_application::clock::now_micros;
 use tracedecay_application::feedback::{
     FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
 };
@@ -31,22 +28,26 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness,
-    CoverageDomainState, Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId,
-    EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
-    EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
-    GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
-    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
-    GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
-    GitIndexTransactionService, IdempotencyKey, MultiRootScopeSetCasRequestV1,
-    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, Omission, OmissionReason,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
-    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestAdmission,
-    RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic, TaskHandoffError,
-    TaskHandoffRedeemedV1, TaskHandoffToken, TemporalState, WorkExecutionError,
-    WorkProjectionApplicationError, WorkflowCoordinationError, WorkflowFanOutRuntimeError,
-    callable_code_operations,
+    CancellationContext, CancellationObservation, CancellationStage, CancellationState,
+    CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState,
+    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
+    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity,
+    EvidencePacket, GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
+    GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
+    GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
+    GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey,
+    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1,
+    Omission, OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination,
+    PageRequest, PageState, PolicyDecisionRef, PolicyEvaluationContextV1,
+    PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
+    ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffGrant, TaskHandoffRedeemed,
+    TaskHandoffToken, TemporalState, WorkflowCoordinationError, WorkflowEffectAuthorityPortV1,
+    WorkflowEffectIdentityV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
+    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1,
+    WorkflowEffectSuccessV1, WorkflowEffectTerminalV1, callable_code_operations,
+    prepare_task_handoff_issue, prepare_task_handoff_redeem,
+    prepare_workflow_definition_registration,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -55,18 +56,20 @@ use tracedecay_domain::configuration::{
     ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, ManifestDigest, ProjectId,
-    ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros, WorkAuthority, canonical_sha256,
+    AccessPolicyDigest, ActorId, ComponentVersion, FeedbackCycleTerminationV1, GitHeadStateV1,
+    GitIndexPreviewId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, ProjectId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
+    WorkAuthority, canonical_sha256,
 };
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::{
-    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, DaemonLspRuntimeSession,
-    DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError, LspRuntimeFailure, LspRuntimeFuture,
-    LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential, LspSessionId,
-    LspSessionOpenRequest, LspSessionRegistry, SessionLifecycle, UpstreamCapabilities,
+    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, ClientFrameAdmission,
+    DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest,
+    FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError,
+    LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
+    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
+    SessionLifecycle, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -88,13 +91,14 @@ use crate::agents::context_scout_ports::{
 };
 use crate::application::ProjectSourceAccessSnapshot;
 use crate::application::advisory::{
-    CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1,
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCurrentBranchRemapper,
-    Pr13AdvisoryDaemonStartupErrorV1, Pr13AdvisoryDaemonStartupRegistrationV1,
-    Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryProductionOpenErrorV1,
-    Pr13AdvisoryProductionOpenV1, Pr13AdvisoryProductionStartupRegistrationV1,
-    Pr13AdvisoryProviderAuthoritiesV1, Pr13AdvisoryRuntimeOpenV1,
-    open_pr13_advisory_production_authorities, register_pr13_advisory_daemon_startup,
+    AdvisoryCycleOutcome, CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1,
+    CiReadOnlyProviderArchiveV1, GitHubCanonicalReviewAnchorAuthorityV1,
+    GitHubCurrentBranchRemapper, Pr13AdvisoryDaemonStartupErrorV1,
+    Pr13AdvisoryDaemonStartupRegistrationV1, Pr13AdvisoryHookLookupNoticeV1,
+    Pr13AdvisoryProductionOpenErrorV1, Pr13AdvisoryProductionOpenV1,
+    Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
+    Pr13AdvisoryRuntimeOpenV1, open_pr13_advisory_production_authorities,
+    register_pr13_advisory_daemon_startup,
 };
 use crate::application::configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationControlStore, ConfigurationError,
@@ -146,8 +150,6 @@ use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationS
 use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
 };
-use crate::daemon::work_runtime::DaemonWorkRuntimeV1;
-use crate::daemon::workflow_runtime::execute_canonical_workflow;
 // Re-exported so the long tail of daemon-internal call sites can keep naming the
 // contract through `service::invocation::` while the split settles.
 #[cfg(test)]
@@ -158,8 +160,8 @@ pub(crate) use crate::daemon_contract::{
     DaemonFeedbackResult, DaemonGitEffectResult, DaemonGitPreviewResult, DaemonInvocationOperation,
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
-    WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkAttemptInvocationV1,
-    WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1,
+    HandoffApplicationInvocationV1, HandoffApplicationOutcomeV1, WorkApplicationInvocationV1,
+    WorkApplicationOutcomeV1, WorkflowApplicationInvocation, WorkflowApplicationOutcome,
 };
 // Wire-shape fixtures build application commands the dispatch path no longer
 // names directly now that request construction lives with the contract.
@@ -172,11 +174,7 @@ use crate::request_identity::{
 };
 use crate::tracedecay::TraceDecay;
 #[cfg(test)]
-use tracedecay_application::{
-    AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
-    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-};
+use tracedecay_application::{MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1};
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookFeedbackDeliveryPortV1,
     HookScopeBindingV1,
@@ -184,12 +182,14 @@ use tracedecay_hooks::{
 
 // Structural split: production logic now lives in the child modules below;
 // this file remains the stable external path (`service::invocation::*`).
+mod clock;
 mod configuration;
 mod dispatch;
 mod feedback;
 mod git;
+mod handoff;
+mod invocation_observability;
 mod lsp;
-mod plan26;
 mod primitive;
 mod registrars;
 #[cfg(test)]
@@ -197,12 +197,20 @@ mod tests;
 mod types;
 mod work;
 
+use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
 use feedback::*;
 use git::*;
+use handoff::*;
+#[cfg(test)]
+use invocation_observability::invocation_rejected_argument;
+use invocation_observability::{
+    emit_invocation_observation, feedback_observation_operation, invocation_observation_subject,
+    invocation_problem_rejected_argument, is_observable_operation, observe_invocation_response,
+};
+use lsp::PublishedCodeIndexWorkspaceDocuments;
 #[cfg(test)]
 use lsp::*;
-use plan26::*;
 use primitive::*;
 use registrars::*;
 use types::*;
@@ -211,7 +219,12 @@ use work::*;
 pub(crate) use configuration::{
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
 };
-pub(crate) use feedback::{DaemonFeedbackInvocationOwner, daemon_operation_event_authority};
+pub(crate) use feedback::{
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonFeedbackInvocationOwner, advisory_cycle_invocation_result,
+    daemon_operation_event_authority,
+};
 pub(crate) use primitive::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
@@ -232,7 +245,6 @@ pub(crate) use registrars::{
     DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
     DaemonConfigurationRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrationError, DaemonLspOwnerRegistrar, DaemonWorkRuntimeRegistrar,
-    DoctorConfigurationOutcomeV1,
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
@@ -242,7 +254,9 @@ pub(in crate::daemon::service) use types::{
 #[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    lsp_admission_open: Arc<Mutex<bool>>,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
+    lsp_lease_tasks: Arc<LspLeaseTaskRegistry>,
     authorized_lsp_workspaces: Arc<Mutex<BTreeMap<ManifestDigest, AuthorizedDaemonLspWorkspace>>>,
     context_scout_registries:
         Arc<Mutex<BTreeMap<ProjectId, Arc<ProjectContextScoutAddressRegistryV1>>>>,
@@ -267,7 +281,9 @@ impl DaemonInvocationService {
     ) -> Self {
         Self {
             code_index_schedulers,
+            lsp_admission_open: Arc::new(Mutex::new(true)),
             lsp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            lsp_lease_tasks: Arc::new(LspLeaseTaskRegistry::default()),
             authorized_lsp_workspaces: Arc::new(Mutex::new(BTreeMap::new())),
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             project_runtimes: ProjectRuntimeRegistryV1::default(),

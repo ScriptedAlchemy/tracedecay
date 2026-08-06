@@ -5,6 +5,8 @@ use std::sync::Arc;
 use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
 pub mod harness;
+#[cfg(test)]
+mod session_sync;
 
 #[doc(hidden)]
 pub fn registered_schema_fixture_fingerprint() -> String {
@@ -45,6 +47,92 @@ async fn row_count(db: &RegisteredGlobalDb, table: &str) -> i64 {
         .await
         .unwrap();
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+#[tokio::test]
+async fn git_common_dir_aliases_share_one_project_and_store_authority() {
+    let harness = RegisteredGlobalDbHarness::open("common-dir-single-authority").await;
+    let root = harness.storage_root().join("repository");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let common_dir = root.join("common.git");
+    for path in [&primary, &linked, &common_dir] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+
+    harness
+        .registered
+        .upsert_code_project(
+            "proj_primary",
+            &primary,
+            Some(&common_dir),
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    harness
+        .registered
+        .upsert_store_instance(super::StoreInstanceUpsert {
+            store_id: "store:proj_primary:profile_sharded".to_string(),
+            project_id: "proj_primary".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_primary".to_string(),
+            manifest_relpath: None,
+            last_verified_at: None,
+            last_write_at: None,
+        })
+        .await
+        .unwrap();
+
+    let resolved = harness
+        .registered
+        .upsert_code_project(
+            "proj_linked",
+            &linked,
+            Some(&common_dir),
+            None,
+            Some("feature"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.project_id, "proj_primary");
+    assert!(
+        harness
+            .registered
+            .get_code_project("proj_linked")
+            .await
+            .is_none()
+    );
+    let context = harness
+        .registered
+        .project_registry_context_by_identity(&linked, Some(&common_dir))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.project.project_id, "proj_primary");
+    assert_eq!(context.stores.len(), 1);
+
+    #[cfg(unix)]
+    {
+        let common_dir_alias = root.join("common-dir-alias");
+        std::os::unix::fs::symlink(&common_dir, &common_dir_alias).unwrap();
+        let aliased = harness
+            .registered
+            .upsert_code_project("proj_symlink", &linked, Some(&common_dir_alias), None, None)
+            .await
+            .unwrap();
+        assert_eq!(aliased.project_id, "proj_primary");
+        assert!(
+            harness
+                .registered
+                .get_code_project("proj_symlink")
+                .await
+                .is_none()
+        );
+    }
 }
 
 #[tokio::test]
@@ -1104,4 +1192,65 @@ async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
         None,
         "the optional form reports unavailable rather than zero"
     );
+}
+
+#[tokio::test]
+async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_identities() {
+    let harness = RegisteredGlobalDbHarness::open("project-identity-conflict").await;
+    let project = harness.storage_root().join("repo");
+    let common_dir = harness.storage_root().join("git-common-dir");
+    let common_dir_owner = harness.storage_root().join("common-dir-owner");
+    let marker_owner = harness.storage_root().join("marker-owner");
+    for path in [&project, &common_dir, &common_dir_owner, &marker_owner] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::create_dir_all(project.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(project.join(".git/refs/heads")).unwrap();
+    std::fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        project.join(".git/config"),
+        "[core]\nrepositoryformatversion = 0\nbare = false\n",
+    )
+    .unwrap();
+
+    harness
+        .registered
+        .upsert_code_project(
+            "proj_common_dir",
+            &common_dir_owner,
+            Some(&common_dir),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    harness
+        .registered
+        .upsert_code_project("proj_marker", &marker_owner, None, None, None)
+        .await
+        .unwrap();
+    tracedecay_runtime_core::storage::write_repository_identity_marker(&project, "proj_marker")
+        .unwrap();
+
+    assert_eq!(
+        harness
+            .registered
+            .project_ids_by_identity(&project, Some(&common_dir))
+            .await
+            .unwrap(),
+        vec!["proj_common_dir".to_owned(), "proj_marker".to_owned()]
+    );
+    let error = harness
+        .registered
+        .resolve_project_store_by_identity(&project, Some(&common_dir))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable: false,
+            ..
+        } if reason_code == "project_identity_conflict"
+    ));
 }

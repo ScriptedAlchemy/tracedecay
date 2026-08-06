@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -317,34 +316,76 @@ async fn retained_project_and_profile_handles_construct_retrieval_services() {
 }
 
 #[tokio::test]
-async fn unavailable_project_worker_rejects_before_expensive_reads() {
-    let (server, dir, _pin) =
+async fn partial_history_search_serves_active_data_without_waiting_for_refresh() {
+    let (server, _dir, _pin) =
         server_with_project_refresh_wake(Some(SessionTemporalRefreshWake::unavailable())).await;
+    let runtime = server
+        .host_admission_test_runtime_for_test()
+        .expect("retained host-admission test runtime");
+    Box::pin(seed_temporal_message(
+        runtime,
+        HostAdmissionScope::Project,
+        MESSAGE_SEARCH_PROJECT_ID,
+        ObservationScopeV1::Project {
+            project_id: ProjectId::new(MESSAGE_SEARCH_PROJECT_ID).expect("project id"),
+        },
+        1,
+        MESSAGE_SEARCH_ROOT_SESSION_ID,
+        "cursor",
+        "message.partial-history",
+        "stored partial history evidence",
+    ))
+    .await;
+    let project_before = runtime
+        .session_domain_sha256_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("project session-domain digest before stored retrieval");
 
-    let payload = tokio::time::timeout(
-        Duration::from_millis(100),
+    let stored = tokio::time::timeout(
+        Duration::from_secs(1),
         message_search(
             &server,
             json!({
-                "query": "database backup",
-                "project_path": dir.path(),
+                "query": "stored partial history evidence",
+                "provider": "cursor",
+                "catch_up": false,
                 "format": "json",
             }),
         ),
     )
     .await
-    .expect("unavailable retrieval should reject within the fast-path budget");
+    .expect("stored retrieval must not join unavailable historical refresh");
 
-    assert_eq!(payload["status"], "unavailable");
-    assert_eq!(payload["error"]["reason"], "refresh_worker_missing");
-    assert_eq!(payload["service_status"]["backlog"], 0);
-    assert_eq!(payload["service_status"]["blocker"], "worker_missing");
+    assert_eq!(stored["outcome"], "partial", "{stored}");
+    assert_eq!(stored["count"], 1, "{stored}");
+    assert!(
+        stored["results"][0]["message"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("stored partial history evidence")),
+        "{stored}"
+    );
+
+    let fresh = message_search(
+        &server,
+        json!({
+            "query": "stored partial history evidence",
+            "provider": "cursor",
+            "catch_up": true,
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(fresh["status"], "unavailable", "{fresh}");
+    assert_eq!(fresh["error"]["reason"], "refresh_worker_missing");
+    assert_eq!(fresh["service_status"]["backlog"], 0);
+    assert_eq!(fresh["service_status"]["blocker"], "worker_missing");
     assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        0,
-        "unavailable status must reject before temporal retrieval starts"
+        runtime
+            .session_domain_sha256_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("project session-domain digest after stored retrieval"),
+        project_before,
+        "stored retrieval and typed refresh rejection must remain read-only"
     );
     server.shutdown().await;
 }
@@ -382,16 +423,12 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
         }),
     )
     .await;
-    assert_eq!(all_registered["project_scope"], "all_registered");
-    // The fan-out is a project-scoped read: it never crosses into the profile
-    // retrieval service, whatever the registry answers.
+    assert_eq!(all_registered["status"], "deferred", "{all_registered}");
     assert_eq!(
-        server.user_session_retrieval_calls.load(Ordering::Relaxed),
-        0
+        all_registered["error"]["code"], "session_retrieval_multi_root_deferred",
+        "{all_registered}"
     );
-    let after_all_registered = server
-        .project_session_retrieval_calls
-        .load(Ordering::Relaxed);
+    assert_eq!(all_registered["project_scope"], "all_registered");
 
     let project = message_search(
         &server,
@@ -401,16 +438,7 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
     // A fresh root with no active generations is empty (zero hits), not
     // unavailable: refresh is a separate explicit durable operation.
     assert_eq!(project["outcome"], "complete_zero");
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        after_all_registered + 1
-    );
-    assert_eq!(
-        server.user_session_retrieval_calls.load(Ordering::Relaxed),
-        0
-    );
+    assert_eq!(project["store_scope"], "project", "{project}");
 
     let profile = message_search(
         &server,
@@ -422,16 +450,7 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
     )
     .await;
     assert_eq!(profile["outcome"], "complete_zero");
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        after_all_registered + 1
-    );
-    assert_eq!(
-        server.user_session_retrieval_calls.load(Ordering::Relaxed),
-        1
-    );
+    assert_eq!(profile["store_scope"], "profile", "{profile}");
 
     let denied = message_search(
         &server,
@@ -443,12 +462,7 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
     )
     .await;
     assert_eq!(denied["outcome"], "wrong_scope");
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        after_all_registered + 2
-    );
+    assert_eq!(denied["store_scope"], "project", "{denied}");
     server.shutdown().await;
 }
 
@@ -656,15 +670,13 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         .open_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
         .await
         .expect("reopen project through daemon authority");
-    let context = runtime
+    let mut context = runtime
         .into_mcp_server_context_for_test(cg, None)
         .expect("restarted registered MCP context");
+    context.project_session_refresh_wake = Some(SessionTemporalRefreshWake::unavailable());
+    context.user_session_refresh_wake = Some(SessionTemporalRefreshWake::unavailable());
+    context.startup_catch_up_enabled = false;
     let restarted = McpServer::new_with_context(context).await;
-    assert!(
-        restarted
-            .wait_for_startup_catch_up(std::time::Duration::from_secs(5))
-            .await
-    );
     let runtime = restarted
         .host_admission_test_runtime_for_test()
         .expect("restarted retained host-admission runtime");
@@ -676,17 +688,22 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         .session_domain_sha256_for_test(HostAdmissionScope::Profile)
         .await
         .expect("restarted profile session-domain digest");
-    let resumed = message_search(
-        &restarted,
-        json!({
-            "query": "orchard evidence",
-            "provider": "cursor",
-            "limit": 1,
-            "cursor": cursor,
-            "format": "json",
-        }),
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(1),
+        message_search(
+            &restarted,
+            json!({
+                "query": "orchard evidence",
+                "provider": "cursor",
+                "limit": 1,
+                "cursor": cursor,
+                "catch_up": false,
+                "format": "json",
+            }),
+        ),
     )
-    .await;
+    .await
+    .expect("restart retrieval must not wait for historical catch-up");
     assert_eq!(resumed["outcome"], "partial", "{resumed}");
     assert_eq!(resumed["count"], 1);
     restarted.shutdown().await;

@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   DashboardDomainStateV1Schema,
   DashboardEnvelopeV1Schema,
+  DoctorFindingsPayloadV1Schema,
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   WIRE_SCHEMA_REVISION,
@@ -125,6 +126,39 @@ describe("wire envelope decoder", () => {
   });
 });
 
+describe("Doctor findings decoder", () => {
+  it("does not admit remediation controls into the read-only dashboard payload", () => {
+    const parsed = DoctorFindingsPayloadV1Schema.parse({
+      family_filter: null,
+      entries: [
+        {
+          finding: {
+            family: "configuration",
+            state: "degraded",
+            evidence: [],
+            coverage: {
+              completeness: "complete",
+              statement: "configuration authority was consulted",
+            },
+            remediation: {
+              owning_operation: "use-case.application.configuration.pin-authority",
+              kind: "action",
+            },
+          },
+          storage_kind: null,
+        },
+      ],
+      report_coverage: null,
+      remediations: [],
+      known_families: ["configuration"],
+      note: "configuration drift observed",
+    });
+
+    expect(parsed).not.toHaveProperty("remediations");
+    expect(parsed.entries[0]!.finding).not.toHaveProperty("remediation");
+  });
+});
+
 describe("wire storage payload decoders", () => {
   const tableGrowthCoverage = {
     completeness: "complete",
@@ -175,18 +209,8 @@ describe("wire storage payload decoders", () => {
             reason: "evaluated against the owner-configured soft limit of 50 bytes",
           },
           growth: {
-            state: "observed",
-            coverage: "since-daemon-start: bounded in-process watermark ring",
-            first_measured_at: 1,
-            last_measured_at: 2,
-            sample_count: 2,
-            first_total_bytes: 140,
-            current_total_bytes: 100,
-            growth_bytes: -40,
-            samples: [
-              { measured_at: 1, total_bytes: 140, free_bytes: 0 },
-              { measured_at: 2, total_bytes: 100, free_bytes: 0 },
-            ],
+            state: "unknown",
+            reason: "no execution-owned store-size watermark is available",
           },
           table_growth: {
             state: "observed",
@@ -203,9 +227,9 @@ describe("wire storage payload decoders", () => {
     });
     expect(parsed.stores[0]!.read.kind).toBe("observed");
     expect(parsed.stores[0]!.roles).toEqual(["graph", "memory"]);
-    // Growth is signed: a shrinking store must not saturate to zero.
+    // A dashboard read cannot establish its own growth baseline.
     const growth = parsed.stores[0]!.growth;
-    expect(growth.state === "observed" && growth.growth_bytes).toBe(-40);
+    expect(growth.state).toBe("unknown");
   });
 
   it("rejects the retired unsupported budget and absent growth variants", () => {
@@ -263,7 +287,6 @@ describe("wire storage payload decoders", () => {
       family_filter: "storage",
       entries: [],
       report_coverage: null,
-      remediations: [],
       known_families: ["storage"],
       kind_statuses: [
         {

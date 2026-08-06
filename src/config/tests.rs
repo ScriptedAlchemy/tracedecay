@@ -1065,359 +1065,6 @@ mod topology_resolution {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PR11 legacy configuration migration input
-//
-// The decoder is read-only: it receives raw JSON and an explicit environment
-// map, builds typed/redacted inputs, and lets the sole resolver apply the
-// documented source order. Runtime adapters consume published snapshots;
-// legacy reads remain migration/diagnostic inputs rather than a write path.
-// ---------------------------------------------------------------------------
-
-mod legacy_configuration_migration_input {
-    use std::collections::BTreeMap;
-
-    use tracedecay_domain::ProjectId;
-    use tracedecay_domain::configuration::{
-        ConfigurationLayerIdV1, ConfigurationValueKindV1, ConfigurationValueV1,
-        DIAGNOSTICS_PREWARM_SETTING_KEY, INDEX_EXCLUDE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-        INDEX_MAX_FILE_SIZE_SETTING_KEY, LEGACY_CONFIG_JSON_SETTING_KEYS_V1,
-        SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
-        SettingScopeV1,
-    };
-
-    use crate::config::registry::ConfigurationRegistry;
-    use crate::config::resolver::resolve_configuration;
-    use crate::config::{
-        LegacyConfigurationDecodeTargetV1, decode_legacy_config_json,
-        decode_legacy_configuration_inputs, decode_legacy_environment_overrides,
-        resolve_legacy_configuration_inputs,
-    };
-    use crate::global_db::configuration::migration::{
-        ConfigurationMigrationQuarantineReasonV1, ReadonlyLegacyConfigurationInputsV1,
-    };
-
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String>,
-        <T as TryFrom<String>>::Error: std::fmt::Debug,
-    {
-        T::try_from(value.to_owned()).expect("fixture id is canonical")
-    }
-
-    fn target() -> LegacyConfigurationDecodeTargetV1 {
-        LegacyConfigurationDecodeTargetV1 {
-            target_layer: ConfigurationLayerIdV1::Project {
-                project_id: id::<ProjectId>("project.legacy-config"),
-            },
-            target_revision_id: id("revision.legacy-config"),
-        }
-    }
-
-    fn legacy_values(
-        config: &super::TraceDecayConfig,
-    ) -> BTreeMap<SettingKey, ConfigurationValueV1> {
-        let sync = &config.sync;
-        BTreeMap::from([
-            (
-                SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap(),
-                ConfigurationValueV1::StringList(config.exclude.clone()),
-            ),
-            (
-                SettingKey::new(INDEX_INCLUDE_SETTING_KEY).unwrap(),
-                ConfigurationValueV1::StringList(config.include.clone()),
-            ),
-            (
-                SettingKey::new(INDEX_MAX_FILE_SIZE_SETTING_KEY).unwrap(),
-                ConfigurationValueV1::Unsigned(config.max_file_size),
-            ),
-            (
-                SettingKey::new("index.extract_docstrings.v1").unwrap(),
-                ConfigurationValueV1::Boolean(config.extract_docstrings),
-            ),
-            (
-                SettingKey::new("index.track_call_sites.v1").unwrap(),
-                ConfigurationValueV1::Boolean(config.track_call_sites),
-            ),
-            (
-                SettingKey::new("index.git_ignore.v1").unwrap(),
-                ConfigurationValueV1::Boolean(config.git_ignore),
-            ),
-            (
-                SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-                ConfigurationValueV1::Boolean(config.diagnostics_prewarm),
-            ),
-            (
-                SettingKey::new("sync.auto_watch.v1").unwrap(),
-                ConfigurationValueV1::Boolean(sync.auto_watch),
-            ),
-            (
-                SettingKey::new("sync.watch_debounce_ms.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.watch_debounce_ms),
-            ),
-            (
-                SettingKey::new("sync.watch_max_delay_ms.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.watch_max_delay_ms),
-            ),
-            (
-                SettingKey::new("sync.watch_max_projects.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.watch_max_projects as u64),
-            ),
-            (
-                SettingKey::new("sync.read_refresh.v1").unwrap(),
-                ConfigurationValueV1::Boolean(sync.read_refresh),
-            ),
-            (
-                SettingKey::new("sync.read_cooldown_secs.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.read_cooldown_secs),
-            ),
-            (
-                SettingKey::new("sync.session_start_sync.v1").unwrap(),
-                ConfigurationValueV1::Boolean(sync.session_start_sync),
-            ),
-            (
-                SettingKey::new("sync.session_start_stale_threshold_secs.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.session_start_stale_threshold_secs),
-            ),
-            (
-                SettingKey::new("sync.backstop_interval_mins.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.backstop_interval_mins),
-            ),
-            (
-                SettingKey::new("sync.full_sync_escalation_files.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.full_sync_escalation_files as u64),
-            ),
-            (
-                SettingKey::new("sync.max_concurrent_syncs.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.max_concurrent_syncs as u64),
-            ),
-            (
-                SettingKey::new("sync.branch_gc_days.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.branch_gc_days),
-            ),
-            (
-                SettingKey::new("sync.orphan_db_gc_days.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
-            ),
-            (
-                SettingKey::new("sync.auto_init.v1").unwrap(),
-                ConfigurationValueV1::Boolean(sync.auto_init),
-            ),
-            (
-                SettingKey::new("sync.auto_track_pr_branches.v1").unwrap(),
-                ConfigurationValueV1::Boolean(sync.auto_track_pr_branches),
-            ),
-            (
-                SettingKey::new(SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY).unwrap(),
-                ConfigurationValueV1::Unsigned(
-                    sync.auto_track_pr_poll_secs
-                        .max(crate::config::MIN_AUTO_TRACK_PR_POLL_SECS),
-                ),
-            ),
-            (
-                SettingKey::new("telemetry.timings.v1").unwrap(),
-                ConfigurationValueV1::Boolean(config.telemetry.timings),
-            ),
-        ])
-    }
-
-    #[test]
-    fn registry_has_every_legacy_scalar_definition_with_project_scope() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let config = super::TraceDecayConfig::default();
-        let values = legacy_values(&config);
-        assert_eq!(values.len(), LEGACY_CONFIG_JSON_SETTING_KEYS_V1.len());
-
-        for key in LEGACY_CONFIG_JSON_SETTING_KEYS_V1 {
-            let key = SettingKey::new(*key).unwrap();
-            let definition = registry.definition(&key).unwrap();
-            assert_eq!(definition.scope, SettingScopeV1::Project);
-            assert_eq!(definition.default_value, values[&key]);
-        }
-        assert_eq!(
-            registry
-                .definition(&SettingKey::new(INDEX_INCLUDE_SETTING_KEY).unwrap())
-                .unwrap()
-                .value_kind,
-            ConfigurationValueKindV1::StringList
-        );
-        assert_eq!(
-            registry
-                .definition(&SettingKey::new(INDEX_MAX_FILE_SIZE_SETTING_KEY).unwrap())
-                .unwrap()
-                .value_kind,
-            ConfigurationValueKindV1::Unsigned
-        );
-    }
-
-    #[test]
-    fn missing_legacy_fields_resolve_to_the_current_default_behavior_digest() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let inputs = decode_legacy_configuration_inputs("{}", &BTreeMap::new(), &target()).unwrap();
-        let migrated = resolve_legacy_configuration_inputs(&registry, &inputs).unwrap();
-        let baseline = resolve_configuration(&registry, &[]).unwrap();
-
-        assert_eq!(
-            migrated.snapshot.effective_behavior_digest,
-            baseline.snapshot.effective_behavior_digest,
-            "typed defaults must preserve the legacy behavior fixture"
-        );
-    }
-
-    #[test]
-    fn decoder_preserves_known_fields_and_quarantines_root_unknown_and_undecodable_values() {
-        let raw = r#"{
-            "root_dir": "/private/repo",
-            "exclude": ["src/generated/**"],
-            "max_file_size": "not-a-number",
-            "sync": { "auto_watch": "not-a-bool", "future_sync": true },
-            "telemetry": { "timings": "not-a-bool" },
-            "future_top_level": 1
-        }"#;
-        let input = decode_legacy_config_json(raw, &target()).unwrap();
-        let reasons: Vec<_> = input
-            .entries
-            .iter()
-            .filter_map(|entry| entry.quarantine_reason)
-            .collect();
-
-        assert_eq!(
-            input
-                .entries
-                .first()
-                .and_then(|entry| entry.quarantine_reason),
-            Some(ConfigurationMigrationQuarantineReasonV1::PathDerivedAuthority),
-            "root_dir must never become authority"
-        );
-        assert!(reasons.contains(&ConfigurationMigrationQuarantineReasonV1::Undecodable));
-        assert!(reasons.contains(&ConfigurationMigrationQuarantineReasonV1::UnknownKey));
-        assert!(input.entries.iter().any(|entry| {
-            entry
-                .setting_key
-                .as_ref()
-                .is_some_and(|key| key.as_str() == INDEX_EXCLUDE_SETTING_KEY)
-                && entry.value
-                    == Some(ConfigurationValueV1::StringList(vec![
-                        "src/generated/**".to_owned(),
-                    ]))
-        }));
-
-        let serialized = serde_json::to_string(&input).unwrap();
-        assert!(!serialized.contains("/private/repo"));
-        assert!(!serialized.contains("root_dir\""));
-    }
-
-    #[test]
-    fn environment_is_an_explicit_higher_precedence_resolution_input() {
-        let raw = r#"{
-            "diagnostics_prewarm": false,
-            "sync": { "auto_watch": true }
-        }"#;
-        let environment = BTreeMap::from([
-            (
-                "TRACEDECAY_DIAGNOSTICS_PREWARM".to_owned(),
-                "true".to_owned(),
-            ),
-            ("TRACEDECAY_SYNC_AUTO_WATCH".to_owned(), "false".to_owned()),
-        ]);
-        let registry = ConfigurationRegistry::core().unwrap();
-        let inputs = decode_legacy_configuration_inputs(raw, &environment, &target()).unwrap();
-        let resolution = resolve_legacy_configuration_inputs(&registry, &inputs).unwrap();
-
-        assert_eq!(
-            resolution
-                .settings
-                .get(&SettingKey::new(SYNC_AUTO_WATCH_SETTING_KEY).unwrap())
-                .unwrap()
-                .effective_value,
-            ConfigurationValueV1::Boolean(false)
-        );
-        assert_eq!(
-            resolution
-                .settings
-                .get(&SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap())
-                .unwrap()
-                .effective_value,
-            ConfigurationValueV1::Boolean(true)
-        );
-
-        let candidates = &resolution
-            .settings
-            .get(&SettingKey::new(SYNC_AUTO_WATCH_SETTING_KEY).unwrap())
-            .unwrap()
-            .candidates;
-        assert_eq!(candidates.len(), 3);
-        assert_eq!(
-            candidates
-                .last()
-                .and_then(|candidate| candidate.safe_reason.as_deref()),
-            Some("highest_valid_legacy_environment")
-        );
-        assert_eq!(
-            candidates[1].safe_reason.as_deref(),
-            Some("higher_precedence_legacy_environment")
-        );
-    }
-
-    #[test]
-    fn input_digests_are_idempotent_and_source_order_is_enforced() {
-        let raw = r#"{"include":[".github/**"],"sync":{"auto_watch":false}}"#;
-        let environment =
-            BTreeMap::from([("TRACEDECAY_SYNC_AUTO_WATCH".to_owned(), "true".to_owned())]);
-        let first = decode_legacy_configuration_inputs(raw, &environment, &target()).unwrap();
-        let second = decode_legacy_configuration_inputs(raw, &environment, &target()).unwrap();
-        let reordered = decode_legacy_configuration_inputs(
-            r#"{"sync":{"auto_watch":false},"include":[".github/**"]}"#,
-            &environment,
-            &target(),
-        )
-        .unwrap();
-        assert_eq!(
-            first.snapshot_digest().unwrap(),
-            second.snapshot_digest().unwrap()
-        );
-        assert_eq!(
-            first.snapshot_digest().unwrap(),
-            reordered.snapshot_digest().unwrap(),
-            "JSON object ordering is not migration provenance"
-        );
-        assert_eq!(
-            first.inputs[0].snapshot_digest().unwrap(),
-            second.inputs[0].snapshot_digest().unwrap()
-        );
-        assert_eq!(
-            first.inputs[1].snapshot_digest().unwrap(),
-            second.inputs[1].snapshot_digest().unwrap()
-        );
-
-        let mut unordered = first.clone();
-        unordered.inputs.swap(0, 1);
-        assert!(unordered.validate().is_err());
-
-        let malformed = decode_legacy_environment_overrides(
-            &BTreeMap::from([
-                (
-                    "TRACEDECAY_SYNC_MAX_CONCURRENT_SYNCS".to_owned(),
-                    "bad".to_owned(),
-                ),
-                ("TRACEDECAY_FUTURE_CONFIG".to_owned(), "1".to_owned()),
-            ]),
-            &target(),
-        )
-        .unwrap();
-        assert!(malformed.entries.iter().all(|entry| entry.value.is_none()));
-        assert!(malformed.entries.iter().any(|entry| {
-            entry.quarantine_reason == Some(ConfigurationMigrationQuarantineReasonV1::Undecodable)
-        }));
-        assert!(malformed.entries.iter().any(|entry| {
-            entry.quarantine_reason == Some(ConfigurationMigrationQuarantineReasonV1::UnknownKey)
-        }));
-
-        let empty = ReadonlyLegacyConfigurationInputsV1 { inputs: Vec::new() };
-        assert!(empty.validate().is_err());
-    }
-}
-
 mod runtime_configuration_cutover {
     use std::collections::BTreeMap;
     #[cfg(unix)]
@@ -1427,7 +1074,7 @@ mod runtime_configuration_cutover {
     use tempfile::TempDir;
     use tracedecay_domain::configuration::{
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-        SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
+        SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
     };
     use tracedecay_domain::{ProjectId, UtcMicros};
     use tracedecay_usecases::config::{
@@ -1437,16 +1084,10 @@ mod runtime_configuration_cutover {
         RuntimeConfigurationTarget as UsecaseRuntimeConfigurationTarget,
     };
 
-    use crate::application::configuration::{
-        ConfigurationControlStore, DirectConfigurationMutation,
-    };
+    use crate::application::configuration::DirectConfigurationMutation;
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
-    use crate::config::{
-        LegacyConfigurationDecodeTargetV1, decode_legacy_configuration_inputs,
-        resolve_legacy_configuration_inputs,
-    };
     use crate::config::{
         PinnedRuntimeConfiguration, RuntimeConfigurationCache, RuntimeConfigurationTarget,
         TraceDecayConfig, cached_runtime_configuration, cached_sync_config,
@@ -1488,58 +1129,6 @@ mod runtime_configuration_cutover {
             let next = self.next.clone();
             Box::pin(async move { Ok(next) })
         }
-    }
-
-    #[test]
-    fn pinned_runtime_materialization_preserves_explicit_environment_precedence() {
-        let project_id = project_id("project.runtime-env-precedence");
-        let revision_id = revision_id("revision.runtime-env-precedence");
-        let target = LegacyConfigurationDecodeTargetV1 {
-            target_layer: ConfigurationLayerIdV1::Project {
-                project_id: project_id.clone(),
-            },
-            target_revision_id: revision_id.clone(),
-        };
-        let inputs = decode_legacy_configuration_inputs(
-            r#"{
-                "root_dir": "/untrusted/legacy-root",
-                "diagnostics_prewarm": false,
-                "sync": { "auto_watch": true }
-            }"#,
-            &BTreeMap::from([
-                (
-                    "TRACEDECAY_DIAGNOSTICS_PREWARM".to_owned(),
-                    "true".to_owned(),
-                ),
-                ("TRACEDECAY_SYNC_AUTO_WATCH".to_owned(), "false".to_owned()),
-            ]),
-            &target,
-        )
-        .expect("legacy input decodes");
-        let resolution = resolve_legacy_configuration_inputs(
-            &ConfigurationRegistry::core().expect("registry is available"),
-            &inputs,
-        )
-        .expect("explicit environment layer resolves");
-        let root = TempDir::new().expect("temporary project root");
-        let pinned = PinnedRuntimeConfiguration::new(
-            RuntimeConfigurationTarget {
-                project_id: project_id.clone(),
-                project_root: root.path().to_path_buf(),
-            },
-            revision_id,
-            resolution.snapshot,
-        )
-        .expect("resolved snapshot materializes");
-
-        assert_eq!(pinned.target.project_id, project_id);
-        assert_eq!(
-            pinned.config.root_dir,
-            root.path().to_string_lossy().to_string()
-        );
-        assert_ne!(pinned.config.root_dir, "/untrusted/legacy-root");
-        assert!(pinned.config.diagnostics_prewarm);
-        assert!(!pinned.config.sync.auto_watch);
     }
 
     #[test]
@@ -1871,6 +1460,11 @@ mod runtime_configuration_cutover {
         let layout = crate::storage::resolve_layout_for_current_profile(root.path())
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        std::fs::write(
+            &layout.config_path,
+            r#"{"sync":{"auto_watch":false},"max_file_size":7}"#,
+        )
+        .expect("write stale config.json input");
 
         assert!(
             runtime_configuration_for_layout(root.path(), &layout).is_err(),
@@ -1892,10 +1486,19 @@ mod runtime_configuration_cutover {
             pinned.target.project_id.as_str(),
             "proj_ensure_runtime_bootstrap"
         );
-        assert_ne!(
+        assert_eq!(
             pinned.revision_id.as_str(),
-            "configuration.bootstrap.default.v1",
-            "the synthetic bootstrap revision is not a durable runtime authority"
+            "configuration.initial.canonical.v1",
+            "fresh stores publish the sole canonical initial revision"
+        );
+        assert!(
+            pinned.config.sync.auto_watch,
+            "stale config.json input must not enter the final configuration authority"
+        );
+        assert_eq!(
+            pinned.config.max_file_size,
+            TraceDecayConfig::default().max_file_size,
+            "fresh initialization uses the typed registry, not config.json"
         );
         assert!(
             layout.sessions_db_path.is_file(),
@@ -1915,10 +1518,10 @@ mod runtime_configuration_cutover {
     }
 
     #[tokio::test]
-    async fn ensure_runtime_configuration_repairs_pre_binding_revision_forward_only() {
+    async fn ensure_runtime_configuration_rejects_a_revision_without_the_registered_binding() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
-        let project_id = project_id("proj_runtime_binding_repair");
+        let project_id = project_id("proj_runtime_binding_required");
         crate::storage::write_enrollment_marker(
             root.path(),
             &crate::storage::EnrollmentMarker {
@@ -1933,7 +1536,7 @@ mod runtime_configuration_cutover {
         let runtime = HostAdmissionTestRuntimeV1::project(
             crate::storage::default_profile_root().unwrap(),
             root.path(),
-            project_id.clone(),
+            project_id,
         )
         .await
         .expect("open retained project runtime");
@@ -1946,61 +1549,26 @@ mod runtime_configuration_cutover {
             crate::global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
                 database.as_ref(),
             );
-        let old_revision = revision_id("configuration.initial.pre-binding");
-        let target = LegacyConfigurationDecodeTargetV1 {
-            target_layer: ConfigurationLayerIdV1::Project {
-                project_id: project_id.clone(),
-            },
-            target_revision_id: old_revision.clone(),
-        };
-        let inputs = decode_legacy_configuration_inputs(
-            r#"{"sync":{"auto_watch":false}}"#,
-            &BTreeMap::new(),
-            &target,
-        )
-        .expect("decode pre-binding configuration");
-        crate::global_db::configuration::migrate_legacy_configuration_inputs(
+        let revision_id = revision_id("configuration.invalid.without-binding");
+        let resolution = resolve_configuration(
             &ConfigurationRegistry::core().expect("configuration registry"),
-            &inputs,
-            &store,
-            UtcMicros(1),
+            &[],
         )
-        .await
-        .expect("seed pre-binding durable revision");
-        let seeded = store.current().await.expect("read seeded configuration");
-        assert_eq!(seeded.revision_id, old_revision);
-        let bindings_key =
-            SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).expect("source bindings key");
-        assert_eq!(
-            seeded.snapshot.effective_values.get(&bindings_key),
-            Some(&ConfigurationValueV1::SourceBindings(Vec::new())),
-            "fixture must reproduce a durable revision created before daemon binding genesis"
-        );
+        .expect("resolve registry defaults without a project binding");
+        store
+            .initialize_canonical(&revision_id, &resolution, UtcMicros(1))
+            .await
+            .expect("seed exact final schema with incompatible configuration data");
 
-        let repaired = runtime
+        let error = runtime
             .ensure_runtime_configuration_for_test(root.path(), &layout)
             .await
-            .expect("registered daemon authority repairs the durable binding");
-        let expected = crate::config::scope_control::daemon_owned_project_source_binding(
-            &project_id,
-            root.path(),
-        )
-        .expect("derive expected daemon binding");
-        assert_ne!(
-            repaired.revision_id, old_revision,
-            "repair must append a forward child revision"
-        );
-        assert_eq!(
-            repaired.snapshot.effective_values.get(&bindings_key),
-            Some(&ConfigurationValueV1::SourceBindings(vec![expected])),
-        );
-
-        let reopened = runtime
-            .ensure_runtime_configuration_for_test(root.path(), &layout)
-            .await
-            .expect("binding repair is idempotent");
-        assert_eq!(reopened.revision_id, repaired.revision_id);
-        assert_eq!(reopened.snapshot, repaired.snapshot);
+            .expect_err("missing registered source binding must not be repaired");
+        assert!(matches!(
+            error,
+            crate::errors::TraceDecayError::ResetRequired { ref authority, .. }
+                if authority == "configuration"
+        ));
     }
 
     #[cfg(unix)]
@@ -2193,7 +1761,7 @@ mod runtime_configuration_cutover {
     }
 
     #[tokio::test]
-    async fn read_only_open_serves_registry_defaults_for_uninitialized_store() {
+    async fn read_only_open_rejects_an_uninitialized_store_without_fabricated_defaults() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let root = TempDir::new().expect("temporary project root");
         crate::storage::write_enrollment_marker(
@@ -2222,21 +1790,17 @@ mod runtime_configuration_cutover {
         )
         .await
         .expect("open retained project runtime");
-        // A read-only reopen must degrade to the registry-default snapshot rather
-        // than hard-erroring on the absent current revision. This is what lets a
-        // moved, consolidated project be inspected read-only.
-        let configuration = runtime
+        let error = runtime
             .load_runtime_configuration_read_only_for_test(root.path(), &layout)
             .await
-            .expect("read-only open serves registry defaults for an uninitialized store");
-        assert_eq!(
-            configuration.target.project_id.as_str(),
-            "proj_read_only_uninitialized"
-        );
-        assert_eq!(
-            configuration.revision_id.as_str(),
-            "configuration.read_only.default.v1",
-            "an uninitialized store must resolve the read-only registry default revision"
+            .expect_err("read-only open must not fabricate a configuration revision");
+        assert!(
+            matches!(
+                error,
+                crate::errors::TraceDecayError::ResetRequired { ref authority, .. }
+                    if authority == "configuration"
+            ),
+            "uninitialized durable configuration must remain a typed reset state: {error:?}"
         );
     }
 }

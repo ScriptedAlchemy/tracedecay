@@ -1,4 +1,4 @@
-//! Daemon-ready injected adapters for PR13 advisory application ports.
+//! Daemon-ready injected adapters for advisory application ports.
 //!
 //! These adapters own no daemon trigger, host transport, GitHub write client,
 //! CI runner, scheduler, lock, or agent continuation.
@@ -41,12 +41,13 @@ pub use ci_runtime::{
 };
 #[cfg(any(test, feature = "test-transport"))]
 pub use fixtures::{
-    PR13_CHECK_ANNOTATIONS_FIXTURE_V1, PR13_CHECK_RUN_FIXTURE_V1, PR13_FIXTURE_ROOT_V1,
-    PR13_PROXIMITY_SESSIONS_FIXTURE_V1, PR13_PULL_REQUEST_FIXTURE_V1,
-    PR13_REVIEW_COMMENT_FIXTURE_V1, PR13_REVIEW_FIXTURE_V1, PR13_REVIEW_THREAD_FIXTURE_V1,
-    PR13_SCENARIO_FIXTURE_V1, PR13_WORKFLOW_JOB_FIXTURE_V1, PR13_WORKFLOW_RUN_FIXTURE_V1,
-    Pr13CiFixtureEvidenceV1, Pr13CiFixtureV1, Pr13GitHubFixtureAnchorsV1,
-    Pr13GitHubReviewFixtureV1, Pr13ProximityFixtureEvidenceV1, Pr13ProximityFixtureV1,
+    ADVISORY_CHECK_ANNOTATIONS_FIXTURE_V1, ADVISORY_CHECK_RUN_FIXTURE_V1, ADVISORY_FIXTURE_ROOT_V1,
+    ADVISORY_PROXIMITY_SESSIONS_FIXTURE_V1, ADVISORY_PULL_REQUEST_FIXTURE_V1,
+    ADVISORY_REVIEW_COMMENT_FIXTURE_V1, ADVISORY_REVIEW_FIXTURE_V1,
+    ADVISORY_REVIEW_THREAD_FIXTURE_V1, ADVISORY_SCENARIO_FIXTURE_V1,
+    ADVISORY_WORKFLOW_JOB_FIXTURE_V1, ADVISORY_WORKFLOW_RUN_FIXTURE_V1,
+    AdvisoryCiFixtureEvidenceV1, AdvisoryCiFixtureV1, AdvisoryGitHubFixtureAnchorsV1,
+    AdvisoryGitHubReviewFixtureV1, AdvisoryProximityFixtureEvidenceV1, AdvisoryProximityFixtureV1,
 };
 pub use github::{
     GitHubCurrentBranchRemapper, GitHubReadOnlyAdmissionError, GitHubReadOnlyConnector,
@@ -104,10 +105,10 @@ pub use proximity_runtime::{
     SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
 };
 pub use runtime::{
-    Pr13AdvisoryContributionsV1, Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1,
-    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryDaemonRegistrationV1,
-    Pr13AdvisoryProviderAuthoritiesV1, Pr13AdvisoryProviderStateV1, Pr13AdvisoryProviderV1,
-    Pr13AdvisoryRuntime, Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, Pr13AdvisoryContributionsV1,
+    Pr13AdvisoryDaemonRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
+    Pr13AdvisoryProviderStateV1, Pr13AdvisoryProviderV1, Pr13AdvisoryRuntime,
+    Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
     open_pr13_advisory_daemon_registration,
 };
 

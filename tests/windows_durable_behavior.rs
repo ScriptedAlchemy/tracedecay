@@ -25,12 +25,6 @@ mod fact_merge_hydration;
 mod domain_session_contract;
 
 #[tokio::test]
-async fn storage_fixture_authorities_are_available() {
-    let _guard = support::HOME_ENV_LOCK.lock().await;
-    assert!(support::ephemeral_safe_fixture_base().is_absolute());
-}
-
-#[tokio::test]
 async fn sqlite_writer_uses_production_wal_normal_policy() {
     let tmp = tempfile::TempDir::new().expect("create SQLite policy fixture");
     let (database, _) = common::initialize_test_database(&tmp.path().join("policy.db"))

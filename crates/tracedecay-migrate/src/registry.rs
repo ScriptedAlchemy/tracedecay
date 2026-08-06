@@ -989,8 +989,8 @@ pub fn stale_project_contexts<'a>(
 
 /// Filters registry rows that are stale under `scope`, restricted to
 /// canonical roots under one of `prefixes` (an empty slice means no
-/// restriction). Shared by `tracedecay migrate registry-gc` and the
-/// post-update health pass so both agree on what counts as a GC candidate.
+/// restriction). The registry report and its explicit apply path share this
+/// predicate so they agree on what counts as a GC candidate.
 pub fn stale_code_projects<'a>(
     projects: &'a [CodeProjectRecord],
     prefixes: &[PathBuf],

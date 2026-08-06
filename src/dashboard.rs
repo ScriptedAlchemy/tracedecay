@@ -121,7 +121,6 @@ impl DashboardGraphTestRuntimeV1 {
             project_root,
             &options,
             self.profile_database.as_ref(),
-            true,
         )
         .await?;
         if layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
@@ -153,7 +152,6 @@ impl DashboardGraphTestRuntimeV1 {
             project_root,
             &options,
             self.profile_database.as_ref(),
-            true,
         )
         .await?;
         let project_id = layout

@@ -9,30 +9,15 @@
 //! project B parked behind it with no deadline. That is a cross-project,
 //! unbounded hold on a request path.
 //!
-//! The exclusivity the old gate actually bought is narrower than "one gate".
-//! [`StoreAdministration`](super::branch_admin::StoreAdministration) documents
-//! it as coordinating "every daemon operation that can create, rekey, or remove
-//! a database owner ... so branch administration cannot prove ownership against
-//! stale daemon state". Both halves of that are *per store*:
-//!
-//! * The holder proof branch administration performs is computed from the
-//!   database paths of one store family (one `data_root`). Nothing another
-//!   store's writer does can invalidate it.
-//! * Owner creation/rekey/removal names one store owner
-//!   ([`StoreOwnerKey::store_root`](super::project_open_admission::StoreOwnerKey)
-//!   is exactly the canonicalized `data_root`).
-//!
-//! So the gate is split by store, and a daemon-wide lane is retained for the
-//! handful of operations that genuinely sweep every mounted store (maintenance
-//! round-robin, shutdown detach).
+//! Logical owner and content operations are scoped per store. Physical writer
+//! ownership and destructive maintenance belong to `StoreRuntimeRegistry`.
 //!
 //! # The lock hierarchy
 //!
 //! ```text
 //! daemon: RwLock          Daemon scope = write, Store scope = read
-//!   └── family: RwLock    Destructive = write, Owner/Content = read
-//!         ├── owner:  Mutex
-//!         └── content: Mutex
+//!   ├── owner:  Mutex
+//!   └── content: Mutex
 //! ```
 //!
 //! Every acquisition takes these in exactly that order, so no lock-order
@@ -40,15 +25,8 @@
 //!
 //! # Exclusivity argument
 //!
-//! * **Never two writers on one store.** Two acquisitions in the same class on
-//!   the same `data_root` contend on the same mutex (`owner`/`content`) or the
-//!   same `family` write lock, so at most one runs.
-//! * **Destructive is totally exclusive on its store.** Branch-store GC takes
-//!   `family.write()`, which excludes every `Owner` and `Content` holder of the
-//!   same store as well as every other `Destructive` holder. That is precisely
-//!   the protection the git-watch sync comment asked for ("prevents branch-store
-//!   GC from selecting or unlinking the `SQLite` family while a watcher sync owns
-//!   it"), and it survives the split.
+//! * **Never two logical operations in one class on one store.** They contend
+//!   on the same `owner` or `content` mutex.
 //! * **Daemon scope still excludes everything.** A `Daemon` acquisition takes
 //!   `daemon.write()`, which no store-scoped acquisition can hold concurrently.
 //! * **Owner and Content are deliberately concurrent.** They are disjoint
@@ -59,9 +37,6 @@
 //!   — hook writes and memory writes go straight to the store without taking
 //!   this gate at all — so admitting an owner-bookkeeping mutation beside a
 //!   sync adds no writer that did not already exist.
-//! * **Nothing that used to be excluded becomes concurrent across a
-//!   `Destructive` boundary.** `Destructive` is the only class that can unlink
-//!   or rekey a `SQLite` family, and it remains totally exclusive.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -72,9 +47,6 @@ use tokio::sync::{Mutex, OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWrite
 /// What one writer acquisition is allowed to do to a store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StoreWriterClass {
-    /// May unlink, select, or rekey the store's `SQLite` family (branch-store GC,
-    /// owner removal). Totally exclusive on its store.
-    Destructive,
     /// Mutates the daemon's owner/scheduler bookkeeping for the store (project
     /// open, owner rekey, scheduler start/stop). Serialized against itself.
     Owner,
@@ -108,22 +80,20 @@ impl WriterScope {
     }
 }
 
-/// The three lanes of one store family. Held by `Arc` from the registry and by
+/// The logical lanes of one store family. Held by `Arc` from the registry and by
 /// every live guard, so a gate outlives any holder even if the registry prunes
 /// its weak entry.
 #[derive(Default)]
 struct StoreGate {
-    family: Arc<RwLock<()>>,
     owner: Arc<Mutex<()>>,
     content: Arc<Mutex<()>>,
 }
 
 impl StoreGate {
-    fn class_mutex(&self, class: StoreWriterClass) -> Option<Arc<Mutex<()>>> {
+    fn class_mutex(&self, class: StoreWriterClass) -> Arc<Mutex<()>> {
         match class {
-            StoreWriterClass::Destructive => None,
-            StoreWriterClass::Owner => Some(Arc::clone(&self.owner)),
-            StoreWriterClass::Content => Some(Arc::clone(&self.content)),
+            StoreWriterClass::Owner => Arc::clone(&self.owner),
+            StoreWriterClass::Content => Arc::clone(&self.content),
         }
     }
 }
@@ -134,7 +104,6 @@ impl StoreGate {
 /// exist to pin the guards.
 pub(super) struct WriterAdmissionGuard {
     _class: Option<OwnedMutexGuard<()>>,
-    _family: Option<FamilyGuard>,
     _daemon: DaemonGuard,
     /// Keeps the store's gate alive for as long as it is held, so a registry
     /// prune between acquisition and release cannot hand a second acquirer a
@@ -146,13 +115,6 @@ pub(super) struct WriterAdmissionGuard {
 /// dropping this value, never by reading it.
 #[allow(dead_code)]
 enum DaemonGuard {
-    Shared(OwnedRwLockReadGuard<()>),
-    Exclusive(OwnedRwLockWriteGuard<()>),
-}
-
-/// Held for RAII only; see [`DaemonGuard`].
-#[allow(dead_code)]
-enum FamilyGuard {
     Shared(OwnedRwLockReadGuard<()>),
     Exclusive(OwnedRwLockWriteGuard<()>),
 }
@@ -211,26 +173,15 @@ impl StoreWriterGates {
         match scope {
             WriterScope::Daemon => WriterAdmissionGuard {
                 _class: None,
-                _family: None,
                 _daemon: DaemonGuard::Exclusive(Arc::clone(&self.daemon).write_owned().await),
                 _gate: None,
             },
             WriterScope::Store { data_root, class } => {
                 let daemon = Arc::clone(&self.daemon).read_owned().await;
                 let gate = self.store_gate(data_root);
-                let family = match class {
-                    StoreWriterClass::Destructive => {
-                        FamilyGuard::Exclusive(Arc::clone(&gate.family).write_owned().await)
-                    }
-                    _ => FamilyGuard::Shared(Arc::clone(&gate.family).read_owned().await),
-                };
-                let class_guard = match gate.class_mutex(*class) {
-                    Some(mutex) => Some(mutex.lock_owned().await),
-                    None => None,
-                };
+                let class_guard = gate.class_mutex(*class).lock_owned().await;
                 WriterAdmissionGuard {
-                    _class: class_guard,
-                    _family: Some(family),
+                    _class: Some(class_guard),
                     _daemon: DaemonGuard::Shared(daemon),
                     _gate: Some(gate),
                 }
@@ -240,32 +191,19 @@ impl StoreWriterGates {
 
     /// Acquires admission only if every level is free right now.
     ///
-    /// Destructive operator commands use this so they report busy instead of
-    /// silently queuing behind project warm-up.
     pub(super) fn try_acquire(&self, scope: &WriterScope) -> Option<WriterAdmissionGuard> {
         match scope {
             WriterScope::Daemon => Some(WriterAdmissionGuard {
                 _class: None,
-                _family: None,
                 _daemon: DaemonGuard::Exclusive(Arc::clone(&self.daemon).try_write_owned().ok()?),
                 _gate: None,
             }),
             WriterScope::Store { data_root, class } => {
                 let daemon = Arc::clone(&self.daemon).try_read_owned().ok()?;
                 let gate = self.store_gate(data_root);
-                let family = match class {
-                    StoreWriterClass::Destructive => {
-                        FamilyGuard::Exclusive(Arc::clone(&gate.family).try_write_owned().ok()?)
-                    }
-                    _ => FamilyGuard::Shared(Arc::clone(&gate.family).try_read_owned().ok()?),
-                };
-                let class_guard = match gate.class_mutex(*class) {
-                    Some(mutex) => Some(mutex.try_lock_owned().ok()?),
-                    None => None,
-                };
+                let class_guard = gate.class_mutex(*class).try_lock_owned().ok()?;
                 Some(WriterAdmissionGuard {
-                    _class: class_guard,
-                    _family: Some(family),
+                    _class: Some(class_guard),
                     _daemon: DaemonGuard::Shared(daemon),
                     _gate: Some(gate),
                 })
@@ -300,36 +238,6 @@ mod tests {
                 .try_acquire(&store("/a", StoreWriterClass::Owner))
                 .is_some(),
             "the gate must be released when the guard drops"
-        );
-    }
-
-    #[tokio::test]
-    async fn destructive_excludes_every_class_on_its_store() {
-        let gates = StoreWriterGates::default();
-        let _held = gates
-            .acquire(&store("/a", StoreWriterClass::Destructive))
-            .await;
-        for class in [
-            StoreWriterClass::Destructive,
-            StoreWriterClass::Owner,
-            StoreWriterClass::Content,
-        ] {
-            assert!(
-                gates.try_acquire(&store("/a", class)).is_none(),
-                "destructive administration must exclude {class:?} on the same store"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn content_sync_excludes_destructive_gc_on_its_store() {
-        let gates = StoreWriterGates::default();
-        let _sync = gates.acquire(&store("/a", StoreWriterClass::Content)).await;
-        assert!(
-            gates
-                .try_acquire(&store("/a", StoreWriterClass::Destructive))
-                .is_none(),
-            "branch-store GC must not select a family a watcher sync owns"
         );
     }
 

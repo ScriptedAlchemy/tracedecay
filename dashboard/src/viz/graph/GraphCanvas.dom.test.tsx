@@ -388,15 +388,18 @@ describe('GraphCanvas', () => {
     await waitFor(() => expect(sigmaState.refreshCount).toBeGreaterThan(before));
   });
 
-  it('states the missing WebGL context instead of constructing a renderer that throws', async () => {
+  it('states the missing WebGL context and the caller-supplied text alternative', async () => {
     stubWebGl(false);
     const { getByText } = render(
       <GraphCanvas
         nodes={[{ id: 'node', label: 'Node', kind: 'function', degree: 1 }]}
         edges={[]}
+        fallbackDescription="the project registry remains available as a text alternative"
       />,
     );
     expect(getByText(/no WebGL context/i)).toBeTruthy();
+    expect(getByText(/project registry remains available/i)).toBeTruthy();
+    expect(document.querySelector('[role="status"][aria-live="polite"]')).not.toBeNull();
     // Never constructed: Sigma throws without a context, and that exception
     // would take the whole workspace route down through the error boundary.
     // Held across the layout engine's async boundary too — a renderer that

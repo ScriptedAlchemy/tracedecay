@@ -132,8 +132,6 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_replace_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_insert_at_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_move_symbol", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_api_migration_plan", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
-    McpToolBinding { name: "tracedecay_api_migration_apply", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_source_edit_reconcile", group: Some(McpToolDispatchGroup::Edit), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_test_map", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_gini", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -275,22 +273,12 @@ pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool
 
 fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
-        "tracedecay_str_replace"
-        | "tracedecay_multi_str_replace"
-        | "tracedecay_insert_at"
-        | "tracedecay_ast_grep_rewrite"
-        | "tracedecay_replace_symbol"
-        | "tracedecay_insert_at_symbol"
-        | "tracedecay_move_symbol"
-        | "tracedecay_api_migration_apply" => EffectClass::SourceEdit,
-        "tracedecay_source_edit_reconcile"
-        | "tracedecay_dashboard"
+        "tracedecay_dashboard"
         | "tracedecay_fact_store"
         | "tracedecay_fact_feedback"
         | "tracedecay_memory_status"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests"
-        | "tracedecay_lcm_doctor"
         | "tracedecay_lcm_compress"
         | "tracedecay_lcm_session_boundary"
         | "tracedecay_session_start"
@@ -317,12 +305,22 @@ fn application_capability_for_tool(
     }))
 }
 
+pub(crate) fn tool_dispatches_source_edit_effect(tool_name: &str) -> bool {
+    matches!(
+        binding(tool_name).and_then(|binding| binding.group),
+        Some(McpToolDispatchGroup::Edit)
+    ) && application_capability_for_tool(tool_name)
+        .ok()
+        .flatten()
+        .is_some_and(|capability| capability.effect() == EffectClass::SourceEdit)
+}
+
 pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
-        || matches!(direct_effect(tool_name), EffectClass::SourceEdit)
+        || tool_dispatches_source_edit_effect(tool_name)
         || matches!(
             tool_name,
-            "tracedecay_search" | "tracedecay_run_affected_tests"
+            "tracedecay_admin_cli" | "tracedecay_search" | "tracedecay_run_affected_tests"
         )
 }
 
@@ -333,7 +331,28 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_store"
             | "tracedecay_session_start"
             | "tracedecay_session_end"
+            | "tracedecay_str_replace"
+            | "tracedecay_multi_str_replace"
+            | "tracedecay_insert_at"
+            | "tracedecay_ast_grep_rewrite"
+            | "tracedecay_replace_symbol"
+            | "tracedecay_insert_at_symbol"
+            | "tracedecay_move_symbol"
     )
+}
+
+fn executable_handler_is_available(
+    binding: &McpToolBinding,
+    effect: EffectClass,
+    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+) -> bool {
+    effect.is_read_only()
+        || verified_effect_journey(binding.name)
+        || matches!(binding.group, Some(McpToolDispatchGroup::Edit))
+            && application_capability.is_some_and(|capability| {
+                capability.effect() == EffectClass::SourceEdit
+                    && capability.availability().is_callable()
+            })
 }
 
 fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract {
@@ -357,17 +376,15 @@ fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract 
     }
 }
 
-fn idempotency_for_tool(tool_name: &str) -> McpIdempotencyContract {
-    match tool_name {
-        "tracedecay_dashboard" => McpIdempotencyContract::Idempotent,
-        "tracedecay_str_replace"
-        | "tracedecay_multi_str_replace"
-        | "tracedecay_insert_at"
-        | "tracedecay_ast_grep_rewrite"
-        | "tracedecay_replace_symbol"
-        | "tracedecay_insert_at_symbol"
-        | "tracedecay_move_symbol"
-        | "tracedecay_api_migration_apply" => McpIdempotencyContract::KeyRequired,
+fn idempotency_for_tool(
+    tool_name: &str,
+    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+) -> McpIdempotencyContract {
+    match application_capability.map(tracedecay_tool_catalog::CapabilityManifestV1::idempotency) {
+        Some(tracedecay_tool_catalog::IdempotencyContract::Required) => {
+            McpIdempotencyContract::KeyRequired
+        }
+        _ if tool_name == "tracedecay_dashboard" => McpIdempotencyContract::Idempotent,
         _ => McpIdempotencyContract::NotProvided,
     }
 }
@@ -412,7 +429,7 @@ fn build_mcp_dispatch_catalog()
                 tracedecay_tool_catalog::CapabilityManifestV1::effect,
             )
         };
-        let available = effect.is_read_only() || verified_effect_journey(binding.name);
+        let available = executable_handler_is_available(binding, effect, application_capability);
         let cancellation = cancellation_for_tool(binding.name, application_capability)?;
         let mut terminal_states = vec![
             McpTerminalState::Completed,
@@ -442,7 +459,7 @@ fn build_mcp_dispatch_catalog()
             deadline: McpDeadlineContractV1::new(
                 super::handlers::tool_dispatch_ceiling(binding.name).as_millis() as u64,
             )?,
-            idempotency: idempotency_for_tool(binding.name),
+            idempotency: idempotency_for_tool(binding.name, application_capability),
             inverse: inverse_for_tool(binding.name, effect),
             cancellation,
             terminal_states,
@@ -535,6 +552,9 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(cataloged, advertised);
         for contract in catalog.contracts() {
+            let binding = binding(contract.tool_name()).unwrap();
+            let application_capability =
+                application_capability_for_tool(contract.tool_name()).unwrap();
             assert_eq!(
                 contract.deadline().maximum_millis(),
                 super::super::handlers::tool_dispatch_ceiling(contract.tool_name()).as_millis()
@@ -542,19 +562,15 @@ mod tests {
             );
             assert_eq!(
                 contract.availability().is_available(),
-                contract.effect().is_read_only() || verified_effect_journey(contract.tool_name())
+                executable_handler_is_available(binding, contract.effect(), application_capability,)
             );
         }
     }
 
     #[test]
-    fn mixed_repair_tools_are_effects_without_fabricated_lifecycle_claims() {
+    fn administrative_tools_are_effects_without_fabricated_lifecycle_claims() {
         let catalog = mcp_dispatch_catalog().unwrap();
-        for tool_name in [
-            "tracedecay_lcm_doctor",
-            "tracedecay_memory_status",
-            "tracedecay_session_refresh",
-        ] {
+        for tool_name in ["tracedecay_memory_status", "tracedecay_session_refresh"] {
             let contract = catalog.contract(tool_name).unwrap();
             assert_eq!(contract.effect(), EffectClass::Administrative);
             assert!(!contract.read_only());
@@ -565,6 +581,34 @@ mod tests {
                 McpInverseContract::Unavailable { .. }
             ));
         }
+    }
+
+    #[test]
+    fn lcm_doctor_is_a_read_only_diagnostic() {
+        let contract = mcp_dispatch_catalog()
+            .unwrap()
+            .contract("tracedecay_lcm_doctor")
+            .unwrap();
+        assert_eq!(contract.effect(), EffectClass::Read);
+        assert!(contract.read_only());
+        assert!(contract.availability().is_available());
+        assert_eq!(contract.idempotency(), McpIdempotencyContract::NotProvided);
+        assert!(matches!(
+            contract.inverse(),
+            McpInverseContract::NotApplicable
+        ));
+    }
+
+    #[test]
+    fn source_edit_reconcile_is_unavailable_without_an_authentic_journey() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        assert!(
+            !catalog
+                .contract("tracedecay_source_edit_reconcile")
+                .unwrap()
+                .availability()
+                .is_available()
+        );
     }
 
     #[test]

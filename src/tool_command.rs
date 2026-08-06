@@ -80,7 +80,6 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_status",
     "tracedecay_lcm_grep",
     "tracedecay_lcm_load_session",
-    "tracedecay_lcm_doctor",
     "tracedecay_lcm_describe",
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",
@@ -611,8 +610,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_replace_symbol"
         || n == "tracedecay_insert_at_symbol"
         || n == "tracedecay_move_symbol"
-        || n == "tracedecay_api_migration_plan"
-        || n == "tracedecay_api_migration_apply"
     {
         "edit"
     } else if n == "tracedecay_fact_store"

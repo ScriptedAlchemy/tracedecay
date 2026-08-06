@@ -3,12 +3,15 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
 use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use super::read_model::{
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
+    scope_from_state,
+};
 use super::{DashboardState, build_selected_project_state, config_error};
 use crate::project_registry::{PublicCodeProject, build_project_registry_view};
 use tracedecay_global_db::ProjectRegistryContext;
@@ -148,18 +151,17 @@ pub(super) struct ProjectContextPayloadV1 {
     is_active: Option<bool>,
     project: Option<PublicCodeProject>,
     aliases: Vec<tracedecay_global_db::ProjectAliasRecord>,
-    stores: Vec<tracedecay_global_db::ProjectStoreContext>,
 }
 
 pub async fn list(
     State(runtime): State<DashboardRuntime>,
     Query(params): Query<ProjectsParams>,
-) -> (StatusCode, Json<ProjectsPayloadV1>) {
+) -> Json<DashboardEnvelopeV1<ProjectsPayloadV1>> {
     let limit = params.limit.unwrap_or(100).clamp(1, 250);
     let Some(db) = runtime.active.savings_db.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ProjectsPayloadV1 {
+        return registry_list_unavailable(
+            &runtime,
+            ProjectsPayloadV1 {
                 status: "missing_registry".to_owned(),
                 error: None,
                 limit,
@@ -169,16 +171,17 @@ pub async fn list(
                 active_project_root: runtime.active_project_root(),
                 summary: None,
                 project_tree: None,
-            }),
+            },
+            "project_registry_not_mounted",
         );
     };
 
     let mut projects = match db.list_code_projects(limit + 1).await {
         Ok(projects) => projects,
         Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ProjectsPayloadV1 {
+            return registry_list_unavailable(
+                &runtime,
+                ProjectsPayloadV1 {
                     status: "registry_unavailable".to_owned(),
                     error: Some(error.to_string()),
                     limit,
@@ -188,7 +191,8 @@ pub async fn list(
                     active_project_root: runtime.active_project_root(),
                     summary: None,
                     project_tree: None,
-                }),
+                },
+                error.to_string(),
             );
         }
     };
@@ -198,9 +202,9 @@ pub async fn list(
     let contexts = match db.project_registry_contexts_for_projects(&projects).await {
         Ok(contexts) => contexts,
         Err(error) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ProjectsPayloadV1 {
+            return registry_list_unavailable(
+                &runtime,
+                ProjectsPayloadV1 {
                     status: "registry_unavailable".to_owned(),
                     error: Some(error.to_string()),
                     limit,
@@ -210,7 +214,8 @@ pub async fn list(
                     active_project_root: runtime.active_project_root(),
                     summary: None,
                     project_tree: None,
-                }),
+                },
+                error.to_string(),
             );
         }
     };
@@ -219,21 +224,47 @@ pub async fn list(
         .iter()
         .map(|project| PublicCodeProject::from_record(project, runtime.active_project_id()))
         .collect::<Vec<_>>();
+    let row_count = rows.len() as u64;
 
-    (
-        StatusCode::OK,
-        Json(ProjectsPayloadV1 {
-            status: "ok".to_owned(),
-            error: None,
-            limit,
-            truncated: Some(truncated),
-            projects: Some(rows),
-            active_project_id,
-            active_project_root: runtime.active_project_root(),
-            summary: Some(view.summary),
-            project_tree: Some(view.project_tree),
-        }),
-    )
+    let payload = ProjectsPayloadV1 {
+        status: "ok".to_owned(),
+        error: None,
+        limit,
+        truncated: Some(truncated),
+        projects: Some(rows),
+        active_project_id,
+        active_project_root: runtime.active_project_root(),
+        summary: Some(view.summary),
+        project_tree: Some(view.project_tree),
+    };
+    let envelope = if truncated {
+        DashboardEnvelopeV1::new(
+            scope_from_state(&runtime.active),
+            DashboardDomainStateV1::Partial,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::fresh_now(),
+            payload,
+        )
+    } else {
+        DashboardEnvelopeV1::ready(
+            scope_from_state(&runtime.active),
+            DashboardCoverageV1::complete(row_count, "projects"),
+            payload,
+        )
+    };
+    Json(envelope)
+}
+
+fn registry_list_unavailable(
+    runtime: &DashboardRuntime,
+    payload: ProjectsPayloadV1,
+    reason: impl Into<String>,
+) -> Json<DashboardEnvelopeV1<ProjectsPayloadV1>> {
+    Json(DashboardEnvelopeV1::unavailable(
+        scope_from_state(&runtime.active),
+        payload,
+        reason,
+    ))
 }
 
 pub fn is_registry_unavailable_error(error: &TraceDecayError) -> bool {
@@ -248,59 +279,61 @@ pub fn is_registry_unavailable_error(error: &TraceDecayError) -> bool {
 }
 
 pub fn registry_unavailable_response(
+    state: &DashboardState,
     error: &TraceDecayError,
-) -> (StatusCode, Json<ProjectContextPayloadV1>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(ProjectContextPayloadV1 {
+) -> Json<DashboardEnvelopeV1<ProjectContextPayloadV1>> {
+    Json(DashboardEnvelopeV1::unavailable(
+        scope_from_state(state),
+        ProjectContextPayloadV1 {
             status: "registry_unavailable".to_owned(),
             error: Some(error.to_string()),
             is_active: None,
             project: None,
             aliases: Vec::new(),
-            stores: Vec::new(),
-        }),
-    )
+        },
+        error.to_string(),
+    ))
 }
 
 pub async fn context(
     State(runtime): State<DashboardRuntime>,
     AxumPath(project_id): AxumPath<String>,
-) -> (StatusCode, Json<ProjectContextPayloadV1>) {
+) -> Json<DashboardEnvelopeV1<ProjectContextPayloadV1>> {
     let Some(db) = runtime.active.savings_db.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(ProjectContextPayloadV1 {
+        return Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(&runtime.active),
+            ProjectContextPayloadV1 {
                 status: "missing_registry".to_owned(),
                 error: None,
                 is_active: None,
                 project: None,
                 aliases: Vec::new(),
-                stores: Vec::new(),
-            }),
-        );
+            },
+            "project_registry_not_mounted",
+        ));
     };
     let context = match db.project_registry_context_by_id(&project_id).await {
         Ok(context) => context,
-        Err(error) => return registry_unavailable_response(&error),
+        Err(error) => return registry_unavailable_response(&runtime.active, &error),
     };
     let Some(context) = context else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ProjectContextPayloadV1 {
+        return Json(DashboardEnvelopeV1::complete_zero_findings(
+            scope_from_state(&runtime.active),
+            DashboardCoverageV1::complete(1, "projects"),
+            ProjectContextPayloadV1 {
                 status: "not_found".to_owned(),
                 error: None,
                 is_active: None,
                 project: None,
                 aliases: Vec::new(),
-                stores: Vec::new(),
-            }),
-        );
+            },
+        ));
     };
     let is_active = Some(project_id.as_str()) == runtime.active_project_id();
-    (
-        StatusCode::OK,
-        Json(ProjectContextPayloadV1 {
+    Json(DashboardEnvelopeV1::ready(
+        scope_from_state(&runtime.active),
+        DashboardCoverageV1::complete(1, "projects"),
+        ProjectContextPayloadV1 {
             status: "ok".to_owned(),
             error: None,
             is_active: Some(is_active),
@@ -309,17 +342,13 @@ pub async fn context(
                 runtime.active_project_id(),
             )),
             aliases: context.aliases,
-            stores: context.stores,
-        }),
-    )
+        },
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_global_db::{
-        CodeProjectRecord, GraphScopeRecord, ProjectRegistryContext, ProjectStoreContext,
-        StoreArtifactRecord, StoreInstanceRecord,
-    };
+    use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext};
 
     fn code_project() -> CodeProjectRecord {
         CodeProjectRecord {
@@ -334,45 +363,11 @@ mod tests {
         }
     }
 
-    fn store_context() -> ProjectStoreContext {
-        ProjectStoreContext {
-            store: StoreInstanceRecord {
-                store_id: "store:test".to_string(),
-                project_id: "proj_test".to_string(),
-                store_kind: "code_project".to_string(),
-                storage_mode: "profile_sharded".to_string(),
-                store_relpath: "projects/proj_test".to_string(),
-                manifest_relpath: Some("projects/proj_test/store_manifest.json".to_string()),
-                created_at: 110,
-                last_verified_at: Some(210),
-                last_write_at: Some(220),
-            },
-            graph_scopes: vec![GraphScopeRecord {
-                graph_scope_id: "store:test:branch:main".to_string(),
-                project_id: "proj_test".to_string(),
-                store_id: "store:test".to_string(),
-                branch_name: "main".to_string(),
-                db_relpath: "projects/proj_test/branches/main.db".to_string(),
-                parent_scope_id: None,
-                last_synced_at: Some(230),
-                writable: true,
-            }],
-            artifacts: vec![StoreArtifactRecord {
-                store_id: "store:test".to_string(),
-                artifact_kind: "graph_db".to_string(),
-                relpath: "projects/proj_test/branches/main.db".to_string(),
-                size_bytes: Some(4096),
-                schema_version: None,
-                updated_at: Some(240),
-            }],
-        }
-    }
-
     fn registry_context() -> ProjectRegistryContext {
         ProjectRegistryContext {
             project: code_project(),
             aliases: Vec::new(),
-            stores: vec![store_context()],
+            stores: Vec::new(),
         }
     }
 
@@ -382,18 +377,6 @@ mod tests {
         let mut changed = registry_context();
         changed.project.canonical_root = "/new-repo".to_string();
         changed.project.last_seen_at += 1;
-
-        assert_ne!(base, changed);
-    }
-
-    #[test]
-    fn registry_context_changes_with_store_metadata() {
-        let base = registry_context();
-        let mut changed = registry_context();
-        changed.stores[0].store.last_write_at = Some(999);
-        changed.stores[0].graph_scopes[0].db_relpath =
-            "projects/proj_test/branches/feature.db".to_string();
-        changed.stores[0].artifacts[0].updated_at = Some(1000);
 
         assert_ne!(base, changed);
     }

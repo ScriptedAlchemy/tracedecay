@@ -1,4 +1,4 @@
-//! Cross-host projection glue for a completed PR13 advisory publication.
+//! Cross-host projection glue for a completed advisory publication.
 //!
 //! This module owns no feedback state, analyzer, suggestion channel, retry
 //! loop, or host transport. It mounts the already-authoritative PR12 read
@@ -34,7 +34,7 @@ use tracedecay_host_integration::{
 };
 
 use super::runtime::{
-    Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1, Pr13AdvisoryCycleRequestV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
     Pr13AdvisoryDaemonRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
     Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
     open_pr13_advisory_daemon_registration,
@@ -306,9 +306,9 @@ pub enum Pr13AdvisoryHookDeliveryV1 {
 
 #[derive(Debug, Error)]
 pub enum Pr13AdvisoryHostDeliveryErrorV1 {
-    #[error("PR13 advisory cycle did not complete")]
+    #[error("advisory cycle did not complete")]
     AdvisoryNotCompleted,
-    #[error("PR13 advisory cycle has no recorded shared-store publication")]
+    #[error("advisory cycle has no recorded shared-store publication")]
     PublicationNotRecorded,
     #[error("completed advisory cycle does not match the shared publication")]
     PublicationMismatch,
@@ -329,7 +329,7 @@ pub enum Pr13AdvisoryRunErrorV1 {
 }
 
 pub struct Pr13AdvisoryRunResultV1 {
-    pub outcome: Pr13AdvisoryCycleOutcomeV1,
+    pub outcome: AdvisoryCycleOutcome,
     pub delivery: Option<Pr13AdvisoryCompletedDeliveryV1>,
 }
 
@@ -355,7 +355,7 @@ pub struct Pr13AdvisoryHostDeliveryRegistrationV1 {
 }
 
 /// One daemon-startup bundle for PR13 execution and every existing delivery
-/// surface. Both members retain handles to the same PR12 owner/store.
+/// surface. Both members retain handles to the same feedback owner/store.
 pub struct Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC> {
     pub advisory: Pr13AdvisoryDaemonRegistrationV1<GR, GA, CS, CE, PE, PC>,
     pub host_delivery: Pr13AdvisoryHostDeliveryRegistrationV1,
@@ -379,7 +379,7 @@ where
     pub fn consume_completed_publication(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
         self.host_delivery
@@ -391,8 +391,8 @@ where
     pub async fn run_once(
         &self,
         context: &RequestContext,
-        control: Pr13AdvisoryCycleControlV1,
-        request: Pr13AdvisoryCycleRequestV1,
+        control: AdvisoryCycleControl,
+        request: AdvisoryCycleRequest,
         host: HostKindV1,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryRunResultV1, Pr13AdvisoryRunErrorV1> {
@@ -424,15 +424,15 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
             .collect()
     }
 
-    /// Validates a completed PR13 advisory outcome against one canonical PR12
+    /// Validates a completed advisory outcome against one canonical PR12
     /// publication, then builds the bounded content-free Hook V2 lookup
     /// notice. The outcome exposes the publication only after the shared store
     /// committed it; this method never reconstructs, polls, or persists it.
     pub fn hook_lookup_notice(
         &self,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
     ) -> Result<Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHostDeliveryErrorV1> {
-        let Pr13AdvisoryCycleOutcomeV1::Completed {
+        let AdvisoryCycleOutcome::Completed {
             cycle,
             observation_input,
             ..
@@ -506,14 +506,14 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     pub fn deliver_hook_lookup_notice<P>(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
         port: &P,
     ) -> Result<Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1>
     where
         P: HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + ?Sized,
     {
-        let Pr13AdvisoryCycleOutcomeV1::Completed {
+        let AdvisoryCycleOutcome::Completed {
             observation_input, ..
         } = outcome
         else {
@@ -632,7 +632,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     pub fn deliver_registered_hook_lookup_notice(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
         self.deliver_hook_lookup_notice(host, outcome, rollback, self.hook_delivery_port.as_ref())
@@ -645,7 +645,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     pub fn consume_completed_publication(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
         let hook = self.deliver_registered_hook_lookup_notice(host, outcome, rollback)?;
@@ -656,7 +656,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     }
 }
 
-/// Builds the concrete host-delivery registration from the PR13 daemon
+/// Builds the concrete host-delivery registration from the advisory daemon
 /// registration's existing read owner/store. `scope` is passed explicitly
 /// because it is the startup authority that admitted the daemon registration.
 pub fn mount_pr13_advisory_host_delivery<GR, GA, CS, CE, PE, PC>(

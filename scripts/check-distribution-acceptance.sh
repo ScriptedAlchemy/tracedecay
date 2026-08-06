@@ -398,13 +398,12 @@ for package in sorted(metadata["packages"], key=lambda value: value["name"]):
 PY
 
 echo "distribution acceptance: testing packaged patched Rust grammar"
-"$repo/scripts/require-exact-test.sh" cargo test \
+cargo nextest run \
   --manifest-path "$code_extraction_package/Cargo.toml" \
   --all-features \
   --config "$patch_config" \
   --test rust \
-  test_rust_cfg_attribute_in_struct_pattern_field \
-  -- --exact
+  --no-tests=fail
 
 echo "distribution acceptance: compiling packaged library with production features"
 cargo check \
@@ -437,90 +436,56 @@ PY
   die "cached ONNX Runtime library is unavailable for the offline semantic tests"
 export ORT_LIB_PATH="$ort_lib_path"
 
-# The lifecycle suite moved out of the root crate's `semantic_code` module into
-# the extracted `tracedecay-semantic` crate, so it is filtered against that
-# package's own module path now.
-echo "distribution acceptance: checking packaged model-acquisition lifecycle suite"
-REQUIRE_EXACT_TEST_COUNT=nonzero \
-  CARGO_NET_OFFLINE=true \
-  "$repo/scripts/require-exact-test.sh" cargo test \
-  --manifest-path "$semantic_package/Cargo.toml" \
-  --release \
-  --features semantic-fastembed \
-  --lib \
-  --config "$patch_config" \
-  model_lifecycle::tests::
-
 echo "distribution acceptance: checking extracted query semantic fallback behavior"
-REQUIRE_EXACT_TEST_COUNT=nonzero \
-  CARGO_NET_OFFLINE=true \
-  "$repo/scripts/require-exact-test.sh" cargo test \
+CARGO_NET_OFFLINE=true cargo nextest run \
   --manifest-path "$query_package/Cargo.toml" \
   --release \
   --all-features \
   --lib \
   --config "$patch_config" \
-  retrieval::semantic::tests::
+  --no-tests=fail
 
 echo "distribution acceptance: checking extracted root strict semantic unavailability"
-REQUIRE_EXACT_TEST_COUNT=nonzero \
-  CARGO_NET_OFFLINE=true \
-  "$repo/scripts/require-exact-test.sh" cargo test \
+CARGO_NET_OFFLINE=true cargo nextest run \
   --manifest-path "$root_package/Cargo.toml" \
   --release \
   --no-default-features \
   --features production \
   --lib \
   --config "$patch_config" \
-  daemon::code_index_scheduler::semantic_query_runtime::tests::
+  --no-tests=fail
 
 echo "distribution acceptance: checking extracted LSP framing and protocol behavior"
-for lsp_test in \
-  bridge::tests::strict_content_length_codec_rejects_ambiguous_or_malformed_headers \
-  protocol::tests::bridge_transport_parses_typed_session_frames_and_acks_delivery; do
-  CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
-    --manifest-path "$lsp_package/Cargo.toml" \
-    --release \
-    --all-features \
-    --lib \
-    --config "$patch_config" \
-    "$lsp_test" \
-    -- \
-    --exact
-done
+CARGO_NET_OFFLINE=true cargo nextest run \
+  --manifest-path "$lsp_package/Cargo.toml" \
+  --release \
+  --all-features \
+  --lib \
+  --config "$patch_config" \
+  --no-tests=fail
 
 echo "distribution acceptance: checking packaged MCP tool behavior"
-for mcp_test in \
-  mcp_handler_test::graph_query_test::test_impact \
-  mcp_handler_test::graph_query_test::test_affected \
-  mcp_handler_test::graph_analysis_test::test_test_map_lists_ts_it_title_as_covering_test \
-  git_correlation_test::sessions_for_and_diagnostics_flag_empty_correlation_index; do
-  CARGO_NET_OFFLINE=true "$repo/scripts/require-exact-test.sh" cargo test \
-    --manifest-path "$root_package/Cargo.toml" \
-    --release \
-    --no-default-features \
-    --features production \
-    --test mcp_suite \
-    --config "$patch_config" \
-    "$mcp_test" \
-    -- \
-    --exact
-done
+CARGO_NET_OFFLINE=true cargo nextest run \
+  --manifest-path "$root_package/Cargo.toml" \
+  --release \
+  --no-default-features \
+  --features production \
+  --test mcp_suite \
+  --config "$patch_config" \
+  --no-tests=fail
 
-echo "distribution acceptance: checking packaged Jina background acquisition"
+echo "distribution acceptance: checking packaged semantic lifecycle and Jina acquisition"
 TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT="$work/semantic-model-profile" \
   CARGO_NET_OFFLINE=true \
   HF_HUB_OFFLINE=1 \
-  "$repo/scripts/require-exact-test.sh" cargo test \
+  cargo nextest run \
   --manifest-path "$semantic_package/Cargo.toml" \
   --release \
   --features semantic-fastembed \
   --lib \
   --config "$patch_config" \
-  model_lifecycle::distribution_acquisition_acceptance::distribution_background_acquisition_installs_verified_jina_model \
-  -- \
-  --exact
+  --no-tests=fail
 
 install_root="$work/install"
 echo "distribution acceptance: installing packaged CLI with production features"

@@ -123,7 +123,7 @@ describe('KnowledgePage fact detail', () => {
         const url = String(input);
         calls.push(url);
         if (url.includes('/api/plugins/holographic/fact/7')) {
-          return jsonResponse({
+          return jsonResponse(envelope({
             error: '',
             fact: fact({
               fact_id: 7,
@@ -140,20 +140,20 @@ describe('KnowledgePage fact detail', () => {
                 },
               ],
             }),
-          });
+          }));
         }
         if (url.includes('/api/plugins/holographic/status')) {
-          return jsonResponse(memoryStatus({ fact_count: 1, trust_075_100_count: 1 }));
+          return jsonResponse(envelope(memoryStatus({ fact_count: 1, trust_075_100_count: 1 })));
         }
         return jsonResponse(
-          memoryOverview({
+          envelope(memoryOverview({
             overview: memorySummary({
               facts: 1,
               entities: 1,
               trust_histogram: [{ bucket: 8, label: '0.8–0.9', count: 1 }],
             }),
             facts: [fact({ fact_id: 7, trust_score: 0.8, content: 'list-truncated fact…' })],
-          }),
+          })),
         );
       }),
     );
@@ -188,16 +188,16 @@ describe('KnowledgePage fact detail', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes('/status')) return jsonResponse(memoryStatus());
+        if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
         return jsonResponse(
-          memoryOverview({
+          envelope(memoryOverview({
             overview: memorySummary({ facts: 42 }),
             reads: {
               facts: { state: 'error', error: 'facts query failed' },
               entities: { state: 'ready' },
               graph: { state: 'ready' },
             },
-          }),
+          })),
         );
       }),
     );
@@ -212,9 +212,9 @@ describe('KnowledgePage fact detail', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes('/status')) return jsonResponse(memoryStatus());
+        if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
         return jsonResponse(
-          memoryOverview(
+          envelope(memoryOverview(
             {
               overview: memorySummary({ facts: 420 }),
               facts_coverage: {
@@ -224,7 +224,7 @@ describe('KnowledgePage fact detail', () => {
               },
             },
             { query: url.includes('q=needle') ? 'needle' : '' },
-          ),
+          )),
         );
       }),
     );
@@ -248,6 +248,33 @@ function renderKnowledge() {
       <KnowledgePage />
     </QueryClientProvider>,
   );
+}
+
+function envelope(payload: unknown) {
+  return {
+    schema_revision: 1,
+    scope: { project_id: 'project.knowledge', storage_mode: 'profile_sharded', store_root: '/data' },
+    version: { entity_version: null, graph_version: null },
+    time: { valid_time_micros: null, observation_time_micros: 1 },
+    source_watermark: null,
+    authorization: { outcome: 'authorized' },
+    coverage: {
+      completeness: 'complete',
+      eligible: 1,
+      examined: 1,
+      matched: 1,
+      excluded: 0,
+      omitted: 0,
+      unknown: 0,
+      denominator: 1,
+      unit: 'facts',
+      omission_reasons: [],
+    },
+    freshness: { state: 'fresh', observed_at_micros: 1, watermark: null },
+    domain_state: 'ready',
+    legal_actions: [],
+    payload,
+  };
 }
 
 function jsonResponse(body: unknown): Response {

@@ -1,11 +1,11 @@
 # TraceDecay V2 Incremental Context Scout
 
-**Delivery:** PR13
-
 Earlier Scout envelope names, conformance packets, fixture matrices, timing
-baselines, and file layouts are historical evidence, not prerequisites or
-artifacts that PR13 must recreate. Published or persisted suggestion fields
-retain their compatibility and migration obligations; acceptance otherwise
+baselines, and file layouts are historical evidence, not prerequisites.
+Independently released public suggestion envelopes retain their negotiated wire
+compatibility. Internal and unreleased shapes change in place, and persisted
+TraceDecay state uses only the exact final shape; old store bytes return
+`ResetRequired` rather than entering a migration or dual-write path. Acceptance
 follows the deterministic and model-assisted behavior, delivery controls,
 overlay safety, and regressions below.
 
@@ -14,7 +14,7 @@ overlay safety, and regressions below.
 After a meaningful saved edit or host boundary, Context Scout can deliver one
 compact, evidence-backed suggestion when new context would materially improve
 the agent's next action. Scout is optional, advisory, bounded, and silent by
-default. PR13 ships both the deterministic path and configured model-assisted
+default. The product ships both the deterministic path and configured model-assisted
 path as working product behavior.
 
 ## End-to-end production path
@@ -53,7 +53,7 @@ policy/configuration revisions, reason, expiry, dedupe identity, coverage,
 redaction/omission state, and delivery state. It copies no unanchored evidence
 and treats historical narrative as quoted evidence, never active instruction.
 
-## PR13 implementation slices
+## Implementation slices
 
 ### Deterministic Scout
 
@@ -122,8 +122,9 @@ and treats historical narrative as quoted evidence, never active instruction.
   explanation, feedback, pause/resume, cancellation, capability, and budget
   surfaces. No approval/apply queue or separate evaluation product is added.
 - Emit typed Scout/host diagnostic and conformance evidence plus remediation
-  references for PR14 Doctor. PR13 owns the working Scout operations and
-  evidence; PR14 owns canonical diagnosis and remediation orchestration.
+  references for Doctor. Scout owns the working advisory operations and
+  evidence; the application layer owns canonical diagnosis and remediation
+  orchestration.
 
 ## Overlay handling
 
@@ -169,10 +170,10 @@ saved.
   intact. No result causes an edit, GitHub write, CI rerun, task mutation,
   workflow admission, or automatic agent continuation.
 
-## Not in PR13
+## Explicit non-goals
 
 - Task graphs, approval queues, orchestration labs, workflow execution,
   recursive tool dispatch, personalized online models, and host-local ranking
   are not Scout features.
-- Dashboard/Doctor rendering may consume Scout state in PR14, but PR13 already
+- Dashboard/Doctor rendering may consume Scout state, while Scout already
   ships the callable status, controls, delivery, and feedback operations.

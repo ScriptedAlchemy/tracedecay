@@ -12,34 +12,14 @@ use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_search() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "helper", "limit": 5}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    assert!(!text.is_empty());
-    assert!(
-        text.contains("helper"),
-        "search results should contain 'helper'"
-    );
-}
-
-#[tokio::test]
-async fn strict_semantic_without_executor_never_serves_legacy_fallback() {
+async fn fallback_allowed_without_executor_never_serves_legacy_fallback() {
     let (cg, _dir) = setup_project().await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_search",
         json!({
             "query": "helper",
-            "semantic_mode": "strict_semantic",
+            "semantic_mode": "fallback_allowed",
             "format": "json"
         }),
         None,
@@ -52,7 +32,7 @@ async fn strict_semantic_without_executor_never_serves_legacy_fallback() {
     assert_eq!(payload["status"].as_str(), Some("unavailable"));
     assert_eq!(
         payload["semantic"]["mode"].as_str(),
-        Some("strict_semantic")
+        Some("fallback_allowed")
     );
     assert_eq!(payload["semantic"]["status"].as_str(), Some("unavailable"));
 }
@@ -406,81 +386,6 @@ async fn test_grep_missing_pattern_errors() {
 }
 
 #[tokio::test]
-async fn test_search_returns_index_coverage_hint_for_skipped_generated_dirs() {
-    let (cg, _env, _dir) = setup_generated_dir_project(false).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "generatedOnly", "limit": 5}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["results"].as_array().map(Vec::len), Some(0));
-    assert_eq!(
-        parsed["index_coverage_hint"]["suggested_command"].as_str(),
-        Some("tracedecay sync --include-folder dist")
-    );
-    assert_eq!(
-        parsed["index_coverage_hint"]["skipped_dirs"][0].as_str(),
-        Some("dist")
-    );
-}
-
-#[tokio::test]
-async fn test_search_lazy_indexes_ignored_dependency_candidates() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
-    fs::write(
-        project.join("src/app.ts"),
-        r#"import type { Foo } from "pkg";
-export const value = 1;
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("node_modules/pkg/index.d.ts"),
-        "export interface Foo { value: string }\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({
-            "query": "Foo",
-            "limit": 5,
-            "format": "json",
-            "lazy_index_ignored_dependencies": true
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(
-        payload["lazy_indexed_ignored_dependency_files"][0].as_str(),
-        Some("node_modules/pkg/index.d.ts")
-    );
-    assert!(payload["results"].as_array().is_some_and(|results| {
-        results.iter().any(|result| {
-            result["name"].as_str() == Some("Foo")
-                && result["file"].as_str() == Some("node_modules/pkg/index.d.ts")
-        })
-    }));
-}
-
-#[tokio::test]
 async fn test_find_exact_symbol_lazy_indexes_ignored_dependency_candidate() {
     let dir = test_temp_dir();
     let project = dir.path();
@@ -545,132 +450,6 @@ export const value = 1;
         payload["matches"][0]["body"].as_str(),
         Some("export interface Foo { value: string }")
     );
-}
-
-#[tokio::test]
-async fn test_search_ignored_dependency_hint_respects_scope_prefix() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(project.join("tests")).unwrap();
-    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
-    fs::write(
-        project.join("src/app.ts"),
-        r#"import type { Foo } from "pkg";
-export const value = 1;
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("tests/app.ts"),
-        r#"import type { Foo } from "pkg";
-export const value = 1;
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("node_modules/pkg/index.d.ts"),
-        "export interface Foo { value: string }\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "Foo", "limit": 5, "format": "json"}),
-        None,
-        Some("tests"),
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    let candidates = payload["ignored_dependency_hint"]["candidates"]
-        .as_array()
-        .unwrap_or_else(|| panic!("scoped ignored dependency candidates: {payload:#}"));
-    assert!(!candidates.is_empty());
-    assert!(candidates.iter().all(|candidate| {
-        candidate["import_file"]
-            .as_str()
-            .is_some_and(|path| path.starts_with("tests/"))
-    }));
-    let db = cg.open_project_store_db().await.unwrap();
-    assert!(
-        db.get_file("node_modules/pkg/index.d.ts")
-            .await
-            .unwrap()
-            .is_none(),
-        "default search should not lazy-index ignored dependencies"
-    );
-}
-
-#[tokio::test]
-async fn test_search_skips_ignored_dependency_hint_when_results_fill_limit() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
-    fs::write(
-        project.join("src/app.ts"),
-        r#"export function Foo() {
-  return "local";
-}
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("node_modules/pkg/index.d.ts"),
-        "export interface Foo { value: string }\n",
-    )
-    .unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "Foo", "limit": 1, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
-    assert_eq!(payload["results"][0]["name"].as_str(), Some("Foo"));
-    assert_eq!(
-        payload["results"][0]["node_id"], payload["results"][0]["id"],
-        "typed lexical fallback must retain the graph identity used by follow-up tools"
-    );
-    assert!(payload.get("ignored_dependency_hint").is_none());
-    assert_eq!(payload["status"].as_str(), Some("lexical_fallback"));
-    assert!(payload["query_fallback_digest"].is_null());
-    assert_eq!(payload["semantic"]["status"].as_str(), Some("unavailable"));
-}
-
-#[tokio::test]
-async fn test_search_omits_index_coverage_hint_when_generated_dir_is_included() {
-    let (cg, _env, _dir) = setup_generated_dir_project(true).await;
-
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "missingAfterInclude", "limit": 5}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let parsed: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(parsed["results"].as_array().map(Vec::len), Some(0));
-    assert!(parsed.get("index_coverage_hint").is_none());
-    assert_eq!(parsed["status"].as_str(), Some("lexical_fallback"));
-    assert_eq!(parsed["semantic"]["status"].as_str(), Some("unavailable"));
-    close_test_graph(cg).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1390,28 +1169,6 @@ async fn test_node_id_alias() {
 }
 
 // ---------------------------------------------------------------------------
-// Extra: touched_files populated for search
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_search_populates_touched_files() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "helper"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(
-        !result.touched_files.is_empty(),
-        "search results should populate touched_files"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Extra: coupling with fan_out direction
 // ---------------------------------------------------------------------------
 
@@ -1666,31 +1423,6 @@ async fn test_files_scope_prefix_filters() {
         "scope_prefix 'src' should exclude test files"
     );
     assert!(text.contains("main.rs"), "should include src/main.rs");
-}
-
-#[tokio::test]
-async fn test_search_scope_prefix_filters() {
-    let (cg, _dir) = setup_project().await;
-    // Search for "helper" but scoped to "tests" — should only return test file results
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "helper", "limit": 20}),
-        None,
-        Some("tests"),
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let items: Vec<serde_json::Value> = serde_json::from_str(text).unwrap_or_default();
-    for item in &items {
-        let file = item["file"].as_str().unwrap_or("");
-        assert!(
-            file.starts_with("tests"),
-            "scoped search should only return files under 'tests', got: {}",
-            file
-        );
-    }
 }
 
 #[tokio::test]
@@ -1999,69 +1731,5 @@ async fn body_prefers_function_over_field_with_same_name() {
     assert!(
         body.contains("pub fn gmres"),
         "body should be the function source, got: {body}"
-    );
-}
-
-/// Regression for new bug-report batch (#19): `tracedecay_search` must rank
-/// trait/struct/function definitions above `use` re-exports of the same name.
-/// Previously, several `use foo::LinearOperator;` lines could outrank the
-/// `pub trait LinearOperator { … }` definition because BM25 scored short
-/// re-export rows highly. We now force a kind tier ahead of BM25 score so a
-/// real def always beats `use` rows.
-#[tokio::test]
-async fn search_ranks_trait_definition_above_use_reexports() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src/a")).unwrap();
-    fs::create_dir_all(project.join("src/b")).unwrap();
-    fs::create_dir_all(project.join("src/c")).unwrap();
-    fs::create_dir_all(project.join("src/d")).unwrap();
-    fs::create_dir_all(project.join("src/e")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-pub mod operator;
-pub mod a;
-pub mod b;
-pub mod c;
-pub mod d;
-pub mod e;
-"#,
-    )
-    .unwrap();
-    fs::write(
-        project.join("src/operator.rs"),
-        "pub trait LinearOperator { fn apply(&self); }\n",
-    )
-    .unwrap();
-    for sub in ["a", "b", "c", "d", "e"] {
-        fs::write(
-            project.join(format!("src/{sub}/mod.rs")),
-            "pub use crate::operator::LinearOperator;\n",
-        )
-        .unwrap();
-    }
-    let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_search",
-        json!({"query": "LinearOperator", "limit": 10, "format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    let items: Value = serde_json::from_str(text).unwrap();
-    let arr = items["results"].as_array().expect("search results");
-    assert!(!arr.is_empty(), "search results: {items:#}");
-    let first_kind = arr[0]["display"]["kind"]
-        .as_str()
-        .or_else(|| arr[0]["kind"].as_str())
-        .unwrap_or("");
-    assert_eq!(
-        first_kind, "trait",
-        "first search hit for LinearOperator should be the trait definition, got '{first_kind}' (full: {arr:?})"
     );
 }

@@ -48,6 +48,7 @@ export function GraphCanvas({
   caption,
   encoding = DEFAULT_ENCODING,
   ariaLabel,
+  fallbackDescription,
   extent,
 }: {
   nodes: GraphCanvasNode[];
@@ -77,6 +78,10 @@ export function GraphCanvas({
   encoding?: GraphCanvasEncoding;
   /** Accessible description of the canvas, for the same reason. */
   ariaLabel?: string;
+  /** The caller's actual non-canvas continuation. Different graph views expose
+   * different text alternatives, so a fallback cannot truthfully name one
+   * generic "symbol list". */
+  fallbackDescription?: string;
   /** The frame a measured field is drawn in, in the caller's own coordinates.
    * Only meaningful alongside placed nodes. Without it the camera frames the
    * bodies that happen to exist, so a field with an empty region — no dormant
@@ -394,13 +399,12 @@ export function GraphCanvas({
   }
   // Sigma is WebGL-only and throws during construction without a context,
   // which React Router's error boundary turns into a dead workspace. Browsers
-  // with WebGL disabled or blocklisted get the truthful state instead — the
-  // symbol list beside the canvas remains the accessible equivalent.
+  // with WebGL disabled or blocklisted get the truthful state instead.
   if (!webglRef.current) {
     return (
       <GraphUnavailable>
         this browser has no WebGL context, so the {nodes.length.toLocaleString()}-symbol
-        graph canvas cannot draw — the symbol list carries the same relations
+        graph canvas cannot draw — {fallbackDescription ?? 'read the field description below'}
       </GraphUnavailable>
     );
   }
@@ -422,7 +426,7 @@ export function GraphCanvas({
       <GraphUnavailable>
         the force layout could not be loaded, so the{' '}
         {nodes.length.toLocaleString()}-symbol graph canvas has no positions to
-        draw — the symbol list carries the same relations
+        draw — {fallbackDescription ?? 'read the field description below'}
       </GraphUnavailable>
     );
   }
@@ -435,8 +439,8 @@ export function GraphCanvas({
       <GraphUnavailable>
         the graph canvas lost its WebGL context, so the{' '}
         {nodes.length.toLocaleString()}-symbol field is no longer being drawn —
-        the symbol list carries the same relations, and the field returns if the
-        browser restores the context
+        {fallbackDescription ?? 'read the field description below'}, and the field
+        returns if the browser restores the context
       </GraphUnavailable>
     );
   }
@@ -517,6 +521,8 @@ function GraphUnavailable({ children }: { children: ReactNode }) {
   return (
     <div
       data-state="unavailable"
+      role="status"
+      aria-live="polite"
       className="flex flex-col items-center gap-2 border-y border-dashed border-edge-strong bg-surface-1 p-6 text-center"
     >
       <span

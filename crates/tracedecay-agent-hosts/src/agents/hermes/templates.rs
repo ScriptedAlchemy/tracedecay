@@ -26,6 +26,7 @@ pub(super) fn plugin_manifest() -> String {
          provides_hooks:\n\
            - pre_llm_call\n\
            - post_tool_call\n\
+           - on_session_end\n\
          provides_commands:\n\
            - /tracedecay_status\n",
         version = crate::PRODUCT_VERSION,
@@ -78,8 +79,8 @@ import subprocess
 import tempfile
 
 TRACEDECAY_BIN = {bin}
-# Default per-call ceiling. Long-running verbs (LCM ingest/compression over
-# long transcripts, doctor/diagnose repair passes) keep a higher ceiling.
+# Default per-call ceiling. Long-running transcript ingestion/compression and
+# bounded diagnostic reads keep a higher ceiling.
 TRACEDECAY_TIMEOUT_SECONDS = 120
 TRACEDECAY_LONG_TIMEOUT_SECONDS = 600
 LONG_RUNNING_TOOLS = frozenset((

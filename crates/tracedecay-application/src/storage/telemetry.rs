@@ -339,7 +339,7 @@ pub enum TableGrowthDoctorEvidenceV1 {
 
 impl TableGrowthDoctorEvidenceV1 {
     /// Doctor health state for this evidence. Ordinary growth is informational:
-    /// it remains healthy with complete coverage and carries no remediation.
+    /// it remains healthy with complete coverage.
     #[must_use]
     pub const fn state(&self) -> DoctorEvidenceStateV1 {
         match self {

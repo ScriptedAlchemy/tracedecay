@@ -309,8 +309,7 @@ impl StoreRuntimeRegistry {
 mod tests {
     use std::fmt::Debug;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use tracedecay_domain::{
@@ -326,9 +325,9 @@ mod tests {
     use crate::store_runtime::registry::{
         LifecycleShardRuntimePublisher, PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot,
         ProfileAuthorityPinResult, PublishedShardRuntime, ResolvedStoreLocator,
-        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenMode,
-        StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistryConfig,
-        StoreRuntimeRegistryFuture, StoreRuntimeResolver,
+        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenBegin,
+        StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+        StoreRuntimeRegistryConfig, StoreRuntimeRegistryFuture, StoreRuntimeResolver,
     };
     use crate::store_runtime::shard::ShardRuntime;
 
@@ -348,19 +347,23 @@ mod tests {
     }
 
     fn code_shard() -> StoreShardIdV1 {
+        code_shard_for("worktree.close-exact")
+    }
+
+    fn code_shard_for(worktree_id: &str) -> StoreShardIdV1 {
         StoreShardIdV1::code(
             id::<BrainId>("brain.close-exact"),
             id::<UserProfileId>("profile.close-exact"),
             id::<ProjectId>("project.close-exact"),
             id::<RepositoryId>("repository.close-exact"),
             CodeShardScopeV1::Worktree {
-                worktree_id: id::<WorktreeId>("worktree.close-exact"),
+                worktree_id: id::<WorktreeId>(worktree_id),
             },
         )
     }
 
     struct FixtureResolver {
-        path: PathBuf,
+        profile_path: PathBuf,
     }
 
     impl StoreRuntimeResolver for FixtureResolver {
@@ -376,7 +379,10 @@ mod tests {
                 key.incarnation(),
                 LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
             );
-            let path = self.path.clone();
+            let path = _database_authority.map_or_else(
+                || self.profile_path.clone(),
+                |authority| authority.canonical_database_path().to_path_buf(),
+            );
             Box::pin(async move { Ok(ResolvedStoreLocator::new(verified, path)) })
         }
     }
@@ -391,8 +397,11 @@ mod tests {
     ) {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount exact-close code runtime").unwrap();
+        let profile_path = path.with_file_name("profile.db");
+        rusqlite::Connection::open(&profile_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver { profile_path }),
             Arc::new(LifecycleShardRuntimePublisher),
         );
         let incarnation = StoreIncarnationV1::new(1).unwrap();
@@ -498,168 +507,179 @@ mod tests {
         drop(profile);
     }
 
-    struct BlockingCloseAttachment {
-        opened_file_identity: u64,
-        drained: AtomicBool,
-        close_started: tokio::sync::Notify,
-        close_released: Mutex<bool>,
-        close_wake: Condvar,
-        closed: AtomicBool,
-    }
-
-    impl BlockingCloseAttachment {
-        fn release_close(&self) {
-            *self.close_released.lock().unwrap() = true;
-            self.close_wake.notify_all();
-        }
-    }
-
-    impl PhysicalRuntimeAttachment for BlockingCloseAttachment {
-        fn snapshot(&self) -> PhysicalRuntimeSnapshot {
-            PhysicalRuntimeSnapshot {
-                healthy: true,
-                writer_present: !self.drained.load(Ordering::SeqCst),
-                ..PhysicalRuntimeSnapshot::default()
-            }
-        }
-
-        fn opened_file_identity(&self) -> Result<u64, String> {
-            Ok(self.opened_file_identity)
-        }
-
-        fn drain(&self) -> Result<(), String> {
-            self.drained.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn close_and_join(&self) -> Result<(), String> {
-            self.close_started.notify_one();
-            let mut released = self.close_released.lock().unwrap();
-            while !*released {
-                released = self.close_wake.wait(released).unwrap();
-            }
-            self.closed.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    struct BlockingClosePublisher {
-        attachment: Arc<BlockingCloseAttachment>,
-    }
-
-    impl ShardRuntimePublisher for BlockingClosePublisher {
-        fn publish(
-            &self,
-            request: ShardRuntimeBuildRequest,
-        ) -> StoreRuntimeRegistryFuture<
-            '_,
-            Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>,
-        > {
-            let attachment = Arc::clone(&self.attachment);
-            Box::pin(async move {
-                let runtime = Arc::new(ShardRuntime::new(
-                    request.binding().clone(),
-                    matches!(request.binding().shard_id.scope, StoreShardScopeV1::Profile),
-                ));
-                runtime
-                    .transition(RuntimeMaintenanceStateV1::Opening)
-                    .and_then(|()| runtime.transition(RuntimeMaintenanceStateV1::Ready))
-                    .unwrap();
-                Ok(PublishedShardRuntime::new(runtime, attachment))
-            })
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelling_exact_close_still_finishes_reserved_runtime() {
+    #[tokio::test]
+    async fn destructive_reservation_fences_open_until_preserved_store_reopens() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
         rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
-        let opened_file_identity = crate::db::sqlite_generation_identity(&path).unwrap();
-        let attachment = Arc::new(BlockingCloseAttachment {
-            opened_file_identity,
-            drained: AtomicBool::new(false),
-            close_started: tokio::sync::Notify::new(),
-            close_released: Mutex::new(false),
-            close_wake: Condvar::new(),
-            closed: AtomicBool::new(false),
-        });
-        let authority =
-            DatabaseAuthority::for_runtime(&path, "mount cancellation-safe exact-close").unwrap();
-        let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { path }),
-            Arc::new(BlockingClosePublisher {
-                attachment: Arc::clone(&attachment),
-            }),
-        );
-        let incarnation = StoreIncarnationV1::new(1).unwrap();
-        let profile = match registry
-            .open(StoreRuntimeOpenRequest::new(
-                profile_shard(),
-                incarnation,
-                None,
-            ))
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
+        let old_runtime_identity = code.runtime_identity();
+        let authority_token = authority.token().to_owned();
+        drop(code);
+
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path.clone()])
+                    .unwrap(),
+            )
             .await
-        {
-            StoreRuntimeOpenResult::Published(handle) => handle,
-            StoreRuntimeOpenResult::Failed(failure) => {
-                panic!("profile publication failed: {failure:?}")
-            }
-        };
+            .unwrap();
+        assert_eq!(reservation.closed().len(), 1);
+
         let pin = match registry.profile_authority_pin(&profile_shard()) {
             ProfileAuthorityPinResult::Pinned(pin) => pin,
             other => panic!("profile pin failed: {other:?}"),
         };
-        let code = match registry
-            .open(StoreRuntimeOpenRequest::new_authorized(
-                code_shard(),
-                incarnation,
-                Some(pin),
-                authority.clone(),
-            ))
+        let open_registry = registry.clone();
+        let open_authority = authority.clone();
+        let pending = tokio::spawn(async move {
+            open_registry
+                .open(StoreRuntimeOpenRequest::new_authorized(
+                    code_shard(),
+                    StoreIncarnationV1::new(1).unwrap(),
+                    Some(pin),
+                    open_authority,
+                ))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !pending.is_finished(),
+            "ordinary opens must wait for destructive maintenance"
+        );
+
+        reservation.abort_preserved().unwrap();
+        let reopened = match tokio::time::timeout(Duration::from_secs(2), pending)
             .await
+            .expect("reserved open must wake")
+            .unwrap()
         {
             StoreRuntimeOpenResult::Published(handle) => handle,
             StoreRuntimeOpenResult::Failed(failure) => {
-                panic!("code publication failed: {failure:?}")
+                panic!("reserved open failed after release: {failure:?}")
             }
         };
-        let binding = code.binding().clone();
+        assert_ne!(reopened.runtime_identity(), old_runtime_identity);
+        assert_eq!(
+            reopened
+                .database_authority("verify reopened destructive store")
+                .unwrap()
+                .token(),
+            authority_token
+        );
+        drop(reopened);
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn destructive_reservation_atomically_rejects_open_begin() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         drop(code);
 
-        let close_registry = registry.clone();
-        let close_binding = binding.clone();
-        let close =
-            tokio::spawn(
-                async move { close_registry.close_exact(&close_binding, &authority).await },
-            );
-        if tokio::time::timeout(Duration::from_secs(2), attachment.close_started.notified())
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap(),
+            )
             .await
-            .is_err()
-        {
-            attachment.release_close();
-            panic!("exact close did not enter the blocking physical close");
-        }
-        close.abort();
-        assert!(close.await.unwrap_err().is_cancelled());
+            .unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+
         assert!(matches!(
-            registry.lookup(&binding),
-            StoreRuntimeLookup::Evicting { .. }
+            registry.begin_or_join_open(&StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority,
+            )),
+            StoreRuntimeOpenBegin::Rejected(
+                StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress { .. }
+            )
         ));
 
-        attachment.release_close();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !matches!(
-                registry.lookup(&binding),
-                StoreRuntimeLookup::Missing { .. }
-            ) {
-                tokio::task::yield_now().await;
-            }
-        })
+        reservation.abort_preserved().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn failed_destructive_close_releases_reservation_for_retry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
+        let target =
+            super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap();
+
+        assert!(matches!(
+            registry.begin_destructive_maintenance(target.clone()).await,
+            Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                external_handles: 1,
+                ..
+            })
+        ));
+
+        drop(code);
+        let retry = registry
+            .begin_destructive_maintenance(target)
+            .await
+            .expect("failed close must release destructive reservation");
+        retry.abort_preserved().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn destructive_reservation_does_not_block_unrelated_database_under_same_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let reserved_path = temporary.path().join("reserved.db");
+        let unrelated_path = temporary.path().join("unrelated.db");
+        rusqlite::Connection::open(&reserved_path).unwrap();
+        rusqlite::Connection::open(&unrelated_path).unwrap();
+        let reserved_path = reserved_path.canonicalize().unwrap();
+        let unrelated_path = unrelated_path.canonicalize().unwrap();
+        let (registry, profile, code, _authority) = mount_code_runtime(reserved_path.clone()).await;
+        drop(code);
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [reserved_path])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let authority =
+            DatabaseAuthority::for_runtime(&unrelated_path, "mount unrelated database").unwrap();
+
+        let unrelated = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard_for("worktree.unrelated"),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority,
+            )),
+        )
         .await
-        .unwrap();
-        assert!(attachment.closed.load(Ordering::SeqCst));
+        .expect("an exact-path reservation must not block another database");
+        let unrelated = match unrelated {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("unrelated database open failed: {failure:?}")
+            }
+        };
+
+        drop(unrelated);
+        reservation.abort_preserved().unwrap();
         drop(profile);
     }
 
@@ -727,8 +747,11 @@ mod tests {
         rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
         let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
+        let profile_path = path.with_file_name("profile.db");
+        rusqlite::Connection::open(&profile_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::with_config(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver { profile_path }),
             Arc::new(FailingPublisher),
             StoreRuntimeRegistryConfig::default(),
         )

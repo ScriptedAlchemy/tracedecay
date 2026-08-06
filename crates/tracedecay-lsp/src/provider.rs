@@ -14,7 +14,8 @@ use crate::gateway::{
     SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
 use crate::overlay::OverlaySnapshot;
-use crate::session::LspRequestId;
+use crate::session::{AuthorizedLspWorkspace, LspRequestId};
+use crate::workspace_diagnostics::WorkspaceDiagnosticSnapshotOutcome;
 
 /// Restart exhaustion is a stable health state, not an invitation for a
 /// bridge or client to start its own analyzer.
@@ -236,6 +237,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenerationDiagnostics {
     pub generation: u64,
+    pub authority_digest: tracedecay_domain::ManifestDigest,
     pub upstream: Vec<GatewayDiagnostic>,
     pub tracedecay: Vec<GatewayDiagnostic>,
 }
@@ -296,6 +298,33 @@ pub trait DiagnosticSnapshotPort {
             failure_class: "refresh-unsupported".to_owned(),
         }
     }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        false
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        _workspace: &AuthorizedLspWorkspace,
+        _root: &AdmittedRoot,
+        _overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        WorkspaceDiagnosticSnapshotOutcome::Failed {
+            code_generation_id: None,
+            failure_class: "workspace-diagnostics-unsupported".to_owned(),
+        }
+    }
+
+    fn request_workspace_refresh(
+        &self,
+        _workspace: &AuthorizedLspWorkspace,
+        _root: &AdmittedRoot,
+        _overlays: &[OverlaySnapshot],
+    ) -> DiagnosticRefreshAdmission {
+        DiagnosticRefreshAdmission::Rejected {
+            failure_class: "workspace-diagnostics-unsupported".to_owned(),
+        }
+    }
 }
 
 impl<T> DiagnosticSnapshotPort for Arc<T>
@@ -319,6 +348,28 @@ where
         source_generation: Option<u64>,
     ) -> DiagnosticRefreshAdmission {
         (**self).request_document_refresh(root, document_uri, overlay, source_generation)
+    }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        (**self).supports_workspace_diagnostics()
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        workspace: &AuthorizedLspWorkspace,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        (**self).workspace_diagnostics(workspace, root, overlays)
+    }
+
+    fn request_workspace_refresh(
+        &self,
+        workspace: &AuthorizedLspWorkspace,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> DiagnosticRefreshAdmission {
+        (**self).request_workspace_refresh(workspace, root, overlays)
     }
 }
 

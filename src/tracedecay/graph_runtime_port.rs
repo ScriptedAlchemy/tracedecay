@@ -20,15 +20,15 @@ use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, Redu
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
 };
-use tracedecay_application::{ApiMigrationApplyResultV1, ApiMigrationPlanV1};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::DependencyImportUse;
 use tracedecay_usecases::tracedecay::{
-    BranchDiagnostics, EditDiagnosticRecord, GraphFuture, GraphRuntimePort, GraphValueFuture,
-    PlannedSourceEditFile,
+    BranchDiagnostics, EditDiagnosticRecord, GraphFuture, GraphRequestControl, GraphRuntimePort,
+    GraphValueFuture, PlannedSourceEditFile,
 };
 
 use crate::db::Database;
-use crate::errors::TraceDecayError;
+use crate::errors::{Result, TraceDecayError};
 use crate::graph::redundancy_scan::RedundancyOptions;
 use crate::storage::StoreLayout;
 use crate::types::{Edge, GraphStats, Node, NodeKind, SearchResult, Subgraph};
@@ -182,6 +182,23 @@ impl GraphRuntimePort for TraceDecay {
 
     fn storage_page_counts(&self) -> GraphFuture<'_, (u64, u64, u64)> {
         Box::pin(TraceDecay::storage_page_counts(self))
+    }
+
+    fn dependency_import_uses<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+        path_prefix: Option<&'a str>,
+        control: GraphRequestControl<'a>,
+    ) -> GraphFuture<'a, Vec<DependencyImportUse>> {
+        Box::pin(async move {
+            ensure_dependency_hint_request_active(control)?;
+            let imports = TraceDecay::db(self)
+                .dependency_import_uses(query, limit, path_prefix)
+                .await?;
+            ensure_dependency_hint_request_active(control)?;
+            Ok(imports)
+        })
     }
 
     fn get_complexity_ranked<'a>(
@@ -359,27 +376,6 @@ impl GraphRuntimePort for TraceDecay {
         ))
     }
 
-    fn apply_api_migration_plan<'a>(
-        &'a self,
-        plan: &'a ApiMigrationPlanV1,
-        dry_run: bool,
-        is_cancelled: &'a mut (dyn FnMut() -> bool + Send),
-    ) -> GraphFuture<'a, ApiMigrationApplyResultV1> {
-        Box::pin(TraceDecay::apply_api_migration_plan(
-            self,
-            plan,
-            dry_run,
-            is_cancelled,
-        ))
-    }
-
-    fn rollback_api_migration_plan<'a>(
-        &'a self,
-        plan: &'a ApiMigrationPlanV1,
-    ) -> GraphFuture<'a, ()> {
-        Box::pin(TraceDecay::rollback_api_migration_plan(self, plan))
-    }
-
     fn recover_source_edit_preimages<'a>(
         &'a self,
         files: &'a [PlannedSourceEditFile],
@@ -393,4 +389,28 @@ impl GraphRuntimePort for TraceDecay {
     ) -> GraphFuture<'a, ()> {
         Box::pin(TraceDecay::commit_source_edit_postimages(self, files))
     }
+}
+
+fn ensure_dependency_hint_request_active(control: GraphRequestControl<'_>) -> Result<()> {
+    if control
+        .cancellation
+        .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+    {
+        return Err(TraceDecayError::project_route(
+            "dependency_hint_cancelled",
+            true,
+            "dependency hint read was cancelled",
+        ));
+    }
+    if control
+        .deadline
+        .is_some_and(|deadline| crate::daemon_client::deadline_remaining(deadline).is_none())
+    {
+        return Err(TraceDecayError::project_route(
+            "dependency_hint_deadline_exceeded",
+            true,
+            "dependency hint read exceeded its admitted deadline",
+        ));
+    }
+    Ok(())
 }

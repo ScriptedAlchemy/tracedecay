@@ -38,7 +38,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
 
-import { CenteredState, LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { buildTraceModel, type NeighborsPayload } from '../../viz/trace/model.ts';
 import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
 import { CallChain } from './CallChain.tsx';
@@ -126,8 +126,16 @@ export function TraceView({
         </h2>
       </header>
       <div className="min-h-0 flex-1 overflow-auto">
-        <LegacyBoundary title="Trace" pending={neighborhood.pending} result={neighborhood.result}>
-          {(payload) => {
+        <ReadSection
+          title="Trace"
+          chrome="centered"
+          state={envelopeReadState(neighborhood.pending, neighborhood.result, {
+            loading: 'reading call edges for this symbol',
+            transport: 'call edges could not be read',
+          })}
+        >
+          {(envelope) => {
+            const payload = envelope.payload;
             const callers = payload.callers ?? [];
             const callees = payload.callees ?? [];
             if (callers.length === 0 && callees.length === 0) {
@@ -135,9 +143,10 @@ export function TraceView({
                 <div className="flex flex-col gap-2 p-6">
                   <CenteredState title="Call-edge result is unverified" kind="partial" />
                   <p className="mx-auto max-w-md text-center text-xs leading-relaxed text-text-muted">
-                    The legacy graph response returned no <code className="font-mono">calls</code>{' '}
-                    rows for {displayName(focus)}, but it carries no read-health field. The
-                    frontend cannot distinguish a successful empty result from a query failure.
+                    The graph response returned no <code className="font-mono">calls</code>{' '}
+                    rows for {displayName(focus)}, but the envelope carries no per-edge read
+                    health. The frontend cannot distinguish a successful empty result from a query
+                    failure without a typed refusal.
                   </p>
                 </div>
               );
@@ -152,7 +161,7 @@ export function TraceView({
               />
             );
           }}
-        </LegacyBoundary>
+        </ReadSection>
       </div>
     </div>
   );

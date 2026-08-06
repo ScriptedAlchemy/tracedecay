@@ -42,11 +42,9 @@ use tracedecay_domain::{
 use crate::RequestContext;
 use crate::error::ApplicationContractError;
 
-use super::remediation::operations;
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
-    DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
     DoctorStorageFindingV1,
 };
 
@@ -63,7 +61,6 @@ fn source_finding(
     reference: &str,
     completeness: DoctorCoverageCompletenessV1,
     statement: &str,
-    remediation: Option<DoctorRemediationRefV1>,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let evidence = DoctorEvidenceRefV1::new(family, DoctorEvidenceReferenceV1::new(reference)?);
     DoctorFindingV1::new(
@@ -71,12 +68,10 @@ fn source_finding(
         state,
         vec![evidence],
         DoctorCoverageStatementV1::new(completeness, statement)?,
-        remediation,
     )
 }
 
-/// Build an honest non-healthy finding for an unobservable source read, carrying
-/// no remediation (nothing is proven to repair).
+/// Build an honest non-healthy finding for an unobservable source read.
 fn unobservable_finding(
     family: DoctorFindingFamilyV1,
     state: DoctorEvidenceStateV1,
@@ -89,20 +84,11 @@ fn unobservable_finding(
         reference,
         DoctorCoverageCompletenessV1::Unknown,
         statement,
-        None,
     )
 }
 
-/// Build a remediation reference (mutating action) to an owning operation.
-fn action_remediation(operation: &str) -> Result<DoctorRemediationRefV1, ApplicationContractError> {
-    Ok(DoctorRemediationRefV1::new(
-        DoctorOwningOperationRefV1::new(operation)?,
-        DoctorRemediationKindV1::Action,
-    ))
-}
-
 /// Map a clean observation into a healthy finding (complete coverage) or an
-/// honest `Partial` finding (incomplete coverage). Never carries remediation.
+/// honest `Partial` finding (incomplete coverage).
 fn clean_finding(
     family: DoctorFindingFamilyV1,
     reference: &str,
@@ -115,7 +101,7 @@ fn clean_finding(
             DoctorEvidenceStateV1::Partial
         }
     };
-    source_finding(family, state, reference, completeness, statement, None)
+    source_finding(family, state, reference, completeness, statement)
 }
 
 // --- Configuration authority (Configuration family) --------------------------
@@ -170,9 +156,6 @@ pub fn configuration_finding(
                 "configuration.resolved.drifted",
                 *coverage,
                 "effective configuration diverges from the desired authority",
-                Some(action_remediation(
-                    operations::CONFIGURATION_PROTECTED_APPLY,
-                )?),
             ),
             ConfigurationDriftV1::PinUnavailable => source_finding(
                 family,
@@ -180,7 +163,6 @@ pub fn configuration_finding(
                 "configuration.resolved.pin-unavailable",
                 *coverage,
                 "a requested configuration pin could not be honored",
-                Some(action_remediation(operations::CONFIGURATION_PIN_AUTHORITY)?),
             ),
         },
         ConfigurationAuthorityReadV1::Unsupported => unobservable_finding(
@@ -273,7 +255,6 @@ pub fn runtime_health_finding(
                 "runtime.health.degraded",
                 *coverage,
                 "daemon runtime is serving but degraded",
-                Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
             ),
             RuntimeLivenessV1::Stuck => source_finding(
                 family,
@@ -281,7 +262,6 @@ pub fn runtime_health_finding(
                 "runtime.health.stuck",
                 *coverage,
                 "daemon runtime is stuck and awaiting recovery",
-                Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
             ),
             RuntimeLivenessV1::Unreachable => {
                 // Unreachable is genuinely undetermined health, not a proven
@@ -292,7 +272,6 @@ pub fn runtime_health_finding(
                     "runtime.health.unreachable",
                     DoctorCoverageCompletenessV1::Unknown,
                     "daemon runtime is unreachable",
-                    Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
                 )
             }
         },
@@ -418,7 +397,6 @@ fn remote_operational_finding(
             "remote.operational.recovery-required",
             *coverage,
             "remote HTTPS authority or spool requires recovery",
-            Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
         ),
         RemoteOperationalReadV1::Observed {
             listener: RemoteListenerReadV1::Serving,
@@ -456,7 +434,6 @@ fn remote_operational_finding(
                 "remote.operational.partial",
                 *coverage,
                 "remote HTTPS listener, authority, spool, replay, or backup is incomplete",
-                Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
             )
         }
         RemoteOperationalReadV1::Unconfigured => unobservable_finding(
@@ -507,7 +484,6 @@ fn profile_authority_finding(
             "profile.authority.incomplete",
             *coverage,
             "the exact registered profile authority is only partially attached",
-            Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
         ),
         ProfileAuthorityReadV1::Denied => unobservable_finding(
             family,
@@ -573,7 +549,6 @@ pub fn host_integration_finding(
     read: &HostIntegrationReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let family = DoctorFindingFamilyV1::Advisory;
-    let repair = || action_remediation(operations::HOST_REPAIR_INTEGRATION);
     match read {
         HostIntegrationReadV1::Observed {
             conformance,
@@ -591,7 +566,6 @@ pub fn host_integration_finding(
                 "host.conformance.drifted",
                 *coverage,
                 "host integration has drifted from the expected shape",
-                Some(repair()?),
             ),
             HostConformanceV1::ExecutableAbsent => source_finding(
                 family,
@@ -599,7 +573,6 @@ pub fn host_integration_finding(
                 "host.conformance.executable-absent",
                 *coverage,
                 "host integration executable is absent",
-                Some(repair()?),
             ),
             HostConformanceV1::ProtocolDrift => source_finding(
                 family,
@@ -607,7 +580,6 @@ pub fn host_integration_finding(
                 "host.conformance.protocol-drift",
                 *coverage,
                 "host integration protocol/version has drifted",
-                Some(repair()?),
             ),
             HostConformanceV1::InvalidFallback => source_finding(
                 family,
@@ -615,7 +587,6 @@ pub fn host_integration_finding(
                 "host.conformance.invalid-fallback",
                 *coverage,
                 "host integration fallback is invalid",
-                Some(repair()?),
             ),
         },
         HostIntegrationReadV1::Unsupported => unobservable_finding(
@@ -887,7 +858,6 @@ fn advisory_feedback_finding(
         state,
         evidence,
         DoctorCoverageStatementV1::new(completeness, statement)?,
-        None,
     )
 }
 
@@ -958,7 +928,6 @@ fn advisory_feedback_summary_finding(
         state,
         evidence,
         DoctorCoverageStatementV1::new(completeness, statement)?,
-        None,
     )
 }
 
@@ -1086,7 +1055,6 @@ pub fn code_index_finding(
     read: &CodeIndexMountReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
     let family = DoctorFindingFamilyV1::SemanticIndex;
-    let remount = || action_remediation(operations::CODE_INDEX_REMOUNT);
     match read {
         CodeIndexMountReadV1::Observed { state, coverage } => match state {
             CodeIndexMountStateV1::Mounted => clean_finding(
@@ -1101,7 +1069,6 @@ pub fn code_index_finding(
                 "code-index.mount.indexing",
                 DoctorCoverageCompletenessV1::Partial,
                 "code index is still indexing",
-                None,
             ),
             CodeIndexMountStateV1::Stale => source_finding(
                 family,
@@ -1109,7 +1076,6 @@ pub fn code_index_finding(
                 "code-index.mount.stale",
                 *coverage,
                 "code index is behind the current generation",
-                Some(remount()?),
             ),
             CodeIndexMountStateV1::Unmounted => source_finding(
                 family,
@@ -1117,7 +1083,6 @@ pub fn code_index_finding(
                 "code-index.mount.unmounted",
                 *coverage,
                 "code index is not mounted",
-                Some(remount()?),
             ),
             CodeIndexMountStateV1::Incompatible => source_finding(
                 family,
@@ -1125,7 +1090,6 @@ pub fn code_index_finding(
                 "code-index.mount.incompatible",
                 *coverage,
                 "mounted code index is incompatible with the current schema",
-                Some(remount()?),
             ),
         },
         CodeIndexMountReadV1::Unsupported => unobservable_finding(
@@ -1222,7 +1186,6 @@ pub fn language_server_finding(
                 "language-server.analyzer.available",
                 DoctorCoverageCompletenessV1::Partial,
                 "project analyzers are available but readiness is not yet observed",
-                None,
             ),
             LanguageServerStateV1::Refreshing => source_finding(
                 family,
@@ -1230,7 +1193,6 @@ pub fn language_server_finding(
                 "language-server.analyzer.refreshing",
                 DoctorCoverageCompletenessV1::Partial,
                 "at least one project analyzer is refreshing or indexing",
-                None,
             ),
             LanguageServerStateV1::Disabled => source_finding(
                 family,
@@ -1238,7 +1200,6 @@ pub fn language_server_finding(
                 "language-server.analyzer.disabled",
                 *coverage,
                 "at least one project analyzer is disabled",
-                None,
             ),
             LanguageServerStateV1::Unavailable => source_finding(
                 family,
@@ -1246,7 +1207,6 @@ pub fn language_server_finding(
                 "language-server.analyzer.unavailable",
                 *coverage,
                 "at least one project analyzer executable is unavailable",
-                None,
             ),
             LanguageServerStateV1::Crashed => source_finding(
                 family,
@@ -1254,7 +1214,6 @@ pub fn language_server_finding(
                 "language-server.analyzer.crashed",
                 *coverage,
                 "at least one project analyzer process crashed",
-                None,
             ),
         },
         LanguageServerReadV1::Unsupported => unobservable_finding(
@@ -1342,7 +1301,6 @@ pub fn observability_finding(
                 "observability.plan26.stale",
                 *coverage,
                 "canonical Plan-26 feedback projection is stale at its retained watermark",
-                None,
             ),
             ObservabilityStateV1::Current => {
                 let statement = if last_observed_at_micros.is_some() {
@@ -1400,8 +1358,26 @@ pub trait ObservabilityDoctorPort: Send + Sync {
 
 // --- Storage retention/size (Storage family) ---------------------------------
 
-/// One storage-source read: either the typed storage findings the runtime
-/// produced via [`crate::storage::findings`], or an honest unavailability.
+/// Why one of the independently consulted storage producers was unresolved.
+///
+/// A partially observed family retains every finding that other producers
+/// returned while carrying this reason to weaken report coverage. `Absent` is
+/// intentionally not a reason: an empty, successfully consulted producer does
+/// not make the observations from its peers incomplete.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorStorageIncompleteReasonV1 {
+    /// The producer is unsupported on this build/platform.
+    Unsupported,
+    /// Authorization to read the producer was denied.
+    Denied,
+    /// The producer state could not be determined.
+    Unknown,
+}
+
+/// One composed storage read: typed findings from resolved producers, their
+/// incomplete-coverage reason when a peer producer was unresolved, or an
+/// honest family-wide unavailability.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DoctorStorageFamilyReadV1 {
@@ -1410,6 +1386,13 @@ pub enum DoctorStorageFamilyReadV1 {
     /// absent family rather than a healthy claim).
     Observed {
         findings: Vec<DoctorStorageFindingV1>,
+    },
+    /// At least one producer returned findings, while another independent
+    /// producer could not be resolved. Findings remain observable, but the
+    /// family must not claim complete coverage.
+    ObservedIncomplete {
+        findings: Vec<DoctorStorageFindingV1>,
+        reason: DoctorStorageIncompleteReasonV1,
     },
     /// Storage retention/size telemetry is unsupported on this build/platform.
     Unsupported,
@@ -1424,7 +1407,7 @@ pub enum DoctorStorageFamilyReadV1 {
 /// Narrow source port for storage retention/size Doctor findings (Plan 38 §7).
 ///
 /// Unlike the other source ports, storage has several heterogeneous read models
-/// (budget/telemetry, orphan, stale-branch, debris, backlog), each with its own
+/// (budget/telemetry, orphan, retired-generation, debris, backlog), each with its own
 /// landed producer in [`crate::storage::findings`]. Rather than re-derive those,
 /// the runtime adapter runs the producers and returns their typed
 /// [`DoctorStorageFindingV1`] values through this port.
@@ -1448,12 +1431,11 @@ mod tests {
         })
         .expect("finding");
         assert!(finding.state().is_healthy_complete());
-        assert!(finding.remediation().is_none());
         assert_eq!(finding.family(), DoctorFindingFamilyV1::Configuration);
     }
 
     #[test]
-    fn configuration_drift_is_degraded_with_apply_remediation() {
+    fn configuration_drift_is_degraded_diagnostic_evidence() {
         let finding = configuration_finding(&ConfigurationAuthorityReadV1::Resolved {
             drift: ConfigurationDriftV1::Drifted,
             coverage: DoctorCoverageCompletenessV1::Complete,
@@ -1461,12 +1443,8 @@ mod tests {
         .expect("finding");
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
         assert_eq!(
-            finding
-                .remediation()
-                .expect("remediation")
-                .owning_operation()
-                .as_str(),
-            operations::CONFIGURATION_PROTECTED_APPLY
+            finding.evidence()[0].reference().as_str(),
+            "configuration.resolved.drifted"
         );
     }
 
@@ -1492,13 +1470,12 @@ mod tests {
         ] {
             let finding = configuration_finding(&read).expect("finding");
             assert_eq!(finding.state(), expected);
-            assert!(finding.remediation().is_none());
             assert!(!finding.state().is_healthy_complete());
         }
     }
 
     #[test]
-    fn runtime_stuck_is_degraded_with_recover_remediation() {
+    fn runtime_stuck_is_degraded_diagnostic_evidence() {
         let finding = runtime_health_finding(&RuntimeHealthReadV1::Observed {
             liveness: RuntimeLivenessV1::Stuck,
             coverage: DoctorCoverageCompletenessV1::Complete,
@@ -1506,12 +1483,8 @@ mod tests {
         .expect("finding");
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
         assert_eq!(
-            finding
-                .remediation()
-                .expect("remediation")
-                .owning_operation()
-                .as_str(),
-            operations::RUNTIME_RECOVER_DAEMON
+            finding.evidence()[0].reference().as_str(),
+            "runtime.health.stuck"
         );
     }
 
@@ -1527,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn host_drift_maps_to_advisory_family_with_repair() {
+    fn host_drift_maps_to_advisory_diagnostic_evidence() {
         let finding = host_integration_finding(&HostIntegrationReadV1::Observed {
             conformance: HostConformanceV1::ProtocolDrift,
             coverage: DoctorCoverageCompletenessV1::Complete,
@@ -1536,28 +1509,23 @@ mod tests {
         assert_eq!(finding.family(), DoctorFindingFamilyV1::Advisory);
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
         assert_eq!(
-            finding
-                .remediation()
-                .expect("remediation")
-                .owning_operation()
-                .as_str(),
-            operations::HOST_REPAIR_INTEGRATION
+            finding.evidence()[0].reference().as_str(),
+            "host.conformance.protocol-drift"
         );
     }
 
     #[test]
-    fn code_index_indexing_is_partial_without_remediation() {
+    fn code_index_indexing_is_partial() {
         let finding = code_index_finding(&CodeIndexMountReadV1::Observed {
             state: CodeIndexMountStateV1::Indexing,
             coverage: DoctorCoverageCompletenessV1::Complete,
         })
         .expect("finding");
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
-        assert!(finding.remediation().is_none());
     }
 
     #[test]
-    fn code_index_stale_is_stale_with_remount() {
+    fn code_index_stale_is_stale_diagnostic_evidence() {
         let finding = code_index_finding(&CodeIndexMountReadV1::Observed {
             state: CodeIndexMountStateV1::Stale,
             coverage: DoctorCoverageCompletenessV1::Complete,
@@ -1565,12 +1533,8 @@ mod tests {
         .expect("finding");
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Stale);
         assert_eq!(
-            finding
-                .remediation()
-                .expect("remediation")
-                .owning_operation()
-                .as_str(),
-            operations::CODE_INDEX_REMOUNT
+            finding.evidence()[0].reference().as_str(),
+            "code-index.mount.stale"
         );
     }
 
@@ -1583,7 +1547,6 @@ mod tests {
         .expect("finding");
         assert_eq!(finding.family(), DoctorFindingFamilyV1::LanguageServer);
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
-        assert!(finding.remediation().is_none());
     }
 
     #[test]
@@ -1597,6 +1560,5 @@ mod tests {
         .expect("finding");
         assert_eq!(finding.family(), DoctorFindingFamilyV1::Observability);
         assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
-        assert!(finding.remediation().is_none());
     }
 }

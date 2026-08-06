@@ -257,7 +257,7 @@ not a shim over `tracedecay-application`; only `MemoryApplication` has a crate
 equivalent. By submodule: `observability` 11, `host_admission` 9 (test-only),
 `event_lane` 6, `dashboard_diagnostics` 6, `memory` 5, `feedback` 4, `context`
 3, `configuration` 3, and one each of `settings_control`, `operation_stream`,
-`git_reads`, `doctor_remediation`.
+and `git_reads`.
 
   Recommended split rather than one sweep:
   - `host_admission` (9) is entirely `#[cfg(test)]` — it moves with whichever
@@ -266,8 +266,8 @@ equivalent. By submodule: `observability` 11, `host_admission` 9 (test-only),
     plus `global_db`, both of which this crate can reach. It is the best
     candidate to move here outright once `global-db` builds.
   - `event_lane`, `dashboard_diagnostics`, `configuration::UserSettingsDaemonClient`,
-    `doctor_remediation` and `operation_stream` are injected authorities →
-    port traits on `DashboardState`, alongside the existing
+    and `operation_stream` are injected authorities → port traits on
+    `DashboardState`, alongside the existing
     `project_graph_resolver` field.
   - `context`, `git_reads`, `feedback::observations` and `memory` are value
     types and pure reads → move or re-export.

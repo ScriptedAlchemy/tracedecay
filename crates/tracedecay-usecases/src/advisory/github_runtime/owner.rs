@@ -75,6 +75,14 @@ where
         self.coordinator.refresh(context, request)
     }
 
+    pub fn authorize<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+    ) -> FeedbackPortFuture<'a, super::GitHubProviderLifecycleV1> {
+        self.source_access.authorize(context, request)
+    }
+
     pub fn expand_retained_body<'a>(
         &'a self,
         context: &'a RequestContext,

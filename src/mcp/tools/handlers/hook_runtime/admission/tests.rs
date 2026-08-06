@@ -250,3 +250,45 @@ fn hook_v2_catchup_response_propagates_transport_disposition() {
     assert_eq!(response["status"], "rejected");
     assert_eq!(response["disposition"], "catchup_required");
 }
+
+#[test]
+fn profile_scoped_native_admission_is_idempotent_in_the_authenticated_profile() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let profile_root = crate::storage::default_profile_root().unwrap();
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root).unwrap();
+    let decoded = tracedecay_hooks::decode_native_hook_event(
+        tracedecay_hooks::HookHostV1::ClaudeCode,
+        br#"{"hook_event_name":"SessionStart"}"#,
+    )
+    .unwrap();
+    let args = serde_json::json!({
+        "admission": tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 {
+            decoded,
+            material: tracedecay_hooks::NativeEnvelopeMaterialV1 {
+                event_id: [7; 16],
+                protected_session_id: [8; 32],
+                observed_at: UtcMicros(1_000),
+                tool_id: None,
+                effect_receipt_id: None,
+                file_id: None,
+                changed_range_count: 0,
+            },
+        },
+    });
+
+    let first =
+        hook_v2_profile_admit(&args, "hook_v2_profile_admit", &profile_root, &identity).unwrap();
+    let duplicate =
+        hook_v2_profile_admit(&args, "hook_v2_profile_admit", &profile_root, &identity).unwrap();
+    assert_eq!(first["status"], "accepted");
+    assert_eq!(first["disposition"], "accepted");
+    assert_eq!(duplicate["status"], "exact_duplicate");
+    assert_eq!(duplicate["disposition"], "accepted");
+    assert!(
+        profile_root
+            .join("hook-v2-profile-admissions")
+            .join("claude")
+            .join("admissions.v1.bin")
+            .is_file()
+    );
+}

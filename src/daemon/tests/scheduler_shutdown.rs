@@ -16,6 +16,7 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
             store_root: PathBuf::from("/stores/shutdown-test"),
             graph_db_path: PathBuf::from("/stores/shutdown-test/graph.db"),
         },
+        project_root: PathBuf::from("/projects/shutdown-test"),
         scope_prefix: None,
     };
     let task = tokio::spawn(std::future::pending::<()>());
@@ -56,6 +57,7 @@ async fn daemon_memory_repair_scheduler_shutdown_aborts_and_joins_every_loop() {
             store_root: PathBuf::from("/stores/memory-repair-shutdown-test"),
             graph_db_path: PathBuf::from("/stores/memory-repair-shutdown-test/graph.db"),
         },
+        project_root: PathBuf::from("/projects/memory-repair-shutdown-test"),
         scope_prefix: None,
     };
     let task = tokio::spawn(std::future::pending::<()>());
@@ -96,6 +98,7 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
             store_root: PathBuf::from("/stores/automation-shutdown-timeout-test"),
             graph_db_path: PathBuf::from("/stores/automation-shutdown-timeout-test/graph.db"),
         },
+        project_root: PathBuf::from("/projects/automation-shutdown-timeout-test"),
         scope_prefix: None,
     };
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
@@ -169,6 +172,7 @@ async fn repair_shutdown_timeout_keeps_unfinished_task_tracked() {
             store_root: PathBuf::from("/stores/repair-shutdown-timeout-test"),
             graph_db_path: PathBuf::from("/stores/repair-shutdown-timeout-test/graph.db"),
         },
+        project_root: PathBuf::from("/projects/repair-shutdown-timeout-test"),
         scope_prefix: None,
     };
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
@@ -246,6 +250,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
             store_root: PathBuf::from("/stores/automation-registration-cancel-test"),
             graph_db_path: PathBuf::from("/stores/automation-registration-cancel-test/old.db"),
         },
+        project_root: PathBuf::from("/projects/automation-registration-cancel-test"),
         scope_prefix: None,
     };
     let mut replacement = key.clone();
@@ -406,6 +411,7 @@ async fn cancelled_contended_repair_retirement_blocks_restart_until_join() {
             store_root: PathBuf::from("/stores/repair-registration-cancel-test"),
             graph_db_path: PathBuf::from("/stores/repair-registration-cancel-test/old.db"),
         },
+        project_root: PathBuf::from("/projects/repair-registration-cancel-test"),
         scope_prefix: None,
     };
     let mut replacement = key.clone();
@@ -509,6 +515,7 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
             store_root: PathBuf::from("/stores/panicked-automation-retirement-test"),
             graph_db_path: PathBuf::from("/stores/panicked-automation-retirement-test/graph.db"),
         },
+        project_root: PathBuf::from("/projects/panicked-automation-retirement-test"),
         scope_prefix: None,
     };
     let repair_key = ProjectServerKey {
@@ -519,6 +526,7 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
             store_root: PathBuf::from("/stores/panicked-repair-retirement-test"),
             graph_db_path: PathBuf::from("/stores/panicked-repair-retirement-test/graph.db"),
         },
+        project_root: PathBuf::from("/projects/panicked-repair-retirement-test"),
         scope_prefix: None,
     };
     let automation_task = tokio::spawn(async {
@@ -598,6 +606,7 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
             store_root: PathBuf::from("/stores/shutdown-gate-test"),
             graph_db_path: PathBuf::from("/stores/shutdown-gate-test/graph.db"),
         },
+        project_root: PathBuf::from("/projects/shutdown-gate-test"),
         scope_prefix: None,
     };
     engine

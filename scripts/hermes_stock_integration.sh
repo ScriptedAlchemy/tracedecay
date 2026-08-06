@@ -45,9 +45,9 @@ run_integration() {
     echo "$plugins_list" | grep tracedecay | grep -q enabled
     echo "ok - hermes plugins list shows tracedecay enabled"
 
-    echo "== tracedecay doctor --agent hermes"
+    echo "== tracedecay doctor"
     set +e
-    doctor_out="$(cd "$project" && "$TRACEDECAY_BIN" doctor --agent hermes 2>&1)"
+    doctor_out="$(cd "$project" && "$TRACEDECAY_BIN" doctor 2>&1)"
     doctor_status=$?
     set -e
     if [[ $doctor_status -ne 0 ]]; then
@@ -113,8 +113,8 @@ main() {
     git -C "$project" add -A
     git -C "$project" -c user.email=ci@tracedecay -c user.name=ci commit -qm init
 
-    # Installation performs offline profile migration and must precede the
-    # sole-owner daemon. Keep every user/profile path inside the throwaway HOME.
+    # Installation must precede the sole-owner daemon. Keep every user/profile
+    # path inside the throwaway HOME.
     echo "== tracedecay install --agent hermes"
     HOME="$fake_home" \
         HERMES_HOME="$hermes_home" \

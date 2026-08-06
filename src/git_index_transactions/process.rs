@@ -1,7 +1,7 @@
 use std::env;
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::path::Path;
+use std::process::{Command, Output};
 
 use tracedecay_application::DirectorySyncPolicy;
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
@@ -34,28 +34,6 @@ pub(super) fn git_command(repository_root: &Path) -> Command {
     command
 }
 
-pub(super) fn run_git_at(
-    repository_root: &Path,
-    operation: &'static str,
-    args: &[&str],
-) -> Result<String, NativeGitIndexError> {
-    let output = git_command(repository_root)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
-    if !output.status.success() {
-        return Err(NativeGitIndexError::GitFailed {
-            operation,
-            status: output.status.to_string(),
-        });
-    }
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim().to_owned())
-        .map_err(|_| NativeGitIndexError::MalformedOutput { operation })
-}
-
 pub(super) fn run_command_with_stdin(
     mut command: Command,
     operation: &'static str,
@@ -86,23 +64,6 @@ pub(super) fn run_command_with_stdin(
     }
 }
 
-pub(super) fn absolute_git_path(
-    repository_root: &Path,
-    value: &str,
-) -> Result<PathBuf, NativeGitIndexError> {
-    if value.is_empty() {
-        return Err(NativeGitIndexError::MalformedOutput {
-            operation: "rev-parse",
-        });
-    }
-    let path = PathBuf::from(value);
-    Ok(if path.is_absolute() {
-        path
-    } else {
-        repository_root.join(path)
-    })
-}
-
 pub(super) fn read_optional_file(path: &Path) -> Result<Vec<u8>, NativeGitIndexError> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(bytes),
@@ -118,10 +79,6 @@ pub(super) fn parse_git_oid(
     let text = std::str::from_utf8(output)
         .map_err(|_| NativeGitIndexError::MalformedOutput { operation })?;
     GitOidV1::new(text.trim()).map_err(|_| NativeGitIndexError::MalformedOutput { operation })
-}
-
-pub(super) fn git_timestamp(micros: i64) -> String {
-    format!("@{} +0000", micros.div_euclid(1_000_000))
 }
 
 pub(super) fn current_operation_state(git_dir: &Path) -> GitOperationStateV1 {
@@ -172,17 +129,4 @@ pub(super) fn worktree_mode(path: &Path) -> Option<GitFileModeV1> {
         return None;
     };
     GitFileModeV1::new(mode).ok()
-}
-
-#[cfg(unix)]
-pub(super) fn is_executable_hook(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-
-    path.is_file()
-        && std::fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-pub(super) fn is_executable_hook(path: &Path) -> bool {
-    path.is_file()
 }

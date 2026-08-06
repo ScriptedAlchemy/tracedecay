@@ -206,6 +206,35 @@ fn tool_command_preserves_trailing_help_and_reserved_args() {
 }
 
 #[test]
+fn workflow_command_binds_one_closed_typed_operation() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "workflow",
+        "register-definition",
+        "--request-file",
+        "workflow.json",
+        "--project",
+        "/tmp/project",
+        "--json",
+    ])
+    .expect("Workflow command should parse");
+
+    let Some(Commands::Workflow { invocation }) = cli.command else {
+        panic!("unexpected Workflow command");
+    };
+    assert_eq!(
+        invocation.operation,
+        tracedecay_api::WorkflowOperation::RegisterDefinition
+    );
+    assert_eq!(
+        invocation.request_file,
+        std::path::Path::new("workflow.json")
+    );
+    assert_eq!(invocation.project.as_deref(), Some("/tmp/project"));
+    assert!(invocation.json);
+}
+
+#[test]
 fn claude_install_alias_dispatches_to_install_command() {
     let cli = Cli::try_parse_from([
         "tracedecay",
@@ -303,14 +332,12 @@ fn update_upgrade_and_update_plugin_parse_to_distinct_commands() {
     assert!(matches!(
         update.command,
         Some(Commands::Update {
-            no_heal: false,
             no_reinstall: false
         })
     ));
     assert!(matches!(
         upgrade.command,
         Some(Commands::Upgrade {
-            no_heal: false,
             no_reinstall: false
         })
     ));
@@ -500,63 +527,6 @@ fn host_bundle_artifact_commands_parse_explicit_scope_and_confirmation() {
 }
 
 #[test]
-fn update_and_post_update_parse_no_heal_flag() {
-    let update = Cli::try_parse_from(["tracedecay", "update", "--no-heal"])
-        .expect("update --no-heal should parse");
-    let post_update = Cli::try_parse_from(["tracedecay", "post-update", "--no-heal"])
-        .expect("post-update --no-heal should parse");
-    let post_update_default = Cli::try_parse_from(["tracedecay", "post-update"])
-        .expect("post-update should parse without --no-heal");
-
-    assert!(matches!(
-        update.command,
-        Some(Commands::Update {
-            no_heal: true,
-            no_reinstall: false
-        })
-    ));
-    assert!(matches!(
-        post_update.command,
-        Some(Commands::PostUpdate {
-            no_heal: true,
-            no_reinstall: false,
-            lifecycle_lease_token: None,
-        })
-    ));
-    assert!(matches!(
-        post_update_default.command,
-        Some(Commands::PostUpdate {
-            no_heal: false,
-            no_reinstall: false,
-            lifecycle_lease_token: None,
-        })
-    ));
-}
-
-#[test]
-fn upgrade_parses_no_heal_flag() {
-    let upgrade = Cli::try_parse_from(["tracedecay", "upgrade", "--no-heal"])
-        .expect("upgrade --no-heal should parse");
-    let upgrade_default =
-        Cli::try_parse_from(["tracedecay", "upgrade"]).expect("upgrade should parse");
-
-    assert!(matches!(
-        upgrade.command,
-        Some(Commands::Upgrade {
-            no_heal: true,
-            no_reinstall: false
-        })
-    ));
-    assert!(matches!(
-        upgrade_default.command,
-        Some(Commands::Upgrade {
-            no_heal: false,
-            no_reinstall: false
-        })
-    ));
-}
-
-#[test]
 fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
     let upgrade = Cli::try_parse_from(["tracedecay", "upgrade", "--no-reinstall"])
         .expect("upgrade --no-reinstall should parse");
@@ -567,35 +537,17 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
 
     assert!(matches!(
         upgrade.command,
-        Some(Commands::Upgrade {
-            no_heal: false,
-            no_reinstall: true
-        })
+        Some(Commands::Upgrade { no_reinstall: true })
     ));
     assert!(matches!(
         update.command,
-        Some(Commands::Update {
-            no_heal: false,
-            no_reinstall: true
-        })
+        Some(Commands::Update { no_reinstall: true })
     ));
     assert!(matches!(
         post_update.command,
         Some(Commands::PostUpdate {
-            no_heal: false,
             no_reinstall: true,
             lifecycle_lease_token: None,
-        })
-    ));
-
-    // --no-heal and --no-reinstall are independent and may combine.
-    let both = Cli::try_parse_from(["tracedecay", "upgrade", "--no-heal", "--no-reinstall"])
-        .expect("upgrade --no-heal --no-reinstall should parse");
-    assert!(matches!(
-        both.command,
-        Some(Commands::Upgrade {
-            no_heal: true,
-            no_reinstall: true
         })
     ));
 }
@@ -1736,23 +1688,20 @@ fn branch_remove_requires_a_branch_name() {
 }
 
 #[test]
-fn parses_sessions_ingest_and_search_commands() {
-    let ingest =
-        Cli::try_parse_from(["tracedecay", "sessions", "ingest", "--provider", "cursor"]).unwrap();
-    match ingest.command {
+fn parses_sessions_import_and_search_commands() {
+    let import = Cli::try_parse_from(["tracedecay", "sessions", "import"]).unwrap();
+    match import.command {
         Some(Commands::Sessions {
             action:
-                SessionsAction::Ingest {
-                    provider,
+                SessionsAction::Import {
                     project_id,
                     project_path,
                 },
         }) => {
-            assert_eq!(provider.as_deref(), Some("cursor"));
             assert!(project_id.is_none());
             assert!(project_path.is_none());
         }
-        _ => panic!("expected sessions ingest command"),
+        _ => panic!("expected sessions import command"),
     }
 
     let search = Cli::try_parse_from([
@@ -1845,7 +1794,7 @@ fn parses_sessions_ingest_and_search_commands() {
 }
 
 #[test]
-fn sessions_help_keeps_ingest_as_legacy_source_admission_only() {
+fn sessions_help_describes_bounded_daemon_import() {
     let command = Cli::command();
     let sessions = command
         .find_subcommand("sessions")
@@ -1860,20 +1809,21 @@ fn sessions_help_keeps_ingest_as_legacy_source_admission_only() {
         .unwrap_or_default();
 
     for needle in [
-        "explicit legacy source-admission command",
-        "canonical observation ingest",
-        "leaves temporal projection to the durable scheduler",
+        "sessions import",
+        "bounded all-host source",
+        "daemon-owned canonical observation path",
+        "without waiting for historical convergence",
         "owns no parallel temporal writer",
         "never invoked by a read",
     ] {
         assert!(
             long_about.contains(needle),
-            "sessions help must retain the ingest cutover contract; missing {needle:?}"
+            "sessions help must retain the import authority contract; missing {needle:?}"
         );
     }
     assert!(
-        after_help.contains("deprecated ingest `--provider` option"),
-        "sessions help must identify the retained ingest compatibility option"
+        after_help.contains("sessions git-sync --dry-run"),
+        "sessions help must expose the durable git sync capability"
     );
 }
 

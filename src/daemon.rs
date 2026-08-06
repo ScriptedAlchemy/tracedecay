@@ -218,6 +218,7 @@ use invocation_executor::{
     frozen_root_generation, invocation_is_git_operation, multi_root_family_allows,
     unavailable_root_generation,
 };
+mod external_acquisition;
 mod invocation_state;
 use invocation_state::DaemonInvocationState;
 mod lsp_sessions;
@@ -300,26 +301,24 @@ use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
     bind_authenticated_profile_identity, project_open_cancellation_checkpoint,
     project_open_cancellation_error, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_open_writer_busy_error, project_route_for_handshake,
-    project_server_capacity_error, project_warming_error,
+    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
+    project_warming_error,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
 use project_server_lifecycle::{
-    await_user_profile_host_admission_replay_for_identity, cancel_project_server_startup_ingests,
-    schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
-    shutdown_project_servers,
+    await_user_profile_host_admission_replay_for_identity, schedule_project_server_retirement,
+    schedule_user_profile_host_admission_replay_for_identity, shutdown_project_servers,
 };
 mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
 mod service;
+pub(crate) mod session_sync;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
 mod store_writer_gate;
 mod wire_io;
-pub(crate) mod work_runtime;
-pub(crate) mod workflow_runtime;
 use wire_io::{
     read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
 };
@@ -339,7 +338,9 @@ pub(crate) use crate::daemon_contract::{
 use bootstrap::drain_client_tasks;
 pub use bootstrap::run_foreground;
 pub(crate) use service::invocation::{
-    BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrar,
+    BoundedPr13HookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
+    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
+    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrar,
     DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
@@ -348,7 +349,7 @@ pub(crate) use service::invocation::{
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
     Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
-    daemon_operation_event_authority,
+    advisory_cycle_invocation_result, daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,

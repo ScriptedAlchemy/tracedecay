@@ -1,5 +1,9 @@
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use tracedecay_domain::{ActorId, Confidence, DomainError, FactOwnerV1, ProvenanceId};
+use tracedecay_domain::{
+    ActorId, Confidence, DomainError, FactOwnerV1, PayloadReferenceV1, ProvenanceId,
+    SanitizationReceiptV1, SanitizerDispositionV1,
+};
 
 use super::super::super::queries::validate_limit;
 use super::super::super::{CompatibilityMemoryRepairStatsV1, FactStoreError, FactStoreResult};
@@ -196,7 +200,75 @@ impl CompatibilityFactAddAliasV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// Receipt-bound sanitized relation metadata.
+///
+/// This complete value is the canonical relation provenance. Persistence
+/// stores it once, rather than maintaining independent metadata and receipt
+/// JSON authorities that can drift.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CompatibilityRelationProvenanceV1 {
+    metadata: Value,
+    sanitization_receipt: SanitizationReceiptV1,
+}
+
+impl CompatibilityRelationProvenanceV1 {
+    pub fn new(
+        metadata: Value,
+        sanitization_receipt: SanitizationReceiptV1,
+    ) -> FactStoreResult<Self> {
+        validate_compatibility_metadata(&metadata, "compatibility relation provenance metadata")?;
+        if !matches!(
+            sanitization_receipt.disposition(),
+            SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
+        ) {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "compatibility relation provenance sanitization disposition",
+            }));
+        }
+        let payload_reference = PayloadReferenceV1::for_payload(&metadata).map_err(|_| {
+            FactStoreError::Contract(DomainError::NonCanonical {
+                field: "compatibility relation provenance metadata",
+            })
+        })?;
+        if sanitization_receipt.payload() != Some(&payload_reference) {
+            return Err(FactStoreError::Contract(DomainError::SnapshotMismatch {
+                field: "compatibility relation provenance sanitization receipt",
+            }));
+        }
+        Ok(Self {
+            metadata,
+            sanitization_receipt,
+        })
+    }
+
+    pub fn metadata(&self) -> &Value {
+        &self.metadata
+    }
+
+    pub fn sanitization_receipt(&self) -> &SanitizationReceiptV1 {
+        &self.sanitization_receipt
+    }
+}
+
+impl<'de> Deserialize<'de> for CompatibilityRelationProvenanceV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            metadata: Value,
+            sanitization_receipt: SanitizationReceiptV1,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.metadata, wire.sanitization_receipt).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompatibilityFactLinkV1 {
     source: CompatibilityFactTargetV1,
     target: CompatibilityFactTargetV1,
@@ -204,7 +276,7 @@ pub struct CompatibilityFactLinkV1 {
     evidence_facts: Vec<CompatibilityFactTargetV1>,
     confidence: Confidence,
     source_label: String,
-    metadata: Value,
+    provenance: CompatibilityRelationProvenanceV1,
 }
 
 impl CompatibilityFactLinkV1 {
@@ -216,7 +288,7 @@ impl CompatibilityFactLinkV1 {
         evidence_facts: Vec<CompatibilityFactTargetV1>,
         confidence: Confidence,
         source_label: String,
-        metadata: Value,
+        provenance: CompatibilityRelationProvenanceV1,
     ) -> FactStoreResult<Self> {
         if source == target {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -224,7 +296,6 @@ impl CompatibilityFactLinkV1 {
             }));
         }
         validate_compatibility_text(&source_label, "compatibility curation relation source")?;
-        validate_compatibility_metadata(&metadata, "compatibility curation relation metadata")?;
         Ok(Self {
             source,
             target,
@@ -232,7 +303,7 @@ impl CompatibilityFactLinkV1 {
             evidence_facts,
             confidence,
             source_label,
-            metadata,
+            provenance,
         })
     }
 
@@ -261,7 +332,11 @@ impl CompatibilityFactLinkV1 {
     }
 
     pub fn metadata(&self) -> &Value {
-        &self.metadata
+        self.provenance.metadata()
+    }
+
+    pub fn provenance(&self) -> &CompatibilityRelationProvenanceV1 {
+        &self.provenance
     }
 }
 

@@ -10,10 +10,6 @@ use tracedecay_api::feedback::{
 use tracedecay_api::read_model::{
     DashboardCoverageCompletenessV1, DashboardDomainStateV1, DashboardScopeV1,
 };
-use tracedecay_api::remediation::{
-    DoctorRemediationErrorPresentationV1, DoctorRemediationOperationPresentationV1,
-    doctor_remediation_envelope,
-};
 
 fn scope() -> DashboardScopeV1 {
     DashboardScopeV1 {
@@ -54,44 +50,6 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
     assert_eq!(conflict.1.0["code"], "configuration_revision_conflict");
     assert_eq!(conflict.1.0["expected_revision_id"], "revision.expected");
     assert_eq!(conflict.1.0["actual_revision_id"], "revision.actual");
-}
-
-#[test]
-fn remediation_presentation_preserves_truthfulness() {
-    let operation = doctor_remediation_envelope(
-        scope(),
-        Ok::<_, (String, DoctorRemediationErrorPresentationV1)>((
-            json!({"operation_id": "operation.preview.1"}),
-            DoctorRemediationOperationPresentationV1::new(DashboardDomainStateV1::Ready, true),
-        )),
-    );
-    let operation_wire = serde_json::to_value(operation).expect("operation envelope wire shape");
-    assert_eq!(operation_wire["domain_state"], "ready");
-    assert_eq!(operation_wire["coverage"]["completeness"], "complete");
-    assert_eq!(operation_wire["payload"]["status"], "operation");
-    assert_eq!(
-        operation_wire["payload"]["operation"]["operation_id"],
-        "operation.preview.1"
-    );
-
-    let unavailable = doctor_remediation_envelope(
-        scope(),
-        Err::<(serde_json::Value, DoctorRemediationOperationPresentationV1), _>((
-            "unsupported".to_owned(),
-            DoctorRemediationErrorPresentationV1::new(DashboardDomainStateV1::Unsupported, true),
-        )),
-    );
-    assert_eq!(
-        unavailable.coverage.completeness,
-        DashboardCoverageCompletenessV1::Unsupported
-    );
-    assert_eq!(
-        unavailable.domain_state,
-        DashboardDomainStateV1::Unsupported
-    );
-    let unavailable_wire = serde_json::to_value(unavailable).expect("unavailable wire shape");
-    assert_eq!(unavailable_wire["payload"]["status"], "unavailable");
-    assert_eq!(unavailable_wire["payload"]["reason"], "unsupported");
 }
 
 #[test]

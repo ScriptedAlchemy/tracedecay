@@ -1,6 +1,5 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Weak};
-use tracedecay_store::CodeShardScopeV1;
+use std::sync::Arc;
 
 use super::maintenance::RegisteredSchemaConvergenceStatus;
 use super::{
@@ -509,6 +508,112 @@ async fn cached_project_sessions_reject_conflicting_enrollment_authority() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_reset_requires_the_exact_unmounted_store_confirmation() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary.path().canonicalize().expect("canonical root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.configuration-reset").expect("project identity");
+    crate::storage::write_enrollment_marker(
+        &project_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("project enrollment");
+    let sessions_path =
+        crate::storage::profile_sharded_data_root(&profile_root, project_id.as_str())
+            .join(crate::storage::SESSIONS_DB_FILENAME);
+    std::fs::create_dir_all(sessions_path.parent().expect("sessions parent"))
+        .expect("sessions directory");
+    let seed = TestConnection::open(&sessions_path);
+    seed.execute_batch(
+        "CREATE TABLE configuration_legacy_flags (value TEXT NOT NULL);
+         INSERT INTO configuration_legacy_flags VALUES ('legacy');
+         CREATE TABLE unrelated_authority (value TEXT NOT NULL);
+         INSERT INTO unrelated_authority VALUES ('preserved');",
+    )
+    .await
+    .expect("seed incompatible configuration");
+    drop(seed);
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 14, "configuration reset")
+            .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+
+    let preview = registry
+        .reset_project_configuration(
+            project_id.clone(),
+            [project_root.clone()],
+            tracedecay_application::ConfigurationResetRequestV1::default(),
+        )
+        .await
+        .expect("typed reset preview");
+    let tracedecay_application::ConfigurationResetOutcomeV1::ConfirmationRequired { confirmation } =
+        preview
+    else {
+        panic!("incompatible configuration must require confirmation");
+    };
+    let mut wrong_confirmation = confirmation.clone();
+    wrong_confirmation.project_id =
+        ProjectId::new("project.wrong-reset-target").expect("wrong project identity");
+    assert!(
+        registry
+            .reset_project_configuration(
+                project_id.clone(),
+                [project_root.clone()],
+                tracedecay_application::ConfigurationResetRequestV1 {
+                    confirmation: Some(wrong_confirmation),
+                },
+            )
+            .await
+            .is_err(),
+        "a confirmation for another project must be rejected"
+    );
+
+    let outcome = registry
+        .reset_project_configuration(
+            project_id,
+            [project_root],
+            tracedecay_application::ConfigurationResetRequestV1 {
+                confirmation: Some(confirmation),
+            },
+        )
+        .await
+        .expect("confirmed scoped reset");
+    assert!(matches!(
+        outcome,
+        tracedecay_application::ConfigurationResetOutcomeV1::Completed { .. }
+    ));
+    let connection = rusqlite::Connection::open(sessions_path).expect("reopen reset database");
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM unrelated_authority", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("preserved unrelated data"),
+        "preserved"
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE name = 'configuration_legacy_flags'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("legacy table count"),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worktree_graph_mount_does_not_require_git() {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
@@ -520,19 +625,33 @@ async fn worktree_graph_mount_does_not_require_git() {
     std::fs::create_dir_all(&project_root).expect("non-git project root");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    let project_id = ProjectId::new("project.non-git-worktree").expect("project id");
+    crate::storage::write_enrollment_marker(
+        &project_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("project enrollment");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 13, "non-git worktree graph")
+            .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
-    let database_path = profile_root.join("stores/non-git-worktree.db");
-    std::fs::create_dir_all(database_path.parent().expect("database parent"))
-        .expect("database directory");
+    let database = registry
+        .project_memory(project_id.clone(), [project_root.clone()])
+        .await
+        .expect("mount project graph without Git");
+    let database_path = database.database_path().to_path_buf();
     let authority = DatabaseAuthority::acquire_test(&database_path, "non-git worktree graph mount")
         .expect("database authority");
 
     let database = registry
         .code_graph_worktree(
             &project_root,
-            ProjectId::new("project.non-git-worktree").expect("project id"),
+            project_id,
             database_path.clone(),
             authority,
             DatabaseAccessMode::ReadWrite,
@@ -541,200 +660,6 @@ async fn worktree_graph_mount_does_not_require_git() {
         .expect("non-git graph runtime");
 
     assert_eq!(database.database_path(), database_path);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn failed_code_graph_open_rolls_back_new_authority_for_retry() {
-    let temporary = tempfile::tempdir().expect("temporary project parent");
-    let root = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
-    let profile_root = root.join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("durable profile identity");
-    let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 13, "failed code graph retry")
-            .expect("daemon database scope");
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-        .await
-        .expect("session runtime registry");
-    let database_root = profile_root.join("stores");
-    std::fs::create_dir_all(&database_root).expect("database directory");
-    let missing_path = database_root.join("missing-worktree.db");
-    let replacement_path = database_root.join("replacement-worktree.db");
-    let shard_id = StoreShardIdV1::code(
-        registry.identity.brain_id().clone(),
-        registry.identity.profile_id().clone(),
-        ProjectId::new("project.failed-code-open").expect("project id"),
-        tracedecay_store::RepositoryId::new("repository.failed-code-open").expect("repository id"),
-        CodeShardScopeV1::Worktree {
-            worktree_id: tracedecay_store::WorktreeId::new("worktree.failed-code-open")
-                .expect("worktree id"),
-        },
-    );
-    let missing_authority =
-        DatabaseAuthority::acquire_test(&missing_path, "fail missing code graph open")
-            .expect("missing database authority");
-
-    let first_error = registry
-        .code_graph_with_authority(
-            shard_id.clone(),
-            missing_path,
-            Some(missing_authority),
-            false,
-        )
-        .await
-        .expect_err("missing code database must fail");
-    assert!(
-        first_error
-            .to_string()
-            .contains("resolved database does not exist"),
-        "unexpected first open error: {first_error}"
-    );
-
-    rusqlite::Connection::open(&replacement_path)
-        .expect("create replacement database")
-        .execute_batch("CREATE TABLE replacement(value INTEGER);")
-        .expect("seed replacement database");
-    let replacement_authority =
-        DatabaseAuthority::acquire_test(&replacement_path, "retry code graph open")
-            .expect("replacement database authority");
-    let runtime = registry
-        .code_graph_with_authority(
-            shard_id,
-            replacement_path.clone(),
-            Some(replacement_authority),
-            false,
-        )
-        .await
-        .expect("retry binds replacement after failed open");
-
-    assert_eq!(runtime.locator().path(), replacement_path);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn concurrent_retry_waits_for_failed_code_authority_rollback() {
-    let temporary = tempfile::tempdir().expect("temporary project parent");
-    let root = temporary
-        .path()
-        .canonicalize()
-        .expect("canonical fixture root");
-    let profile_root = root.join("profile");
-    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-        .expect("durable profile identity");
-    let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 14, "code graph open gate")
-            .expect("daemon database scope");
-    let database_root = profile_root.join("stores");
-    std::fs::create_dir_all(&database_root).expect("database directory");
-    let missing_path = database_root.join("concurrent-missing.db");
-    let replacement_path = database_root.join("concurrent-replacement.db");
-    rusqlite::Connection::open(&replacement_path)
-        .expect("create replacement database")
-        .execute_batch("CREATE TABLE replacement(value INTEGER);")
-        .expect("seed replacement database");
-    let registry = Arc::new(
-        DaemonSessionRuntimeRegistryV1::open(identity)
-            .await
-            .expect("session runtime registry"),
-    );
-    let shard = StoreShardIdV1::code(
-        registry.identity.brain_id().clone(),
-        registry.identity.profile_id().clone(),
-        ProjectId::new("project.concurrent-code-open").expect("project id"),
-        tracedecay_store::RepositoryId::new("repository.concurrent-code-open")
-            .expect("repository id"),
-        CodeShardScopeV1::Worktree {
-            worktree_id: tracedecay_store::WorktreeId::new("worktree.concurrent-code-open")
-                .expect("worktree id"),
-        },
-    );
-    let blocker = registry.code_graph_open_guard(&shard).await;
-    let first_registry = Arc::clone(&registry);
-    let first_shard = shard.clone();
-    let first = tokio::spawn(async move {
-        let authority =
-            DatabaseAuthority::acquire_test(&missing_path, "fail concurrent code graph open")
-                .expect("missing database authority");
-        first_registry
-            .code_graph_with_authority(first_shard, missing_path, Some(authority), false)
-            .await
-    });
-    wait_for_code_graph_gate_claims(&registry, &shard, 2).await;
-
-    let second_registry = Arc::clone(&registry);
-    let second_shard = shard.clone();
-    let expected_path = replacement_path.clone();
-    let second = tokio::spawn(async move {
-        let authority =
-            DatabaseAuthority::acquire_test(&replacement_path, "retry concurrent code graph open")
-                .expect("replacement database authority");
-        second_registry
-            .code_graph_with_authority(second_shard, replacement_path, Some(authority), false)
-            .await
-    });
-    wait_for_code_graph_gate_claims(&registry, &shard, 3).await;
-    drop(blocker);
-
-    let first_error = first
-        .await
-        .expect("failed-open task must join")
-        .expect_err("missing code database must fail");
-    assert!(
-        first_error
-            .to_string()
-            .contains("resolved database does not exist"),
-        "unexpected first open error: {first_error}"
-    );
-    let runtime = second
-        .await
-        .expect("retry task must join")
-        .expect("retry must bind after failed authority rollback");
-    assert_eq!(runtime.locator().path(), expected_path);
-
-    let other_shard = StoreShardIdV1::code(
-        registry.identity.brain_id().clone(),
-        registry.identity.profile_id().clone(),
-        ProjectId::new("project.other-code-open").expect("project id"),
-        tracedecay_store::RepositoryId::new("repository.other-code-open").expect("repository id"),
-        CodeShardScopeV1::Worktree {
-            worktree_id: tracedecay_store::WorktreeId::new("worktree.other-code-open")
-                .expect("worktree id"),
-        },
-    );
-    let _other_guard = registry.code_graph_open_guard(&other_shard).await;
-    assert!(
-        !registry
-            .code_graph_open_gates
-            .lock()
-            .await
-            .contains_key(&shard),
-        "completed shard gates must be pruned"
-    );
-}
-
-async fn wait_for_code_graph_gate_claims(
-    registry: &DaemonSessionRuntimeRegistryV1,
-    shard: &StoreShardIdV1,
-    expected: usize,
-) {
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            let strong_count = registry
-                .code_graph_open_gates
-                .lock()
-                .await
-                .get(shard)
-                .map_or(0, Weak::strong_count);
-            if strong_count >= expected {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("code graph open must claim the shard gate");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

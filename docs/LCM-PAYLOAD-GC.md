@@ -2,7 +2,14 @@
 
 Status: **design / actionable algorithm**. This is the implementation-and-test
 spec for payload GC. It is normative for `delete_external_payload`, the reaper,
-the schema-v5 marker store, the GC config knobs, and the safety invariants.
+the GC marker store, the GC config knobs, and the safety invariants.
+
+**Doctor boundary:** `lcm_doctor` is strictly read-only diagnosis and evidence.
+It never invokes this reaper and never repairs, applies, cleans, garbage-collects,
+retains, relinks, or migrates. The daemon maintenance owner, or an explicitly
+authorized owner operation with an active write scope, owns any GC apply run.
+Doctor requests require `provider`; `session_id` is optional and scopes the
+read-only evidence when supplied.
 
 It is a child of the **lifetime & retention contract**
 ([`docs/LCM-PAYLOAD-LIFECYCLE.md`](LCM-PAYLOAD-LIFECYCLE.md)) and the
@@ -28,14 +35,15 @@ invariants.
 **Goals**
 
 1. Introduce the **only** payload-file deletion primitive
-   (`delete_external_payload`) and a **background reaper** (`run_payload_gc`)
+   (`delete_external_payload`) and a **daemon-owned reaper** (`run_payload_gc`)
    that reconciles filesystem and DB state toward the lifecycle contract.
 2. Reap exactly the contract's collectable states — orphan files,
    unreferenced metadata, missing metadata (after the long window), and
    dangling placeholders — and **never** live or corrupted payloads.
 3. Be crash-safe and idempotent: any re-run after any crash converges to a
    clean state with no data loss and no duplicate work.
-4. Default to **dry-run / report**; destruction is opt-in (`apply = true`).
+4. Default owner runs to **dry-run / report**; destruction is opt-in
+   (`apply = true`) and requires explicit owner authorization.
 5. Emit no payload body bytes anywhere (logs, reports, metrics, errors).
 
 **Non-goals** (inherit the contract §14): age/content retention policy,
@@ -63,16 +71,16 @@ convenience — they encode the path/ref/symlink safety the contract §13 demand
 | Ref extraction from placeholder text | `extract_payload_refs_from_text` | `payload.rs:73` | Used by tombstone rewrite + reference-set. |
 | Tombstone-prefix recognition (already accepts `[gc'd …]`) | `is_external_payload_placeholder` | `payload.rs:104` | **No new parser.** Tombstone writer only changes the prefix. |
 | Load one metadata row | `load_payload_metadata` | `payload.rs:312` | `pub(crate)`. |
-| **Reference-set computation** | `referenced_payload_refs` | `doctor.rs:498` | The canonical "is this ref cited by a live raw row" query (whole-message `payload_ref` **and** placeholders in the 4 text columns). **Extract to a shared `pub(crate)` helper;** GC and doctor must agree exactly (OM-2). |
-| All metadata refs | `all_payload_metadata_refs` | `doctor.rs:461` | Set of `payload_ref` PKs. |
-| Unreferenced count | `count_unreferenced_payload_metadata` | `doctor.rs:473` | For status; GC's scan reuses the same sets. |
-| Backup before mutate | `checkpoint_wal_for_backup`, `backup_database` | `doctor.rs:1107`, `doctor.rs:1070` | Reuse verbatim for "backup before reap" (§13). |
+| **Reference-set computation** | `referenced_payload_refs` | `gc.rs` / doctor diagnostics | The canonical "is this ref cited by a live raw row" query (whole-message `payload_ref` **and** placeholders in the 4 text columns). GC and read-only Doctor diagnostics must agree exactly (OM-2). |
+| All metadata refs | `all_payload_metadata_refs` | `maintenance.rs` | Set of `payload_ref` PKs. |
+| Unreferenced count | `count_unreferenced_payload_metadata` | status/maintenance queries | For status; GC's scan reuses the same sets. |
+| Backup before mutate | `checkpoint_wal_for_backup`, `backup_database` | `maintenance.rs` | Reuse for an authorized owner "backup before reap" (§13); Doctor never calls it. |
 | Now | `current_timestamp` (`crate::tracedecay`) / SQL `unixepoch()` | — | Marker/`last_gc_at` timestamps. |
 
 **New symbols this design introduces** (implementation task): `delete_external_payload`,
 `run_payload_gc` + phase functions, `tombstone_placeholder_in_text`, a shared
-`referenced_payload_refs` (extracted), `LcmGcConfig`, `LcmGcReport`, the v5
-marker tables, and `LcmError::PayloadGc'd`.
+`referenced_payload_refs` (extracted), `LcmGcConfig`, `LcmGcReport`, the marker
+tables, and `LcmError::PayloadGc'd`.
 
 ---
 
@@ -80,7 +88,8 @@ marker tables, and `LcmError::PayloadGc'd`.
 
 Synchronous, payload-aware, the **only** code permitted to `remove_file` a
 payload. Implements contract §6.1 (D-1..D-4) and is reused by the reaper, by any
-future session/message delete API, and by an operator `doctor` reap of one ref.
+future session/message delete API, and by an explicitly authorized owner delete
+operation. Doctor diagnostics never invoke it.
 
 ### 3.1 Signature
 
@@ -95,7 +104,7 @@ pub(crate) async fn delete_external_payload(
 
 pub(crate) struct DeleteOpts {
     pub rewrite_placeholders: bool, // tombstone residual raw refs (default true)
-    pub remove_file: bool,          // false => metadata+ref cleanup only (tests/doctor)
+    pub remove_file: bool,          // false => metadata+ref cleanup only (preview/tests)
     pub verify_hash: bool,          // D-4 hash gate (default true)
 }
 
@@ -182,15 +191,17 @@ with the placeholder grammar.
 
 ## 4. The reaper — `run_payload_gc`
 
-The background reconciliation pass. Default `apply = false` (dry-run/report,
-contract §10.6). It runs four phases in a fixed order; each phase is independently
-idempotent and may be skipped via config.
+The daemon-owned reconciliation pass. Default `apply = false` (dry-run/report,
+contract §10.6). An apply run requires an explicitly authorized owner write
+scope; `lcm_doctor` can only report the same candidate evidence. It runs four
+phases in a fixed order; each phase is independently idempotent and may be
+skipped via config.
 
 ```
 run_payload_gc(conn, root, provider, session_id, cfg) -> LcmGcReport:
     report = LcmGcReport::default()
     if cfg.backup_before_reap && cfg.apply:
-        checkpoint_wal_for_backup(conn); backup_database(db_path, root)   # §13
+        checkpoint_wal_for_backup(conn); backup_database(db_path, root)   # owner §13
 
     dir = existing_payload_dir(root)            # validated canonical dir
     metadata_refs = all_payload_metadata_refs(conn)        # PK set
@@ -227,7 +238,7 @@ the whole run on a single bad ref.
 
 ---
 
-## 5. The two-scan rule and the marker store (schema v5)
+## 5. The two-scan rule and the marker store
 
 ### 5.1 Why a marker store is required
 
@@ -240,11 +251,11 @@ rows it tracks. A sidecar JSON file would reintroduce the exact file/DB-desync
 problem GC exists to solve. Therefore the marker lives in **additive tables
 inside the LCM DB**.
 
-### 5.2 Schema v5 (additive, monotonic-safe)
+### 5.2 Marker tables (additive, monotonic-safe)
 
-Bump `LCM_SCHEMA_VERSION` 4 → 5 and add, inside `ensure_lcm_schema`
-(`schema.rs:87`) via `CREATE TABLE IF NOT EXISTS` (so partial runs and DBs
-mid-migration converge):
+The current LCM schema creates these additive tables inside `ensure_lcm_schema`
+via `CREATE TABLE IF NOT EXISTS` (so partial runs and DBs mid-migration
+converge):
 
 ```sql
 -- Per-ref two-scan marker (unreferenced + missing tracking).
@@ -263,20 +274,17 @@ CREATE TABLE IF NOT EXISTS lcm_gc_meta (
 );
 ```
 
-Monotonic safety (contract §11, §13): the guard at `schema.rs:91-96` already
-skips DBs written by a release with `version >= LCM_SCHEMA_VERSION`; the
-`IF NOT EXISTS` DDL makes the v5 step idempotent for DBs that ran a partially
-applied earlier attempt. **No existing column or row is altered** — existing
-payloads start with no mark, i.e. `live`, which is correct (they get marked on
-their first observed-unreferenced scan). This honors GP-2 ("no new column" on
-the payload table) while giving GC a crash-safe marker store.
+Monotonic safety (contract §11, §13): the schema guard skips DBs written by a
+newer release, and the `IF NOT EXISTS` DDL is idempotent. **No existing column or
+row is altered** — payloads without a mark are `live` until the first observed-
+unreferenced scan. This honors GP-2 ("no new column" on the payload table) while
+giving owner GC a crash-safe marker store.
 
-> **Optional evolved form (contract GP-3).** A cleaner long-term shape is to fold
-> the marker into `lcm_external_payloads` as additive columns
-> `unreferenced_since INTEGER` + `gc_state TEXT`. v1 ships the side tables above
-> (smaller blast radius, no `ALTER` of the hot table); a later v6 may migrate
-> the side table into columns and drop `lcm_gc_marks`. The contract is identical
-> either way; tests assert behavior, not table shape.
+> **Future schema option (contract GP-3).** A later additive schema revision may
+> fold the marker into `lcm_external_payloads` as `unreferenced_since` and
+> `gc_state` columns. The contract is identical either way; tests assert behavior,
+> not table shape. Any migration remains an owner-authorized schema operation,
+> never a Doctor action.
 
 ### 5.3 Mark lifecycle (the two-scan rule, concretely)
 
@@ -477,10 +485,9 @@ appearing in more than one of the four columns or more than once in one column.
 
 ## 9. Configuration knobs
 
-A new `LcmGcConfig` (mirrors `LcmCleanConfig` at `types.rs:507` — serde defaults,
-built from MCP args in `session.rs`, effective defaults surfaced via
-`LcmConfigStatus` at `types.rs:500`). Env wiring mirrors `ignore_session_patterns`
-(`templates.rs:1319`).
+`LcmGcConfig` is daemon-owned maintenance policy. Read-only Doctor diagnostics
+may classify noise through `LcmNoiseClassificationConfig`, but neither Doctor
+nor MCP accepts GC policy or invokes maintenance.
 
 | Knob | Type | Default | Bounds | Effect |
 |---|---|---|---|---|
@@ -488,9 +495,9 @@ built from MCP args in `session.rs`, effective defaults surfaced via
 | `lcm_payload_reap_missing_metadata_after_seconds` | u64 | `604800` (7d) | `0` = never | Window after which a *missing* payload (row+ref, no file) becomes eligible for tombstoning. |
 | `lcm_payload_reap_missing_metadata_enabled` | bool | `false` | — | Master opt-in for Phase C auto-tombstone. `false` ⇒ missing payloads reported forever (contract §9 caution). |
 | `lcm_payload_gc_max_batch_size` | usize | `500` (== `SQLITE_IN_BATCH_SIZE`) | ≥1 | Caps refs reaped per run; bounds txn/lock time. Excess candidates wait for the next run. |
-| `lcm_payload_gc_backup_before_reap` | bool | `true` | — | Run `checkpoint_wal_for_backup`+`backup_database` before an `apply` run (contract §13). |
-| `lcm_payload_gc_interval_seconds` | u64 | `21600` (6h) | — | Advisory cadence for host scheduling; the store records `last_gc_at` and a scheduler skips if too recent. The store does **not** self-schedule (§12). |
-| `lcm_payload_gc_enabled` | bool | `true` | — | Master switch for *scheduled/background* GC only. Manual `mode=gc apply` always works regardless. |
+| `lcm_payload_gc_backup_before_reap` | bool | `true` | — | Run `checkpoint_wal_for_backup`+`backup_database` before an authorized owner maintenance run (contract §13). |
+| `lcm_payload_gc_interval_seconds` | u64 | `21600` (6h) | — | Daemon maintenance cadence; the store records `last_gc_at` and the owner skips if too recent. |
+| `lcm_payload_gc_enabled` | bool | `true` | — | Master switch for daemon-scheduled GC. An explicitly authorized owner run may be invoked independently of the scheduler. |
 
 **No zero-grace escape hatch.** The 300 s floor is enforced in the config parser
 (contract GP-1) so a misconfiguration cannot create a near-zero grace that races
@@ -574,28 +581,24 @@ rationale (keep the hot path simple), GC does **not** piggyback on ingest and
 does **not** spawn its own scheduler. It exposes `run_payload_gc` for any caller
 and records `last_gc_at`; scheduling is host-driven.
 
-**Manual / operator invocation** (reuse the existing `lcm_doctor` surface):
+**Manual / owner invocation:**
 
-- `lcm_doctor` with `mode = "gc"` (new mode; parsed alongside `repair`/`clean`
-  in `session.rs:667` `lcm_doctor_mode`). `apply = false` (default) ⇒ dry-run
-  report (§11). `apply = true` ⇒ destructive reap. This reuses the doctor
-  request shape (`DoctorRequest`, `doctor.rs:23`), the backup-before-mutate
-  pattern (`doctor.rs:159`), and the `dry_run` flag already in the doctor
-  response (`doctor.rs:88`).
-- MCP tool surfaces: extend `lcm_doctor` (`templates.rs:561`, handler
-  `session.rs:1199`) to accept `mode: "gc"` + `gc_config`; optionally add a
-  dedicated `lcm_payload_gc` tool alias that maps to the same handler for
-  discoverability. `lcm_status` (`templates.rs:556`, handler `session.rs:1175`)
-  gains the GC health fields below (read-only).
-- A `gc_config` argument carries `LcmGcConfig` (§9), built the same way
-  `LcmCleanConfig` is today (`session.rs:687`).
+- The daemon maintenance coordinator may schedule `run_payload_gc` and perform
+  an apply run under its write ownership. An explicit owner API may do the same
+  after validating the active write scope and recording the backup/report.
+- `lcm_doctor` remains a read-only diagnosis/evidence surface. It may expose GC
+  candidate counts and the last run status, but it has no `gc` mode, no `apply`
+  flag, and no destructive alias. A separate owner operation is required for
+  any mutation.
+- `lcm_status` gains the GC health fields below (read-only). A `gc_config`
+  argument carries `LcmGcConfig` (§9) for the daemon/owner entry point.
 
-**Recommended host scheduling** (Hermes cronjob / `watchers` skill invoking the
-MCP tool): a frequent **dry-run** report (e.g. every 1–6 h) for visibility, and a
-less frequent **apply** (e.g. daily) gated by `lcm_payload_gc_interval_seconds`
-via `last_gc_at`. The dry-run is cheap (no I/O mutations, no locks beyond reads)
-and safe to run any time. A run skips apply if `now - last_gc_at <
-gc_interval_seconds` unless the operator forces it.
+**Recommended scheduling:** the daemon owner may run a frequent **dry-run**
+report (e.g. every 1–6 h) for visibility and a less frequent **apply** (e.g.
+daily) gated by `lcm_payload_gc_interval_seconds` and `last_gc_at`. The dry-run
+is cheap (no I/O mutations, no locks beyond reads) and safe to run any time. An
+apply run is skipped if `now - last_gc_at < gc_interval_seconds` unless the
+authorized owner explicitly forces it.
 
 **Per-store, not global.** Each resolved project store (user-level shard,
 explicit local store, or legacy local store) is GC'd independently against its
@@ -631,8 +634,9 @@ Mapped to the contract §13 and this doc. Implementation and tests assert each.
 9. **Idempotent + convergent:** any re-run after any crash reaches a clean state
    with no data loss and no double-work (§5.3, §10).
 10. **Backup before mutate:** `checkpoint_wal_for_backup` + `backup_database`
-    before an `apply` run (§4, mirrors `doctor.rs:159`/`:1070`).
-11. **Dry-run default; destruction opt-in** (`apply = true`) (§11, §12).
+    before an authorized owner `apply` run (§4, §12).
+11. **Dry-run default; destruction opt-in** (`apply = true`) for owner operations
+    (§11, §12). Doctor is always read-only.
 12. **Per-ref `BEGIN IMMEDIATE`, no FS I/O under the lock;** bounded by
     `gc_max_batch_size` (§10).
 13. **Distinct `LcmError::PayloadGc'd`** for tombstoned refs (MF-1) so ops can
@@ -662,30 +666,25 @@ of existing fields):
 
 Concrete, ordered, minimal-blast-radius steps. Each is independently testable.
 
-1. **Schema v5** (`schema.rs`): bump `LCM_SCHEMA_VERSION` to 5; add
-   `lcm_gc_marks` + `lcm_gc_meta` via `CREATE TABLE IF NOT EXISTS` inside
-   `ensure_lcm_schema`. No `ALTER` of existing tables. Add `lcm_gc_meta`
-   get/set helpers (mirror `src/db/metadata.rs`).
-2. **Extract `referenced_payload_refs`** from `doctor.rs:498` to a shared
-   `pub(crate)` location (e.g. `payload.rs` or a new `gc.rs`); update doctor to
-   call the shared helper. Behavior unchanged.
-3. **`LcmError::PayloadGc'd`** (`types.rs:726`) + `Display` (`types.rs:745`);
-   wire `expand_payload` (`payload.rs:211`) to return it for tombstoned refs.
-4. **`tombstone_placeholder_in_text`** (`payload.rs` or `gc.rs`) + unit tests for
-   all prefixes, idempotency, multi-column, nested.
-5. **`safe_remove_payload_file`** (§7.3) + **`delete_external_payload`** (§3).
-6. **Phases A–D** + **`run_payload_gc`** (§4–6) behind `LcmGcConfig` (§9).
-7. **`LcmGcReport`** (§11) + status fields (§14).
-8. **Doctor `mode = "gc"`** (`doctor.rs`, `session.rs:667`/`:1199`,
-   `templates.rs:561`) + optional `lcm_payload_gc` MCP alias; `lcm_status` GC
-   fields (`global_db.rs:1217`, `query.rs`).
-9. **Env/config wiring** (`templates.rs:1319` pattern) + effective-default
-   surfacing in `LcmConfigStatus`.
+1. **Marker-table authority** (`schema.rs`): keep `lcm_gc_marks` and
+   `lcm_gc_meta` additive and idempotent, with their get/set helpers.
+2. **Shared reference authority:** keep `referenced_payload_refs` in the shared
+   GC path and have read-only Doctor call the same helper. Behavior must agree.
+3. **Payload errors and tombstones:** keep `LcmError::PayloadGc'd`,
+   `StillReferenced`, and `tombstone_placeholder_in_text` covered for all
+   prefixes, idempotency, multi-column, and nested cases.
+4. **Owner reaper:** keep `safe_remove_payload_file` and
+   `delete_external_payload` behind the authorized owner boundary.
+5. **Phases A–D:** keep `run_payload_gc` and `LcmGcConfig` dry-run by default;
+   only owner apply runs may mutate.
+6. **Reports and visibility:** keep `LcmGcReport`/status fields and ensure
+   Doctor/status serialize evidence without applying it.
+7. **Config wiring:** keep effective defaults surfaced to the daemon/owner
+   maintenance entry point.
 
-Each step adds capability without changing existing behavior until the mode is
-invoked; the doctor `clean` path (`doctor.rs:1239`) is unchanged in effect
-(continues to delete rows and leave files, now *classified* as deferred per
-contract §7) and may gain a one-line note that files are reaped by GC after grace.
+Each step adds capability without widening Doctor: the doctor continues to
+report payload evidence while the daemon/authorized owner path performs any
+deferred retention or GC write and records the resulting report.
 
 ---
 
@@ -717,13 +716,11 @@ these hooks support.
 
 ## 17. Open items handed off
 
-- **Implementation** of `delete_external_payload` + reaper + schema v5 is the
-  next task (the parent contract §16 anticipated it; this card was scoped to
-  *design*). Recommend the orchestrator (`t_baa1d2cf`) spawn it after this
-  design, the dashboard spec (`t_0ab1c041`), and the test plan (`t_f0e07c5c`)
-  land, with this doc as its spec.
-- **UI/CLI surfacing** (healthy/warning/error thresholds, dry-run view
-  placement) → `t_0ab1c041`.
-- **Named test cases + fixtures** → `t_f0e07c5c`.
-- **Schema-v5-vs-v6 (GP-3 column form)** is a deferred, behavior-preserving
-  refactor; not needed for v1 correctness.
+- **Owner reaper and retention:** keep the implementation and authorization
+  boundary covered by the current runtime tests.
+- **UI/CLI surfacing:** expose healthy/warning/error evidence and any dry-run
+  owner control without adding a mutating Doctor route.
+- **Tests and fixtures:** keep direct behavior coverage for state transitions,
+  safe removal, idempotency, path rejection, and error distinction.
+- **Future marker-column form (GP-3):** optional behavior-preserving schema work;
+  never a Doctor migration.

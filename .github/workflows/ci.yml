@@ -182,15 +182,13 @@ jobs:
     # This job consumes the dashboard artifact shared by Rust jobs instead of
     # rebuilding it.
     needs: dashboard-assets
-    # Also runs on push so the workflow-contract tests below actually protect
-    # master, which is the branch they exist to protect. `on.push.branches` is
-    # already limited to master and feature/holographic-memory, and the
-    # concurrency group keys pushes by ref and PRs by number, so this adds no
-    # duplicate or competing run.
+    # Run on master pushes so the release workflow contracts protect the
+    # branch they release, while release-please PRs avoid expected version
+    # drift until their GitHub release completes.
     if: >-
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
-       !startsWith(github.head_ref, 'release-plz-'))
+       !startsWith(github.head_ref, 'release-please--'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -221,13 +219,19 @@ jobs:
           python3 scripts/test-resolve-release-source-profile.py
           python3 scripts/test-scoop-manifest-workflows.py
 
+      - name: Test GitHub release installer
+        run: bash tests/install_script_test.sh
+
+      - name: Test release artifact inventory
+        run: |
+          python3 scripts/test-check-release-artifacts.py
+          python3 scripts/test-package-release-archive.py
+          python3 scripts/test-plan-release-recovery.py
+
       - name: Check release version drift
         continue-on-error: true
-        # PR-only, unchanged. This one queries crates.io and fails whenever
-        # Cargo.toml is ahead of the registry, which is the normal transient
-        # state on master between a release-plz merge and the publish
-        # completing. Running it on master push would go red every release for
-        # reasons unrelated to the commit.
+        # A release-please PR is excluded at the job level because its version
+        # is expected to lead the latest GitHub release until the PR merges.
         if: github.event_name == 'pull_request'
         run: scripts/check-release-drift.sh
 
@@ -324,24 +328,16 @@ jobs:
           npm --prefix plugin/cursor-native-extension test
           npm --prefix plugin/cursor-native-extension run package
 
-      # These three gates filter by test name, and libtest exits 0 when a filter
-      # matches nothing (unlike the nextest used elsewhere, which has
-      # --no-tests=fail). require-exact-test.sh asserts the count libtest
-      # reports, so a rename, a moved #[cfg], or a feature change fails here
-      # instead of turning the gate into a silent no-op that reports success.
       - name: Lite feature compile check
-        # The ONLY --no-default-features build lane; the exact-test it once
-        # ran was deleted, but lite-profile compile coverage stays.
+        # The ONLY --no-default-features build lane.
         run: cargo check --locked --no-default-features --features lite
 
       - name: Host-bundle default-feature platform lifecycle
-        run: |
-          set -euo pipefail
-          # The ONLY default-feature (not --all-features) lifecycle run.
-          scripts/require-exact-test.sh \
-            cargo test --locked --test pr13_host_bundle_acceptance \
-            receipt_backed_doctor_checks_deployed_digests_registration_and_repair \
-            -- --exact
+        # The ONLY default-feature (not --all-features) lifecycle run.
+        run: >-
+          cargo nextest run --locked
+          --test host_bundle_acceptance
+          --no-tests=fail
 
       - name: FastEmbed fixture pin check
         if: matrix.name == 'Linux'
@@ -357,11 +353,9 @@ jobs:
       - name: Run in-flight observation crash harness
         if: matrix.name == 'Linux'
         run: >-
-          scripts/require-exact-test.sh
-          cargo test --locked --all-features --features test-transport
+          cargo nextest run --locked --all-features --features test-transport
           --test daemon_fault_harness_test
-          killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
-          -- --exact
+          --no-tests=fail
 
   windows-build:
     name: Build Windows tests
@@ -672,18 +666,19 @@ jobs:
       - name: Cache Windows Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-pr12-pr13-lite-windows-msvc
+          shared-key: ci-application-advisory-lite-windows-msvc
           cache-on-failure: true
 
-      # Same libtest no-op hazard as the Linux/macOS `test` job: `cargo test
-      # <name> -- --exact` exits 0 when the filter matches nothing.
       - name: Lite feature compile check
         shell: bash
         run: cargo check --locked --no-default-features --features lite
 
       - name: Host-bundle default-feature platform lifecycle
         shell: bash
-        run: cargo test --locked --test pr13_host_bundle_acceptance
+        run: >-
+          cargo nextest run --locked
+          --test host_bundle_acceptance
+          --no-tests=fail
 
       - name: Merge Windows junit
         shell: bash
@@ -786,68 +781,6 @@ jobs:
             target/perf-gate/perf-gate-summary.md
           if-no-files-found: warn
           retention-days: 14
-
-  release-compatibility:
-    name: Release compatibility
-    needs: dashboard-assets
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download dashboard artifact
-        uses: actions/download-artifact@v7
-        with:
-          name: dashboard-app-dist
-          path: dashboard/app-dist
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Validate publishable package manifests
-        # Package the workspace as one dependency-ordered batch because the V2
-        # crates do not exist in the registry until release-plz publishes them.
-        run: |
-          set -euo pipefail
-          cargo package --workspace --locked --allow-dirty --no-verify
-
-          version="$(
-            cargo metadata --no-deps --locked --format-version 1 |
-              jq -r '.packages[] | select(.name == "tracedecay") | .version'
-          )"
-          root_archive="target/package/tracedecay-${version}.crate"
-          test -s "$root_archive"
-          tar tzf "$root_archive" > root-archive-contents.txt
-          grep -Fq "/build-support/dashboard_cache.rs" root-archive-contents.txt
-          grep -Fq "/dashboard/app-dist/" root-archive-contents.txt
-
-          package_root="${RUNNER_TEMP}/tracedecay-package"
-          rm -rf "$package_root"
-          mkdir -p "$package_root"
-          tar xzf "$root_archive" -C "$package_root"
-          python3 scripts/check-dashboard-bundle.py \
-            "$package_root/tracedecay-${version}/dashboard/app-dist"
-
-      - name: Check root crate API compatibility
-        # Advisory: with release-type "major" every break is pre-approved, so
-        # a red here is informational at best.
-        continue-on-error: true
-        uses: obi1kenobi/cargo-semver-checks-action@v2
-        env:
-          # semver-checks builds the crate from a synthetic resolver-v1
-          # workspace, so make dependency selection honor this job's toolchain.
-          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
-        with:
-          package: tracedecay
-          rust-toolchain: manual
-          # The V2 storage cutover intentionally breaks the pre-V2 public API.
-          # Release-plz owns the version bump at release time (the drift guard
-          # forbids pre-bumping in the PR). In semver-checks vocabulary,
-          # "major" means "breaking release" — for this 0.0.x crate that IS
-          # the planned 0.1.0 minor-version bump (no 1.0 is implied). Declare
-          # it so the action stops comparing against the unchanged version.
-          release-type: major
 
   clippy:
     name: Clippy

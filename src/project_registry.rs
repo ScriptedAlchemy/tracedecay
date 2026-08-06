@@ -152,10 +152,8 @@ fn project_entry(
     if let Some(branch) = &context.project.default_branch {
         branches.insert(branch.clone());
     }
-    let mut graph_scope_count = 0usize;
     let mut artifact_count = 0usize;
     for store in &context.stores {
-        graph_scope_count += store.graph_scopes.len();
         artifact_count += store.artifacts.len();
         for scope in &store.graph_scopes {
             branches.insert(scope.branch_name.clone());
@@ -171,7 +169,6 @@ fn project_entry(
         default_branch: context.project.default_branch.clone(),
         branches: branches.into_iter().collect(),
         store_count: context.stores.len(),
-        graph_scope_count,
         artifact_count,
         alias_count: context.aliases.len(),
         last_seen_at: context.project.last_seen_at,

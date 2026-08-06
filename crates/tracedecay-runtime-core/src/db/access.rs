@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs::File;
 #[cfg(any(test, feature = "test-transport"))]
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -20,22 +19,23 @@ mod lease;
 mod owner_io;
 mod path_layout;
 
+use bootstrap::reject_hard_linked_database;
 #[cfg(windows)]
 pub use bootstrap::windows_hard_link_count;
-use bootstrap::{BootstrapAuthority, acquire_bootstrap_authority, reject_hard_linked_database};
 pub use lease::enter_maintenance_database_scope;
 #[cfg(not(test))]
 pub use lease::enter_owned_maintenance_database_scope;
+#[cfg(test)]
+use lease::fallback_scoped_runtime_role;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
-pub use lease::{database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner};
+pub use lease::{enter_daemon_database_scope, probe_writer_owner};
 pub use owner_io::is_lock_contended;
 use owner_io::{
-    authority_token, epoch_ms, open_lock_file, publish_record_atomically, read_owner,
-    read_record_strict, remove_record_durably, write_owner, write_record_atomically, writer_owner,
+    authority_token, epoch_ms, publish_record_atomically, read_record_strict, writer_owner,
 };
 use path_layout::{
-    bootstrap_database_key, canonical_profile_root, database_lock_root,
-    is_legacy_repository_database, platform_identity_key, stable_path_hash, stable_path_set_hash,
+    canonical_profile_root, database_profile_root, is_legacy_repository_database,
+    platform_identity_key,
 };
 
 static PROCESS_LEASES: LazyLock<Mutex<HashMap<PathBuf, ProcessLease>>> =
@@ -44,7 +44,7 @@ static DAEMON_SCOPES: LazyLock<Mutex<HashMap<PathBuf, DaemonScopeState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static MAINTENANCE_SCOPES: LazyLock<Mutex<HashMap<PathBuf, MaintenanceScopeState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static AUTHORITY_NONCE: AtomicU64 = AtomicU64::new(0);
+static TOKEN_NONCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_STARTED_EPOCH_MS: LazyLock<u128> = LazyLock::new(epoch_ms);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,26 +90,6 @@ assert!(error.to_string().contains(
 #[derive(Clone, Debug)]
 pub struct DatabaseAuthority {
     inner: Arc<AuthorityInner>,
-}
-
-#[derive(Debug)]
-pub struct DatabaseDeletionFence {
-    transaction_id: String,
-    entries: Vec<DeletionFenceEntry>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DatabaseDeletionState {
-    Missing,
-    Deleting,
-    Deleted,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct DatabaseDeletionStates {
-    missing: usize,
-    deleting: usize,
-    deleted: usize,
 }
 
 #[derive(Debug)]
@@ -189,55 +169,22 @@ struct AuthorityInner {
     identity: DatabaseIdentity,
     role: DatabaseAuthorityRole,
     token: String,
-    _bootstrap: Option<BootstrapAuthority>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DatabaseIdentity {
     database_path: PathBuf,
     database_key: PathBuf,
-    database_id: u64,
     profile_root: PathBuf,
     allows_ambient_profile_scope: bool,
-    access_lock_path: PathBuf,
-    writer_lock_path: PathBuf,
-    writer_owner_path: PathBuf,
-    deletion_tombstone_path: PathBuf,
-    bootstrap_lock_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
-struct DeletionFenceEntry {
-    identity: DatabaseIdentity,
-    access: File,
-    writer: File,
-}
-
-#[derive(Debug)]
-enum ProcessLease {
-    Authority {
-        token: String,
-        refs: usize,
-        held: HeldLocks,
-    },
-    Deletion {
-        transaction_id: String,
-        owner: WriterOwner,
-    },
-}
-
-#[derive(Debug)]
-enum HeldLocks {
-    Daemon {
-        access: File,
-        writer: File,
-        owner: WriterOwner,
-    },
-    Maintenance {
-        access: File,
-        writer: File,
-        owner: WriterOwner,
-    },
+struct ProcessLease {
+    token: String,
+    refs: usize,
+    role: DatabaseAuthorityRole,
+    owner: WriterOwner,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -291,15 +238,7 @@ impl DatabaseAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&identity.database_key)
-            .is_some_and(|lease| {
-                matches!(
-                    lease,
-                    ProcessLease::Authority {
-                        held: HeldLocks::Maintenance { .. },
-                        ..
-                    }
-                )
-            });
+            .is_some_and(|lease| lease.role == DatabaseAuthorityRole::Maintenance);
         if maintenance_active {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent);
         }
@@ -322,16 +261,11 @@ impl DatabaseAuthority {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&identity.database_key)
-                .and_then(|lease| match lease {
-                    ProcessLease::Authority {
-                        held: HeldLocks::Maintenance { .. },
-                        ..
-                    } => Some(DatabaseAuthorityRole::Maintenance),
-                    ProcessLease::Authority {
-                        held: HeldLocks::Daemon { .. },
-                        ..
-                    } => Some(DatabaseAuthorityRole::Test),
-                    ProcessLease::Deletion { .. } => None,
+                .map(|lease| match lease.role {
+                    DatabaseAuthorityRole::Maintenance => DatabaseAuthorityRole::Maintenance,
+                    DatabaseAuthorityRole::Daemon | DatabaseAuthorityRole::Test => {
+                        DatabaseAuthorityRole::Test
+                    }
                 });
             if let Some(role) = existing_role {
                 return Self::acquire_identity(identity, role, intent);
@@ -344,15 +278,7 @@ impl DatabaseAuthority {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&identity.database_key)
-            .is_some_and(|lease| {
-                matches!(
-                    lease,
-                    ProcessLease::Authority {
-                        held: HeldLocks::Maintenance { .. },
-                        ..
-                    }
-                )
-            });
+            .is_some_and(|lease| lease.role == DatabaseAuthorityRole::Maintenance);
         if maintenance_active {
             return Self::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent);
         }
@@ -460,21 +386,16 @@ impl DatabaseAuthority {
     }
 
     fn acquire_identity(
-        mut identity: DatabaseIdentity,
+        identity: DatabaseIdentity,
         role: DatabaseAuthorityRole,
         intent: &str,
     ) -> Result<Self> {
-        let bootstrap = acquire_bootstrap_authority(&identity, intent)?;
-        if bootstrap.is_some() {
-            identity = DatabaseIdentity::for_path(&identity.database_path)?;
-        }
         let token = acquire_process_lease(&identity, role, intent)?;
         Ok(Self {
             inner: Arc::new(AuthorityInner {
                 identity,
                 role,
                 token,
-                _bootstrap: bootstrap,
             }),
         })
     }
@@ -516,7 +437,7 @@ impl DatabaseIdentity {
             access_error("resolve", db_path, "database path has no parent directory")
         })?;
         std::fs::create_dir_all(parent)
-            .map_err(|error| access_io_error("create lock directory", parent, &error))?;
+            .map_err(|error| access_io_error("create database parent directory", parent, &error))?;
 
         let entry = match std::fs::symlink_metadata(&absolute) {
             Ok(metadata) => Some(metadata),
@@ -539,34 +460,12 @@ impl DatabaseIdentity {
             reject_hard_linked_database(&database_path)?;
         }
         let database_key = platform_identity_key(&database_path);
-        let lock_root = database_lock_root(&database_path, parent);
-        std::fs::create_dir_all(&lock_root).map_err(|error| {
-            access_io_error("create database lock directory", &lock_root, &error)
-        })?;
-        let lock_id = stable_path_hash(&database_key);
-        let bootstrap_lock_path = if entry.is_none() {
-            bootstrap_database_key(
-                database_path.parent().unwrap_or(parent),
-                database_path.file_name().unwrap_or(file_name),
-            )
-            .map(|key| lock_root.join(format!("{:016x}.bootstrap.lock", stable_path_hash(&key))))
-        } else {
-            None
-        };
-        let profile_root = lock_root
-            .parent()
-            .map_or_else(|| parent.to_path_buf(), Path::to_path_buf);
+        let profile_root = database_profile_root(&database_path, parent);
         Ok(Self {
             allows_ambient_profile_scope: is_legacy_repository_database(&database_path),
             database_path,
             database_key,
-            database_id: lock_id,
             profile_root: platform_identity_key(&profile_root),
-            access_lock_path: lock_root.join(format!("{lock_id:016x}.access.lock")),
-            writer_lock_path: lock_root.join(format!("{lock_id:016x}.writer.lock")),
-            writer_owner_path: lock_root.join(format!("{lock_id:016x}.writer.owner")),
-            deletion_tombstone_path: lock_root.join(format!("{lock_id:016x}.deletion.tombstone")),
-            bootstrap_lock_path,
         })
     }
 }

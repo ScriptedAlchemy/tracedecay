@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip';
 import { Fact, Legend, Meter, Panel } from '../../ui/instrument.tsx';
 import { formatCount } from '../../ui/format.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
 import {
@@ -41,7 +41,7 @@ export function ThreadChain({
   thread: PlacedThread | null;
   relations: ThreadRelations;
 }) {
-  const chain = useLegacy(
+  const chain = useEnvelope(
     ['loom', 'chain', thread?.id ?? 'none'],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(thread?.sessionId ?? '')}?limit=200`,
     LcmSessionPayloadV1Schema,
@@ -102,8 +102,16 @@ export function ThreadChain({
           </div>
         ) : null}
 
-        <LegacyBoundary title="Chain" pending={chain.isPending} result={chain.data}>
-          {(data) => {
+        <ReadSection
+          title="Chain"
+          chrome="centered"
+          state={envelopeReadState(chain.isPending, chain.data, {
+            loading: 'reading transcript chain',
+            transport: 'transcript chain could not be read',
+          })}
+        >
+          {(envelope) => {
+            const data = envelope.payload;
             if (data.exists === false) {
               return (
                 <StateChip
@@ -243,7 +251,7 @@ export function ThreadChain({
               </div>
             );
           }}
-        </LegacyBoundary>
+        </ReadSection>
       </div>
     </Panel>
   );

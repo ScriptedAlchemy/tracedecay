@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FIXTURES, resolveFixture } from '../../../stories/fixtures/data.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { CostsPage } from './CostsPage.tsx';
 
 afterEach(() => {
@@ -10,9 +11,7 @@ afterEach(() => {
 
 describe('CostsPage truth claims', () => {
   it('separates provider, tokenizer, and estimate coverage without inventing cache causality', async () => {
-    const payload = structuredClone(
-      FIXTURES['/api/plugins/savings/overview'],
-    ) as Record<string, unknown>;
+    const payload = savingsOverviewPayload();
     const sessions = payload['sessions'] as Record<string, unknown>;
     sessions['usage_messages'] = 100;
     sessions['tokenized_messages'] = 300;
@@ -28,9 +27,7 @@ describe('CostsPage truth claims', () => {
   });
 
   it('reports an unreported message class as unreported, not as zero coverage', async () => {
-    const payload = structuredClone(
-      FIXTURES['/api/plugins/savings/overview'],
-    ) as Record<string, unknown>;
+    const payload = savingsOverviewPayload();
     const sessions = payload['sessions'] as Record<string, unknown>;
     // The block is available and holds messages, but the per-class counts and
     // the session count never came back. Coalescing them printed "0% of 41,204
@@ -55,9 +52,7 @@ describe('CostsPage truth claims', () => {
   });
 
   it('renders failed turn reads as unavailable instead of actual zero spend', async () => {
-    const payload = structuredClone(
-      FIXTURES['/api/plugins/savings/overview'],
-    ) as Record<string, unknown>;
+    const payload = savingsOverviewPayload();
     // `savings_api::read_failed_block` — the block reports the failure and
     // leaves every figure null rather than settling to zero.
     payload['turns'] = {
@@ -78,9 +73,7 @@ describe('CostsPage truth claims', () => {
   });
 
   it('renders a failed session aggregate separately from an empty ledger', async () => {
-    const payload = structuredClone(
-      FIXTURES['/api/plugins/savings/overview'],
-    ) as Record<string, unknown>;
+    const payload = savingsOverviewPayload();
     payload['sessions'] = {
       available: false,
       db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
@@ -109,9 +102,7 @@ describe('CostsPage truth claims', () => {
   });
 
   it('keeps the canonical cost read alive when the savings ledger read fails', async () => {
-    const payload = structuredClone(
-      FIXTURES['/api/plugins/savings/overview'],
-    ) as Record<string, unknown>;
+    const payload = savingsOverviewPayload();
     // `savings_api::read_failed_block` shape: the block reports the failure and
     // leaves both summaries null rather than settling them to zero.
     payload['savings'] = {
@@ -134,9 +125,7 @@ describe('CostsPage truth claims', () => {
   });
 
   it('discloses that project savings are a capped top slice', async () => {
-    const payload = structuredClone(
-      FIXTURES['/api/plugins/savings/overview'],
-    ) as Record<string, unknown>;
+    const payload = savingsOverviewPayload();
     const savings = payload['savings'] as Record<string, unknown>;
     const lifetime = savings['lifetime_counters'] as Record<string, unknown>;
     lifetime['project_total'] = 57;
@@ -163,7 +152,7 @@ function renderCosts(savingsOverview: unknown) {
       const pathname = new URL(String(input), 'http://localhost').pathname;
       const body =
         pathname === '/api/plugins/savings/overview'
-          ? savingsOverview
+          ? fixtureEnvelope(savingsOverview)
           : resolveFixture(pathname, '');
       return new Response(JSON.stringify(body), { status: 200 });
     }),
@@ -176,4 +165,11 @@ function renderCosts(savingsOverview: unknown) {
       <CostsPage />
     </QueryClientProvider>,
   );
+}
+
+function savingsOverviewPayload(): Record<string, unknown> {
+  const fixture = structuredClone(FIXTURES['/api/plugins/savings/overview']) as {
+    payload: Record<string, unknown>;
+  };
+  return fixture.payload;
 }

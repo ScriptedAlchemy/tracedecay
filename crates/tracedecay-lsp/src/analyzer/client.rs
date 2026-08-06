@@ -5,6 +5,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::SinkExt;
 use lsp_types::request::{
     CallHierarchyIncomingCalls, CallHierarchyOutgoingCalls, CallHierarchyPrepare,
     DocumentSymbolRequest, GotoDeclaration, GotoDeclarationParams, GotoDefinition,
@@ -26,6 +27,7 @@ use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 use super::broker::{CodeDiagnostic, DiagnosticSeverity};
 use super::error::{
@@ -33,8 +35,8 @@ use super::error::{
     AnalyzerRuntimeError as TraceDecayError,
 };
 use crate::{
-    AnalyzerEvent, AsyncContentLengthError, AsyncContentLengthReader,
-    ConnectionLocalRequestSequence, FramePoll, write_content_length_frame_until,
+    AnalyzerEvent, AsyncContentLengthError, ConnectionLocalRequestSequence, ContentLengthCodec,
+    FramePoll, read_content_length_frame_until,
 };
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -277,8 +279,8 @@ pub struct StdioLspClient {
     command: String,
     document_versions: BTreeMap<String, i32>,
     next_request_id: ConnectionLocalRequestSequence,
-    stdin: tokio::process::ChildStdin,
-    reader: AsyncContentLengthReader<tokio::process::ChildStdout>,
+    stdin: FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
+    reader: FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
     child: tokio::process::Child,
     stderr_task: JoinHandle<()>,
 }
@@ -302,7 +304,7 @@ impl StdioLspClient {
                 message: format!("failed to spawn LSP server '{command}': {e}"),
             })?;
 
-        let mut stdin = child.stdin.take().ok_or_else(|| TraceDecayError::Config {
+        let stdin = child.stdin.take().ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to open stdin for LSP server '{command}'"),
         })?;
         let stdout = child.stdout.take().ok_or_else(|| TraceDecayError::Config {
@@ -311,7 +313,8 @@ impl StdioLspClient {
         let stderr = child.stderr.take().ok_or_else(|| TraceDecayError::Config {
             message: format!("failed to open stderr for LSP server '{command}'"),
         })?;
-        let mut reader = AsyncContentLengthReader::new(stdout);
+        let mut stdin = FramedWrite::new(stdin, ContentLengthCodec::new());
+        let mut reader = FramedRead::new(stdout, ContentLengthCodec::new());
         let stderr_capture = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = spawn_stderr_capture(stderr, Arc::clone(&stderr_capture));
 
@@ -899,13 +902,13 @@ fn enrich_start_error(command: &str, err: TraceDecayError, stderr: &str) -> Trac
 }
 
 async fn wait_for_initialize(
-    reader: &mut AsyncContentLengthReader<tokio::process::ChildStdout>,
+    reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
     deadline: tokio::time::Instant,
     command: &str,
     timeout: Duration,
 ) -> Result<()> {
     loop {
-        let frame = match reader.read_frame_until(deadline).await {
+        let frame = match read_content_length_frame_until(reader, deadline).await {
             Ok(FramePoll::Frame(frame)) => frame,
             Ok(FramePoll::Pending) | Err(AsyncContentLengthError::DeadlineElapsed) => {
                 return Err(TraceDecayError::Config {
@@ -930,24 +933,25 @@ async fn wait_for_initialize(
 }
 
 async fn write_message_with_timeout(
-    stdin: &mut tokio::process::ChildStdin,
+    stdin: &mut FramedWrite<tokio::process::ChildStdin, ContentLengthCodec>,
     value: Value,
     timeout: Duration,
 ) -> Result<()> {
     let body = serde_json::to_vec(&value).map_err(|e| TraceDecayError::Config {
         message: format!("failed to encode LSP message: {e}"),
     })?;
-    write_content_length_frame_until(stdin, &body, tokio::time::Instant::now() + timeout)
-        .await
-        .map_err(|error| match error {
-            AsyncContentLengthError::DeadlineElapsed => TraceDecayError::Config {
-                message: format!(
-                    "LSP message write timed out after {} ms",
-                    timeout.as_millis()
-                ),
-            },
-            error => frame_write_error(error),
-        })
+    tokio::time::timeout_at(
+        tokio::time::Instant::now() + timeout,
+        stdin.send(body.as_slice()),
+    )
+    .await
+    .map_err(|_| TraceDecayError::Config {
+        message: format!(
+            "LSP message write timed out after {} ms",
+            timeout.as_millis()
+        ),
+    })?
+    .map_err(frame_write_error)
 }
 
 fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
@@ -974,11 +978,11 @@ fn cancel_request_message(request_id: u64) -> Value {
 }
 
 async fn read_message_until(
-    reader: &mut AsyncContentLengthReader<tokio::process::ChildStdout>,
+    reader: &mut FramedRead<tokio::process::ChildStdout, ContentLengthCodec>,
     deadline: tokio::time::Instant,
     timeouts: LspRefreshTimeouts,
 ) -> Result<Option<JsonRpcMessage>> {
-    match reader.read_frame_until(deadline).await {
+    match read_content_length_frame_until(reader, deadline).await {
         Ok(FramePoll::Frame(frame)) => decode_message(&frame).map(Some),
         Ok(FramePoll::Pending | FramePoll::Closed) => Ok(None),
         Err(AsyncContentLengthError::DeadlineElapsed) => Err(refresh_timed_out(timeouts)),

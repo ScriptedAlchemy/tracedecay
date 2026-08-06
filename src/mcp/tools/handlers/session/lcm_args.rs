@@ -393,32 +393,6 @@ pub(super) fn lcm_load_content_slice(args: &Value) -> Result<(LcmContentSlice, O
     Ok((LcmContentSlice { offset, limit }, clamped_from))
 }
 
-pub(super) fn lcm_doctor_mode(args: &Value) -> Result<&str> {
-    let mode = optional_non_empty_string_arg(args, "mode")?.unwrap_or("diagnose");
-    match mode {
-        "diagnose" | "repair" | "retention" | "clean" | "gc" => Ok(mode),
-        _ => Err(argument_error(
-            "mode must be one of diagnose, repair, retention, clean, gc",
-        )),
-    }
-}
-
-pub(super) fn lcm_doctor_clean_apply_enabled(_args: &Value) -> Result<bool> {
-    Ok(crate::global_db::env_flag("LCM_DOCTOR_CLEAN_APPLY_ENABLED"))
-}
-
-pub(super) fn lcm_gc_apply_enabled(_args: &Value) -> Result<bool> {
-    Ok(crate::global_db::env_flag("LCM_GC_APPLY_ENABLED"))
-}
-
-pub(super) fn lcm_clean_config(args: &Value) -> Result<LcmCleanConfig> {
-    Ok(LcmCleanConfig {
-        ignore_session_patterns: string_array_arg(args, "ignore_session_patterns")?,
-        stateless_session_patterns: string_array_arg(args, "stateless_session_patterns")?,
-        ignore_message_patterns: string_array_arg(args, "ignore_message_patterns")?,
-    })
-}
-
 pub(super) fn lcm_gc_config(args: &Value) -> Result<LcmGcConfig> {
     match args.get("gc_config") {
         Some(value) => serde_json::from_value::<LcmGcConfig>(value.clone()).map_err(|err| {
@@ -623,22 +597,4 @@ pub(super) fn parse_git_scope_filter(args: &Value) -> Result<GitScopeFilter> {
         optional_non_empty_string_arg(args, "commit")?,
     )
     .map_err(|err| argument_error(err.to_string()))
-}
-
-#[cfg(test)]
-mod authority_tests {
-    use super::*;
-
-    #[test]
-    fn doctor_apply_gates_ignore_caller_overrides() {
-        let clean_env = crate::global_db::env_flag("LCM_DOCTOR_CLEAN_APPLY_ENABLED");
-        let gc_env = crate::global_db::env_flag("LCM_GC_APPLY_ENABLED");
-        let args = json!({
-            "doctor_clean_apply_enabled": !clean_env,
-            "lcm_gc_apply_enabled": !gc_env,
-        });
-
-        assert_eq!(lcm_doctor_clean_apply_enabled(&args).unwrap(), clean_env);
-        assert_eq!(lcm_gc_apply_enabled(&args).unwrap(), gc_env);
-    }
 }

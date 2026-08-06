@@ -1902,7 +1902,7 @@ mod tests {
 
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const THREAD_CAPTURE: &str =
-        include_str!("../fixtures/pr13_branch_pr/review_thread.graphql.json");
+        include_str!("../fixtures/provider_branch_review/review_thread.graphql.json");
 
     #[derive(Clone, Copy)]
     enum FixtureCredentialAuthorityModeV1 {

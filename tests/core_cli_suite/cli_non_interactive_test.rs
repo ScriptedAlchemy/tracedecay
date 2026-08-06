@@ -602,7 +602,7 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
 
     assert!(
         home.path()
-            .join("plugins/tracedecay/.codex-plugin/plugin.json")
+            .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")
             .is_file(),
         "install --agent codex should still install the Codex plugin bundle"
     );
@@ -1960,6 +1960,49 @@ fn branch_remove_deletes_branch_db_from_profile_shard() {
     assert!(
         !shard_root.join("branches/feature_ui.db").exists(),
         "branch remove should delete branch DB from profile shard"
+    );
+}
+
+#[tokio::test]
+async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
+    write_profile_sharded_fixture(home.path(), project.path());
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+    let shard_root = profile_shard_root(home.path());
+    write_branch_meta(
+        &shard_root,
+        &[("feature/legacy-memory", "branches/feature_legacy_memory.db")],
+        true,
+    );
+    let branch_db = shard_root.join("branches/feature_legacy_memory.db");
+    rusqlite::Connection::open(&branch_db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE memory_facts (fact_id TEXT PRIMARY KEY);
+             INSERT INTO memory_facts (fact_id) VALUES ('branch-local');",
+        )
+        .unwrap();
+
+    let mut command = tracedecay_command(home.path(), project.path());
+    command.args(["branch", "remove", "feature/legacy-memory"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "branch remove should not require a migration receipt\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !branch_db.exists(),
+        "branch remove should delete obsolete branch-local memory with its branch database"
     );
 }
 

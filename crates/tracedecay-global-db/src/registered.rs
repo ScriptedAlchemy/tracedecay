@@ -24,44 +24,15 @@ pub struct RegisteredGlobalDb {
     authority: DatabaseAuthority,
 }
 
-pub struct RegisteredWorkApplicationServicesV1 {
-    commands:
-        tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>,
-    projections: tracedecay_application::WorkProjectionReadService<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
-}
-
-impl RegisteredWorkApplicationServicesV1 {
-    pub fn commands(
-        &self,
-    ) -> &tracedecay_application::WorkService<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
-    {
-        &self.commands
-    }
-
-    pub fn projections(
-        &self,
-    ) -> &tracedecay_application::WorkProjectionReadService<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.projections
-    }
-}
-
-/// PR17 workflow definition/activation and task-handoff-token services over
-/// the same registered Work exact-SQL channel as [`RegisteredWorkApplicationServicesV1`].
-/// This is not a second Work authority: [`WorkflowSqliteAuthority`] installs its
-/// tables through the exact handle `WorkSqliteStorage` owns.
+/// Workflow definition reads and journaled mutation authority over the
+/// registered exact-SQL channel.
 ///
 /// [`WorkflowSqliteAuthority`]: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority
 pub struct RegisteredWorkflowApplicationServicesV1 {
     definitions: tracedecay_application::WorkflowDefinitionService<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     >,
-    handoffs: tracedecay_application::TaskHandoffService<
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
-    >,
+    effects: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
@@ -73,16 +44,77 @@ impl RegisteredWorkflowApplicationServicesV1 {
         &self.definitions
     }
 
-    pub fn handoffs(
-        &self,
-    ) -> &tracedecay_application::TaskHandoffService<
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
-    > {
-        &self.handoffs
+    pub fn effects(&self) -> &tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority {
+        &self.effects
     }
 }
 
 impl RegisteredGlobalDb {
+    /// Inspects an unpublished registered runtime and returns confirmation only
+    /// when its configuration authority issued a typed reset refusal.
+    pub async fn configuration_reset_confirmation(
+        runtime: &StoreRuntimeHandle,
+        expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
+        expected_locator: &tracedecay_store::VerifiedStoreLocatorV1,
+        authority: &DatabaseAuthority,
+    ) -> tracedecay_runtime_core::errors::Result<super::configuration::ConfigurationResetConfirmation>
+    {
+        let write_connection =
+            registered_connection(runtime, expected_binding, expected_locator, authority)?;
+        match super::configuration::configuration_reset_confirmation(&write_connection).await {
+            Ok(Some(confirmation)) => Ok(confirmation),
+            Ok(None) => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "configuration reset is not required for this store".to_owned(),
+            }),
+            Err(error) => Err(configuration_schema_error(
+                "inspect registered configuration schema",
+                error,
+            )),
+        }
+    }
+
+    /// Applies an explicitly confirmed, configuration-scoped reset before the
+    /// registered database facade is published.
+    ///
+    /// The confirmation must come from the exact typed reset refusal observed
+    /// for this store. Locator, binding, file identity, and write authority are
+    /// revalidated before any schema object is dropped.
+    pub async fn reset_configuration_and_attach(
+        runtime: StoreRuntimeHandle,
+        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
+        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
+        authority: DatabaseAuthority,
+        confirmation: super::configuration::ConfigurationResetConfirmation,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        let write_connection =
+            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
+        let transaction = write_connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| registered_error("begin confirmed configuration reset", error))?;
+        if let Err(error) =
+            super::configuration::reset_configuration_schema(&transaction, &confirmation).await
+        {
+            let rollback = transaction.rollback().await;
+            return match rollback {
+                Ok(()) => Err(configuration_schema_error(
+                    "reset registered configuration schema",
+                    error,
+                )),
+                Err(rollback_error) => Err(registered_error(
+                    "rollback rejected configuration reset",
+                    format!("{error}; rollback failed: {rollback_error}"),
+                )),
+            };
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registered_error("commit confirmed configuration reset", error))?;
+        super::ensure_registered_schema(&write_connection).await?;
+        Self::finish_attach(runtime, write_connection, authority).await
+    }
+
     /// Creates the registered schema at its final shape (or verifies an
     /// existing store already carries it) before validating and exposing the
     /// registered global database facade. No path is reopened, and no store is
@@ -270,7 +302,7 @@ impl RegisteredGlobalDb {
     ///
     /// Exposed so the composition root can build the adapters it owns —
     /// `RuntimeEvidenceAssemblyStore`, `RuntimeExternalSourceStore`,
-    /// `GlobalDbObservationStore`, `DaemonWorkRuntimeV1` — without this crate
+    /// `GlobalDbObservationStore` — without this crate
     /// naming a root type. See the "root-owned adapters" seam note in
     /// `SEAMS.md`.
     pub fn runtime(&self) -> &StoreRuntimeHandle {
@@ -285,15 +317,16 @@ impl RegisteredGlobalDb {
         &self.authority
     }
 
-    pub fn work_storage(
+    fn workflow_storage_handle(
         &self,
-    ) -> tracedecay_runtime_core::errors::Result<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>
-    {
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
+    > {
         let handle = self
             .runtime
             .authorized_exact_sql_handle(self.authority.clone())
             .map_err(|error| {
-                registered_error("attach registered Work storage", format!("{error:?}"))
+                registered_error("attach registered workflow storage", format!("{error:?}"))
             })?;
         validate_registered_identity(
             handle.binding(),
@@ -301,7 +334,7 @@ impl RegisteredGlobalDb {
             self.runtime.binding(),
             self.runtime.locator().verified(),
         )?;
-        Ok(tracedecay_rusqlite_runtime::work::WorkSqliteStorage::from_registered(handle))
+        Ok(handle)
     }
 
     pub fn authorized_scope_set_storage(
@@ -331,29 +364,16 @@ impl RegisteredGlobalDb {
         )
     }
 
-    pub fn work_application_services(
-        &self,
-    ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkApplicationServicesV1> {
-        let storage = self.work_storage()?;
-        Ok(RegisteredWorkApplicationServicesV1 {
-            commands: tracedecay_application::WorkService::new(storage.clone()),
-            projections: tracedecay_application::WorkProjectionReadService::new(storage),
-        })
-    }
-
-    /// Attaches the PR17 workflow-definition/task-handoff authority over the
-    /// registered Work exact-SQL handle. Installs `workflow_*` tables
-    /// idempotently through the same handle `work_storage` validates.
+    /// Attaches the workflow-definition/task-handoff authority over the
+    /// registered exact-SQL handle.
     pub fn workflow_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     > {
-        let storage = self.work_storage()?;
-        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_work_storage(&storage)
-            .map_err(|error| {
-                registered_error("attach registered workflow storage", format!("{error:?}"))
-            })
+        let storage = self.workflow_storage_handle()?;
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_registered(storage)
+            .map_err(workflow_storage_error)
     }
 
     pub fn workflow_application_services(
@@ -362,14 +382,26 @@ impl RegisteredGlobalDb {
         let authority = self.workflow_storage()?;
         Ok(RegisteredWorkflowApplicationServicesV1 {
             definitions: tracedecay_application::WorkflowDefinitionService::new(authority.clone()),
-            handoffs: tracedecay_application::TaskHandoffService::new(authority),
+            effects: authority,
         })
     }
 
-    // Root-owned adapter, deliberately not built here: `work_runtime` returned
-    // `crate::daemon::work_runtime::DaemonWorkRuntimeV1<WorkSqliteStorage>`,
-    // which lives above this crate. The composition root builds it from
-    // `work_storage()` plus `Arc::clone(&registered)`; see `SEAMS.md`.
+    /// Attaches the single-use handoff-open authority through the same
+    /// registered exact-SQL handle as workflow state.
+    pub fn handoff_open_storage(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority,
+    > {
+        let storage = self.workflow_storage_handle()?;
+        tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority::from_registered(storage)
+            .map_err(|error| {
+                registered_error(
+                    "attach registered handoff-open storage",
+                    format!("{error:?}"),
+                )
+            })
+    }
 
     pub fn storage_telemetry_handle(
         &self,
@@ -870,6 +902,39 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
+fn configuration_schema_error(
+    operation: &str,
+    error: super::configuration::ConfigurationSchemaError,
+) -> TraceDecayError {
+    match error {
+        super::configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+            TraceDecayError::reset_required("configuration", reason)
+        }
+        super::configuration::ConfigurationSchemaError::Storage(error) => {
+            registered_error(operation, error)
+        }
+    }
+}
+
+fn workflow_storage_error(
+    error: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError,
+) -> TraceDecayError {
+    match error {
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::ResetRequired => {
+            TraceDecayError::reset_required(
+                "workflow",
+                "persisted workflow schema does not match the final workflow authority",
+            )
+        }
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::Unavailable => {
+            registered_error(
+                "attach registered workflow storage",
+                "workflow storage is unavailable",
+            )
+        }
+    }
+}
+
 fn sqlite_identity_error_message(
     error: tracedecay_runtime_core::db::SqliteFileIdentityError,
 ) -> &'static str {
@@ -888,6 +953,10 @@ fn sqlite_identity_error_message(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "registered/workflow_schema_tests.rs"]
+mod workflow_schema_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1038,6 +1107,101 @@ mod tests {
         assert!(validate_opened_file_identity(None, 7).is_err());
         assert!(validate_opened_file_identity(Some(6), 7).is_err());
         assert!(validate_opened_file_identity(Some(7), 7).is_ok());
+    }
+
+    #[tokio::test]
+    async fn typed_configuration_reset_reopens_the_exact_registered_runtime() {
+        crate::register_test_schema_installer();
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("project/sessions.db");
+        fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+        let authority = DatabaseAuthority::acquire_test(
+            &database_path,
+            "configuration reset registered runtime",
+        )
+        .unwrap();
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: tracedecay_domain::ProjectId::new(
+                    "project.configuration-reset".to_owned(),
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let writer = database
+                .writer_connection("seed incompatible configuration shape")
+                .await
+                .unwrap();
+            crate::ensure_registered_schema(writer.engine_connection())
+                .await
+                .unwrap();
+            writer
+                .engine_connection()
+                .execute_batch(
+                    "CREATE TABLE configuration_legacy_shadow (value TEXT NOT NULL);
+                     INSERT INTO configuration_legacy_shadow VALUES ('must-not-be-read');
+                     CREATE TABLE unrelated_operator_state (value TEXT NOT NULL);
+                     INSERT INTO unrelated_operator_state VALUES ('preserve-me');",
+                )
+                .await
+                .unwrap();
+        }
+        let runtime = database.retained_runtime().clone();
+        let expected_binding = runtime.binding().clone();
+        let expected_locator = runtime.locator().verified().clone();
+        let authority = runtime
+            .database_authority("attach configuration reset runtime")
+            .unwrap();
+        let error = match RegisteredGlobalDb::migrate_and_attach(
+            runtime.clone(),
+            expected_binding.clone(),
+            expected_locator.clone(),
+            authority.clone(),
+        )
+        .await
+        {
+            Ok(_) => panic!("incompatible configuration must not be published"),
+            Err(error) => error,
+        };
+        let confirmation = crate::configuration::ConfigurationResetConfirmation::try_from(&error)
+            .expect("typed refusal produces reset confirmation");
+
+        let registered = RegisteredGlobalDb::reset_configuration_and_attach(
+            runtime,
+            expected_binding,
+            expected_locator,
+            authority,
+            confirmation,
+        )
+        .await
+        .expect("confirmed scoped reset reopens the exact runtime");
+
+        let snapshot = registered.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query("SELECT value FROM unrelated_operator_state", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "preserve-me"
+        );
+        assert!(
+            crate::configuration::configuration_reset_confirmation(&snapshot)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

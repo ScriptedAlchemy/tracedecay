@@ -469,6 +469,7 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
             ignored_collision_digest: None,
         },
         tracedecay_domain::GitOperationStateV1::None,
+        Some(digest('0')),
         Some(digest('1')),
         Some(digest('2')),
         Some(digest('3')),
@@ -484,8 +485,8 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
     )
     .expect("native repository snapshot");
     let identity = GitCommitIdentityV1 {
-        name: "PR12 Fixture".to_owned(),
-        email: "pr12-fixture@example.com".to_owned(),
+        name: "Application Fixture".to_owned(),
+        email: "application-fixture@example.com".to_owned(),
         at: UtcMicros(1_000_000),
     };
     let commit_intent = GitIndexCommitIntentV1::new(

@@ -19,8 +19,8 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
     GraphEntity, GraphEntityId, GraphFormatVersion, GraphLabel, GraphNamespace, GraphProjectionId,
     GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind,
-    GraphSnapshot, GraphWatermark, NeverCancelled, ProjectionReplacement, SourceGeneration,
-    TraversalRequest,
+    GraphSnapshot, GraphTraversalDirection, GraphWatermark, NeverCancelled, ProjectionReplacement,
+    SourceGeneration, TraversalRequest,
 };
 
 mod traversal;
@@ -382,6 +382,7 @@ impl CodeGraphEvidenceReader {
             namespace: namespace()?,
             start: symbol_entity_id(seed)?,
             relation_kinds: BTreeSet::new(),
+            direction: GraphTraversalDirection::Outgoing,
             max_depth: graph_depth,
             max_visits: self.projection_node_count,
             max_results: self.projection_node_count,

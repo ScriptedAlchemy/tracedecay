@@ -39,8 +39,7 @@ pub use access::windows_hard_link_count;
 pub use access::{DaemonDatabaseScope, MaintenanceDatabaseScope};
 pub use access::{DatabaseAuthority, DatabaseAuthorityRole};
 pub use access::{
-    DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
-    enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
+    WriterOwnership, enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use analytics::HealthFileAggregate;
 pub use connection::Database;
@@ -56,10 +55,6 @@ pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
 pub(crate) use memory_v2::MemoryV2LegacyPurgeReceipt;
-pub use memory_v2::{
-    MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
-    list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
-};
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,

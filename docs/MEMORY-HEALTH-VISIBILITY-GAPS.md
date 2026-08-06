@@ -1,39 +1,41 @@
 # Holographic Memory — Health Visibility Gap Analysis
 
-> Historical gap analysis. Its `dashboard/holographic/*` frontend references
+> Audit snapshot. Its `dashboard/holographic/*` frontend references
 > describe the legacy plugin at `/legacy`, not the single-app product dashboard
 > built from `dashboard/src/workspaces/` and served at `/`.
 
 Scope: operator visibility into **holographic (FHRR) memory health** across every
 user-facing surface — the `tracedecay` CLI, the standalone `tracedecay dashboard`
 HTTP backend, the `dashboard/holographic/*` frontend page, the MCP tool surface,
-and the doctor/maintenance commands. The LCM session store and the code graph are
-referenced only as comparison/contrast.
+and the read-only Doctor/maintenance evidence surfaces. The LCM session store and
+the code graph are referenced only as comparison/contrast.
 
-This is a **gap analysis + recommendations** artifact (task `t_f47ae50b`), not an
-implementation. It builds on two prior audits in this repo:
+**Doctor boundary:** Doctor is strictly read-only diagnosis and evidence. It does
+not repair, apply, clean, garbage-collect, retain, relink, or migrate anything.
+Daemon-owned maintenance and explicitly authorized owner operations are separate
+write paths and must not be presented as Doctor actions.
+
+This is a **gap analysis + recommendations** artifact, not an implementation. It
+builds on two prior audits in this repo:
 
 - `docs/DASHBOARD-API-AUDIT.md` — every dashboard route + the data-access contract.
 - `docs/MEMORY-STORAGE-GROWTH-AUDIT.md` — per-fact cost, capacity math, unbounded-growth paths.
 
-Real numbers below are measured against the live checkout DB
+The measured snapshot below uses the live checkout DB
 (`.tracedecay/tracedecay.db`, 78.5 MB total; **129 facts**, memory subsystem
-**2.43 MiB**) on the `master` working tree at `5ad31c4`.
+**2.43 MiB**).
 
-> **Current-status update (post-Q3/Q6):** two gaps this analysis flagged have
-> since **landed in code** and are no longer open:
+> **Current status:** two gaps this analysis flagged have **landed in code** and
+> are no longer open:
 > - **Q3 — `MemoryStatus` surfacing (was G2):** the rich status object is now
 >   reachable by humans via `tracedecay memory status` (CLI,
 >   `MemoryAction::Status`), `GET /api/plugins/holographic/status` (dashboard
 >   route), and a dashboard Memory Health card; the MCP tool doc now
->   cross-references them. Where this doc still says MemoryStatus is "MCP-only",
->   there is "no `memory status` CLI", or it is "invisible to humans", that is
->   the **gap-analysis-time state**, flagged as historical below.
+>   cross-references them.
 > - **Q6 — feedback-history read API (trust-decay §5 explainability):**
 >   `TraceDecay::fact_trust_history(fact_id)`, the MCP fact `get` `trust_history`
 >   field, and `GET /api/plugins/holographic/fact/{fact_id}/trust-history` make
->   the `memory_feedback_events` audit table readable. Where this doc still calls
->   that table "write-only", that is the **gap-analysis-time state**.
+>   the `memory_feedback_events` audit table readable.
 >
 > Gaps that remain open: the memory **doctor** (G1, M5), the T2 diagnostic cards
 > (G3 store-size breakdown, G4 orphan badge, G5 stale-memory card, G6 FTS-health
@@ -64,28 +66,29 @@ Read-only SQL against the live DB to ground each gap in current numbers.
 
 ## 2. The headline structural gap
 
-**The LCM subsystem has a full doctor; holographic memory does not.**
+**The LCM subsystem has a read-only doctor; holographic memory does not yet have a
+dedicated diagnosis bundle.**
 
 | Surface | LCM session store | Holographic memory |
 |---|---|---|
-| Diagnose (schema/FTS/integrity/orphan/retention) | ✅ `tracedecay_lcm_doctor` MCP + `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` | ❌ none |
+| Diagnose (schema/FTS/integrity/orphan/retention) | ✅ `tracedecay_lcm_doctor` MCP + `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` (read-only) | ❌ none |
 | Status/telemetry | ✅ `tracedecay_lcm_status` | ⚠️ `tracedecay_memory_status` (counts only — no integrity/health) |
-| Plan + apply repairs (dry-run → backup → apply) | ✅ `doctor(mode=repair/clean)` | ❌ none (`memory curate` is dedup-only) |
-| Cleanup candidates w/ backup | ✅ `clean_lcm_noise` | ❌ none |
+| Owner maintenance | ✅ daemon/explicitly authorized retention and payload-GC paths | ⚠️ `memory curate` is the explicit curation path; no unified memory maintenance owner |
 
 `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` gathers schema version, FTS rebuild-needed flags,
 payload orphan/missing-file diagnostics, summary-source integrity, lifecycle
-frontier checks, retention candidates, and noise cleanup candidates — then plans
-safe repairs, backs up the DB, and applies them, all behind `mode`/`apply`
-flags. **Nothing equivalent exists for `memory_facts` / `memory_entities` /
+frontier checks, retention candidates, and maintenance debt evidence. It reports
+those findings only. Daemon-owned or explicitly authorized owner operations consume
+the evidence when a write is actually requested. **Nothing equivalent exists for
+`memory_facts` / `memory_entities` /
 `memory_banks` / `memory_oplog`.** That asymmetry is the single biggest
 visibility gap and the natural home for most of the metrics below.
 
-The top-level `tracedecay doctor` (`src/doctor.rs`) is an **installation**
-health check (binary, project-index existence, global DB, agent integrations,
-network) plus a whole-DB `VACUUM`. It reports DB file size + reclaimed bytes but
-**zero memory-specific metrics** — no fact count, no vector bytes, no FTS, no
-orphans.
+The top-level `tracedecay doctor` (`src/doctor.rs`) is an **installation and
+runtime evidence** check (binary, project-index existence, global DB, agent
+integrations, network, and daemon findings). It performs no VACUUM or other
+mutation and currently reports **zero memory-specific metrics** — no fact count,
+no vector bytes, no FTS, no orphans.
 
 ---
 
@@ -112,13 +115,13 @@ Already renders, from `GET /api/plugins/holographic` (`overview_payload`):
 
 | # | Required visibility | Status | Where it is today | Gap |
 |---|---|---|---|---|
-| A | **Store size** | ❌/⚠️ | `tracedecay doctor` shows whole-DB bytes + VACUUM reclaim; `status --runtime` shows DB/WAL/SHM bytes + db/source ratio. **Neither breaks out the memory subsystem**, and neither is in the dashboard. | No memory-subsystem byte footprint (facts vector bytes, FTS bytes, oplog bytes); no per-table size; no "memory is X% of DB". |
+| A | **Store size** | ❌/⚠️ | `tracedecay doctor` and `status --runtime` show whole-DB/runtime evidence, but **neither breaks out the memory subsystem**, and neither is in the dashboard. | No memory-subsystem byte footprint (facts vector bytes, FTS bytes, oplog bytes); no per-table size; no "memory is X% of DB". |
 | B | **Vector counts** | ⚠️ partial | Per-category HRR coverage (vectors/facts) in dashboard. Since **Q3 landed**, `MemoryStatus.missing_vector_count` + `hrr_dim` + `estimated_capacity` are surfaced via `tracedecay memory status` (CLI), `GET /api/plugins/holographic/status`, and the Memory Health card (at audit time these were MCP-only). | **Total vector bytes and dimension/precision (f64 vs f32) still unshown** (G3/G10). The capacity ceiling (269 facts/bank) and utilization % are now surfaced by Q3. |
 | C | **FTS / entity stats** | ⚠️/❌ | Entity count + entity-type composition in dashboard; `orphan_entities` reported **reactively** inside a curation dry-run plan. | No standing FTS index size/health; **no FTS sync check** (LCM doctor has `rebuild_needed` detection — memory does not); no orphan-entity count except by running curate. **5 orphan entities already exist** in a 129-fact checkout and are invisible without a curation run. |
 | D | **Trust-decay status** | ❌ | Trust histogram + mean shown (static `trust_score`). Decay is **ranking-only, recomputed at query time, never written to disk** (`retrieval.rs::temporal_decay_factor`, 365-day half-life, floored at 0.10). The per-result `why` field exposes the dynamic factor per result. | No "effective decayed trust" aggregate view / projection (G7, still open). `below_default_recall_threshold_count` is now surfaced via **Q3** (`memory status` / `/status`). The trust *change history* is now readable via **Q6** (`fact_trust_history` / `/trust-history`). |
 | E | **Stale memories** | ❌ | Nothing. `last_recalled_at` is stored per fact but unused for any UI/CLI signal. | No "not recalled in N days" list/count. **In this checkout, 129/129 facts have `last_recalled_at IS NULL` (never recalled)** — a strong staleness signal that is entirely invisible. |
 | F | **Index health** | ⚠️/❌ | HRR bank freshness status (`stale_bank`) per category is the only index-health signal. `MemoryStatus.repair` (`missing_vectors_repaired`, `banks_rebuilt`) exists, unsurfaced. | No FTS integrity check; no `memory_facts_fts` row-count sync vs `memory_facts`; no bank-capacity utilization; no dirty-bank queue display (`memory_bank_dirty` = 3 here); no auto_vacuum/VACUUM-status indicator; no "rebuild needed" planner like LCM's. |
-| G | **Suggested maintenance actions** | ⚠️ partial | Curation tab proposes delete/merge (similarity dedup) + entity prune/classify. `tracedecay memory curate` (CLI) does the same headless. | No unified "doctor" action list: **reap orphan entities, prune oplog, rebuild FTS, rebuild banks, VACUUM/reclaim, retention sweep** — none are offered as discoverable actions. Several have no code path at all (see §5). |
+| G | **Suggested maintenance actions** | ⚠️ partial | Curation tab proposes delete/merge (similarity dedup) + entity prune/classify. `tracedecay memory curate` (CLI) does the same headless. | No unified read-only evidence bundle for **reap orphan entities, prune oplog, rebuild FTS, rebuild banks, reclaim, or retention**. Any write must remain on a separate daemon/authorized owner path; Doctor does not offer actions. |
 
 ### 3.3 The status surface — now surfaced (was "hidden" at audit time)
 
@@ -135,14 +138,7 @@ missing_vector_count,               // facts missing/legacy HRR vectors
 repair: { missing_vectors_repaired, banks_rebuilt }
 ```
 
-**Status at audit time (historical):** this object was reachable **only** via
-the `tracedecay_memory_status` MCP tool; the dashboard never called it (the only
-callers were side-effecting readiness probes in `dashboard.rs:141` and
-`memory_curate.rs:117`, whose return value was discarded), and the `tracedecay`
-CLI had no `memory status` subcommand (`MemoryAction` had no `Status` variant).
-So the richest existing health object was invisible to humans.
-
-**Resolved by Q3 (landed):** a `Status` arm was added to `MemoryAction`
+**Resolved by Q3:** a `Status` arm was added to `MemoryAction`
 (`src/cli.rs`, `src/main.rs`), giving `tracedecay memory status` (human +
 `--json`); the dashboard route `GET /api/plugins/holographic/status`
 (`src/dashboard.rs:265`, `crates/tracedecay-dashboard-api/src/memory_api.rs`) returns the same
@@ -156,15 +152,15 @@ equivalents (`src/mcp/tools/definitions.rs:1801`). **G2 is closed.**
 
 | ID | Gap | Severity | Root cause |
 |---|---|---|---|
-| G1 | **No memory doctor** (vs LCM's full diagnose/repair/clean flow) | High | No `memory` doctor module; only `curate`. |
+| G1 | **No memory doctor** (read-only diagnosis/evidence) | High | No `memory` diagnosis module; only `curate` and status. |
 | ~~G2~~ | ~~**`MemoryStatus` not surfaced** to dashboard or CLI~~ | ~~High~~ | **Resolved by Q3.** `memory status` CLI (`MemoryAction::Status`), `GET /api/plugins/holographic/status`, and a dashboard Memory Health card now surface it. |
-| G3 | **Store size** never broken out by memory table; not in dashboard | High | `doctor`/`--runtime` report whole-DB bytes only; no `dbstat`/per-table rollup. |
+| G3 | **Store size** never broken out by memory table; not in dashboard | High | Doctor/`--runtime` report whole-DB evidence only; no `dbstat`/per-table rollup. |
 | G4 | **Orphan entities invisible** without a curation run (5 now) | High | No standing diagnostic; only reported inside a curate plan. |
 | G5 | **Stale / never-recalled memories invisible** (129/129 here) | High | `last_recalled_at` stored but unused for any signal. |
 | G6 | **FTS index health not checked** (no `rebuild_needed` like LCM) | Med | No FTS row-sync/`rebuild` probe for `memory_facts_fts`. |
 | G7 | **Trust-decay status not surfaced** (decay is query-time only) | Med | No "effective trust" view; `below_default_recall_threshold_count` hidden. |
 | G8 | **Bank capacity/utilization (269 ceiling) not shown** | Med | `estimated_capacity` computed in `MemoryStatus`, never displayed. |
-| G9 | **No maintenance action menu** (reap/prune/rebuild/VACUUM/retention) | Med | Several actions have no code path at all (oplog prune, entity reap, FTS rebuild). |
+| G9 | **No maintenance evidence/owner routing** | Med | Several actions have no code path at all (oplog prune, entity reap, FTS rebuild); Doctor remains read-only. |
 | G10 | **Vector precision (f64 vs f32) + total vector bytes not shown** | Low | Precision is implicit in the blob; audit recommends f32 migration but nothing displays it. |
 | G11 | **Dirty-bank queue & oplog growth not surfaced** | Low | `memory_bank_dirty` (3) and unbounded `memory_oplog` have no visibility. |
 
@@ -184,24 +180,25 @@ backend endpoint/data needed. Tiers: **T1** = reuses existing data, low effort;
 | D2 | **Store-size breakdown card**: per-table bytes (`memory_facts`, `memory_facts_fts*`, `memory_entities`, `memory_fact_entities`, `memory_banks`, `memory_oplog`), memory-subsystem total, and "% of whole DB". A donut/composition. | T2 | New endpoint running `dbstat` rollup (or cached `SUM(length(hrr_vector))` + table-size probes). |
 | D3 | **Index-health strip**: FTS sync status (`memory_facts` rows vs `memory_facts_fts` doc count), bank-freshness aggregate (reuse existing `hrr_coverage` `stale_bank`), dirty-bank queue depth (`memory_bank_dirty`), `journal_mode` + `auto_vacuum` state. | T2 | New endpoint; FTS sync = two `COUNT(*)`s; the rest are one-shot PRAGMAs/counts. |
 | D4 | **Stale-memory card**: counts of `last_recalled_at IS NULL` and `last_recalled_at < now − N days` (default 180, matching the decay half-life), with a drill-in list. | T2 | New endpoint; one `GROUP BY`/`CASE` query over `memory_facts`. |
-| D5 | **Orphan-entities badge + action**: surface the orphan count (5 now) as a standing badge on the Entities card with a one-click "Reap N orphans" button calling the doctor's reap action (§5.3). | T2 | Doctor diagnostics + reap action (M3). |
-| D6 | **Maintenance action menu** (Curation tab or new "Health" tab): Reap orphan entities · Prune oplog · Rebuild FTS · Rebuild banks · Vacuum/reclaim · Run retention sweep. Each dry-run-first with a confirm step, mirroring LCM doctor's `mode`/`apply` shape. | T3 | The doctor endpoint set (§5.3). |
+| D5 | **Orphan-entities badge + owner link**: surface the orphan count (5 now) as a standing badge on the Entities card and link to the explicitly authorized owner operation when one exists. The Doctor endpoint remains evidence-only (§5.3). | T2 | Read-only diagnostics plus a separate owner route. |
+| D6 | **Maintenance evidence panel** (Curation tab or new "Health" tab): show candidates for orphan cleanup, oplog pruning, FTS/bank rebuild, reclaim, and retention. Any confirm/apply control must call a daemon/authorized owner operation, never Doctor. | T3 | Read-only doctor/status fields plus separate owner endpoints. |
 
 ### 5.2 CLI (`src/cli.rs` / `src/main.rs`)
 
 | # | Recommendation | Tier | Backend needed |
 |---|---|---|---|
 | C1 | ~~**`tracedecay memory status`** — print `MemoryStatus` (human + `--json`).~~ | T1 | **Done (Q3).** `MemoryAction::Status` in `src/cli.rs`/`src/main.rs` surfaces `cg.memory_status()` (human + `--json`). |
-| C2 | **`tracedecay memory doctor`** — the CLI twin of the dashboard doctor: diagnose → plan → (`--apply`) repair/clean. Mirrors `tracedecay doctor` ergonomics and the LCM `doctor` mode/apply shape. | T3 | The doctor module (§5.3). |
+| C2 | **`tracedecay memory doctor`** — a read-only CLI diagnosis/evidence report for memory health. It has no repair, clean, GC, retention, relink, migration, or `--apply` mode. | T3 | The read-only doctor module (§5.3). |
 | C3 | **Extend `tracedecay doctor`** with a "Memory" section: fact/entity/bank counts, missing vectors, orphan entities, FTS sync, oplog rows, memory-subsystem bytes. Reuse the doctor diagnostics so the single command is the one-stop health check. | T2 | Doctor diagnostics (read-only subset). |
 | C4 | **Extend `status --runtime`** (`RuntimeSnapshot`) with memory counts: `fact_count`, `memory_bytes` (subsystem), `vector_bytes`. Currently it only reports graph `node_count`/`edge_count` + whole-DB bytes. | T2 | Add fields to `DatabaseSnapshot`; 2–3 more scalar queries in `sample_database`. |
 
-### 5.3 Backend — the missing memory doctor (highest-leverage new work)
+### 5.3 Backend — the missing read-only memory doctor (highest-leverage new work)
 
-Model it on `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs`: a `gather_diagnostics` →
-`plan_and_apply_repairs` pipeline with `mode ∈ {diagnose, repair, clean}` and
-`apply: bool`, plus a pre-apply DB backup (LCM already has
-`backup_database`/`checkpoint_wal_for_backup` to reuse).
+Model it on `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs`: a
+`gather_diagnostics` pipeline that returns typed evidence and candidate counts.
+There is no repair/clean/apply mode and no backup in Doctor. Daemon-owned
+maintenance and explicitly authorized owner operations may consume this evidence
+through separate entry points.
 
 **Diagnostics to gather** (all cheap read-only SQL; current values in parens):
 
@@ -223,24 +220,24 @@ Model it on `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs`: a `gather_di
 - Storage/compaction: `journal_mode`, `auto_vacuum`, freelist page count, and the
   memory-subsystem `dbstat` rollup (2.43 MiB) vs whole-DB size (78.5 MiB).
 
-**Planned/applied actions** (each `safe: bool`, description, candidate_count):
+**Owner maintenance candidates** (reported as evidence; never applied by Doctor):
 
-| Action | Exists today? | Notes |
+| Action | Exists today? | Owner boundary |
 |---|---|---|
-| `rebuild_memory_fts` | ❌ new | `INSERT INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild')`. Mirrors LCM `rebuild_summary_fts`. |
-| `reap_orphan_entities` | ❌ new | One `DELETE ... WHERE NOT EXISTS (...)`. Removes the 5 orphans. |
-| `rebuild_dirty_banks` | ✅ `rebuild_dirty_banks` exists | Just needs a doctor entry point. |
-| `prune_oplog` | ❌ new | Cap `memory_oplog` by age/count. No prune path exists today (confirmed). |
-| `vacuum_reclaim` | ✅ `TraceDecay::optimize` | Report freelist/reclaimable bytes; apply `VACUUM` (or `incremental_vacuum` after enabling it). |
-| `retention_sweep` | ❌ new | Hard-delete facts with `trust_score < MIN_TRUST AND updated_at < now − MAX_AGE`. Surfaces the existing decay math as a real cleanup path (audit rec #2). |
+| `rebuild_memory_fts` | ❌ new | Owner-only write: `INSERT INTO memory_facts_fts(memory_facts_fts) VALUES('rebuild')`. |
+| `reap_orphan_entities` | ❌ new | Owner-only write: one `DELETE ... WHERE NOT EXISTS (...)`. |
+| `rebuild_dirty_banks` | ✅ `rebuild_dirty_banks` exists | Owner maintenance may invoke it; Doctor only reports dirty banks. |
+| `prune_oplog` | ❌ new | Owner-only write; no prune path exists today (confirmed). |
+| `vacuum_reclaim` | ✅ `TraceDecay::optimize` | Owner-only reclaim operation; Doctor reports storage evidence. |
+| `retention_sweep` | ❌ new | Owner-only hard-delete path; Doctor reports candidates and never selects or applies them. |
 
 ### 5.4 MCP
 
 | # | Recommendation | Tier |
 |---|---|---|
-| M1 | **`tracedecay_memory_doctor`** tool — the agent-callable twin of LCM's `tracedecay_lcm_doctor`, wrapping §5.3. Restores parity between the two subsystems. | T3 |
+| M1 | **`tracedecay_memory_doctor`** tool — the agent-callable, read-only diagnosis/evidence twin of LCM's `tracedecay_lcm_doctor`. It cannot repair, apply, clean, GC, retain, relink, or migrate. | T3 |
 | M2 | ~~Document/promote **`tracedecay_memory_status`** (already exists) — make it discoverable (it is not referenced by any UI/CLI).~~ | T1 | **Done (Q3).** The MCP tool description now points humans to `tracedecay memory status` and `GET /api/plugins/holographic/status` (`src/mcp/tools/definitions.rs:1801`). |
-| M3 | Add the **entity-reap** and **oplog-prune** as discrete safe actions the doctor (and thus agents) can call. | T2 |
+| M3 | Add **entity-reap** and **oplog-prune** as discrete explicitly authorized owner operations. Doctor and read-only agents may report their candidates, but cannot call the writes. | T2 |
 
 ---
 
@@ -252,13 +249,15 @@ To support §5.1–§5.4 the backend needs:
    **Done (Q3).** Route wired at `src/dashboard.rs:265` returning
    `memory_status()` + largest-bank utilization; unblocks D1/C1. (Additive field
    — preserves the shape-compat rules in `DASHBOARD-API-AUDIT.md` §6 P18/P19.)
-2. **`GET /api/plugins/holographic/health`** (or `/doctor?mode=diagnose`) — the
-   diagnostics bundle from §5.3. New read-only queries; no schema change.
-3. **`POST /api/plugins/holographic/doctor`** `{mode, apply}` — plan+apply
-   repairs with pre-apply backup. The memory twin of LCM's doctor endpoint.
+2. **`GET /api/plugins/holographic/health`** (or `/doctor`) — the diagnostics
+   bundle from §5.3. New read-only queries; no schema change.
+3. **No mutating Doctor endpoint.** If a dashboard exposes an apply control, it
+   must call a separate daemon/authorized owner endpoint with its own write scope;
+   Doctor remains a read-only evidence route.
 4. **`RuntimeSnapshot` extension** — add `fact_count`, `memory_bytes`,
    `vector_bytes` to `DatabaseSnapshot` (C4).
-5. **New repair primitives** (backend functions the doctor calls):
+5. **New owner maintenance primitives** (backend functions called only by the
+   daemon or an explicitly authorized owner operation):
    `rebuild_memory_fts`, `reap_orphan_entities`, `prune_oplog`,
    `retention_sweep`. None exist today; all are small and go through
    `MemoryStore` canonical paths (respect `DASHBOARD-API-AUDIT.md` P4/P5 —
@@ -275,16 +274,17 @@ To support §5.1–§5.4 the backend needs:
    almost no new logic. D2 store-size card (G3 — needs a `dbstat`/per-table
    rollup) is still open.
 2. **T2 diagnostics:** D3 index-health strip, D4 stale-memory card, D5
-   orphan-entity badge, C3 extend `doctor`, C4 extend `--runtime`. Closes G4,
+   orphan-entity badge, C3 extend read-only `doctor`, C4 extend `--runtime`. Closes G4,
    G5, G6, G7, G8 read side.
-3. **T3 the doctor:** §5.3 module → C2 `memory doctor` CLI + M1
-   `tracedecay_memory_doctor` + D6 maintenance menu + the four new repair
-   primitives. Closes G1, G9 and gives every read-side gap a matching *action*.
+3. **T3 diagnosis plus owner maintenance:** §5.3 read-only module → C2
+   `memory doctor` CLI + M1 `tracedecay_memory_doctor`; separate owner routes may
+   add maintenance primitives without widening Doctor's authority. Closes G1 and
+   gives every read-side gap an evidence path.
 
 The Q3 portion of step 1 has landed — `MemoryStatus` is no longer unreachable
-by humans. The store-size breakdown (G3, D2) and step 3 (the memory doctor)
-remain open; step 3 is what brings memory to parity with LCM's operational
-story.
+by humans. The store-size breakdown (G3, D2) and the read-only memory diagnosis
+bundle remain open. LCM's operational write paths belong to daemon/authorized
+owners, not to Doctor.
 
 ---
 
@@ -307,6 +307,4 @@ story.
 - Live DB: `.tracedecay/tracedecay.db` (129 facts; memory subsystem 2.43 MiB of
   78.5 MB total; 5 orphan entities; 3 dirty banks; 129/129 facts never recalled).
 
-*Generated for Kanban task t_f47ae50b. Source audited at the `master` working
-tree (commit range around `5ad31c4`). All numbers measured read-only against the
-live checkout DB.*
+*All numbers in this audit are read-only measurements against the checkout DB.*

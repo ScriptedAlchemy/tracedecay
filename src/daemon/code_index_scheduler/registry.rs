@@ -7,10 +7,14 @@
 //! [`CodeIndexWorktreeSchedulerV1`]; this module never runs it while holding the
 //! registry map lock.
 
-use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::{
+    collections::BTreeMap,
+    path::{Component, Path, PathBuf},
+    sync::{
+        Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
@@ -33,6 +37,8 @@ use super::{
 };
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+
+mod resident_memory;
 
 /// Bounded daemon-wide concurrency for expensive background reconciles and
 /// mounts. A single global permit serialized EVERY project/worktree cold build
@@ -1085,11 +1091,13 @@ impl CodeIndexSchedulerRegistryV1 {
         Some(latest.generation.manifest().generation_id.clone())
     }
 
-    /// Exact live dashboard projection for one mounted worktree.
+    /// Exact bounded dashboard projection for one mounted worktree.
     ///
-    /// The freshness ladder runs before projection. Generation and scope fields
-    /// are copied from the durable sealed generation, never reconstructed from
-    /// the dashboard's display path.
+    /// This is a status read, not a query-admission boundary: it reports the
+    /// last scheduler execution state and never runs a freshness probe, opens
+    /// Git, scans the worktree, publishes a generation, or posts a wake.
+    /// Generation and scope fields are copied from the last sealed generation,
+    /// never reconstructed from the dashboard's display path.
     pub(in crate::daemon) async fn dashboard_freshness(
         &self,
         project_root: &Path,
@@ -1106,7 +1114,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         tokio::task::spawn_blocking(move || {
             let refreshing = reconcile_in_progress.load(Ordering::Acquire);
-            let mut scheduler = match scheduler.try_lock() {
+            let scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -1164,7 +1172,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     };
                 }
             };
-            let reconciled = scheduler.ensure_fresh_for_query().is_ok();
             let verified = scheduler.verified_against_source();
             let latest = if reconciled {
                 match scheduler.try_latest_complete() {
@@ -1181,6 +1188,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 None
             };
+            let stale = !reconciled || !verified || scheduler.freshness_window_elapsed();
             let hook_hint_count = scheduler.pending_hint_count();
             let (
                 repository_id,
@@ -1217,7 +1225,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 } else {
                     "indexing"
                 }
-            } else if !verified {
+            } else if stale || hook_hint_count != Some(0) {
                 if latest.is_some() {
                     "stale"
                 } else {
@@ -1589,6 +1597,74 @@ impl CodeIndexSchedulerRegistryV1 {
             GenerationDecodeAdmissionV1::AlreadyDecoded,
         )
         .await
+    }
+
+    fn current_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        let (scheduler, serving_generation) = {
+            let mounted = self.mounted.try_lock().ok()?;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.serving_generation),
+            )
+        };
+        let mut scheduler = match scheduler.try_lock() {
+            Ok(scheduler) => scheduler,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let latest = scheduler
+            .latest_complete_ready_for_exact_source_with(
+                GenerationDecodeAdmissionV1::AlreadyDecoded,
+            )
+            .ok()
+            .flatten()?;
+        if !Self::latest_matches_scope(&latest, scope) {
+            return None;
+        }
+        *serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+        Some(latest)
+    }
+
+    /// Report an already-decoded current generation for one exact mounted root
+    /// and scope without mounting, decoding, or reconciling.
+    pub(in crate::daemon) fn has_current_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        self.current_ready_decoded_for_root_scope(project_root, scope)
+            .is_some()
+    }
+
+    /// Return the exact ready generation without blocking the async executor
+    /// on the bounded synchronous freshness probe.
+    pub(in crate::daemon) async fn latest_complete_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let registry = self.clone();
+        let project_root = project_root.to_path_buf();
+        let scope = scope.clone();
+        tokio::task::spawn_blocking(move || {
+            registry.current_ready_decoded_for_root_scope(&project_root, &scope)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     async fn latest_complete_ready_for_scope_with(

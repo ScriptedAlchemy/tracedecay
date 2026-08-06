@@ -1,5 +1,5 @@
-//! Integration coverage for the historical session↔git correlation backfill
-//! (`tracedecay sessions git-backfill`).
+//! Integration coverage for historical session↔git convergence
+//! (`tracedecay sessions git-sync`).
 //!
 //! Seeds a `sessions.db` with two sessions — one spanning a mid-session branch
 //! switch — against a real git repo carrying commits on both branches, runs

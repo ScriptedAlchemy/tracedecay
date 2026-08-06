@@ -62,6 +62,14 @@ impl TranscriptCatchUpFailure {
         Self::new("scheduler", "frontier", "ingest_frontier_unavailable", true)
     }
 
+    pub(super) const fn source_discovery_partial(provider: &'static str) -> Self {
+        Self::new(provider, "discovery", "source_discovery_partial", true)
+    }
+
+    pub(super) const fn source_scan_partial(provider: &'static str, retryable: bool) -> Self {
+        Self::new(provider, "scan", "source_scan_partial", retryable)
+    }
+
     /// Mutable session ingestion requires a retained daemon registry mount.
     /// Compatibility callers without that mount must fail before touching the
     /// legacy database or any provider source.
@@ -84,6 +92,24 @@ impl ProviderRunFailure for TranscriptCatchUpFailure {
 
 pub(super) type ProviderRunOutcome = GenericProviderRunOutcome<TranscriptCatchUpFailure>;
 pub(super) type ProviderRunFold = GenericProviderRunFold<TranscriptCatchUpFailure>;
+
+/// Converts operation cancellation into provider-loop control termination.
+///
+/// Callers must branch on this before warning, recording a source failure, or
+/// publishing provider coverage.
+pub(super) fn cancelled_provider_outcome(
+    error: &source::TranscriptIngestError,
+) -> Option<ProviderRunOutcome> {
+    error.is_cancelled().then(ProviderRunOutcome::skipped)
+}
+
+pub(super) fn cancelled_claude_provider_outcome(
+    error: &claude_observation::ClaudeObservationIngestError,
+) -> Option<ProviderRunOutcome> {
+    error
+        .is_typed_cancellation()
+        .then(ProviderRunOutcome::skipped)
+}
 
 /// Hard limits for one multi-source ingest pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +287,7 @@ pub fn classify_transcript_ingest_failure(
     }
 
     let (reason_code, retryable) = match error {
+        source::TranscriptIngestError::Cancelled { .. } => ("ingest_pass_cancelled", true),
         source::TranscriptIngestError::Store(TranscriptStoreError::Conflict { .. }) => {
             ("transcript_cursor_conflict", true)
         }
@@ -286,6 +313,9 @@ pub fn classify_transcript_ingest_failure(
         source::TranscriptIngestError::ScanGenerationChanged { .. } => {
             ("transcript_source_generation_changed", true)
         }
+        source::TranscriptIngestError::BlockingScanTaskFailed { .. } => {
+            ("transcript_blocking_scan_failed", true)
+        }
         source::TranscriptIngestError::Privacy(_) => ("transcript_privacy_rejected", false),
         source::TranscriptIngestError::NonDurableRecord { .. } => unreachable!(),
         source::TranscriptIngestError::Domain(_)
@@ -296,6 +326,67 @@ pub fn classify_transcript_ingest_failure(
         }
     };
     TranscriptCatchUpFailure::new(provider, source, reason_code, retryable)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use tracedecay_store::TranscriptStoreError;
+
+    use crate::observation::ObservationCancellation;
+
+    use super::*;
+
+    #[test]
+    fn typed_cancellation_is_control_termination_without_source_failure() {
+        let error = source::TranscriptIngestError::Cancelled { provider: "test" };
+
+        let outcome = cancelled_provider_outcome(&error)
+            .expect("typed cancellation must terminate provider control flow");
+
+        assert!(outcome.failures.is_empty());
+        assert_eq!(outcome.stats, TranscriptIngestStats::default());
+        assert_eq!(outcome.bytes_consumed, 0);
+        assert_eq!(outcome.deferred_units, 0);
+    }
+
+    #[test]
+    fn typed_claude_cancellation_is_control_termination_without_source_failure() {
+        let error = claude_observation::ClaudeObservationIngestError::Application(
+            crate::observation::ObservationApplicationError::Cancelled,
+        );
+
+        let outcome = cancelled_claude_provider_outcome(&error)
+            .expect("typed Claude cancellation must terminate provider control flow");
+
+        assert!(outcome.failures.is_empty());
+        assert_eq!(outcome.stats, TranscriptIngestStats::default());
+    }
+
+    #[test]
+    fn cancellation_token_does_not_suppress_storage_failure() {
+        let cancellation = ObservationCancellation::default();
+        cancellation.cancel();
+        let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
+            operation: "test",
+            source: Box::new(std::io::Error::other("test storage failure")),
+        });
+
+        assert!(cancelled_provider_outcome(&error).is_none());
+
+        let failure = classify_transcript_ingest_failure("test", "observation", &error);
+        assert_eq!(failure.reason_code, "transcript_storage_failed");
+        assert!(failure.retryable);
+    }
+
+    #[test]
+    fn storage_failure_without_cancellation_remains_a_source_failure() {
+        let error = source::TranscriptIngestError::Store(TranscriptStoreError::Storage {
+            operation: "test",
+            source: Box::new(std::io::Error::other("test storage failure")),
+        });
+
+        assert!(cancelled_provider_outcome(&error).is_none());
+    }
 }
 
 fn non_durable_reason_code(reason: &'static str) -> &'static str {
@@ -411,6 +502,7 @@ pub fn classify_claude_observation_failure(
         Ingest::Store(error) => store(error),
         Ingest::Projection(error) => projection(error),
         Ingest::Transcript(error) => transcript(error),
+        Ingest::Terminated { error, .. } => return classify_claude_observation_failure(error),
         Ingest::Application(error) => match error {
             crate::observation::ObservationApplicationError::Store(error) => store(error),
             crate::observation::ObservationApplicationError::Cancelled => {

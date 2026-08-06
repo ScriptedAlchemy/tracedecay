@@ -4,6 +4,7 @@
 //! factory, and the currently published pool. Restart and reload construct a
 //! complete replacement before one atomic state swap; callers therefore see
 //! either the old pool or the replacement, never a half-reloaded runtime.
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
@@ -12,8 +13,10 @@ use std::pin::Pin;
 use std::sync::RwLockWriteGuard;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
+use std::time::Duration;
 
 use serde::Serialize;
+use tokio::task::JoinHandle;
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
 
 use super::fastembed_adapter::FastEmbedEmbeddingRuntime;
@@ -68,375 +71,7 @@ pub struct RuntimeReloadReportV1 {
     pub closed_idle_sessions: usize,
 }
 
-type SemanticRuntimePrepareFutureV1 = Pin<
-    Box<
-        dyn Future<
-                Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
-            > + Send
-            + 'static,
-    >,
->;
-type SemanticRuntimeCommitFutureV1 = Pin<
-    Box<
-        dyn Future<Output = Result<SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1>>
-            + Send
-            + 'static,
-    >,
->;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SemanticGenerationPointerV1 {
-    pub generation: VectorGenerationIdV1,
-    pub source_generation: CodeGenerationId,
-    pub projection_key: ProjectionKeyV1,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SemanticRuntimeScheduleFailureV1 {
-    Artifact,
-    Runtime,
-    Projection,
-    Publication,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum SemanticRuntimeScheduleStatusV1 {
-    Unavailable,
-    Indexing {
-        target_generation: CodeGenerationId,
-        completed_units: u64,
-        total_units: u64,
-        prior_generation: Option<VectorGenerationIdV1>,
-    },
-    Current {
-        generation: VectorGenerationIdV1,
-    },
-    Failed {
-        reason: SemanticRuntimeScheduleFailureV1,
-        prior_generation: Option<VectorGenerationIdV1>,
-    },
-}
-
-#[derive(Debug)]
-pub struct SemanticRuntimeScheduleCancellationV1 {
-    cancelled: AtomicBool,
-    completed_units: AtomicU64,
-    total_units: u64,
-}
-
-impl SemanticRuntimeScheduleCancellationV1 {
-    pub fn new(total_units: u64) -> Self {
-        Self {
-            cancelled: AtomicBool::new(false),
-            completed_units: AtomicU64::new(0),
-            total_units,
-        }
-    }
-
-    pub fn cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-
-    pub fn set_completed_units(&self, completed_units: u64) {
-        self.completed_units
-            .fetch_max(completed_units.min(self.total_units), Ordering::AcqRel);
-    }
-
-    fn completed_units(&self) -> u64 {
-        self.completed_units.load(Ordering::Acquire)
-    }
-
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-}
-
-impl CancellationSignal for SemanticRuntimeScheduleCancellationV1 {
-    fn cancelled(&self) -> bool {
-        Self::cancelled(self)
-    }
-}
-
-pub struct PreparedSemanticRuntimeCommitV1 {
-    commit: Box<dyn FnOnce() -> SemanticRuntimeCommitFutureV1 + Send + 'static>,
-}
-
-impl PreparedSemanticRuntimeCommitV1 {
-    pub fn new<Commit, CommitFuture>(commit: Commit) -> Self
-    where
-        Commit: FnOnce() -> CommitFuture + Send + 'static,
-        CommitFuture: Future<Output = Result<SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1>>
-            + Send
-            + 'static,
-    {
-        Self {
-            commit: Box::new(move || Box::pin(commit())),
-        }
-    }
-
-    async fn commit(self) -> Result<SemanticGenerationPointerV1, SemanticRuntimeScheduleFailureV1> {
-        (self.commit)().await
-    }
-
-    pub fn on_success<Publish>(self, publish: Publish) -> Self
-    where
-        Publish: FnOnce(&SemanticGenerationPointerV1) -> Result<(), SemanticRuntimeScheduleFailureV1>
-            + Send
-            + 'static,
-    {
-        Self::new(move || async move {
-            let pointer = self.commit().await?;
-            publish(&pointer)?;
-            Ok(pointer)
-        })
-    }
-}
-
-pub struct SemanticRuntimeWorkV1 {
-    target_generation: CodeGenerationId,
-    total_units: u64,
-    prepare: Box<
-        dyn FnOnce(Arc<SemanticRuntimeScheduleCancellationV1>) -> SemanticRuntimePrepareFutureV1
-            + Send
-            + 'static,
-    >,
-}
-
-impl SemanticRuntimeWorkV1 {
-    pub fn new<Prepare, PrepareFuture>(
-        target_generation: CodeGenerationId,
-        total_units: u64,
-        prepare: Prepare,
-    ) -> Self
-    where
-        Prepare:
-            FnOnce(Arc<SemanticRuntimeScheduleCancellationV1>) -> PrepareFuture + Send + 'static,
-        PrepareFuture: Future<
-                Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
-            > + Send
-            + 'static,
-    {
-        Self {
-            target_generation,
-            total_units: total_units.max(1),
-            prepare: Box::new(move |cancellation| Box::pin(prepare(cancellation))),
-        }
-    }
-
-    pub fn total_units(&self) -> u64 {
-        self.total_units
-    }
-}
-
-struct SemanticRuntimeSchedulingStateV1 {
-    sequence: u64,
-    status: SemanticRuntimeScheduleStatusV1,
-    current: Option<SemanticGenerationPointerV1>,
-    cancellation: Option<Arc<SemanticRuntimeScheduleCancellationV1>>,
-    committing: bool,
-}
-
-impl Default for SemanticRuntimeSchedulingStateV1 {
-    fn default() -> Self {
-        Self {
-            sequence: 0,
-            status: SemanticRuntimeScheduleStatusV1::Unavailable,
-            current: None,
-            cancellation: None,
-            committing: false,
-        }
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct SemanticRuntimeSchedulingHandleV1 {
-    state: Arc<Mutex<SemanticRuntimeSchedulingStateV1>>,
-}
-
-impl SemanticRuntimeSchedulingHandleV1 {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Start one bounded preparation task without waiting for artifact I/O,
-    /// model loading, projection, or publication.
-    ///
-    /// A task already inside its serialized atomic commit is not displaced;
-    /// callers receive `false` and may schedule the newer generation again.
-    pub fn schedule(&self, work: SemanticRuntimeWorkV1) -> bool {
-        let (sequence, cancellation) = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.committing {
-                return false;
-            }
-            if let Some(cancellation) = state.cancellation.take() {
-                cancellation.cancel();
-            }
-            state.sequence = state.sequence.wrapping_add(1);
-            let sequence = state.sequence;
-            let cancellation =
-                Arc::new(SemanticRuntimeScheduleCancellationV1::new(work.total_units));
-            state.status = SemanticRuntimeScheduleStatusV1::Indexing {
-                target_generation: work.target_generation.clone(),
-                completed_units: 0,
-                total_units: work.total_units,
-                prior_generation: state
-                    .current
-                    .as_ref()
-                    .map(|pointer| pointer.generation.clone()),
-            };
-            state.cancellation = Some(Arc::clone(&cancellation));
-            (sequence, cancellation)
-        };
-
-        let handle = self.clone();
-        let watcher = self.clone();
-        tokio::spawn(async move {
-            let worker = tokio::spawn(async move {
-                let prepared = (work.prepare)(Arc::clone(&cancellation)).await;
-                let prepared = match prepared {
-                    Ok(prepared) if !cancellation.cancelled() => prepared,
-                    Ok(_) => {
-                        handle
-                            .finish_failure(sequence, SemanticRuntimeScheduleFailureV1::Cancelled);
-                        return;
-                    }
-                    Err(reason) => {
-                        handle.finish_failure(sequence, reason);
-                        return;
-                    }
-                };
-
-                {
-                    let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
-                    if state.sequence != sequence || cancellation.cancelled() || state.committing {
-                        return;
-                    }
-                    state.committing = true;
-                }
-
-                let committed = prepared.commit().await;
-                let mut state = handle.state.lock().unwrap_or_else(PoisonError::into_inner);
-                if state.sequence != sequence {
-                    state.committing = false;
-                    return;
-                }
-                state.committing = false;
-                state.cancellation = None;
-                match committed {
-                    Ok(pointer) => {
-                        state.current = Some(pointer.clone());
-                        state.status = SemanticRuntimeScheduleStatusV1::Current {
-                            generation: pointer.generation,
-                        };
-                    }
-                    Err(reason) => {
-                        state.status = SemanticRuntimeScheduleStatusV1::Failed {
-                            reason,
-                            prior_generation: state
-                                .current
-                                .as_ref()
-                                .map(|pointer| pointer.generation.clone()),
-                        };
-                    }
-                }
-            });
-            if worker.await.is_err() {
-                watcher.finish_worker_terminated(sequence);
-            }
-        });
-        true
-    }
-
-    pub fn status(&self) -> SemanticRuntimeScheduleStatusV1 {
-        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut status = state.status.clone();
-        if let (
-            SemanticRuntimeScheduleStatusV1::Indexing {
-                completed_units, ..
-            },
-            Some(cancellation),
-        ) = (&mut status, state.cancellation.as_ref())
-        {
-            *completed_units = cancellation.completed_units();
-        }
-        status
-    }
-
-    pub fn current(&self) -> Option<SemanticGenerationPointerV1> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .current
-            .clone()
-    }
-
-    pub fn restore_current(&self, pointer: SemanticGenerationPointerV1) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(cancellation) = state.cancellation.take() {
-            cancellation.cancel();
-        }
-        state.sequence = state.sequence.wrapping_add(1);
-        state.committing = false;
-        state.current = Some(pointer.clone());
-        state.status = SemanticRuntimeScheduleStatusV1::Current {
-            generation: pointer.generation,
-        };
-    }
-
-    pub fn cancel(&self) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.committing {
-            return false;
-        }
-        let Some(cancellation) = state.cancellation.take() else {
-            return false;
-        };
-        cancellation.cancel();
-        state.sequence = state.sequence.wrapping_add(1);
-        state.status = SemanticRuntimeScheduleStatusV1::Failed {
-            reason: SemanticRuntimeScheduleFailureV1::Cancelled,
-            prior_generation: state
-                .current
-                .as_ref()
-                .map(|pointer| pointer.generation.clone()),
-        };
-        true
-    }
-
-    fn finish_failure(&self, sequence: u64, reason: SemanticRuntimeScheduleFailureV1) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.sequence == sequence && !state.committing {
-            state.cancellation = None;
-            state.status = SemanticRuntimeScheduleStatusV1::Failed {
-                reason,
-                prior_generation: state
-                    .current
-                    .as_ref()
-                    .map(|pointer| pointer.generation.clone()),
-            };
-        }
-    }
-
-    fn finish_worker_terminated(&self, sequence: u64) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.sequence == sequence {
-            state.committing = false;
-            state.cancellation = None;
-            state.status = SemanticRuntimeScheduleStatusV1::Failed {
-                reason: SemanticRuntimeScheduleFailureV1::Runtime,
-                prior_generation: state
-                    .current
-                    .as_ref()
-                    .map(|pointer| pointer.generation.clone()),
-            };
-        }
-    }
-}
-
+include!("runtime_service/scheduling.rs");
 struct ActiveRuntime<R: EmbeddingRuntime> {
     generation: u64,
     authority: Arc<AdmittedProjectionArtifactV1>,
@@ -670,6 +305,14 @@ mod tests {
         .expect("scheduler reached expected state");
     }
 
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn query_warmup_opens_and_releases_one_reusable_session() {
         let factory: SharedEmbeddingRuntimeFactory<FakeEmbeddingRuntime> =
@@ -884,5 +527,170 @@ mod tests {
             !publication_ran.load(Ordering::SeqCst),
             "cancelled preparation must not enter atomic publication"
         );
+    }
+
+    #[tokio::test]
+    async fn publication_installs_runtime_and_current_pointer_before_observation() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let observed_handle = handle.clone();
+        let installed = Arc::new(AtomicBool::new(false));
+        let installed_for_commit = Arc::clone(&installed);
+        let installed_for_observer = Arc::clone(&installed);
+        let expected = pointer('e');
+        let expected_for_work = expected.clone();
+        let (observed_tx, observed_rx) = tokio::sync::oneshot::channel();
+
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            expected.source_generation.clone(),
+            1,
+            move |_cancellation| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(
+                    move || async move { Ok(expected_for_work) },
+                )
+                .on_success(move |_pointer| {
+                    installed_for_commit.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .on_published(move |pointer| async move {
+                    let _ = observed_tx.send((
+                        installed_for_observer.load(Ordering::SeqCst),
+                        observed_handle.current(),
+                        pointer,
+                    ));
+                }))
+            },
+        )));
+
+        let (runtime_installed, current, observed) =
+            tokio::time::timeout(Duration::from_secs(1), observed_rx)
+                .await
+                .expect("publication observation")
+                .expect("publication observer");
+        assert!(runtime_installed);
+        assert_eq!(current, Some(expected.clone()));
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn shutdown_fences_and_joins_the_active_projection_worker() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            CodeGenerationId::new("code-generation.shutdown").expect("source generation"),
+            1,
+            move |cancellation| async move {
+                let _ = started_tx.send(());
+                while !cancellation.cancelled() {
+                    tokio::task::yield_now().await;
+                }
+                Err(SemanticRuntimeScheduleFailureV1::Cancelled)
+            },
+        )));
+        started_rx.await.expect("worker started");
+
+        assert!(handle.begin_shutdown());
+        assert!(!handle.begin_shutdown(), "shutdown fence is idempotent");
+        assert!(!handle.schedule(SemanticRuntimeWorkV1::new(
+            CodeGenerationId::new("code-generation.rejected").expect("source generation"),
+            1,
+            move |_cancellation| async move { Err(SemanticRuntimeScheduleFailureV1::Cancelled) },
+        )));
+
+        let receipt = handle
+            .cancel_and_join_until(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await;
+        assert!(receipt.is_clean());
+        assert_eq!(receipt.joined_workers, 1);
+        assert_eq!(receipt.aborted_workers, 0);
+        assert_eq!(receipt.remaining_workers, 0);
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Failed {
+                reason: SemanticRuntimeScheduleFailureV1::Cancelled,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_shutdown_deadline_reports_retained_unjoined_workers() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let (first_started_tx, first_started_rx) = tokio::sync::oneshot::channel();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            CodeGenerationId::new("code-generation.abort-first").expect("source generation"),
+            1,
+            move |_cancellation| async move {
+                let _ = first_started_tx.send(());
+                std::future::pending().await
+            },
+        )));
+        first_started_rx.await.expect("first worker started");
+        let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            CodeGenerationId::new("code-generation.abort-second").expect("source generation"),
+            1,
+            move |_cancellation| async move {
+                let _ = second_started_tx.send(());
+                std::future::pending().await
+            },
+        )));
+        second_started_rx.await.expect("second worker started");
+
+        let receipt = handle
+            .cancel_and_join_until(tokio::time::Instant::now())
+            .await;
+
+        assert!(!receipt.is_clean());
+        assert_eq!(receipt.joined_workers, 0);
+        assert_eq!(receipt.aborted_workers, 2);
+        assert_eq!(receipt.remaining_workers, 2);
+        let cleanup = handle
+            .cancel_and_join_until(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await;
+        assert!(cleanup.is_clean());
+        assert_eq!(cleanup.remaining_workers, 0);
+        assert!(matches!(
+            handle.status(),
+            SemanticRuntimeScheduleStatusV1::Failed {
+                reason: SemanticRuntimeScheduleFailureV1::Cancelled,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_before_the_shared_deadline_and_joins_cooperative_tasks() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_by_worker = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            CodeGenerationId::new("code-generation.deadline-race").expect("source generation"),
+            1,
+            move |_cancellation| async move {
+                let _drop_signal = DropSignal(dropped_by_worker);
+                let _ = started_tx.send(());
+                std::future::pending().await
+            },
+        )));
+        started_rx.await.expect("worker started");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let shutdown = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                tokio::time::timeout_at(deadline, handle.cancel_and_join_until(deadline))
+                    .await
+                    .expect("shutdown returns before the shared deadline")
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        let receipt = shutdown.await.expect("shutdown task joined");
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(receipt.is_clean());
+        assert_eq!(receipt.aborted_workers, 1);
+        assert_eq!(receipt.remaining_workers, 0);
     }
 }

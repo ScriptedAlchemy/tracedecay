@@ -290,12 +290,11 @@ Related: tracedecay doctor (detects daemon problems), tracedecay serve.";
 pub(crate) const UPGRADE_AFTER_HELP: &str = "\
 Examples:
   tracedecay upgrade                             Install the newest release
-  tracedecay upgrade --no-heal                   Skip the post-update health pass
   tracedecay upgrade --no-reinstall              Skip refreshing configured agents
 
 After a real install, upgrade re-runs install for every configured agent
 integration so a separate `tracedecay reinstall` is not needed. --no-reinstall
-skips that refresh; --no-heal (independent) skips only the health pass.
+skips that refresh.
 
 Related: tracedecay update (refresh even when current), tracedecay channel
 (switch stable/beta).";
@@ -303,12 +302,10 @@ Related: tracedecay update (refresh even when current), tracedecay channel
 pub(crate) const UPDATE_AFTER_HELP: &str = "\
 Examples:
   tracedecay update                              Upgrade if needed, then refresh
-  tracedecay update --no-heal                    Skip the post-update health pass
   tracedecay update --no-reinstall               Skip refreshing configured agents
 
 Update re-runs install for every configured agent integration so a separate
-`tracedecay reinstall` is not needed. --no-reinstall skips that refresh;
---no-heal (independent) skips only the health pass.
+`tracedecay reinstall` is not needed. --no-reinstall skips that refresh.
 
 Related: tracedecay upgrade (refresh only after a real install),
 tracedecay update-plugin (plugins only), tracedecay channel.";
@@ -399,7 +396,6 @@ upgrade behaves unexpectedly.";
 pub(crate) const DOCTOR_AFTER_HELP: &str = "\
 Examples:
   tracedecay doctor                              Check everything
-  tracedecay doctor --agent cursor               Check one agent integration
 
 Related: tracedecay install (fix missing integration), tracedecay daemon
 status, tracedecay status (index health).";
@@ -459,10 +455,10 @@ Related: tracedecay gain --json (scriptable equivalent).";
 
 pub(crate) const SESSIONS_LONG_ABOUT: &str = "\
 Searches daemon-owned session-temporal projections. The MCP twin of search is \
-tracedecay_message_search. `sessions ingest` is retained only as an explicit \
-legacy source-admission command: it admits provider records through canonical \
-observation ingest, leaves temporal projection to the durable scheduler, owns \
-no parallel temporal writer, and is never invoked by a read. `sessions refresh` \
+tracedecay_message_search. `sessions import` schedules bounded all-host source \
+admission through the daemon-owned canonical observation path and returns \
+without waiting for historical convergence. It owns no parallel temporal writer \
+and is never invoked by a read. `sessions refresh` \
 is the separate explicit, daemon-owned path for one exact temporal session scope; it \
 never defaults to the current directory. Refresh maps `--provider` to the \
 source scope, `--source`/`--target` to committed/observed frontiers, and uses \
@@ -470,7 +466,8 @@ the application defaults temporal mode=current and grain=logical_message.";
 
 pub(crate) const SESSIONS_AFTER_HELP: &str = "\
 Examples:
-  tracedecay sessions ingest                     Explicit legacy source admission
+  tracedecay sessions import                     Schedule native host transcript import
+  tracedecay sessions git-sync --dry-run          Preview session/Git convergence
   tracedecay sessions search \"auth refactor\"     Full-text transcript search
   tracedecay sessions search \"bug\" --limit 5 --provider cursor
   tracedecay sessions search \"plan\" --project-path /path/to/repo
@@ -485,9 +482,7 @@ Examples:
 resume, or begin. status is read-only and never requests durable cancellation; \
 request abort or deadline outcomes also never imply durable cancellation. The \
 deprecated `--operation-id` alias is accepted for migration only; an internal \
-operation id is not a refresh capability. The deprecated ingest `--provider` \
-option is accepted for migration only; source admission sweeps all supported \
-providers.
+operation id is not a refresh capability.
 
 Related: tracedecay tool message_search (MCP twin), tracedecay tool
 lcm_grep (scoped/time-filtered recall), tracedecay tool session_refresh,

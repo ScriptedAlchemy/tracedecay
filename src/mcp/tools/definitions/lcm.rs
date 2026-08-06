@@ -39,55 +39,21 @@ pub(super) fn def_lcm_status() -> ToolDefinition {
 }
 
 pub(super) fn def_lcm_doctor() -> ToolDefinition {
-    def_rw(
+    def(
         "tracedecay_lcm_doctor",
         "LCM Doctor",
-        "Run bounded LCM diagnostics, dry-run safe repairs, optionally apply safe FTS repairs or payload GC, and report retention candidates without payload body exposure.",
+        "Run bounded, read-only LCM diagnostics for one provider without payload body exposure. The report includes integrity findings and retention or cleanup candidates; daemon-owned maintenance acts on those findings outside this tool.",
         json!({
             "type": "object",
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Specific provider id to inspect or repair. Required; 'all' is not accepted for this lifecycle tool."
+                    "description": "Specific provider id to inspect. Required; 'all' is not accepted."
                 },
                 "session_id": {
                     "type": "string",
                     "description": "Optional provider-local session id filter."
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["diagnose", "repair", "retention", "clean", "gc"],
-                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates, clean reports or applies safe ignore/stateless/noise cleanup, gc previews or applies payload garbage collection."
-                },
-                "apply": {
-                    "type": "boolean",
-                    "description": "When mode=repair, mode=clean, or mode=gc, apply the requested action. Defaults to false for dry-run."
-                },
-                "doctor_clean_apply_enabled": {
-                    "type": "boolean",
-                    "description": "Safety gate for mode=clean + apply. Defaults to false unless LCM_DOCTOR_CLEAN_APPLY_ENABLED is set."
-                },
-                "lcm_gc_apply_enabled": {
-                    "type": "boolean",
-                    "description": "Safety gate for mode=gc + apply. Defaults to false unless LCM_GC_APPLY_ENABLED is set."
-                },
-                "gc_config": {
-                    "type": "object",
-                    "description": "Optional payload GC config overrides (grace_seconds, reap_missing_after, reap_missing_enabled, max_batch_size, backup_before_reap, interval_seconds, gc_enabled).",
-                    "additionalProperties": false,
-                    "properties": {
-                        "grace_seconds": {"type": "integer", "minimum": 0},
-                        "reap_missing_after": {"type": "integer", "minimum": 0},
-                        "reap_missing_enabled": {"type": "boolean"},
-                        "max_batch_size": {"type": "integer", "minimum": 1},
-                        "backup_before_reap": {"type": "boolean"},
-                        "interval_seconds": {"type": "integer", "minimum": 0},
-                        "gc_enabled": {"type": "boolean"}
-                    }
-                },
-                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions that should be diagnosed as ignored cleanup candidates."),
-                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions that should be diagnosed as cleanup candidates."),
-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to treat as storage-only noise.")
+                }
             },
             "required": ["provider"]
         }),

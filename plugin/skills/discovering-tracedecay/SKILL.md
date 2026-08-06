@@ -17,10 +17,6 @@ transports. MCP is optional: capability discovery must work from a shell alone.
 3. Run **`tracedecay --help`** for lifecycle commands such as `init`, `sync`,
    `doctor`, `daemon`, `sessions`, `analytics`, `automation`, and `upgrade`.
    Then inspect one command with `tracedecay <command> --help`.
-   For a versioned API migration, inspect the read-only
-   `tracedecay_api_migration_plan` result before invoking
-   `tracedecay_api_migration_apply`; never infer or bypass the reported
-   preconditions.
 4. Choose the smallest matching workflow and continue with its skill:
 
 | Intent | Workflow skill |

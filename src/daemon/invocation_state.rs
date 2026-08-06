@@ -144,6 +144,22 @@ impl DaemonInvocationState {
         .await
     }
 
+    pub(super) async fn mount_core_query_authority_for_project(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+        cursor_keys: &crate::global_db::session_temporal::GlobalDbCursorKeyProvider,
+    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
+    {
+        code_index_scheduler::query_runtime::mount_core_query_authority_on_project_open(
+            &self.code_index_schedulers,
+            project_root,
+            scope,
+            cursor_keys,
+        )
+        .await
+    }
+
     pub(super) fn restore_initial_query_authority_for_project(
         &self,
         scope: tracedecay_application::ResolvedScope,
@@ -300,7 +316,7 @@ impl DaemonInvocationState {
             scope_set
                 .roots()
                 .iter()
-                .map(|scope| &scope.scope_digest)
+                .map(|root| &root.scope().scope_digest)
                 .collect::<Vec<_>>(),
         )) else {
             return DaemonInvocationResponse::problem(
@@ -320,7 +336,8 @@ impl DaemonInvocationState {
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
-        for (ordinal, scope) in scope_set.roots().iter().enumerate() {
+        for (ordinal, root) in scope_set.roots().iter().enumerate() {
+            let scope = root.scope();
             let registry_context = match database
                 .project_registry_context_by_id(scope.project_id.as_str())
                 .await
@@ -607,6 +624,7 @@ impl DaemonInvocationState {
     }
 
     pub(super) async fn shutdown(&self) {
+        self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
@@ -621,6 +639,63 @@ impl DaemonInvocationState {
     ) -> DaemonInvocationResponse {
         if let Some(response) = invalid_multi_root_invocation_response(&request) {
             return response;
+        }
+        if request.is_configuration_reset() {
+            if let Err(problem) = request.validate() {
+                return DaemonInvocationResponse::problem(request.request_id, problem);
+            }
+            let Some(project_path) = project_path else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let service::invocation::DaemonInvocationPayload::Configuration {
+                request:
+                    crate::application_surface::ConfigurationSurfaceRequest::Reset(reset_request),
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } = request.payload
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::InvalidRequest,
+                );
+            };
+            if cancellation.is_cancelled()
+                || deadline.is_elapsed_at(observed_at)
+                || deadline.is_elapsed_at(crate::daemon_client::invocation_now_micros())
+            {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            }
+            return match store_administration
+                .reset_project_configuration(project_path, reset_request)
+                .await
+            {
+                Ok(outcome) => DaemonInvocationResponse::with_outcome(
+                    request.request_id,
+                    service::invocation::DaemonInvocationOutcome::ConfigurationReset { outcome },
+                ),
+                Err(error) => {
+                    crate::daemon::log_daemon_event(
+                        "configuration_reset",
+                        &[
+                            ("outcome", "refused".to_owned()),
+                            ("project", project_path.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    DaemonInvocationResponse::problem(
+                        request.request_id,
+                        service::invocation::DaemonInvocationProblem::Unavailable,
+                    )
+                }
+            };
         }
         let request_project_path = request.requires_project().then_some(project_path).flatten();
         if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead {
@@ -690,7 +765,7 @@ impl DaemonInvocationState {
             let roots = match resolve_multi_root_projects(
                 store_administration,
                 &self.service,
-                &scope_set_request.project_ids,
+                &scope_set_request.roots,
             )
             .await
             {
@@ -822,7 +897,7 @@ mod resident_memory_tests {
             &state.resident_memory,
             state.code_index_schedulers.resident_memory(),
         ));
-        assert!(Arc::ptr_eq(&state.resident_memory, &cloned.resident_memory,));
+        assert!(Arc::ptr_eq(&state.resident_memory, &cloned.resident_memory));
         assert_eq!(
             state.resident_memory.snapshot().limit_bytes,
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1

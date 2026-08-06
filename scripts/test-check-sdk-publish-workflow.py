@@ -96,6 +96,25 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         )
         self.assert_rejected(mutated)
 
+    def test_rejects_missing_sdk_registry_client_parity_gate(self) -> None:
+        mutated = self.workflow.replace(
+            "      - name: Verify canonical SDK registry-client parity\n"
+            "        run: scripts/check-sdk-codegen.sh\n\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_missing_package_dry_run(self) -> None:
+        mutated = self.workflow.replace(
+            "      - name: Verify package dry run\n"
+            "        working-directory: sdks/typescript\n"
+            "        run: npm pack --dry-run --json --ignore-scripts\n\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated)
+
     def test_rejects_python_registry_job(self) -> None:
         mutated = self.workflow + "\n  publish-python:\n    runs-on: ubuntu-latest\n"
         self.assert_rejected(mutated)

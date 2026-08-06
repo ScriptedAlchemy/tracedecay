@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -9,8 +8,7 @@ use tracedecay_domain::{
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ParseOffset, ProjectionPersistOutcome, ProjectionStoreError, StoreShardScopeV1,
-    build_scope_resolution_authorization_v1,
+    ParseOffset, ProjectionStoreError, StoreShardScopeV1, build_scope_resolution_authorization_v1,
 };
 
 use crate::anchor_resolution::{EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport};
@@ -19,7 +17,8 @@ use crate::memory::{
 };
 use crate::observation::{
     AdvanceNonDurableSourceCursorRequest, CaptureObservationOutcome, CaptureObservationRequest,
-    ObservationApplication, ObservationApplicationError, ObservationCancellation,
+    ExternalSourceProjectionRetryHandleV1, ExternalSourceProjectionStateV1, ObservationApplication,
+    ObservationApplicationError, ObservationCancellation,
 };
 use crate::store::observation::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -28,6 +27,7 @@ use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionCon
 
 mod disposition;
 mod durability;
+mod projection_drain;
 mod replay;
 mod runtime;
 mod schedule;
@@ -204,6 +204,7 @@ pub struct HostProjectionDrainOutcome {
     pub projected_outputs: u64,
     pub skipped: u64,
     pub exact_duplicates: u64,
+    pub deferred: bool,
     pub session_ids: Vec<String>,
 }
 
@@ -226,6 +227,14 @@ impl HostAdmissionOutcome {
 
     pub const fn accepted_for_replay() -> Self {
         Self::new(HostAdmissionStatus::AcceptedForReplay, false, None)
+    }
+
+    pub const fn external_source_projection_pending() -> Self {
+        Self::new(
+            HostAdmissionStatus::AcceptedForReplay,
+            false,
+            Some("external_source_projection_pending"),
+        )
     }
 
     pub const fn retained_backpressured(reason_code: &'static str) -> Self {
@@ -707,6 +716,7 @@ fn canonical_projection_drain_outcome(
         projected_outputs: outcome.projected_outputs,
         skipped: outcome.skipped,
         exact_duplicates: outcome.exact_duplicates,
+        deferred: outcome.deferred,
         session_ids: outcome.session_ids,
     }
 }
@@ -866,8 +876,11 @@ impl<'a> HostAdmissionFacade<'a> {
             )
             .await
             .map_err(|error| classify_error(&error))?;
-        if let CaptureObservationOutcome::Persisted { outcome, .. } = &outcome {
-            crate::external_source_store::RuntimeExternalSourceStore::new(
+        if let CaptureObservationOutcome::Persisted {
+            outcome: persisted, ..
+        } = &outcome
+        {
+            let projection = crate::external_source_store::RuntimeExternalSourceStore::new(
                 database.runtime().clone(),
                 database.authority().clone(),
             )
@@ -875,12 +888,27 @@ impl<'a> HostAdmissionFacade<'a> {
                 tracing::warn!(%error, "registered external-source adapter is unavailable");
                 HostAdmissionOutcome::registered_authority_unavailable()
             })?
-            .capture_host_observation(outcome.receipt())
+            .capture_host_observation(persisted.receipt())
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "registered external-source commit failed");
-                HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+                match error {
+                    crate::external_source_store::RuntimeExternalSourceErrorV1::Unavailable => {
+                        HostAdmissionOutcome::retained_unavailable(
+                            "external_source_runtime_unavailable",
+                        )
+                    }
+                    _ => {
+                        HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+                    }
+                }
             })?;
+            if let crate::external_source_store::RuntimeSourceCaptureOutcomeV1::ProjectionPending(
+                receipt,
+            ) = projection
+            {
+                return accepted_for_external_source_replay(outcome, receipt);
+            }
         }
         Ok(outcome)
     }
@@ -906,80 +934,6 @@ impl<'a> HostAdmissionFacade<'a> {
             ))
             .await
             .map_err(|error| classify_error(&error))
-    }
-
-    pub async fn drain_projection_queue(
-        &self,
-        provider: &str,
-        scope: &ObservationScopeV1,
-        cancellation: &ObservationCancellation,
-        max: usize,
-    ) -> Result<HostProjectionDrainOutcome, HostAdmissionOutcome> {
-        let store = self.store(provider, scope)?;
-        let mut outcome = HostProjectionDrainOutcome::default();
-        let mut session_ids = BTreeSet::new();
-        for _ in 0..max {
-            if cancellation.is_cancelled() {
-                return Err(classify_error(&ObservationApplicationError::Cancelled));
-            }
-            let Some(observation_id) = store.next_queued_observation().await.map_err(|error| {
-                tracing::warn!(%error, "projection store operation failed during host drain");
-                projection_store_unavailable()
-            })?
-            else {
-                break;
-            };
-            let projected = match store.project_observation(&observation_id).await {
-                Ok(projected) => projected,
-                Err(ProjectionStoreError::RetryDeferred { .. }) => break,
-                Err(error @ ProjectionStoreError::Contract(_)) => {
-                    tracing::warn!(
-                        %error,
-                        observation = observation_id.as_str(),
-                        "deterministic projection contract rejection committed"
-                    );
-                    outcome.skipped = outcome.skipped.saturating_add(1);
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "projection store operation failed during host drain");
-                    return Err(projection_error_outcome(&error));
-                }
-            };
-            match projected {
-                ProjectionPersistOutcome::Projected(projected) => {
-                    outcome.projected = outcome.projected.saturating_add(1);
-                    outcome.projected_outputs = outcome.projected_outputs.saturating_add(
-                        u64::try_from(projected.output_count()).unwrap_or(u64::MAX),
-                    );
-                    if let Some(observation) = store
-                        .get_observation(&observation_id)
-                        .await
-                        .map_err(|error| {
-                    tracing::warn!(%error, "projection store operation failed during host drain");
-                    projection_store_unavailable()
-                })?
-                    {
-                        session_ids.insert(
-                            observation
-                                .observation()
-                                .source()
-                                .session_id()
-                                .as_str()
-                                .to_owned(),
-                        );
-                    }
-                }
-                ProjectionPersistOutcome::Skipped { .. } => {
-                    outcome.skipped = outcome.skipped.saturating_add(1);
-                }
-                ProjectionPersistOutcome::ExactDuplicate(_) => {
-                    outcome.exact_duplicates = outcome.exact_duplicates.saturating_add(1);
-                }
-            }
-        }
-        outcome.session_ids = session_ids.into_iter().collect();
-        Ok(outcome)
     }
 
     fn application(
@@ -1206,6 +1160,18 @@ fn supported_provider(provider: &str) -> bool {
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {
     match outcome {
+        CaptureObservationOutcome::AcceptedForReplay { outcome, .. }
+            if matches!(*outcome, ObservationPersistOutcome::ExactDuplicate(_)) =>
+        {
+            HostAdmissionOutcome::new(
+                HostAdmissionStatus::ExactDuplicate,
+                false,
+                Some("external_source_projection_pending"),
+            )
+        }
+        CaptureObservationOutcome::AcceptedForReplay { .. } => {
+            HostAdmissionOutcome::external_source_projection_pending()
+        }
         CaptureObservationOutcome::Persisted { outcome, .. } => match *outcome {
             ObservationPersistOutcome::Committed(_) => {
                 HostAdmissionOutcome::new(HostAdmissionStatus::Committed, false, None)
@@ -1230,6 +1196,37 @@ fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome 
             Some("sanitizer_quarantined"),
         ),
     }
+}
+
+fn accepted_for_external_source_replay(
+    outcome: CaptureObservationOutcome,
+    receipt: tracedecay_store::SourceCommitReceiptV1,
+) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
+    let CaptureObservationOutcome::Persisted {
+        outcome,
+        projection_status,
+        sanitized_record,
+        findings,
+    } = outcome
+    else {
+        return Err(HostAdmissionOutcome::retained_unavailable(
+            "external_source_projection_receipt_mismatch",
+        ));
+    };
+    let durable_observation_id = outcome.receipt().observation().observation_id().clone();
+    let retry_handle = ExternalSourceProjectionRetryHandleV1::new(
+        receipt.source_frontier().binding().clone(),
+        receipt.receipt_digest().clone(),
+    );
+    Ok(CaptureObservationOutcome::AcceptedForReplay {
+        durable_observation_id,
+        projection_state: ExternalSourceProjectionStateV1::Pending,
+        retry_handle,
+        outcome,
+        projection_status,
+        sanitized_record,
+        findings,
+    })
 }
 
 fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {

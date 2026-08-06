@@ -9,7 +9,7 @@
 #   5. Appends CLAUDE.md rules that instruct Claude to prefer tracedecay
 #
 # Prerequisites:
-#   - tracedecay binary on PATH (cargo install or brew install)
+#   - tracedecay binary on PATH (GitHub release installer, Homebrew, or Scoop)
 #   - jq installed (brew install jq)
 #   - cargo installed if ast-grep needs to be installed or upgraded
 #   - Claude Code installed
@@ -26,8 +26,7 @@ HOOK_SRC="$SCRIPT_DIR/block-explore-agent.sh"
 # Check prerequisites
 if ! command -v tracedecay &>/dev/null; then
     echo "Error: tracedecay not found on PATH. Install it first:" >&2
-    echo "  cargo install --path .    # from the repo" >&2
-    echo "  brew install ScriptedAlchemy/tap/tracedecay  # or via Homebrew" >&2
+    echo "  curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash" >&2
     exit 1
 fi
 

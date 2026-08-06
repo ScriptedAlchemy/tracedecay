@@ -27,6 +27,7 @@ pub(crate) enum LspClientMethod {
     TextDocumentDidChange,
     TextDocumentDidClose,
     TextDocumentDidSave,
+    WorkspaceDiagnostic,
     TextDocumentDiagnostic,
     TextDocumentDeclaration,
     TextDocumentDefinition,
@@ -62,6 +63,7 @@ impl LspClientMethod {
             "textDocument/didChange" => Self::TextDocumentDidChange,
             "textDocument/didClose" => Self::TextDocumentDidClose,
             "textDocument/didSave" => Self::TextDocumentDidSave,
+            "workspace/diagnostic" => Self::WorkspaceDiagnostic,
             "textDocument/diagnostic" => Self::TextDocumentDiagnostic,
             "textDocument/declaration" => Self::TextDocumentDeclaration,
             "textDocument/definition" => Self::TextDocumentDefinition,
@@ -101,6 +103,7 @@ pub(crate) enum ParsedIncoming {
     },
     ClientResponse {
         id: LspRequestId,
+        succeeded: bool,
     },
 }
 
@@ -142,10 +145,15 @@ pub(crate) fn parse_incoming(value: Value) -> Result<ParsedIncoming, (Value, Rpc
         ));
     }
     let Some(method) = object.get("method").and_then(Value::as_str) else {
-        if let Some(id) = id.as_ref().and_then(request_id)
-            && (object.contains_key("result") || object.contains_key("error"))
-        {
-            return Ok(ParsedIncoming::ClientResponse { id });
+        if let Some(id) = id.as_ref().and_then(request_id) {
+            let has_result = object.contains_key("result");
+            let has_error = object.contains_key("error");
+            if has_result ^ has_error {
+                return Ok(ParsedIncoming::ClientResponse {
+                    id,
+                    succeeded: has_result,
+                });
+            }
         }
         return Err((
             response_id,
@@ -182,7 +190,9 @@ pub(crate) fn dispatch_incoming<P, S, D>(
     D: DiagnosticSnapshotPort,
 {
     match incoming {
-        ParsedIncoming::ClientResponse { id } => session.handle_client_response(id),
+        ParsedIncoming::ClientResponse { id, succeeded } => {
+            session.handle_client_response(id, succeeded)
+        }
         ParsedIncoming::Notification { method, params } => {
             dispatch_notification(session, method, params, now_ms);
         }
@@ -257,6 +267,11 @@ fn dispatch_request<P, S, D>(
                 let _ = session.enqueue_value(error_response(response_id, error));
             }
         },
+        LspClientMethod::WorkspaceDiagnostic => {
+            session.with_request(response_id, None, now_ms, move |session| {
+                session.pull_workspace_diagnostics(&params)
+            });
+        }
         LspClientMethod::TextDocumentDeclaration => {
             start_position_semantic(
                 session,

@@ -38,26 +38,25 @@ use crate::runtime::shared::{
     content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotCaptureOutcome, bounded_snapshot_input_len, capture_snapshot_observations,
-    non_durable_snapshot_record, read_snapshot_text_bounded,
+    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotCaptureOutcome,
+    bounded_snapshot_input_len, capture_snapshot_observations, non_durable_snapshot_record,
+    read_snapshot_text_bounded,
 };
 #[cfg(test)]
-use crate::runtime::snapshot_observation::{
-    canonical_snapshot_envelope, host_admission_error, snapshot_cursor_after,
-};
+use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, read_changed_file,
 };
 use serde_json::{Map, Value};
 #[cfg(test)]
-use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
-};
+use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
 use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+
+mod observation;
+pub use observation::KiroSnapshotObservationRecord;
 
 const PROVIDER: &str = "kiro";
 const KIRO_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
@@ -78,47 +77,6 @@ pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KiroSnapshotObservationRecord {
-    session_id: String,
-    native_record_id: String,
-    order: u64,
-    payload: Vec<u8>,
-}
-
-impl SnapshotAdmissionRecord for KiroSnapshotObservationRecord {
-    fn provider(&self) -> &'static str {
-        PROVIDER
-    }
-
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    fn native_record_id(&self) -> &str {
-        &self.native_record_id
-    }
-
-    fn order(&self) -> u64 {
-        self.order
-    }
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-}
-
-#[cfg(test)]
-impl KiroSnapshotObservationRecord {
-    fn cursor_after(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        snapshot_cursor_after(PROVIDER, &self.session_id, self.order, scope, generation)
-    }
 }
 
 impl KiroSource {
@@ -337,13 +295,16 @@ pub async fn capture_kiro_snapshot_observations(
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
     capture_snapshot_observations(
         facade,
+        PROVIDER,
         scope,
         cancellation,
         max_new_bytes,
-        source.discover_transcript_paths(
-            project_root,
-            TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
-        ),
+        || {
+            source.discover_transcript_paths(
+                project_root,
+                TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
+            )
+        },
         |path| source.snapshot_input_bytes(path),
         |path| {
             let Some(parsed) =
@@ -999,6 +960,7 @@ fn message_metadata(entry: &Value, location_cwd: Option<&Path>) -> Value {
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+    use crate::runtime::snapshot_observation::SnapshotAdmissionRecord;
 
     #[test]
     fn workspace_folder_file_uri_round_trips_native_paths() {
@@ -1102,7 +1064,7 @@ mod observation_tests {
 
     #[tokio::test]
     async fn pre_cancelled_snapshot_capture_does_not_advance_kiro_source() {
-        use crate::admission::test_support::PanicHostAdmission;
+        use crate::admission::test_support::MemoryHostAdmission;
 
         let temp = tempfile::TempDir::new().expect("temp Kiro storage");
         let project = temp.path().join("project");
@@ -1133,11 +1095,12 @@ mod observation_tests {
             workspace_storage_dir,
             user_registered_roots: None,
         };
+        let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
         let error = capture_kiro_snapshot_observations(
-            &PanicHostAdmission,
+            &admission,
             &source,
             &project,
             ObservationScopeV1::Profile,
@@ -1148,11 +1111,21 @@ mod observation_tests {
         .expect_err("pre-cancelled Kiro capture must stop before persistence");
         assert!(matches!(
             error,
-            TranscriptIngestError::NonDurableRecord {
-                reason: "admission_cancelled",
-                ..
-            }
+            TranscriptIngestError::Cancelled { provider: "kiro" }
         ));
+        assert!(admission.observations().is_empty());
+
+        let replay = capture_kiro_snapshot_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("uncancelled Kiro retry must admit the untouched source");
+        assert_eq!(replay.stats.messages_upserted, 1);
     }
 
     #[tokio::test]

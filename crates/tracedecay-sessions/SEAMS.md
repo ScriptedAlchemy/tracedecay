@@ -117,18 +117,16 @@ Until `unregistered_admission` is registered, the two standalone Codex entry
 points (`try_admit_codex_jsonl_observations_for_{project,profile}`) return an
 empty progress instead of walking the rollout.
 
-### 4. Re-home the composition-root modules staged under `root-wiring/`
+### 4. Re-home the composition-root benchmark module staged under `root-wiring/`
 
-Three modules were pure composition-root code: they build registered databases,
-daemon runtime registries, and root application services. They are preserved
+One module is pure composition-root code: it builds registered databases,
+daemon runtime registries, and root application services. It is preserved
 verbatim under `crates/tracedecay-sessions/root-wiring/` (not part of any
 target) and must move into `src/` in the root crate:
 
 | Staged file | Notes |
 | --- | --- |
 | `root-wiring/session_temporal_benchmark.rs` | 1500 lines. Needs root `application::{context, session}`, `daemon::{profile_identity, store_runtime::session_registry}`, `config::lock_user_data_dir_test_env`, `RegisteredGlobalDb`, `GlobalDbSessionTemporalStore`. `benches/session_temporal.rs` and `tests/session_suite/temporal_benchmark.rs` reach it through `tracedecay::sessions::session_temporal_benchmark`, so the root module must keep that path. |
-| `root-wiring/transcript_backfill_test_runtimes.rs` | `TranscriptFactsBackfillTestRuntimeV1` and `StructuredBackfillTestRuntimeV1`, the two `#[doc(hidden)]` registered-`ProjectSessions` fixtures. They wrap `HostAdmissionTestRuntimeV1` and call the (now generic) `runtime::transcript_backfill` entry points. |
-
 ### 5. Layout helpers that now exist twice
 
 `host_ports::{vscode_data_dir, kiro_data_dir}` duplicate
@@ -150,7 +148,7 @@ the fixtures move.
 | `src/runtime/claude_observation.rs` (`mod tests`) | `crate::config::PinnedUserDataDir`, `crate::admission::HostAdmissionTestRuntimeV1`, `RegisteredGlobalDb`; also defines two spies against the retired `*AdmissionPort` trait pair that should collapse into one `impl HostAdmission`. |
 | `src/runtime/claude_observation_benchmark/baseline.rs` | `crate::hooks::…` |
 | `src/runtime/lcm/raw.rs` (`mod ingest_protection_defaults_tests`) | `crate::user_config::UserConfig` — should build `host_ports::LcmRedactionPolicy` directly and call `IngestProtectionDefaults::from_policy`. |
-| `src/runtime/{cline_like,kiro,cursor,cursor_composer,hermes,ingest,transcript_backfill}` test modules | `crate::admission::HostAdmissionTestRuntimeV1` and `RegisteredGlobalDb` fixtures |
+| `src/runtime/{cline_like,kiro,cursor,cursor_composer,hermes,ingest,kimi,opencode}` test modules | `crate::admission::HostAdmissionTestRuntimeV1` and `RegisteredGlobalDb` fixtures |
 
 ## Non-code references to the old path
 

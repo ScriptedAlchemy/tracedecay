@@ -32,18 +32,6 @@ pub(super) fn project_open_cancellation_error() -> TraceDecayError {
     }
 }
 
-/// A project open that could not be admitted to its store's writer lane inside
-/// [`REQUEST_WRITER_ADMISSION_DEADLINE`](super::branch_admin::REQUEST_WRITER_ADMISSION_DEADLINE).
-/// Retryable: the store has another writer, and the next attempt may find it
-/// free.
-pub(super) fn project_open_writer_busy_error(project_path: &Path) -> TraceDecayError {
-    super::branch_admin::store_writer_busy(format!(
-        "project '{}' could not acquire its store writer lane: another writer is active on the \
-         same store; retry shortly",
-        project_path.display()
-    ))
-}
-
 pub(super) fn project_open_cancellation_checkpoint(cancellation: &CancellationToken) -> Result<()> {
     if cancellation.is_cancelled() {
         return Err(project_open_cancellation_error());
@@ -105,12 +93,22 @@ pub(super) async fn project_open_gate(
     gates: &tokio::sync::Mutex<ProjectOpenGates>,
     route: &ProjectRouteKey,
 ) -> Arc<ProjectOpenGate> {
+    let mut gate_route = route.clone();
+    if let Some(git_common_dir) =
+        tracedecay_runtime_core::worktree::git_common_dir(&route.project_path)
+    {
+        gate_route.project_path = git_common_dir;
+    }
     let mut gates = gates.lock().await;
-    if let Some(gate) = gates.gates.get(route).and_then(std::sync::Weak::upgrade) {
+    if let Some(gate) = gates
+        .gates
+        .get(&gate_route)
+        .and_then(std::sync::Weak::upgrade)
+    {
         return gate;
     }
     let gate = Arc::new(ProjectOpenGate::new(()));
-    gates.gates.insert(route.clone(), Arc::downgrade(&gate));
+    gates.gates.insert(gate_route, Arc::downgrade(&gate));
     gate
 }
 

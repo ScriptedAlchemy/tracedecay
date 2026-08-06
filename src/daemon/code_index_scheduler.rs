@@ -23,9 +23,9 @@ use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, ManifestDigest,
     PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerDispositionV1, SanitizerRevision, SensitivityLevelV1,
-    SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
+    ProjectionOutcomeV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    WorktreeId, canonical_sha256,
 };
 #[cfg(test)]
 use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
@@ -45,16 +45,15 @@ use crate::{
             CodeIndexActiveSlotV1, CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1,
             CodeIndexCapturedFileV1, CodeIndexInputErrorV1, CodeIndexProductionConfigV1,
             CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
-            CodeIndexPublishedGenerationV1, SharedPhysicalCodeArtifactPoolV1,
+            CodeIndexPublishedGenerationV1, CodeIndexRepositoryParseIdentityV1,
+            SharedPhysicalCodeArtifactPoolV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
             build_batch_receipt,
         },
     },
-    privacy::{
-        CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
-    },
+    privacy::CODE_SOURCE_SANITIZER_VERSION_V1,
     retention::code_index_generations::{
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
     },
@@ -836,6 +835,27 @@ impl PendingHintsV1 {
     }
 }
 
+/// One candidate path's capture result, produced independently per file so
+/// the read/sanitize/digest sweep can run at machine width.
+struct CapturedCandidateV1 {
+    file: SanitizedCodeFileV1,
+    captured: CodeIndexCapturedFileV1,
+    receipt_id: SanitizationReceiptId,
+    retained: Arc<[u8]>,
+}
+
+struct CapturedSnapshotV1 {
+    snapshot: SanitizedCodeSnapshotV1,
+    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
+    captured_files: Vec<CodeIndexCapturedFileV1>,
+    changed_paths: BTreeSet<String>,
+    /// Strong references to this snapshot's interned bytes. The shared byte
+    /// pool holds only weak entries; the scheduler retains its current
+    /// snapshot's bytes so identical content in sibling worktrees can reuse
+    /// them (physical sharing without identity aliasing).
+    retained_bytes: Vec<Arc<[u8]>>,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct CodeIndexPublishEvidenceV1 {
     pub generation_id: CodeGenerationId,
@@ -1349,6 +1369,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     captured_files: captured.captured_files,
                     changed_files,
                     invalidations: BTreeSet::new(),
+                    repository_parse_identity: captured.repository_parse_identity,
                     sealed_at: now_micros(),
                     target_projection_key: projection_key()?,
                 },
@@ -1509,6 +1530,27 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.latest_complete_with(admission)
     }
 
+    /// Admit a generation only when the current worktree stat signature still
+    /// matches the signature sealed by the last reconcile. Workspace-wide
+    /// completeness needs this stronger fence because a file can be added
+    /// inside the ordinary bounded-staleness window.
+    fn latest_complete_ready_for_exact_source_with(
+        &mut self,
+        admission: GenerationDecodeAdmissionV1,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        let latest = self.latest_complete_ready_for_query_with(admission)?;
+        if latest.is_none() {
+            return Ok(None);
+        }
+        match self.worktree_stat_signature() {
+            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => Ok(latest),
+            _ => {
+                self.request_background_reconcile();
+                Ok(None)
+            }
+        }
+    }
+
     /// A cheap stat-level (path, mtime, size) signature of the present source
     /// candidates. It opens gix and runs stat-based status (no byte reads, no
     /// content hashing), so it can gate the far more expensive read+hash capture
@@ -1631,6 +1673,13 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub(super) const fn verified_against_source(&self) -> bool {
         self.verified_against_source
+    }
+
+    /// Whether the last execution-owned source observation is older than the
+    /// configured freshness window. This only inspects scheduler state; it does
+    /// not reopen Git, scan the worktree, enqueue a wake, or mutate a watermark.
+    pub(super) fn freshness_window_elapsed(&self) -> bool {
+        self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
     }
 
     pub(super) fn pending_hint_count(&self) -> Option<u64> {
@@ -1799,19 +1848,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        let sanitized: CodeSourceSanitizationV1 = sanitize_code_source_bytes(&raw_bytes)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Privacy(error.to_string()))?;
-        let sensitivity_level = match sanitized.receipt().disposition() {
-            SanitizerDispositionV1::Accepted => SensitivityLevelV1::Public,
-            SanitizerDispositionV1::Redacted => SensitivityLevelV1::Redacted,
-            SanitizerDispositionV1::Rejected | SanitizerDispositionV1::Quarantined => {
-                return Err(CodeIndexSchedulerErrorV1::Privacy(
-                    "durable code source carried a non-durable sanitizer disposition".to_owned(),
-                ));
-            }
-        };
-        let receipt_id = sanitized.receipt().receipt().receipt_id().clone();
-        let (sanitized_bytes, _) = sanitized.into_parts();
+        let (sanitized_bytes, sensitivity_level, receipt_id) =
+            privacy::sanitize_code_file(&raw_bytes)?;
         let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
         let occurrence = file_occurrence_id(
             &self.repository_id,
@@ -1857,6 +1895,17 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let candidate_paths = classification.candidate_paths();
         let changed_paths = classification.changed_paths();
+        let dirty = if classification
+            .changes()
+            .iter()
+            .any(|change| change.class == classification::WorktreeChangeClassV1::Conflicted)
+        {
+            RepositoryDirtyStateV1::Conflicted
+        } else if classification.changes().is_empty() {
+            RepositoryDirtyStateV1::Clean
+        } else {
+            RepositoryDirtyStateV1::Dirty
+        };
 
         let registry = StaticLanguageRegistry::new();
         // Read + sanitize + digest is per-file pure work over independent
@@ -1954,6 +2003,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         Ok(CapturedSnapshotV1 {
+            repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                tree: self.identity.head_tree().cloned(),
+                dirty,
+            },
             snapshot: SanitizedCodeSnapshotV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),
@@ -2177,6 +2230,7 @@ mod activation;
 mod cadence;
 mod classification;
 pub(crate) mod identity;
+mod privacy;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
 mod record_index;

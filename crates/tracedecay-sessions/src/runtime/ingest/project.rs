@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
@@ -208,6 +209,7 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
         .collect();
     let mut attempted = 0usize;
     let mut cancelled = false;
+    let mut claude_projected_session_ids = BTreeSet::new();
     for candidate in selected.iter().copied() {
         if cancellation.is_cancelled() {
             cancelled = true;
@@ -217,19 +219,19 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             break;
         }
         attempted = attempted.saturating_add(1);
-        provider_runs.record(
-            ProjectProviderRun {
-                project_root,
-                project_id: &canonical_project_id,
-                facade,
-                scope: &scope,
-                candidate,
-                max_new_bytes: provider_byte_cap,
-                cancellation,
-            }
-            .run()
-            .await,
-        );
+        let provider_run = ProjectProviderRun {
+            project_root,
+            project_id: &canonical_project_id,
+            facade,
+            scope: &scope,
+            candidate,
+            max_new_bytes: provider_byte_cap,
+            cancellation,
+        }
+        .run()
+        .await;
+        claude_projected_session_ids.extend(provider_run.claude_projected_session_ids);
+        provider_runs.record(provider_run.outcome);
         if cancellation.is_cancelled() {
             cancelled = true;
             provider_runs
@@ -248,7 +250,13 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
         .await
         {
             Ok(projection_stats) => {
-                provider_runs.stats = provider_runs.stats.merge(projection_stats.transcript);
+                provider_runs.deferred_units = provider_runs
+                    .deferred_units
+                    .saturating_add(projection_stats.deferred_sources);
+                provider_runs.stats = provider_runs.stats.merge(
+                    projection_stats
+                        .deduplicated_transcript_stats(&mut claude_projected_session_ids),
+                );
             }
             Err(error) => {
                 let failure = claude_catch_up_failure("projection", &error);

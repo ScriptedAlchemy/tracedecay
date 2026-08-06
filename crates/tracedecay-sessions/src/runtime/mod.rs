@@ -15,18 +15,21 @@ pub mod cursor_agent;
 pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
+mod host_scan;
 pub mod ingest;
 mod ingest_byte_budget;
 mod jsonl_observation_admission;
+pub mod kimi;
 pub mod kiro;
 pub mod lcm;
+pub mod opencode;
+mod opencode_frontier;
+mod opencode_part_scan;
+mod opencode_snapshot;
 pub mod shared;
 pub mod snapshot_observation;
 pub mod source;
 pub mod store_port;
-// Exposes three `#[doc(hidden)]` process-safety test helpers that the root
-// integration tests reach through the `crate::sessions` shim.
-pub mod transcript_backfill;
 pub mod vibe;
 pub mod workflow_index;
 pub mod workflow_ingest;
@@ -34,10 +37,11 @@ pub mod workflow_state;
 
 pub use crate::{ProviderScope, SessionProvider};
 pub use ingest::{
-    TranscriptCatchUpFailure, classify_claude_observation_failure,
+    IngestPassCoverage, TranscriptCatchUpFailure, classify_claude_observation_failure,
     classify_transcript_ingest_failure, home_dir, ingest_project_sources_for_provider,
     ingest_project_sources_for_provider_with_cancellation,
     ingest_user_global_sources_for_provider_with_authorities,
+    ingest_user_global_sources_for_provider_with_authorities_and_cancellation,
     ingest_user_global_sources_for_startup_with_db, registered_project_roots_from,
     try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_home,
 };

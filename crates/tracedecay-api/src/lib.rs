@@ -14,10 +14,10 @@
 pub mod configuration;
 pub mod doctor;
 pub mod feedback;
+pub mod handoff;
 mod http;
 pub mod multi_root;
 pub mod read_model;
-pub mod remediation;
 pub mod remote;
 mod sse;
 pub mod work;
@@ -32,6 +32,10 @@ use tracedecay_application::{
 };
 use tracedecay_tool_catalog::BindingId;
 
+pub use handoff::{
+    HandoffApplicationOwner, HandoffHttpRequest, HandoffInvocationFuture, HandoffOperation,
+    handoff_application_router, handoff_invalid_request_response,
+};
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
     HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
@@ -148,6 +152,10 @@ pub enum HttpSseEvent<T> {
         sequence: u64,
         terminal: StreamTermination,
     },
+    Unavailable {
+        sequence: u64,
+        terminal: StreamTermination,
+    },
     Partial {
         sequence: u64,
         terminal: StreamTermination,
@@ -169,6 +177,7 @@ impl<T> HttpSseEvent<T> {
             Self::Cancelled { .. } => "cancelled",
             Self::TimedOut { .. } => "timed_out",
             Self::Failed { .. } => "failed",
+            Self::Unavailable { .. } => "unavailable",
             Self::Partial { .. } => "partial",
             Self::EffectUnknown { .. } => "effect_unknown",
         }
@@ -184,6 +193,7 @@ impl<T> HttpSseEvent<T> {
             | Self::Cancelled { sequence, .. }
             | Self::TimedOut { sequence, .. }
             | Self::Failed { sequence, .. }
+            | Self::Unavailable { sequence, .. }
             | Self::Partial { sequence, .. }
             | Self::EffectUnknown { sequence, .. } => Some(*sequence),
         }
@@ -196,6 +206,7 @@ impl<T> HttpSseEvent<T> {
                 | Self::Cancelled { .. }
                 | Self::TimedOut { .. }
                 | Self::Failed { .. }
+                | Self::Unavailable { .. }
                 | Self::Partial { .. }
                 | Self::EffectUnknown { .. }
         )
@@ -218,6 +229,7 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
                 OperationTermination::Cancelled => Self::Cancelled { sequence, terminal },
                 OperationTermination::TimedOut => Self::TimedOut { sequence, terminal },
                 OperationTermination::Failed => Self::Failed { sequence, terminal },
+                OperationTermination::Unavailable => Self::Unavailable { sequence, terminal },
                 OperationTermination::Partial => Self::Partial { sequence, terminal },
                 OperationTermination::EffectUnknown => Self::EffectUnknown { sequence, terminal },
             },

@@ -128,8 +128,7 @@ duplicating business logic.
   Lifecycle, framing, and document notifications remain protocol mechanics,
   not callable catalog capabilities. `prepareRename` and `rename` bind only to
   read-only candidate/preview UseCaseIds owned by
-  [34](34-workspace-refactoring-and-api-migration.md); they never bind directly
-  to `tracedecay_rename_symbol`, API-migration apply, another write-effect
+  [34](34-workspace-refactoring.md); they never bind directly to a write-effect
   entry, `workspace/applyEdit`, or opaque server commands. No separate
   `lsp_*` capability is cataloged for them, and no binding may apply an edit
   on their behalf. `textDocument/codeAction` is cataloged only when its owning
@@ -394,15 +393,14 @@ shipped apply operations remain independently callable base tools. Composed
 refactoring workflow bundles reference those canonical tools instead of copying
 handlers or schemas.
 
-[Workspace refactoring and API migration](34-workspace-refactoring-and-api-migration.md)
-owns the behavior and acceptance contract for apply-grade previews, atomic symbol
-rename, and semantic API migration. In particular:
+[Workspace refactoring](34-workspace-refactoring.md) owns the
+behavior and acceptance contract for apply-grade previews and atomic symbol
+rename. In particular:
 
-- pure symbol rename and compatibility-aware API promotion are separate operations;
-- apply tools consume immutable preview/plan identifiers and digests and fail closed on stale evidence;
+- apply tools consume immutable preview identifiers and digests and fail closed
+  on stale evidence;
 - catalog capability metadata is granular by language and symbol/site kind;
 - unsupported or not-yet-shipped apply operations are never advertised as callable;
 - human-readable and JSON results render one typed changed/unchanged/skipped/blocked manifest; and
-- neutral adoption evals must prove that agents preview before apply and choose
-  semantic migration rather than rename when compatibility or coordinated
-  definition changes are required.
+- neutral adoption evals must prove that agents preview before apply and do not
+  misuse rename for coordinated definition changes.

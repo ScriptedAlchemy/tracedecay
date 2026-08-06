@@ -85,7 +85,6 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
             [
                 "over_budget_store",
                 "orphan_store",
-                "stale_branch_dbs",
                 "incident_debris_present",
                 "retention_backlog",
                 "table_growth",
@@ -99,21 +98,9 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
                 .find(|entry| entry["kind"] == kind)
                 .unwrap_or_else(|| panic!("missing storage producer status for {kind}: {envelope}"))
         };
-        let budget = status_for("over_budget_store");
-        assert_eq!(
-            budget["state"], "unset",
-            "a readable owner config with no soft budgets is unset, never clean: {budget}"
-        );
-        assert!(
-            budget["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("store_soft_budgets_bytes")),
-            "the unset state must name its real configuration source: {budget}"
-        );
-
         for kind in [
+            "over_budget_store",
             "orphan_store",
-            "stale_branch_dbs",
             "incident_debris_present",
             "retention_backlog",
             "table_growth",
@@ -121,7 +108,7 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
             let producer = status_for(kind);
             assert_eq!(
                 producer["state"], "unsupported",
-                "an unadmitted Doctor source must stay explicitly unsupported: {producer}"
+                "dashboard telemetry must not override an unadmitted canonical Doctor source: {producer}"
             );
             assert!(
                 producer["reason"]

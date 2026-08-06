@@ -4,12 +4,16 @@ mod automation;
 pub mod dispatch;
 mod help;
 pub(crate) mod output;
+mod package_hook;
+mod workflow;
 pub use automation::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
     AutomationRunAction, AutomationRunsAction, AutomationSkillsAction,
     AutomationSkillsInstallTarget,
 };
 use help::*;
+pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
+pub use workflow::WorkflowInvocationArgs;
 
 fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
@@ -59,6 +63,20 @@ pub enum FeedbackRollbackAction {
         /// Confirm the feedback-route restoration
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum ConfigurationAction {
+    /// Inspect an incompatible project configuration store, or reset it by
+    /// echoing the exact daemon-issued confirmation token.
+    Reset {
+        /// Project path (default: current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Exact token printed by the preceding reset inspection
+        #[arg(long)]
+        confirmation: Option<String>,
     },
 }
 
@@ -130,33 +148,6 @@ pub struct Cli {
     pub adopt: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-pub enum PackageHookAction {
-    /// Run Scoop package lifecycle integration.
-    Scoop {
-        #[command(subcommand)]
-        action: ScoopPackageHookAction,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum ScoopPackageHookAction {
-    /// Snapshot and quiesce a managed service before Scoop replaces the app tree.
-    Prepare {
-        #[arg(long, value_parser = ["tracedecay", "tracedecay-beta"])]
-        package_id: String,
-        #[arg(long)]
-        state_file: std::path::PathBuf,
-    },
-    /// Restore a snapshotted managed service after Scoop installs the new binary.
-    Restore {
-        #[arg(long, value_parser = ["tracedecay", "tracedecay-beta"])]
-        package_id: String,
-        #[arg(long)]
-        state_file: std::path::PathBuf,
-    },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -245,6 +236,16 @@ pub enum Commands {
         /// `@` is read from that file (handy for multi-line replacement bodies).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Invoke one typed daemon-owned Workflow application operation.
+    Workflow {
+        #[command(flatten)]
+        invocation: WorkflowInvocationArgs,
+    },
+    /// Operate the daemon-owned typed configuration control plane
+    Config {
+        #[command(subcommand)]
+        action: ConfigurationAction,
     },
     /// Inspect language-server support for dashboard code diagnostics
     #[command(long_about = LSP_LONG_ABOUT, after_help = LSP_AFTER_HELP)]
@@ -439,9 +440,6 @@ pub enum Commands {
     /// OpenCode direct tool.execute.after Hook V2 handler.
     #[command(name = "hook-opencode-tool-after", hide = true)]
     HookOpenCodeToolAfter,
-    /// Detached profile user-session automation review.
-    #[command(name = "hook-user-session-review", hide = true)]
-    HookUserSessionReview,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {
@@ -479,14 +477,11 @@ pub enum Commands {
     /// Install the latest version; refreshes plugins only after a real install
     ///
     /// Downloads and installs the newest release. When a new binary was
-    /// installed, also refreshes generated plugins and the daemon service and
-    /// runs the post-update health pass on the new version. When already up
-    /// to date it stops there — use `tracedecay update` to refresh regardless.
+    /// installed, also refreshes generated plugins, configured agent
+    /// integrations, and the daemon service. When already up to date it stops
+    /// there — use `tracedecay update` to refresh regardless.
     #[command(after_help = UPGRADE_AFTER_HELP)]
     Upgrade {
-        /// Skip the post-update health pass (safe repairs + doctor summary)
-        #[arg(long)]
-        no_heal: bool,
         /// Skip refreshing already-configured agent integrations
         #[arg(long)]
         no_reinstall: bool,
@@ -494,13 +489,10 @@ pub enum Commands {
     /// Refresh generated plugins and the daemon, even when already up to date
     ///
     /// Upgrades the binary first when a newer release exists, then always
-    /// refreshes generated plugins and the daemon service and runs the
-    /// post-update health pass — even when the binary was already current.
+    /// refreshes generated plugins, configured agent integrations, and the
+    /// daemon service — even when the binary was already current.
     #[command(after_help = UPDATE_AFTER_HELP)]
     Update {
-        /// Skip the post-update health pass (safe repairs + doctor summary)
-        #[arg(long)]
-        no_heal: bool,
         /// Skip refreshing already-configured agent integrations
         #[arg(long)]
         no_reinstall: bool,
@@ -508,9 +500,6 @@ pub enum Commands {
     /// Refresh plugins and daemon after the binary has been updated.
     #[command(name = "post-update", hide = true)]
     PostUpdate {
-        /// Skip the post-update health pass (safe repairs + doctor summary)
-        #[arg(long)]
-        no_heal: bool,
         /// Skip refreshing already-configured agent integrations
         #[arg(long)]
         no_reinstall: bool,
@@ -581,11 +570,7 @@ pub enum Commands {
     },
     /// Check tracedecay installation, configuration, and agent integration
     #[command(long_about = DOCTOR_LONG_ABOUT, after_help = DOCTOR_AFTER_HELP)]
-    Doctor {
-        /// Check only this agent (default: all agents)
-        #[arg(long, value_parser = agent_value_parser())]
-        agent: Option<String>,
-    },
+    Doctor,
     /// Token cost summary from Claude Code sessions
     #[command(long_about = COST_LONG_ABOUT, after_help = COST_AFTER_HELP)]
     Cost {
@@ -921,11 +906,8 @@ pub(crate) struct SessionRefreshOperationArgs {
 
 #[derive(Subcommand)]
 pub enum SessionsAction {
-    /// Ingest all supported transcript providers into the project session DB
-    Ingest {
-        /// Deprecated compatibility option; ingest always sweeps all supported providers
-        #[arg(long)]
-        provider: Option<String>,
+    /// Schedule bounded import of current and historical native host transcripts
+    Import {
         /// Registered project id whose session store should receive ingested messages
         #[arg(long)]
         project_id: Option<String>,
@@ -940,13 +922,12 @@ pub enum SessionsAction {
         #[command(subcommand)]
         action: SessionsRefreshAction,
     },
-    /// Backfill the session↔git correlation index from historical session,
-    /// analytics, and reflog signals
-    GitBackfill {
-        /// Registered project id whose session store should be backfilled
+    /// Synchronize session↔git correlation from session, analytics, and reflog signals
+    GitSync {
+        /// Registered project id whose session store should be synchronized
         #[arg(long)]
         project_id: Option<String>,
-        /// Registered project root path or alias whose session store should be backfilled
+        /// Registered project root path or alias whose session store should be synchronized
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
         /// Lower bound on session activity and commit times (ISO-8601 or unix

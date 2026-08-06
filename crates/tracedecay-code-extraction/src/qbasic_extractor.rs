@@ -79,16 +79,32 @@ impl QBasicExtractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     /// `source` is the `QBasic` source code to parse.
     pub fn extract_qbasic(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         // Create the File root node.
         let file_node = Node {
@@ -120,55 +136,45 @@ impl QBasicExtractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        let root = tree.root_node();
-
-        // Walk the top-level children of the program.
-        let mut cursor = root.walk();
         // Collect preceding comments for docstrings.
         let mut pending_comment: Option<String> = None;
-        if cursor.goto_first_child() {
-            loop {
-                let node = cursor.node();
-                match node.kind() {
-                    "line" => {
-                        // A line can contain: apostrophe_comment, const_statement,
-                        // dim_statement, call_statement, declare_statement, let_statement, etc.
-                        if let Some(comment) = Self::extract_line_comment(&state, node) {
-                            // Accumulate comments as potential docstrings.
-                            pending_comment = Some(comment);
-                        } else {
-                            Self::visit_line(&mut state, node, pending_comment.as_deref());
-                            pending_comment = None;
-                        }
-                    }
-                    "type_definition" => {
-                        Self::visit_type_definition(&mut state, node, pending_comment.as_deref());
-                        pending_comment = None;
-                    }
-                    "sub_definition" => {
-                        Self::visit_sub_definition(&mut state, node, pending_comment.as_deref());
-                        pending_comment = None;
-                    }
-                    "function_definition" => {
-                        Self::visit_function_definition(
-                            &mut state,
-                            node,
-                            pending_comment.as_deref(),
-                        );
-                        pending_comment = None;
-                    }
-                    _ => {
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |node| {
+            match node.kind() {
+                "line" => {
+                    // A line can contain: apostrophe_comment, const_statement,
+                    // dim_statement, call_statement, declare_statement, let_statement, etc.
+                    if let Some(comment) = Self::extract_line_comment(&state, node) {
+                        // Accumulate comments as potential docstrings.
+                        pending_comment = Some(comment);
+                    } else {
+                        Self::visit_line(&mut state, node, pending_comment.as_deref());
                         pending_comment = None;
                     }
                 }
-                if !cursor.goto_next_sibling() {
-                    break;
+                "type_definition" => {
+                    Self::visit_type_definition(&mut state, node, pending_comment.as_deref());
+                    pending_comment = None;
+                }
+                "sub_definition" => {
+                    Self::visit_sub_definition(&mut state, node, pending_comment.as_deref());
+                    pending_comment = None;
+                }
+                "function_definition" => {
+                    Self::visit_function_definition(&mut state, node, pending_comment.as_deref());
+                    pending_comment = None;
+                }
+                _ => {
+                    pending_comment = None;
                 }
             }
-        }
+        });
 
         state.node_stack.pop();
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -686,5 +692,15 @@ impl crate::LanguageExtractor for QBasicExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_qbasic(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

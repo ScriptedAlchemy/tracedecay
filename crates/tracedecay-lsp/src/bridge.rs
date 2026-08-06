@@ -8,8 +8,11 @@
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use futures_util::StreamExt;
+use tokio::io::AsyncRead;
 use tokio::time::Instant;
+use tokio_util::bytes::{Buf, BytesMut};
+use tokio_util::codec::{Decoder, Encoder, FramedRead};
 
 /// Hard JSON-RPC payload limit for one bridged frame.
 pub const MAX_LSP_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -43,91 +46,101 @@ pub enum ContentLengthCodecError {
 /// `Content-Type` header, but reject duplicate or unknown headers rather than
 /// silently choosing an interpretation. This prevents framing desynchronizing
 /// a reconnecting bridge after malformed input.
-#[derive(Clone, Debug, Default)]
-pub struct ContentLengthCodec {
-    input: Vec<u8>,
-}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ContentLengthCodec;
 
 impl ContentLengthCodec {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Adds raw bytes read from stdio. Call [`Self::next_frame`] until it
-    /// returns `Ok(None)` before reading more bytes.
-    pub fn push(&mut self, bytes: &[u8]) {
-        self.input.extend_from_slice(bytes);
-    }
-
-    /// Returns one fully decoded opaque JSON-RPC payload when available.
-    pub fn next_frame(&mut self) -> Result<Option<LspFrame>, ContentLengthCodecError> {
-        let Some(header_end) = find_header_end(&self.input) else {
-            if has_invalid_line_ending(&self.input) || self.input.len() > MAX_LSP_HEADER_BYTES {
-                return Err(if self.input.len() > MAX_LSP_HEADER_BYTES {
-                    ContentLengthCodecError::HeaderTooLarge {
-                        limit: MAX_LSP_HEADER_BYTES,
-                    }
-                } else {
-                    ContentLengthCodecError::MalformedHeader
-                });
-            }
-            return Ok(None);
-        };
-        if header_end > MAX_LSP_HEADER_BYTES {
-            return Err(ContentLengthCodecError::HeaderTooLarge {
-                limit: MAX_LSP_HEADER_BYTES,
-            });
-        }
-
-        let body_len = parse_content_length(&self.input[..header_end])?;
-        if body_len > MAX_LSP_FRAME_BYTES {
-            return Err(ContentLengthCodecError::FrameTooLarge {
-                size: body_len,
-                limit: MAX_LSP_FRAME_BYTES,
-            });
-        }
-        let body_start = header_end + 4;
-        let Some(message_len) = body_start.checked_add(body_len) else {
-            return Err(ContentLengthCodecError::FrameTooLarge {
-                size: body_len,
-                limit: MAX_LSP_FRAME_BYTES,
-            });
-        };
-        if self.input.len() < message_len {
-            return Ok(None);
-        }
-        let frame = self.input[body_start..message_len].to_vec();
-        self.input.drain(..message_len);
-        Ok(Some(frame))
+    pub const fn new() -> Self {
+        Self
     }
 
     /// Encodes an opaque JSON-RPC payload into the standard LSP envelope.
     pub fn encode(frame: &[u8]) -> Result<Vec<u8>, ContentLengthCodecError> {
-        if frame.len() > MAX_LSP_FRAME_BYTES {
-            return Err(ContentLengthCodecError::FrameTooLarge {
-                size: frame.len(),
-                limit: MAX_LSP_FRAME_BYTES,
+        let mut encoded = BytesMut::new();
+        encode_frame(frame, &mut encoded)?;
+        Ok(encoded.to_vec())
+    }
+}
+
+impl Decoder for ContentLengthCodec {
+    type Error = AsyncContentLengthError;
+    type Item = LspFrame;
+
+    fn decode(&mut self, input: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        decode_frame(input).map_err(Into::into)
+    }
+
+    fn decode_eof(&mut self, input: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if let Some(frame) = self.decode(input)? {
+            return Ok(Some(frame));
+        }
+        if input.is_empty() {
+            Ok(None)
+        } else {
+            Err(ContentLengthCodecError::UnexpectedEof.into())
+        }
+    }
+}
+
+impl Encoder<&[u8]> for ContentLengthCodec {
+    type Error = AsyncContentLengthError;
+
+    fn encode(&mut self, frame: &[u8], output: &mut BytesMut) -> Result<(), Self::Error> {
+        encode_frame(frame, output).map_err(Into::into)
+    }
+}
+
+fn decode_frame(input: &mut BytesMut) -> Result<Option<LspFrame>, ContentLengthCodecError> {
+    let Some(header_end) = find_header_end(input) else {
+        if has_invalid_line_ending(input) || input.len() > MAX_LSP_HEADER_BYTES {
+            return Err(if input.len() > MAX_LSP_HEADER_BYTES {
+                ContentLengthCodecError::HeaderTooLarge {
+                    limit: MAX_LSP_HEADER_BYTES,
+                }
+            } else {
+                ContentLengthCodecError::MalformedHeader
             });
         }
-        let mut encoded = format!("Content-Length: {}\r\n\r\n", frame.len()).into_bytes();
-        encoded.extend_from_slice(frame);
-        Ok(encoded)
+        return Ok(None);
+    };
+    if header_end > MAX_LSP_HEADER_BYTES {
+        return Err(ContentLengthCodecError::HeaderTooLarge {
+            limit: MAX_LSP_HEADER_BYTES,
+        });
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.input.is_empty()
+    let body_len = parse_content_length(&input[..header_end])?;
+    if body_len > MAX_LSP_FRAME_BYTES {
+        return Err(ContentLengthCodecError::FrameTooLarge {
+            size: body_len,
+            limit: MAX_LSP_FRAME_BYTES,
+        });
     }
+    let body_start = header_end + 4;
+    let Some(message_len) = body_start.checked_add(body_len) else {
+        return Err(ContentLengthCodecError::FrameTooLarge {
+            size: body_len,
+            limit: MAX_LSP_FRAME_BYTES,
+        });
+    };
+    if input.len() < message_len {
+        return Ok(None);
+    }
+    let mut message = input.split_to(message_len);
+    message.advance(body_start);
+    Ok(Some(message.to_vec()))
+}
 
-    /// Completes the byte stream. EOF is valid only between frames; buffered
-    /// header or body bytes are a framing failure rather than a clean bridge
-    /// shutdown.
-    pub fn finish(&self) -> Result<(), ContentLengthCodecError> {
-        if self.input.is_empty() {
-            Ok(())
-        } else {
-            Err(ContentLengthCodecError::UnexpectedEof)
-        }
+fn encode_frame(frame: &[u8], output: &mut BytesMut) -> Result<(), ContentLengthCodecError> {
+    if frame.len() > MAX_LSP_FRAME_BYTES {
+        return Err(ContentLengthCodecError::FrameTooLarge {
+            size: frame.len(),
+            limit: MAX_LSP_FRAME_BYTES,
+        });
     }
+    output.extend_from_slice(format!("Content-Length: {}\r\n\r\n", frame.len()).as_bytes());
+    output.extend_from_slice(frame);
+    Ok(())
 }
 
 fn find_header_end(input: &[u8]) -> Option<usize> {
@@ -211,85 +224,23 @@ impl From<ContentLengthCodecError> for AsyncContentLengthError {
     }
 }
 
-/// Deadline-aware Tokio reader backed by the strict [`ContentLengthCodec`].
+/// Reads one framed payload before `deadline`.
 ///
-/// The adapter never parses the payload. A deadline reached between frames is
-/// [`FramePoll::Pending`]; a deadline reached after partial input is an error,
-/// preventing callers from silently discarding an incomplete envelope.
-pub struct AsyncContentLengthReader<R> {
-    reader: R,
-    decoder: ContentLengthCodec,
-}
-
-impl<R> AsyncContentLengthReader<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader,
-            decoder: ContentLengthCodec::new(),
-        }
-    }
-
-    pub fn into_inner(self) -> R {
-        self.reader
-    }
-}
-
-impl<R> AsyncContentLengthReader<R>
+/// An idle deadline is retryable, while a partial frame at the deadline is a
+/// typed failure so callers cannot silently discard an incomplete envelope.
+pub async fn read_content_length_frame_until<R>(
+    reader: &mut FramedRead<R, ContentLengthCodec>,
+    deadline: Instant,
+) -> Result<FramePoll, AsyncContentLengthError>
 where
     R: AsyncRead + Unpin,
 {
-    pub async fn read_frame_until(
-        &mut self,
-        deadline: Instant,
-    ) -> Result<FramePoll, AsyncContentLengthError> {
-        loop {
-            if let Some(frame) = self.decoder.next_frame()? {
-                return Ok(FramePoll::Frame(frame));
-            }
-            if Instant::now() >= deadline {
-                return if self.decoder.is_empty() {
-                    Ok(FramePoll::Pending)
-                } else {
-                    Err(AsyncContentLengthError::DeadlineElapsed)
-                };
-            }
-
-            let mut buffer = [0_u8; STDIO_READ_BUFFER_BYTES];
-            let read = match tokio::time::timeout_at(deadline, self.reader.read(&mut buffer)).await
-            {
-                Ok(result) => result?,
-                Err(_) if self.decoder.is_empty() => return Ok(FramePoll::Pending),
-                Err(_) => return Err(AsyncContentLengthError::DeadlineElapsed),
-            };
-            if read == 0 {
-                return if self.decoder.is_empty() {
-                    Ok(FramePoll::Closed)
-                } else {
-                    Err(ContentLengthCodecError::UnexpectedEof.into())
-                };
-            }
-            self.decoder.push(&buffer[..read]);
-        }
+    match tokio::time::timeout_at(deadline, reader.next()).await {
+        Ok(Some(result)) => result.map(FramePoll::Frame),
+        Ok(None) => Ok(FramePoll::Closed),
+        Err(_) if reader.read_buffer().is_empty() => Ok(FramePoll::Pending),
+        Err(_) => Err(AsyncContentLengthError::DeadlineElapsed),
     }
-}
-
-/// Encodes and writes one opaque payload before `deadline`.
-pub async fn write_content_length_frame_until<W>(
-    writer: &mut W,
-    frame: &[u8],
-    deadline: Instant,
-) -> Result<(), AsyncContentLengthError>
-where
-    W: AsyncWrite + Unpin,
-{
-    let encoded = ContentLengthCodec::encode(frame)?;
-    tokio::time::timeout_at(deadline, async {
-        writer.write_all(&encoded).await?;
-        writer.flush().await
-    })
-    .await
-    .map_err(|_| AsyncContentLengthError::DeadlineElapsed)??;
-    Ok(())
 }
 
 /// I/O failure emitted by the concrete non-blocking stdio framing adapter.
@@ -313,6 +264,16 @@ impl From<ContentLengthCodecError> for ContentLengthStdioError {
     }
 }
 
+impl From<AsyncContentLengthError> for ContentLengthStdioError {
+    fn from(error: AsyncContentLengthError) -> Self {
+        match error {
+            AsyncContentLengthError::Io(error) => Self::Io(error),
+            AsyncContentLengthError::Codec(error) => Self::Codec(error),
+            AsyncContentLengthError::DeadlineElapsed => Self::InternalState,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PendingStdioWrite {
     frame: LspFrame,
@@ -333,6 +294,7 @@ pub struct ContentLengthStdioTransport<R, W> {
     reader: R,
     writer: W,
     decoder: ContentLengthCodec,
+    input: BytesMut,
     pending_write: Option<PendingStdioWrite>,
 }
 
@@ -342,6 +304,7 @@ impl<R, W> ContentLengthStdioTransport<R, W> {
             reader,
             writer,
             decoder: ContentLengthCodec::new(),
+            input: BytesMut::new(),
             pending_write: None,
         }
     }
@@ -359,19 +322,19 @@ where
     type Error = ContentLengthStdioError;
 
     fn poll_frame(&mut self) -> Result<FramePoll, Self::Error> {
-        if let Some(frame) = self.decoder.next_frame()? {
+        if let Some(frame) = self.decoder.decode(&mut self.input)? {
             return Ok(FramePoll::Frame(frame));
         }
 
         let mut buffer = [0_u8; STDIO_READ_BUFFER_BYTES];
         match self.reader.read(&mut buffer) {
-            Ok(0) if self.decoder.is_empty() => Ok(FramePoll::Closed),
+            Ok(0) if self.input.is_empty() => Ok(FramePoll::Closed),
             Ok(0) => Err(ContentLengthCodecError::UnexpectedEof.into()),
             Ok(read) => {
-                self.decoder.push(&buffer[..read]);
+                self.input.extend_from_slice(&buffer[..read]);
                 Ok(self
                     .decoder
-                    .next_frame()?
+                    .decode(&mut self.input)?
                     .map_or(FramePoll::Pending, FramePoll::Frame))
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(FramePoll::Pending),
@@ -812,20 +775,20 @@ mod tests {
     fn strict_content_length_codec_handles_split_and_back_to_back_frames() {
         let first = ContentLengthCodec::encode(br#"{"jsonrpc":"2.0"}"#).unwrap();
         let second = ContentLengthCodec::encode(br#"{"method":"initialized"}"#).unwrap();
-        let mut codec = ContentLengthCodec::new();
-        codec.push(&first[..11]);
-        assert_eq!(codec.next_frame(), Ok(None));
-        codec.push(&first[11..]);
-        codec.push(&second);
+        let mut input = BytesMut::new();
+        input.extend_from_slice(&first[..11]);
+        assert_eq!(decode_frame(&mut input), Ok(None));
+        input.extend_from_slice(&first[11..]);
+        input.extend_from_slice(&second);
         assert_eq!(
-            codec.next_frame(),
+            decode_frame(&mut input),
             Ok(Some(br#"{"jsonrpc":"2.0"}"#.to_vec()))
         );
         assert_eq!(
-            codec.next_frame(),
+            decode_frame(&mut input),
             Ok(Some(br#"{"method":"initialized"}"#.to_vec()))
         );
-        assert_eq!(codec.next_frame(), Ok(None));
+        assert_eq!(decode_frame(&mut input), Ok(None));
     }
 
     #[test]
@@ -852,9 +815,8 @@ mod tests {
                 ContentLengthCodecError::MalformedHeader,
             ),
         ] {
-            let mut codec = ContentLengthCodec::new();
-            codec.push(wire);
-            assert_eq!(codec.next_frame(), Err(expected));
+            let mut input = BytesMut::from(wire);
+            assert_eq!(decode_frame(&mut input), Err(expected));
         }
     }
 

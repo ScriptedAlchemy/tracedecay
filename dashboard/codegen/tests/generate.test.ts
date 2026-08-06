@@ -42,7 +42,7 @@ describe("contracts generator", () => {
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
     const order = [
       "const ActorIdSchema",
-      "const CancellationObservationSchema",
+      "const AnalyticsAgentsPayloadV1Schema",
       "const DashboardAuthorizationV1Schema",
       "const DashboardCoverageV1Schema",
       "const DashboardDomainStateV1Schema",
@@ -54,7 +54,7 @@ describe("contracts generator", () => {
       "const DashboardTimeV1Schema",
       "const DashboardVersionV1Schema",
       "const DashboardWatermarkV1Schema",
-      "const DeadlineSchema",
+      "const DeliveryCiTimelineV1Schema",
     ].map((needle) => generated.indexOf(needle));
     expect(order.every((i) => i >= 0)).toBe(true);
     const sorted = [...order].sort((a, b) => a - b);

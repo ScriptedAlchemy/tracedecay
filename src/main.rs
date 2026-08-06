@@ -12,6 +12,7 @@ mod cli;
 mod commands;
 mod cost_cmd;
 mod global;
+mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
 mod project_cmd;
@@ -19,6 +20,7 @@ mod sessions_cmd;
 mod status_cmd;
 mod tool_command;
 mod update_cmd;
+mod workflow_command;
 
 pub use tracedecay::serve;
 
@@ -215,6 +217,10 @@ fn is_extract_worker(command: Option<&Commands>) -> bool {
 }
 
 fn main() {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    if let Some(code) = hook_capture_cmd::try_run(&args) {
+        process::exit(code);
+    }
     let spawned = std::thread::Builder::new()
         .name("tracedecay-main".to_string())
         .stack_size(ASYNC_STACK_BYTES)
@@ -558,6 +564,7 @@ impl CommandFamily {
             | Commands::Wipe { .. }
             | Commands::List { .. } => Self::Project,
             Commands::Tool { .. }
+            | Commands::Workflow { .. }
             | Commands::Lsp { .. }
             | Commands::ExtractWorker
             | Commands::Dashboard { .. }
@@ -597,8 +604,7 @@ impl CommandFamily {
             | Commands::HookHermesTerminalReceipt
             | Commands::HookKimiEvent
             | Commands::HookOpenCodeEvent
-            | Commands::HookOpenCodeToolAfter
-            | Commands::HookUserSessionReview => Self::Hook,
+            | Commands::HookOpenCodeToolAfter => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
@@ -608,8 +614,9 @@ impl CommandFamily {
             | Commands::ResetCounter { .. }
             | Commands::DisableUploadCounter
             | Commands::EnableUploadCounter
-            | Commands::Gitignore { .. } => Self::Configuration,
-            Commands::Doctor { .. }
+            | Commands::Gitignore { .. }
+            | Commands::Config { .. } => Self::Configuration,
+            Commands::Doctor
             | Commands::Cost { .. }
             | Commands::Bench { .. }
             | Commands::Gain { .. }
@@ -808,14 +815,11 @@ async fn dispatch_runtime_command(command: Commands) -> tracedecay::errors::Resu
         } => {
             tool_command::run(project, name, args).await?;
         }
+        Commands::Workflow { invocation } => workflow_command::run(invocation).await?,
         Commands::Lsp { action } => {
             lsp_cmd::handle_lsp_action(action).await?;
         }
-        Commands::ExtractWorker => {
-            // Handled by the early dispatch at the top of run(); this arm
-            // exists only for clap match exhaustiveness.
-            unreachable!("extract-worker handled by early dispatch")
-        }
+        Commands::ExtractWorker => unreachable!("extract-worker handled by early dispatch"),
         Commands::Dashboard {
             path,
             host,
@@ -1138,8 +1142,7 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
         | Commands::HookHermesTerminalReceipt
         | Commands::HookKimiEvent
         | Commands::HookOpenCodeEvent
-        | Commands::HookOpenCodeToolAfter
-        | Commands::HookUserSessionReview) => {
+        | Commands::HookOpenCodeToolAfter) => {
             hook_cmd::handle_hook_command(hook_command).await?;
         }
         _ => unreachable!("non-hook command passed to hook dispatcher"),
@@ -1149,29 +1152,18 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
 
 async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
-        Commands::Upgrade {
-            no_heal,
-            no_reinstall,
-        } => {
-            update_cmd::run_upgrade_command(no_heal, no_reinstall)?;
+        Commands::Upgrade { no_reinstall } => {
+            update_cmd::run_upgrade_command(no_reinstall)?;
         }
-        Commands::Update {
-            no_heal,
-            no_reinstall,
-        } => {
-            update_cmd::run_update_command(no_heal, no_reinstall)?;
+        Commands::Update { no_reinstall } => {
+            update_cmd::run_update_command(no_reinstall)?;
         }
         Commands::PostUpdate {
-            no_heal,
             no_reinstall,
             lifecycle_lease_token,
         } => {
-            update_cmd::run_post_update_command(
-                no_heal,
-                no_reinstall,
-                lifecycle_lease_token.as_deref(),
-            )
-            .await?;
+            update_cmd::run_post_update_command(no_reinstall, lifecycle_lease_token.as_deref())
+                .await?;
         }
         Commands::PackageHook {
             action: PackageHookAction::Scoop { action },
@@ -1249,6 +1241,45 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
         Commands::Gitignore { path, action } => {
             commands::handle_gitignore(path, action).await?;
         }
+        Commands::Config {
+            action: ConfigurationAction::Reset { path, confirmation },
+        } => {
+            let project_path = tracedecay::config::resolve_path(path);
+            let (outcome, token) =
+                tracedecay::daemon_client::DaemonInvocationClient::reset_configuration(
+                    project_path,
+                    confirmation.as_deref(),
+                )
+                .await?;
+            match outcome {
+                tracedecay_application::ConfigurationResetOutcomeV1::ConfirmationRequired {
+                    confirmation,
+                } => {
+                    let token =
+                        token.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                            message: "daemon omitted the configuration reset confirmation token"
+                                .to_owned(),
+                        })?;
+                    eprintln!(
+                        "Configuration reset required for project {} (profile {}, store {}).",
+                        confirmation.project_id,
+                        confirmation.profile_id,
+                        confirmation.runtime_binding_digest
+                    );
+                    println!("{token}");
+                }
+                tracedecay_application::ConfigurationResetOutcomeV1::Completed {
+                    project_id,
+                    profile_id,
+                    runtime_binding_digest,
+                    ..
+                } => {
+                    eprintln!(
+                        "Reset configuration for project {project_id} (profile {profile_id}, store {runtime_binding_digest})."
+                    );
+                }
+            }
+        }
         _ => unreachable!("non-configuration command passed to configuration dispatcher"),
     }
     Ok(())
@@ -1256,8 +1287,8 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
 
 async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
-        Commands::Doctor { agent } => {
-            tracedecay::doctor::run_doctor(agent.as_deref()).await?;
+        Commands::Doctor => {
+            tracedecay::doctor::run_doctor().await?;
         }
         Commands::Cost {
             range,
@@ -1331,7 +1362,9 @@ impl CommandStartupPolicy {
             // Tool calls are the documented MCP fallback and must remain a local,
             // latency-bounded protocol path. Unrelated counter uploads or agent
             // maintenance belong on interactive commands and daemon background work.
-            Commands::Tool { .. } => Self::SkipAll,
+            Commands::Tool { .. } | Commands::Workflow { .. } | Commands::Config { .. } => {
+                Self::SkipAll
+            }
             // Explicit lifecycle/maintenance commands manage their own work.
             // Serve is also latency-sensitive: clients impose a 30 s MCP
             // initialize timeout, so no implicit startup work belongs there.
@@ -1346,10 +1379,13 @@ impl CommandStartupPolicy {
             | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
-            | Commands::Doctor { .. }
+            | Commands::Doctor
             | Commands::Analytics { .. }
             | Commands::Sessions {
-                action: SessionsAction::Unfinished { .. },
+                action:
+                    SessionsAction::Import { .. }
+                    | SessionsAction::GitSync { .. }
+                    | SessionsAction::Unfinished { .. },
             }
             | Commands::Migrate { .. }
             | Commands::Projects { .. }

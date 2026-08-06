@@ -47,16 +47,32 @@ impl ExtractionState {
 
 impl ErlangExtractor {
     pub fn extract_erlang(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(t) => t,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         let file_node = Node {
             id: state.file_node_id.clone(),
@@ -85,10 +101,15 @@ impl ErlangExtractor {
         };
         state.nodes.push(file_node);
 
-        let root = tree.root_node();
-        Self::visit_children(&mut state, root);
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            Self::visit_node(&mut state, child);
+        });
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     fn parse_source(source: &str) -> Result<Tree, String> {
@@ -439,5 +460,15 @@ impl crate::LanguageExtractor for ErlangExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_erlang(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

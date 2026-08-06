@@ -75,13 +75,6 @@ pub mod config;
 pub mod contract_schema;
 mod delivery_api;
 mod doctor_findings_api;
-pub mod doctor_remediation_api;
-pub use doctor_remediation_api::{
-    DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
-    DoctorRemediationDispatcherV1, DoctorRemediationLegalActionV1,
-    DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1, DoctorRemediationTargetV1,
-    DoctorRemediationVerificationV1,
-};
 mod events_api;
 mod explorer_api;
 pub mod feedback_api;
@@ -91,18 +84,7 @@ mod graph_service;
 mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
-// SEAM(sessions): the sessions mover physically relocated this dashboard test
-// module to `crates/tracedecay-sessions/src/runtime/lcm/`, where nothing
-// declares it — it is a dashboard test (`super::*` resolves to this crate's
-// root, and it drives an `axum::Router` over `DashboardState`). The `#[path]`
-// follows the file so the coverage is not silently dropped; the lead should
-// physically move it back under this crate (`src/` or `tests/`) at
-// integration, at which point this attribute goes away.
-#[cfg(test)]
-#[path = "../../tracedecay-sessions/src/runtime/lcm/dashboard_fixes_tests.rs"]
-mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
-mod lcm_service;
 mod loom_api;
 mod memory_analysis;
 mod memory_api;
@@ -235,8 +217,6 @@ pub struct DashboardStateCompositionV1 {
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
-    pub doctor_remediation_dispatcher:
-        Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     pub code_diagnostics_broker:
@@ -353,10 +333,6 @@ pub struct DashboardState {
     /// Admitted canonical Doctor report source. Absent when the dashboard was
     /// not opened by an owner holding an exact application request context.
     pub doctor_report_reader: Option<DoctorReportReader>,
-    /// Optional admitted owner-operation router. Its absence keeps remediation
-    /// references descriptive and non-actionable.
-    pub doctor_remediation_dispatcher:
-        Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     /// Active-project daemon application transport. Mutating dashboard routes
     /// use this catalog-bound executor instead of opening stores or applying
     /// configuration inside HTTP adapters.
@@ -434,13 +410,9 @@ impl DashboardState {
             crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1,
         >,
         doctor_report_reader: Option<DoctorReportReader>,
-        doctor_remediation_dispatcher: Option<
-            doctor_remediation_api::DoctorRemediationDispatcherV1,
-        >,
     ) {
         self.code_diagnostics_authority = code_diagnostics_authority;
         self.doctor_report_reader = doctor_report_reader;
-        self.doctor_remediation_dispatcher = doctor_remediation_dispatcher;
     }
 }
 
@@ -531,7 +503,6 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
-        doctor_remediation_dispatcher,
         code_index_freshness_reader,
         feedback_status_reader,
         code_diagnostics_broker,
@@ -592,14 +563,9 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader: None,
-        doctor_remediation_dispatcher: None,
         application_invocation_executor,
     };
-    state.retain_admitted_authorities(
-        code_diagnostics_authority,
-        doctor_report_reader,
-        doctor_remediation_dispatcher,
-    );
+    state.retain_admitted_authorities(code_diagnostics_authority, doctor_report_reader);
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {
@@ -623,7 +589,6 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
-            doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
             feedback_status_reader: None,
             code_diagnostics_broker: None,
@@ -662,7 +627,6 @@ pub async fn build_selected_project_state(
             // selected state's exact canonical root and returns only a mounted
             // scheduler, so the root-addressed read port is safe to reuse.
             doctor_report_reader: None,
-            doctor_remediation_dispatcher: None,
             code_index_freshness_reader: active.code_index_freshness_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
             code_diagnostics_broker: None,
@@ -842,7 +806,6 @@ where
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
-            doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
             feedback_status_reader: None,
             code_diagnostics_broker: Some(code_diagnostics_broker),
@@ -1310,20 +1273,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/hermes-lcm/session/{session_id}",
             get(lcm_api::session),
         )
-        .route("/api/plugins/hermes-lcm/node/{node_id}", get(lcm_api::node))
         .route("/api/plugins/hermes-lcm/timeline", get(lcm_api::timeline))
-        .route(
-            "/api/plugins/hermes-lcm/compression",
-            get(lcm_api::compression),
-        )
-        .route(
-            "/api/plugins/hermes-lcm/payloads/health",
-            get(lcm_api::payloads_health),
-        )
-        .route(
-            "/api/plugins/hermes-lcm/payloads/gc",
-            get(lcm_api::payloads_gc_preview).post(lcm_api::payloads_gc_apply),
-        )
         // Code graph explorer API (project-local nodes / edges / files tables)
         .route("/api/plugins/graph/overview", get(graph_api::overview))
         .route("/api/plugins/graph/search", get(graph_api::search))
@@ -1418,18 +1368,6 @@ fn project_api_router() -> Router<DashboardState> {
             get(doctor_findings_api::findings),
         )
         .route(
-            "/api/doctor/remediations/preview",
-            post(doctor_remediation_api::preview),
-        )
-        .route(
-            "/api/doctor/remediations/apply",
-            post(doctor_remediation_api::apply),
-        )
-        .route(
-            "/api/doctor/remediations/{operation_id}",
-            get(doctor_remediation_api::status),
-        )
-        .route(
             "/api/storage/telemetry",
             get(storage_telemetry_api::telemetry),
         )
@@ -1476,7 +1414,8 @@ async fn project_scoped_api_gateway(
     let selected = match runtime.selected_project_state(&project_id).await {
         Ok(selected) => selected,
         Err(err) if projects::is_registry_unavailable_error(&err) => {
-            return projects::registry_unavailable_response(&err).into_response();
+            return projects::registry_unavailable_response(&runtime.active_state(), &err)
+                .into_response();
         }
         Err(err) => {
             return (
@@ -1703,8 +1642,6 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
         "features": {
             "memory": true,
             "lcm": has_lcm,
-            "lcm_gc": has_lcm,
-            "lcm_payload_health": has_lcm,
             "graph": true,
             "analytics": true,
             "feedback": state.feedback_status_reader.is_some(),
@@ -1822,7 +1759,6 @@ mod authority_tests {
                 automation_scheduler_reconciler: None,
                 automation_writer: standalone_dashboard_automation_writer(),
                 doctor_report_reader: None,
-                doctor_remediation_dispatcher: None,
                 application_invocation_executor: None,
             };
             Self {
@@ -1916,13 +1852,6 @@ mod authority_tests {
                 )
             })
         });
-        let doctor_dispatcher = DoctorRemediationDispatcherV1::new(
-            Arc::new(|_| Box::pin(async { Vec::new() })),
-            Arc::new(|_| {
-                Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
-            }),
-            Arc::new(|_| panic!("dashboard construction does not observe remediation")),
-        );
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
             crate::application::dashboard_diagnostics::diagnostic_broker(
                 fixture.layout.project_root.clone(),
@@ -1939,7 +1868,6 @@ mod authority_tests {
                 ),
             ),
             Some(Arc::clone(&doctor_reader)),
-            Some(doctor_dispatcher),
         );
         let state = fixture.state;
 
@@ -1950,11 +1878,39 @@ mod authority_tests {
                 .expect("admitted Doctor reader"),
             &doctor_reader,
         ));
-        assert!(state.doctor_remediation_dispatcher.is_some());
         assert!(
             state.code_diagnostics_authority.is_some(),
             "daemon dashboard must retain the admitted diagnostics authority"
         );
+    }
+
+    #[tokio::test]
+    async fn doctor_routes_expose_diagnostics_without_mutation_endpoints() {
+        let fixture = DashboardStateFixture::open("project.dashboard-doctor-read-only").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for (method, path) in [
+            (Method::POST, "/api/doctor/remediations/preview"),
+            (Method::POST, "/api/doctor/remediations/apply"),
+            (Method::GET, "/api/doctor/remediations/operation"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("legacy Doctor mutation request"),
+                )
+                .await
+                .expect("legacy Doctor mutation response");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} is not mounted"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2186,6 +2142,218 @@ mod authority_tests {
         }
     }
 
+    #[tokio::test]
+    async fn graph_overview_returns_the_canonical_dashboard_envelope() {
+        let fixture = DashboardStateFixture::open("project.dashboard-graph-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/graph/overview")
+                    .body(Body::empty())
+                    .expect("graph overview request"),
+            )
+            .await
+            .expect("graph overview response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("graph overview body");
+        let value: Value = serde_json::from_slice(&body).expect("graph overview json");
+
+        assert_eq!(
+            value["schema_revision"],
+            crate::read_model::DASHBOARD_SCHEMA_REVISION_V1
+        );
+        assert_eq!(value["domain_state"], "ready");
+        assert_eq!(value["authorization"]["outcome"], "authorized");
+        assert!(value["payload"]["totals"].is_object());
+    }
+
+    #[tokio::test]
+    async fn missing_project_registry_is_an_enveloped_unknown_read() {
+        let fixture = DashboardStateFixture::open("project.dashboard-registry-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .body(Body::empty())
+                    .expect("project registry request"),
+            )
+            .await
+            .expect("project registry response");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the daemon answered; source unavailability belongs in the envelope"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("project registry body");
+        let value: Value = serde_json::from_slice(&body).expect("project registry json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "unknown");
+        assert_eq!(value["payload"]["status"], "missing_registry");
+        assert_eq!(value["coverage"]["completeness"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn memory_status_returns_the_canonical_dashboard_envelope() {
+        let fixture = DashboardStateFixture::open("project.dashboard-memory-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/holographic/status")
+                    .body(Body::empty())
+                    .expect("memory status request"),
+            )
+            .await
+            .expect("memory status response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("memory status body");
+        let value: Value = serde_json::from_slice(&body).expect("memory status json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "ready");
+        assert_eq!(value["coverage"]["completeness"], "complete");
+        assert!(value["payload"]["memory"].is_object());
+    }
+
+    #[tokio::test]
+    async fn lcm_browse_reads_are_typed_unavailable_until_temporal_hydration_mounts() {
+        let fixture = DashboardStateFixture::open("project.dashboard-lcm-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/hermes-lcm/overview",
+            "/api/plugins/hermes-lcm/search?q=needle",
+            "/api/plugins/hermes-lcm/session/session-missing",
+            "/api/plugins/hermes-lcm/timeline",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("LCM browse request"),
+                )
+                .await
+                .expect("LCM browse response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("LCM browse body");
+            let value: Value = serde_json::from_slice(&body).expect("LCM browse json");
+
+            assert_eq!(value["schema_revision"], 1, "{uri}");
+            assert_eq!(value["domain_state"], "unknown", "{uri}");
+            assert!(value["payload"].is_null(), "{uri}");
+            assert_eq!(
+                value["coverage"]["omission_reasons"],
+                serde_json::json!(["lcm_temporal_retrieval_not_mounted"]),
+                "{uri}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_analytics_is_an_enveloped_unknown_read() {
+        let fixture = DashboardStateFixture::open("project.dashboard-analytics-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/analytics/overview")
+                    .body(Body::empty())
+                    .expect("analytics overview request"),
+            )
+            .await
+            .expect("analytics overview response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("analytics overview body");
+        let value: Value = serde_json::from_slice(&body).expect("analytics overview json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "unknown");
+        assert_eq!(value["payload"]["available"], false);
+        assert_eq!(
+            value["coverage"]["omission_reasons"],
+            serde_json::json!(["analytics_sources_unavailable"])
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_analytics_detail_reads_are_enveloped_unknown_states() {
+        let fixture = DashboardStateFixture::open("project.dashboard-analytics-detail").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for uri in [
+            "/api/plugins/analytics/hints",
+            "/api/plugins/analytics/usage",
+            "/api/plugins/analytics/underused",
+            "/api/plugins/analytics/diagnostics",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("analytics detail request"),
+                )
+                .await
+                .expect("analytics detail response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .expect("analytics detail body");
+            let value: Value = serde_json::from_slice(&body).expect("analytics detail json");
+
+            assert_eq!(value["schema_revision"], 1, "{uri}");
+            assert_eq!(value["domain_state"], "unknown", "{uri}");
+            assert_eq!(value["payload"]["available"], false, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_savings_is_an_enveloped_unknown_read() {
+        let fixture = DashboardStateFixture::open("project.dashboard-savings-envelope").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/plugins/savings/overview")
+                    .body(Body::empty())
+                    .expect("savings overview request"),
+            )
+            .await
+            .expect("savings overview response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("savings overview body");
+        let value: Value = serde_json::from_slice(&body).expect("savings overview json");
+
+        assert_eq!(value["schema_revision"], 1);
+        assert_eq!(value["domain_state"], "unknown");
+        assert_eq!(value["payload"]["savings"]["available"], false);
+        assert_eq!(value["payload"]["sessions"]["available"], false);
+        assert_eq!(value["payload"]["turns"]["available"], false);
+    }
+
     #[test]
     fn a_selected_project_answers_feedback_and_work_reads_and_nothing_else_by_post() {
         for tail in ["feedback/get", "feedback/expand", "feedback/list"] {
@@ -2219,10 +2387,6 @@ mod authority_tests {
                 "{tail} must not be answerable for a selected project"
             );
         }
-        assert_eq!(
-            selected_project_application_read(&Method::POST, "doctor/remediations/apply"),
-            None
-        );
         assert_eq!(
             selected_project_application_read(&Method::POST, "feedback/status"),
             None

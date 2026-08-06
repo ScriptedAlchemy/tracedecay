@@ -90,7 +90,7 @@ fn pattern_specs(
             (KnownCredential, KNOWN_CREDENTIAL_PATTERN, None),
             (
                 CredentialAssignment,
-                r"(?i)\b(?:api[_ -]?key|secret|token|passwd|password|credential|private[_ -]?key|access[_ -]?key)\b[ \t]*[:=][ \t]*",
+                r"(?i)\b(?:api[_ -]?(?:key|token)|secret|token|passwd|password|credential|private[_ -]?key|access[_ -]?(?:key|token)|client[_ -]?secret)\b[ \t]*[:=][ \t]*",
                 Some(6),
             ),
         ],
@@ -104,7 +104,7 @@ fn pattern_specs(
             (KnownCredential, KNOWN_CREDENTIAL_PATTERN, None),
             (
                 CredentialAssignment,
-                r"(?i)\b(?:api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|access[_-]?key)\b[ \t]*[:=][ \t]*",
+                r"(?i)\b(?:api[_-]?(?:key|token)|secret|token|passwd|password|credential|private[_-]?key|access[_-]?(?:key|token)|client[_-]?secret)\b[ \t]*[:=][ \t]*",
                 Some(16),
             ),
         ],
@@ -362,12 +362,22 @@ pub(crate) fn high_entropy_ranges(text: &str) -> Vec<Range<usize>> {
                 }
                 component_start = component_end + 1;
             }
-        } else if looks_high_entropy_token(candidate) {
+        } else if looks_high_entropy_token(candidate) && !is_lcm_payload_ref(candidate) {
             ranges.push(start..end);
         }
         start = end;
     }
     ranges
+}
+
+fn is_lcm_payload_ref(candidate: &str) -> bool {
+    candidate
+        .strip_prefix("ref=")
+        .unwrap_or(candidate)
+        .strip_prefix("payload_")
+        .is_some_and(|digest| {
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 pub(crate) fn looks_high_entropy_token(token: &str) -> bool {

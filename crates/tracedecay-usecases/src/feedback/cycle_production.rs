@@ -305,7 +305,7 @@ impl FeedbackCycleRuntimePort for ProductionProximityFeedbackCycleRuntimeV1 {
 }
 
 /// LSP-facing production port for the same canonical cycle. It introduces no
-/// publication path: the wrapped PR12 owner atomically records the combined
+/// publication path: the wrapped feedback owner atomically records the combined
 /// result through its existing store.
 pub fn production_proximity_feedback_cycle_input(
     feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,

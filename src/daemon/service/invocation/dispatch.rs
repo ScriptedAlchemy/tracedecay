@@ -43,21 +43,22 @@ impl DaemonInvocationService {
             )
             .await;
         let feedback_runtime = runtimes.feedback;
+        let advisory_cycle = runtimes.advisory_cycle;
         let observations = feedback_runtime
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
-        let observation_subject = plan26_invocation_subject(&request_id, operation, delivery_route);
+        let observation_subject =
+            invocation_observation_subject(&request_id, operation, delivery_route);
         if let Err(problem) = request.validate() {
-            if plan26_observable_operation(operation)
-                && let Some((argument, rejection)) =
-                    plan26_invocation_problem_rejected_argument(problem)
+            if is_observable_operation(operation)
+                && let Some((argument, rejection)) = invocation_problem_rejected_argument(problem)
             {
-                emit_plan26_invocation_event(
+                emit_invocation_observation(
                     observations.as_ref(),
                     observation_subject.as_ref(),
                     current_micros(),
                     Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                        operation: plan26_feedback_operation(operation),
+                        operation: feedback_observation_operation(operation),
                         route: delivery_route,
                         argument,
                         rejection,
@@ -69,13 +70,13 @@ impl DaemonInvocationService {
             return DaemonInvocationResponse::problem(request_id, problem);
         }
         let dispatched_at = current_micros();
-        if plan26_observable_operation(operation) {
-            emit_plan26_invocation_event(
+        if is_observable_operation(operation) {
+            emit_invocation_observation(
                 observations.as_ref(),
                 observation_subject.as_ref(),
                 dispatched_at,
                 Plan26FeedbackSourceEventV1::Dispatch {
-                    operation: plan26_feedback_operation(operation),
+                    operation: feedback_observation_operation(operation),
                     outcome: Plan26FeedbackOutcomeV1::Admitted,
                     capacity: 1,
                     admitted: 1,
@@ -222,8 +223,21 @@ impl DaemonInvocationService {
                 )
                 .await
             }
-            DaemonInvocationPayload::FeedbackAdvisoryCycle { .. } => {
-                execute_feedback_advisory_cycle(request_id).await
+            DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback_advisory_cycle(
+                    request_id,
+                    advisory_cycle,
+                    document_uri,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
             }
             DaemonInvocationPayload::FeedbackImpact {
                 request_handle,
@@ -466,26 +480,8 @@ impl DaemonInvocationService {
                     DaemonInvocationProblem::InvalidRequest,
                 )
             }
-            DaemonInvocationPayload::WorkApplication {
-                request,
-                observed_at,
-                deadline,
-                cancellation,
-            } => {
-                let Some(registered) = work_runtime else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                execute_work_application(
-                    registered,
-                    request_id,
-                    request,
-                    observed_at,
-                    deadline,
-                    cancellation,
-                )
+            DaemonInvocationPayload::WorkApplication { .. } => {
+                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
             }
             DaemonInvocationPayload::WorkflowApplication {
                 request,
@@ -507,7 +503,6 @@ impl DaemonInvocationService {
                 };
                 Box::pin(execute_workflow_application(
                     registered,
-                    project_root,
                     request_id,
                     request,
                     observed_at,
@@ -516,7 +511,7 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
-            DaemonInvocationPayload::WorkAttempt {
+            DaemonInvocationPayload::HandoffApplication {
                 request,
                 observed_at,
                 deadline,
@@ -528,8 +523,9 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::Unavailable,
                     );
                 };
-                Box::pin(execute_work_attempt(
+                Box::pin(execute_handoff_application(
                     registered,
+                    feedback_runtime,
                     request_id,
                     request,
                     observed_at,
@@ -537,6 +533,9 @@ impl DaemonInvocationService {
                     cancellation,
                 ))
                 .await
+            }
+            DaemonInvocationPayload::WorkAttempt { .. } => {
+                DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
             }
             DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
                 self.execute_semantic_evaluation(project_root, request_id, *candidate)
@@ -546,42 +545,83 @@ impl DaemonInvocationService {
                 client_revision,
                 requested_root_uri,
                 workspace_folders,
-            } => {
-                self.open_lsp_session(
-                    lsp_registry,
-                    lsp_workspace,
-                    request_id,
-                    client_revision,
-                    requested_root_uri,
-                    workspace_folders,
-                    now_ms,
-                    lsp_owner,
-                )
-                .await
-            }
-            DaemonInvocationPayload::LspFrame { session, frame } => {
-                self.send_lsp_frame(lsp_registry, request_id, session, frame, now_ms)
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.open_lsp_session(
+                        lsp_registry,
+                        lsp_workspace,
+                        request_id,
+                        client_revision,
+                        requested_root_uri,
+                        workspace_folders,
+                        now_ms,
+                        lsp_owner,
+                    )
                     .await
-            }
-            DaemonInvocationPayload::LspPoll { session } => {
-                self.poll_lsp_frame(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
-            DaemonInvocationPayload::LspAcknowledge { session } => {
-                self.acknowledge_lsp_frame(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
-            DaemonInvocationPayload::LspReconnect { session } => {
-                self.reconnect_lsp_session(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
-            DaemonInvocationPayload::LspDetach { session } => {
-                self.detach_lsp_session(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspFrame {
+                session,
+                frame,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.send_lsp_frame(lsp_registry, request_id, session, frame, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspPoll {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.poll_lsp_frame(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspAcknowledge {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.acknowledge_lsp_frame(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspReconnect {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.reconnect_lsp_session(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspDetach {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.detach_lsp_session(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
         };
-        if plan26_observable_operation(operation) {
-            observe_plan26_invocation_response(
+        if is_observable_operation(operation) {
+            observe_invocation_response(
                 observations.as_ref(),
                 observation_subject.as_ref(),
                 operation,

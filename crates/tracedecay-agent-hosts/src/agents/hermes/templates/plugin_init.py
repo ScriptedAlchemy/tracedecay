@@ -1,5 +1,6 @@
 """tracedecay Hermes plugin registration."""
 import copy
+import atexit
 import json
 import hashlib
 import logging
@@ -491,60 +492,90 @@ def _pre_llm_call(*args, **kwargs):
 _TERMINAL_TOOL_NAMES = frozenset((
     "terminal", "bash", "shell", "exec_command", "run_command", "terminal.exec",
 ))
+_HOST_RECEIPT_QUEUE_LIMIT = 64
 _HOST_RECEIPT_QUEUE = deque()
-_HOST_RECEIPT_QUEUE_LOCK = threading.Lock()
-_HOST_RECEIPT_WORKER_ACTIVE = False
+_HOST_RECEIPT_QUEUE_CONDITION = threading.Condition()
+_HOST_RECEIPT_WORKER = None
+
+def _drain_host_receipts():
+    global _HOST_RECEIPT_WORKER
+    while True:
+        with _HOST_RECEIPT_QUEUE_CONDITION:
+            if not _HOST_RECEIPT_QUEUE:
+                _HOST_RECEIPT_WORKER = None
+                _HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+                return
+            queued = _HOST_RECEIPT_QUEUE.popleft()
+            _HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+        try:
+            candidate = queued.pop("_project_candidate", None)
+            hermes_home = queued.pop("_hermes_home", None)
+            trusted_project = queued.pop("_trusted_project", False)
+            if candidate:
+                route_state, resolved = _project_scope_resolution(
+                    candidate, hermes_home
+                )
+                if route_state == "unregistered" and trusted_project:
+                    resolved = _code_project_root(
+                        explicit=candidate,
+                        hermes_home=hermes_home,
+                    )
+                if not resolved:
+                    continue
+                queued["cwd"] = str(resolved)
+                route = queued.get("route")
+                if isinstance(route, dict):
+                    route["cwd"] = str(resolved)
+            subprocess.run(
+                [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
+                input=json.dumps(queued),
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=(
+                    tools.TRACEDECAY_LONG_TIMEOUT_SECONDS
+                    if queued.get("event") == "turnIngested" and not queued.get("cwd")
+                    else 2
+                ),
+                check=False,
+            )
+        except Exception as exc:
+            logger.debug("tracedecay host receipt notification failed: %s", exc)
 
 def _notify_host_receipt(event, thread_name):
-    global _HOST_RECEIPT_WORKER_ACTIVE
-    with _HOST_RECEIPT_QUEUE_LOCK:
+    global _HOST_RECEIPT_WORKER
+    start_failed = False
+    with _HOST_RECEIPT_QUEUE_CONDITION:
+        while len(_HOST_RECEIPT_QUEUE) >= _HOST_RECEIPT_QUEUE_LIMIT:
+            _HOST_RECEIPT_QUEUE_CONDITION.wait()
         _HOST_RECEIPT_QUEUE.append(event)
-        if _HOST_RECEIPT_WORKER_ACTIVE:
-            return
-        _HOST_RECEIPT_WORKER_ACTIVE = True
-
-    def _drain():
-        global _HOST_RECEIPT_WORKER_ACTIVE
-        while True:
-            with _HOST_RECEIPT_QUEUE_LOCK:
-                if not _HOST_RECEIPT_QUEUE:
-                    _HOST_RECEIPT_WORKER_ACTIVE = False
-                    return
-                queued = _HOST_RECEIPT_QUEUE.popleft()
+        if _HOST_RECEIPT_WORKER is None:
+            worker = threading.Thread(
+                target=_drain_host_receipts,
+                name=thread_name,
+                daemon=False,
+            )
+            _HOST_RECEIPT_WORKER = worker
             try:
-                candidate = queued.pop("_project_candidate", None)
-                hermes_home = queued.pop("_hermes_home", None)
-                trusted_project = queued.pop("_trusted_project", False)
-                if candidate:
-                    route_state, resolved = _project_scope_resolution(
-                        candidate, hermes_home
-                    )
-                    if route_state == "unregistered" and trusted_project:
-                        resolved = _code_project_root(
-                            explicit=candidate,
-                            hermes_home=hermes_home,
-                        )
-                    if not resolved:
-                        continue
-                    queued["cwd"] = str(resolved)
-                    queued["route"]["cwd"] = str(resolved)
-                subprocess.run(
-                    [tools.TRACEDECAY_BIN, "hook-hermes-terminal-receipt"],
-                    input=json.dumps(queued),
-                    text=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=(
-                        tools.TRACEDECAY_LONG_TIMEOUT_SECONDS
-                        if queued.get("event") == "turnIngested" and not queued.get("cwd")
-                        else 2
-                    ),
-                    check=False,
-                )
-            except Exception as exc:
-                logger.debug("tracedecay host receipt notification failed: %s", exc)
+                # Start while holding the condition so a concurrent session-end
+                # join can never observe a Thread that has not started yet.
+                worker.start()
+            except Exception:
+                _HOST_RECEIPT_WORKER = None
+                _HOST_RECEIPT_QUEUE_CONDITION.notify_all()
+                start_failed = True
+    if start_failed:
+        _drain_host_receipts()
 
-    threading.Thread(target=_drain, name=thread_name, daemon=True).start()
+def _join_host_receipts():
+    while True:
+        with _HOST_RECEIPT_QUEUE_CONDITION:
+            worker = _HOST_RECEIPT_WORKER
+        if worker is None:
+            return
+        worker.join()
+
+atexit.register(_join_host_receipts)
 
 def _post_tool_call(*args, **kwargs):
     """Send a bounded, fail-open terminal receipt to TraceDecay."""
@@ -2888,6 +2919,7 @@ class TraceDecayContextEngine(ContextEngine):
         self._report_compression_boundary(session_id, bound_session_id, kwargs)
 
     def on_session_end(self, session_id=None, messages=None, **kwargs):
+        _join_host_receipts()
         # Real session boundary: drop the per-session record so long-lived
         # gateway processes do not accumulate dead conversation state.
         key = self._session_key(session_id)

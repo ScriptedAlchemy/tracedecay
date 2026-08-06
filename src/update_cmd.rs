@@ -1,10 +1,10 @@
 //! The `upgrade` / `update` / `post-update` / `update-plugin` flow: binary
 //! upgrade via subprocess re-exec, generated-plugin refresh, daemon service
-//! refresh, the post-update health pass, and the full tracked-agent
-//! reinstall that keeps config-managed integrations in sync.
+//! refresh, and the full tracked-agent reinstall that keeps config-managed
+//! integrations in sync.
 //!
 //! The post-update pass refreshes every already-configured agent integration
-//! (re-running `install` + `post_install` for each tracked agent), so a
+//! through its canonical lifecycle transaction and post-install action, so a
 //! separate `tracedecay reinstall` is not needed after an upgrade. Pass
 //! `--no-reinstall` to skip that agent-integration refresh.
 //!
@@ -39,7 +39,7 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
 /// For those hosts the receipt-backed component-set transaction is the sole
 /// writer of the deployed artifacts: `reinstall_agent_integrations` routes them
 /// through `apply_default_canonical_component_set` and never calls
-/// `install` / `update_plugin`. A second writer outside that transaction (this
+/// `update_plugin`. A second writer outside that transaction (this
 /// generated-artifact refresh) rewrote the very files the receipt claims,
 /// before the transaction resealed them, so every version bump left the
 /// receipt stale and Doctor reported a component-ownership conflict.
@@ -79,11 +79,6 @@ fn refresh_generated_plugins_at(
             );
             continue;
         }
-        let hermes_was_installed = ag.id() == "hermes" && ag.has_tracedecay(home);
-        // Generated-plugin refresh never rewrites Hermes profile config, so it
-        // must not be blocked by an unresolved historical session migration.
-        // Migration remains mandatory on install/uninstall paths that can
-        // remove a legacy project pin.
         let ctx = tracedecay::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
@@ -91,16 +86,7 @@ fn refresh_generated_plugins_at(
             project_root: None,
             dashboard: true,
         };
-        let outcome = match ag.update_plugin(&ctx) {
-            Ok(tracedecay::agents::UpdatePluginOutcome::NotInstalled) if hermes_was_installed => {
-                ag.install(&ctx).map(|()| {
-                    tracedecay::agents::UpdatePluginOutcome::Refreshed(vec![
-                        home.join(".hermes/plugins/tracedecay"),
-                    ])
-                })
-            }
-            outcome => outcome,
-        };
+        let outcome = ag.update_plugin(&ctx);
         match outcome {
             Ok(tracedecay::agents::UpdatePluginOutcome::Refreshed(paths)) => {
                 refreshed_any = true;
@@ -366,7 +352,7 @@ where
                     eprintln!(
                         "  \x1b[33mwarning:\x1b[0m post-upgrade refresh failed: {error}\n  \
                          The new binary is installed; run {retry} to retry the \
-                         plugin refresh and health pass."
+                         plugin and agent-integration refresh."
                     );
                 }
                 Ok(())
@@ -382,34 +368,22 @@ where
     }
 }
 
-pub(crate) fn run_update_command(
-    no_heal: bool,
-    no_reinstall: bool,
-) -> tracedecay::errors::Result<()> {
-    run_update_flow("update", RefreshPolicy::Always, no_heal, no_reinstall)
+pub(crate) fn run_update_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
+    run_update_flow("update", RefreshPolicy::Always, no_reinstall)
 }
 
-pub(crate) fn run_upgrade_command(
-    no_heal: bool,
-    no_reinstall: bool,
-) -> tracedecay::errors::Result<()> {
-    run_update_flow(
-        "upgrade",
-        RefreshPolicy::AfterInstall,
-        no_heal,
-        no_reinstall,
-    )
+pub(crate) fn run_upgrade_command(no_reinstall: bool) -> tracedecay::errors::Result<()> {
+    run_update_flow("upgrade", RefreshPolicy::AfterInstall, no_reinstall)
 }
 
 fn run_update_flow(
     operation: &str,
     refresh_policy: RefreshPolicy,
-    no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
     tracedecay::daemon::with_exclusive_maintenance_window(operation, |lease_token| {
         run_install_then_refresh(refresh_policy, tracedecay::upgrade::run_upgrade, |binary| {
-            run_post_update_subcommand(no_heal, no_reinstall, binary, lease_token)
+            run_post_update_subcommand(no_reinstall, binary, lease_token)
         })
     })
 }
@@ -434,7 +408,6 @@ fn combine_operation_and_restore<T>(
 }
 
 pub(crate) async fn run_post_update_command(
-    no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease_token: Option<&str>,
 ) -> tracedecay::errors::Result<()> {
@@ -443,12 +416,12 @@ pub(crate) async fn run_post_update_command(
             "post-update",
             Some(token),
         )?;
-        return run_post_update_tasks(no_heal, no_reinstall, &lifecycle_lease).await;
+        return run_post_update_tasks(no_reinstall, &lifecycle_lease).await;
     }
 
     let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire("post-update")?;
     let operation_result = match guard.lifecycle_lease() {
-        Ok(lifecycle_lease) => run_post_update_tasks(no_heal, no_reinstall, lifecycle_lease).await,
+        Ok(lifecycle_lease) => run_post_update_tasks(no_reinstall, lifecycle_lease).await,
         Err(error) => Err(error),
     };
     let restore_result = guard.finish();
@@ -488,7 +461,6 @@ fn post_update_binary_from(installed: Option<&Path>, current: Option<&Path>) -> 
 }
 
 fn run_post_update_subcommand(
-    no_heal: bool,
     no_reinstall: bool,
     installed: Option<&Path>,
     lifecycle_lease_token: &str,
@@ -499,9 +471,6 @@ fn run_post_update_subcommand(
         .arg("post-update")
         .arg("--lifecycle-lease-token")
         .arg(lifecycle_lease_token);
-    if no_heal {
-        command.arg("--no-heal");
-    }
     if no_reinstall {
         command.arg("--no-reinstall");
     }
@@ -519,8 +488,8 @@ fn run_post_update_subcommand(
 }
 
 /// The result of a tracked-agent reinstall pass. Version markers may only
-/// advance on [`ReinstallOutcome::AllOk`]; a partial failure leaves the
-/// markers untouched so the startup silent reinstall retries the work.
+/// advance on [`ReinstallOutcome::AllOk`]; a failure leaves the markers
+/// untouched so the startup silent reinstall retries the work.
 pub(crate) enum ReinstallOutcome {
     /// Every tracked agent reinstalled successfully (an empty tracked list is
     /// also `AllOk`).
@@ -545,22 +514,13 @@ pub(crate) fn partition_reinstall_results(
     for (id, result) in results {
         match result {
             Ok(crate::agent_cmd::AgentReinstallOutcome::Installed) => {}
-            Ok(crate::agent_cmd::AgentReinstallOutcome::DeferredUserAction(deferred)) => {
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m {id} reinstall deferred: {}",
-                    deferred.remediation
-                );
-                for path in deferred.staged_paths {
-                    eprintln!("    staged: {}", path.display());
-                }
-            }
             Err(error) => failed.push(format!("{id}: {error}")),
         }
     }
-    if failed.is_empty() {
-        ReinstallOutcome::AllOk
-    } else {
+    if !failed.is_empty() {
         ReinstallOutcome::PartialFailure { failed }
+    } else {
+        ReinstallOutcome::AllOk
     }
 }
 
@@ -605,7 +565,7 @@ pub(crate) fn install_pass_covers_tracked_agents(
     tracked.iter().all(|id| refreshed.contains(id))
 }
 
-/// Re-runs full `install()` + `post_install()` for every tracked agent so tool
+/// Re-runs the canonical component lifecycle for every tracked agent so tool
 /// permissions, hooks, and MCP config stay in sync with the running binary — a
 /// superset of `refresh_generated_plugins`, which rewrites generated artifacts
 /// only. Mirrors the canonical `handle_reinstall_command` (global scope:
@@ -663,7 +623,6 @@ async fn reinstall_tracked_agents_with_lease(
 }
 
 pub(crate) async fn run_post_update_tasks(
-    no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
@@ -672,22 +631,16 @@ pub(crate) async fn run_post_update_tasks(
     let previous_daemon_state =
         tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
-    let mutation_result = run_post_update_mutations(no_heal, no_reinstall, lifecycle_lease).await;
+    let mutation_result = run_post_update_mutations(no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
     combine_operation_and_restore("post-update maintenance", mutation_result, restart_result)
 }
 
 async fn run_post_update_mutations(
-    no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> tracedecay::errors::Result<()> {
     refresh_generated_plugins().await?;
-    if no_heal {
-        eprintln!("Skipping post-update health pass (--no-heal).");
-    } else {
-        tracedecay::doctor::heal::run_post_update_health_pass_under_lease(lifecycle_lease).await;
-    }
 
     if no_reinstall {
         eprintln!("Skipping agent integration refresh (--no-reinstall).");
@@ -711,18 +664,11 @@ async fn run_post_update_mutations(
     // markers stay put, so the next ordinary command retries via the silent
     // reinstall.
     //
-    // Migrate first so a configured-but-untracked agent (has_tracedecay true,
-    // absent from `installed_agents`) is picked up and refreshed too — exactly
-    // what the canonical `handle_reinstall_command` does.
     let mut config = UserConfig::load();
-    if let Some(home) = tracedecay::agents::home_dir() {
-        tracedecay::agents::migrate_installed_agents(&home, &mut config);
-    }
     // Prune tracked ids that no longer resolve to an integration (a release
     // renamed/removed one, or a typo landed in `installed_agents`).
-    // `migrate_installed_agents` only ADDS ids, so without this the stale id
-    // would be retried on every command forever. The reinstall pass already
-    // skips such ids, but dropping them here stops the pointless retry churn.
+    // The reinstall pass skips such ids, but dropping them here stops the
+    // pointless retry churn.
     let before = config.installed_agents.len();
     config
         .installed_agents
@@ -931,23 +877,6 @@ mod tests {
         (id.to_string(), Err(config_err("install failed")))
     }
 
-    fn deferred(
-        id: &str,
-    ) -> (
-        String,
-        tracedecay::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
-    ) {
-        (
-            id.to_string(),
-            Ok(crate::agent_cmd::AgentReinstallOutcome::DeferredUserAction(
-                tracedecay::agents::DeferredUserAction {
-                    remediation: "run /plugins install staged-kimi".to_string(),
-                    staged_paths: vec![PathBuf::from("staged-kimi")],
-                },
-            )),
-        )
-    }
-
     #[test]
     fn generated_artifact_bin_accepts_cargo_target_tracedecay_exe() {
         let current = Path::new("/repo/target/debug/tracedecay");
@@ -977,14 +906,6 @@ mod tests {
     fn partition_all_success_is_all_ok() {
         assert!(matches!(
             partition_reinstall_results(vec![ok("claude"), ok("cursor")]),
-            ReinstallOutcome::AllOk
-        ));
-    }
-
-    #[test]
-    fn partition_deferred_user_action_is_non_blocking() {
-        assert!(matches!(
-            partition_reinstall_results(vec![ok("claude"), deferred("kimi")]),
             ReinstallOutcome::AllOk
         ));
     }

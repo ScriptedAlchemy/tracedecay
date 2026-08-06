@@ -74,14 +74,17 @@ pub(crate) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/native
 
 mod context_controller;
 mod diagnostics_controller;
+mod dynamic_diagnostics_controller;
 mod lifecycle_controller;
 mod outbound_controller;
 mod semantic_controller;
+mod workspace_diagnostics_controller;
 
 use context_controller::ContextController;
 #[cfg(test)]
 use context_controller::bind_context_document_digest;
 use diagnostics_controller::DiagnosticsController;
+use dynamic_diagnostics_controller::DynamicDiagnosticsController;
 use lifecycle_controller::LifecycleController;
 pub use outbound_controller::DaemonLspProtocolTransport;
 use outbound_controller::OutboundController;
@@ -92,8 +95,19 @@ use semantic_controller::SemanticController;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProtocolDispatch {
     pub queued_messages: usize,
-    pub backpressured: bool,
     pub closed: bool,
+}
+
+/// Ownership result for one client-to-daemon frame.
+///
+/// `Consumed` means the caller must release its copy even when dispatch filled
+/// the outbound queue. `Backpressured` is returned only before payload
+/// decoding or routing, so retaining and retrying that frame is lossless.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientFrameAdmission {
+    Consumed(ProtocolDispatch),
+    Backpressured,
+    Closed,
 }
 
 /// One authenticated daemon LSP session. It owns no durable state and is
@@ -107,6 +121,7 @@ where
     lifecycle: LifecycleController<P, S>,
     outbound: OutboundController,
     diagnostics: DiagnosticsController<D>,
+    dynamic_diagnostics: DynamicDiagnosticsController,
     context: ContextController,
     semantic: SemanticController,
 }
@@ -117,13 +132,44 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
-    /// Decodes and routes one opaque JSON-RPC payload. Responses and server
-    /// notifications remain queued until a typed daemon-session transport
-    /// acknowledges delivery to the bridge.
+    /// Admits one bridge-owned frame without ambiguous post-dispatch
+    /// backpressure. A consumed frame is never reported as retryable.
+    pub fn try_handle_client_payload(
+        &mut self,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> ClientFrameAdmission {
+        if matches!(
+            self.lifecycle.control.lifecycle(),
+            SessionLifecycle::Exited | SessionLifecycle::Expired
+        ) {
+            return ClientFrameAdmission::Closed;
+        }
+        self.prepare_payload_dispatch(now_ms);
+        if !self.has_client_frame_outbound_capacity() {
+            return ClientFrameAdmission::Backpressured;
+        }
+        ClientFrameAdmission::Consumed(self.handle_prepared_payload(payload, now_ms))
+    }
+
+    /// Decodes and routes one already-admitted JSON-RPC payload. Responses and
+    /// server notifications remain queued until a typed daemon-session
+    /// transport acknowledges delivery to the bridge.
     pub fn handle_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
+        self.prepare_payload_dispatch(now_ms);
+        self.handle_prepared_payload(payload, now_ms)
+    }
+
+    fn prepare_payload_dispatch(&mut self, now_ms: u64) {
         self.expire_requests(now_ms);
+        // Capability loss closes admission before the triggering client
+        // request is dispatched. Capability gain is projected only through
+        // the dynamic-registration acknowledgement path.
+        self.reconcile_dynamic_diagnostics();
+    }
+
+    fn handle_prepared_payload(&mut self, payload: &[u8], now_ms: u64) -> ProtocolDispatch {
         let before = self.outbound.queue.len();
-        let backpressured_before = self.outbound.queued_bytes >= MAX_QUEUED_OUTBOUND_BYTES;
         if payload.len() > MAX_LSP_FRAME_BYTES {
             self.enqueue_value(error_response(
                 Value::Null,
@@ -135,7 +181,6 @@ where
             ));
             return ProtocolDispatch {
                 queued_messages: self.outbound.queue.len().saturating_sub(before),
-                backpressured: true,
                 closed: false,
             };
         }
@@ -151,11 +196,11 @@ where
             self.flush_debounced_diagnostics(now_ms);
             return ProtocolDispatch {
                 queued_messages: self.outbound.queue.len().saturating_sub(before),
-                backpressured: backpressured_before,
                 closed: false,
             };
         };
         self.dispatch_value(value, now_ms);
+        self.reconcile_dynamic_diagnostics();
         self.flush_debounced_diagnostics(now_ms);
         self.poll_context_requests();
         self.poll_context_expansions();
@@ -163,8 +208,6 @@ where
         self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
-            backpressured: backpressured_before
-                || self.outbound.queued_bytes >= MAX_QUEUED_OUTBOUND_BYTES,
             closed: matches!(
                 self.lifecycle.control.lifecycle(),
                 SessionLifecycle::Exited | SessionLifecycle::Expired
@@ -177,6 +220,7 @@ where
     pub fn flush_due(&mut self, now_ms: u64) -> ProtocolDispatch {
         let before = self.outbound.queue.len();
         self.expire_requests(now_ms);
+        self.reconcile_dynamic_diagnostics();
         self.flush_debounced_diagnostics(now_ms);
         self.poll_context_requests();
         self.poll_context_expansions();
@@ -184,7 +228,6 @@ where
         self.flush_context_changes();
         ProtocolDispatch {
             queued_messages: self.outbound.queue.len().saturating_sub(before),
-            backpressured: self.outbound.queued_bytes >= MAX_QUEUED_OUTBOUND_BYTES,
             closed: matches!(
                 self.lifecycle.control.lifecycle(),
                 SessionLifecycle::Exited | SessionLifecycle::Expired
@@ -216,6 +259,8 @@ where
             .overlays
             .open(uri.clone(), language_id, version, text)
             .map_err(|error| self.close_for_overlay_error(error))?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         // A close followed by a reopen starts a new document incarnation; LSP
         // versions need not remain monotone across that boundary. Remove any
         // queued/acknowledged publication ordering state before publishing the
@@ -272,6 +317,8 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.discard_document_context(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
@@ -300,6 +347,8 @@ where
             .overlays
             .close(&uri)
             .map_err(overlay_failure)?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.discard_document_context(&uri);
         self.diagnostics.native_upstream.remove(&uri);
         self.lifecycle
@@ -323,6 +372,8 @@ where
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.discard_document_context(&uri);
         if matches!(
             self.lifecycle.gateway.document_saved(uri.clone()),

@@ -35,3 +35,29 @@ impl GraphDbError {
         }
     }
 }
+
+pub(crate) fn rollback_failure(
+    context: &str,
+    primary: impl std::fmt::Display,
+    rollback: impl std::fmt::Display,
+) -> GraphDbError {
+    GraphDbError::DurabilityUncertain {
+        message: format!("{context} failure `{primary}` followed by rollback failure: {rollback}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GraphDbError, rollback_failure};
+
+    #[test]
+    fn rollback_failure_preserves_both_errors_and_context() {
+        assert_eq!(
+            rollback_failure("format initialization", "create failed", "rollback failed"),
+            GraphDbError::DurabilityUncertain {
+                message: "format initialization failure `create failed` followed by rollback failure: rollback failed"
+                    .to_owned(),
+            }
+        );
+    }
+}

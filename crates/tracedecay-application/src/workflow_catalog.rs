@@ -4,32 +4,53 @@ use tracedecay_tool_catalog::{
     CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError,
     CodecBindingKey, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
     ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableUnavailableDispositionV1, IdempotencyContract, LifecycleClass, OperationId,
-    PaginationContract, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1,
-    SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ServiceId,
-    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    IdempotencyContract, LifecycleClass, OperationId, PaginationContract, PrivacyClass, ProfileId,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension,
+    ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
-use crate::{WorkflowExecutionTruthV1, WorkflowFanOutRequestV1};
+use crate::{
+    TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed,
+    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation,
+};
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
-pub const WORKFLOW_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 5] = [
+pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 8] = [
     (
         "register_definition",
         "capability.workflow.register_definition",
         "use-case.workflow.register_definition",
     ),
     (
-        "activate_definition",
-        "capability.workflow.activate_definition",
-        "use-case.workflow.activate_definition",
+        "validate_definition",
+        "capability.workflow.validate_definition",
+        "use-case.workflow.validate_definition",
     ),
     (
-        "execute_fan_out",
-        "capability.workflow.execute_fan_out",
-        "use-case.workflow.execute_fan_out",
+        "get_definition",
+        "capability.workflow.get_definition",
+        "use-case.workflow.get_definition",
+    ),
+    (
+        "list_definitions",
+        "capability.workflow.list_definitions",
+        "use-case.workflow.list_definitions",
+    ),
+    (
+        "definition_history",
+        "capability.workflow.definition_history",
+        "use-case.workflow.definition_history",
+    ),
+    (
+        "diff_definition",
+        "capability.workflow.diff_definition",
+        "use-case.workflow.diff_definition",
     ),
     (
         "handoff_issue",
@@ -46,21 +67,44 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 5] = [
 pub fn workflow_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(
-        WORKFLOW_APPLICATION_OPERATION_IDS_V1
+        WORKFLOW_APPLICATION_OPERATION_IDS
             .iter()
-            .map(|(operation, _, _)| {
-                if *operation == "execute_fan_out" {
-                    available::<WorkflowFanOutRequestV1, WorkflowExecutionTruthV1>(
-                        operation,
-                        "/application/workflow/execute-fan-out",
-                    )
-                } else {
-                    Ok(ExecutableBindingAvailabilityV1::Unavailable {
-                        operation_id: OperationId::new(format!("operation.workflow.{operation}"))
-                            .expect("static Workflow operation ID is valid"),
-                        disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
-                    })
+            .map(|(operation, _, _)| match *operation {
+                "register_definition" => {
+                    available::<
+                        WorkflowDefinitionRegisterRequest,
+                        tracedecay_domain::WorkflowDefinition,
+                    >(operation, "/application/workflow/register-definition")
                 }
+                "validate_definition" => available::<
+                    WorkflowDefinitionValidateRequest,
+                    WorkflowDefinitionValidation,
+                >(operation, "/application/workflow/validate-definition"),
+                "get_definition" => available::<
+                    WorkflowDefinitionGetRequest,
+                    tracedecay_domain::WorkflowDefinition,
+                >(operation, "/application/workflow/get-definition"),
+                "list_definitions" => available::<
+                    WorkflowDefinitionListRequest,
+                    Vec<tracedecay_domain::WorkflowDefinition>,
+                >(operation, "/application/workflow/list-definitions"),
+                "definition_history" => available::<
+                    WorkflowDefinitionHistoryRequest,
+                    Vec<tracedecay_domain::WorkflowDefinition>,
+                >(operation, "/application/workflow/definition-history"),
+                "diff_definition" => available::<
+                    WorkflowDefinitionDiffRequest,
+                    WorkflowDefinitionDiff,
+                >(operation, "/application/workflow/diff-definition"),
+                "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
+                    operation,
+                    "/application/workflow/handoff-issue",
+                ),
+                "handoff_redeem" => available::<TaskHandoffRedeemRequest, TaskHandoffRedeemed>(
+                    operation,
+                    "/application/workflow/handoff-redeem",
+                ),
+                _ => unreachable!("static Workflow operation is exhaustive"),
             })
             .collect::<Result<Vec<_>, _>>()?,
     )
@@ -98,6 +142,14 @@ where
 }
 
 fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogValidationError> {
+    let read_only = matches!(
+        operation,
+        "validate_definition"
+            | "get_definition"
+            | "list_definitions"
+            | "definition_history"
+            | "diff_definition"
+    );
     let binding_id = BindingId::new(format!("binding.http.workflow.{operation}"))
         .expect("static Workflow binding ID is valid");
     CapabilityManifestV1::new(CapabilityManifestInputV1 {
@@ -113,7 +165,11 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
         )?,
         request_schema: schema_ref(format!("schema.workflow.{operation}.request"))?,
         result_schema: schema_ref(format!("schema.workflow.{operation}.result"))?,
-        effect: EffectClass::Administrative,
+        effect: if read_only {
+            EffectClass::Read
+        } else {
+            EffectClass::Administrative
+        },
         scope: ScopeRequirement::new(vec![
             ScopeDimension::Project,
             ScopeDimension::Repository,
@@ -122,19 +178,41 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
-        lifecycle: LifecycleClass::Stateless,
+        lifecycle: if read_only {
+            LifecycleClass::Stateless
+        } else {
+            LifecycleClass::Resumable
+        },
         streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(vec![
-            CancellationPoint::BeforeAdmission,
-            CancellationPoint::BeforeEffect,
-            CancellationPoint::EffectInFlight,
-            CancellationPoint::AfterCommit,
-        ])?,
-        deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
+        cancellation: if read_only {
+            CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ])?
+        } else {
+            CancellationContract::NotCancellable
+        },
+        deadline: DeadlineContract::new(
+            30_000,
+            if read_only {
+                DeadlineBehavior::ReturnOperationReceipt
+            } else {
+                DeadlineBehavior::ReturnEffectReceipt
+            },
+        )?,
         pagination: None::<PaginationContract>,
-        idempotency: IdempotencyContract::Required,
-        inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
-            reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+        idempotency: if read_only {
+            IdempotencyContract::NotRequired
+        } else {
+            IdempotencyContract::Required
+        },
+        inverse: if read_only {
+            tracedecay_tool_catalog::InverseContract::NotApplicable
+        } else {
+            tracedecay_tool_catalog::InverseContract::Unavailable {
+                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+            }
         },
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
@@ -142,16 +220,30 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
             RevalidationPoint::Policy,
             RevalidationPoint::ExpectedState,
         ])?,
-        reconciliation: ReconciliationContract::Required,
-        receipt: ReceiptContract::DurableEffect,
-        terminal_states: TerminalStateContract::new(vec![
-            TerminalState::Completed,
-            TerminalState::Cancelled,
-            TerminalState::TimedOut,
-            TerminalState::Failed,
-            TerminalState::Partial,
-            TerminalState::EffectUnknown,
-        ])?,
+        reconciliation: if read_only {
+            ReconciliationContract::NotRequired
+        } else {
+            ReconciliationContract::Required
+        },
+        receipt: if read_only {
+            ReceiptContract::Operation
+        } else {
+            ReceiptContract::DurableEffect
+        },
+        terminal_states: TerminalStateContract::new({
+            let mut states = vec![
+                TerminalState::Completed,
+                TerminalState::TimedOut,
+                TerminalState::Failed,
+                TerminalState::Partial,
+            ];
+            if read_only {
+                states.push(TerminalState::Cancelled);
+            } else {
+                states.push(TerminalState::EffectUnknown);
+            }
+            states
+        })?,
         availability: AvailabilityContract::Available,
         binding_ids: vec![binding_id],
         profile_eligibility: vec![
@@ -170,26 +262,97 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 
 #[cfg(test)]
 mod tests {
-    use super::workflow_executable_binding_registry;
+    use tracedecay_tool_catalog::{
+        CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
+        IdempotencyContract, LifecycleClass, ReceiptContract, ReconciliationContract,
+        TerminalState,
+    };
+
+    use super::{workflow_executable_binding_registry, workflow_manifest};
 
     #[test]
-    fn workflow_registry_advertises_only_the_mounted_fan_out_route() {
+    fn workflow_registry_advertises_every_mounted_application_route() {
         let registry = workflow_executable_binding_registry().unwrap();
-        assert_eq!(registry.iter().count(), 5);
+        assert_eq!(registry.iter().count(), 8);
         let advertised = registry
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert_eq!(advertised.len(), 1);
-        assert_eq!(
-            advertised[0].operation_id().as_str(),
-            "operation.workflow.execute_fan_out"
-        );
-        let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
-            advertised[0].exposure()
-        else {
-            panic!("mounted Workflow fan-out must have a public route");
-        };
-        assert_eq!(route_path, "/application/workflow/execute-fan-out");
+        assert_eq!(advertised.len(), 8);
+        for binding in advertised {
+            let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
+                binding.exposure()
+            else {
+                panic!("mounted Workflow operation must have a public route");
+            };
+            assert!(route_path.starts_with("/application/workflow/"));
+        }
+    }
+
+    #[test]
+    fn workflow_mutations_declare_durable_effect_semantics() {
+        for operation in ["register_definition", "handoff_issue", "handoff_redeem"] {
+            let manifest = workflow_manifest(operation).unwrap();
+            assert_eq!(manifest.effect(), EffectClass::Administrative);
+            assert_eq!(manifest.lifecycle(), LifecycleClass::Resumable);
+            assert_eq!(manifest.idempotency(), IdempotencyContract::Required);
+            assert_eq!(manifest.reconciliation(), ReconciliationContract::Required);
+            assert_eq!(manifest.receipt(), ReceiptContract::DurableEffect);
+            assert_eq!(
+                manifest.deadline().behavior(),
+                DeadlineBehavior::ReturnEffectReceipt
+            );
+            assert!(
+                manifest
+                    .terminal_states()
+                    .contains(TerminalState::EffectUnknown)
+            );
+            assert!(
+                !manifest
+                    .terminal_states()
+                    .contains(TerminalState::Cancelled)
+            );
+            assert!(matches!(
+                manifest.cancellation(),
+                CancellationContract::NotCancellable
+            ));
+        }
+    }
+
+    #[test]
+    fn workflow_queries_declare_read_semantics() {
+        for operation in [
+            "validate_definition",
+            "get_definition",
+            "list_definitions",
+            "definition_history",
+            "diff_definition",
+        ] {
+            let manifest = workflow_manifest(operation).unwrap();
+            assert_eq!(manifest.effect(), EffectClass::Read);
+            assert_eq!(manifest.lifecycle(), LifecycleClass::Stateless);
+            assert_eq!(manifest.idempotency(), IdempotencyContract::NotRequired);
+            assert_eq!(
+                manifest.reconciliation(),
+                ReconciliationContract::NotRequired
+            );
+            assert_eq!(manifest.receipt(), ReceiptContract::Operation);
+            assert_eq!(
+                manifest.deadline().behavior(),
+                DeadlineBehavior::ReturnOperationReceipt
+            );
+            assert!(
+                !manifest
+                    .terminal_states()
+                    .contains(TerminalState::EffectUnknown)
+            );
+            for point in [
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ] {
+                assert!(manifest.cancellation().observes(point));
+            }
+        }
     }
 }

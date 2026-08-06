@@ -11,8 +11,8 @@ use tracedecay_sessions::lcm::contracts::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
-    LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessage, LcmRawMessageOverview, LcmSourceRef,
-    LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
+    LcmExpandedSummarySource, LcmPayloadRef, LcmRawMessageMetadata, LcmRawMessageOverview,
+    LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview, validate_payload_ref,
 };
 
 macro_rules! field {
@@ -97,7 +97,8 @@ pub(super) async fn expand(
                 kind: "raw_message".to_string(),
                 content: String::new(),
                 content_range: empty_content_range(slice),
-                raw_message: Some(raw),
+                raw_message: None,
+                raw_message_metadata: Some(raw),
                 summary_node: None,
                 summary_sources: Vec::new(),
                 payload_ref,
@@ -135,6 +136,7 @@ pub(super) async fn expand(
                 content: String::new(),
                 content_range: empty_content_range(slice),
                 raw_message: None,
+                raw_message_metadata: None,
                 summary_node: Some(summary),
                 summary_sources,
                 payload_ref: None,
@@ -156,6 +158,7 @@ pub(super) async fn expand(
                 content: String::new(),
                 content_range: empty_content_range(slice),
                 raw_message: None,
+                raw_message_metadata: None,
                 summary_node: None,
                 summary_sources: Vec::new(),
                 payload_ref: Some(payload_ref),
@@ -166,7 +169,7 @@ pub(super) async fn expand(
         }
     };
 
-    Ok(apply_canonical_content(expansion, slice, canonical_content))
+    apply_canonical_content(expansion, slice, canonical_content)
 }
 
 struct DescribeCounts {
@@ -475,7 +478,7 @@ async fn describe_external_payload(
 async fn load_raw_message(
     snapshot: &ReadSnapshot,
     store_id: i64,
-) -> Result<LcmRawMessage, LcmError> {
+) -> Result<LcmRawMessageMetadata, LcmError> {
     let mut rows = query(
         snapshot,
         "SELECT provider, message_id, session_id, store_id, role, ordinal,
@@ -489,15 +492,13 @@ async fn load_raw_message(
     let row = next_row(&mut rows)
         .await?
         .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    raw_message_from_row(&row)
+    raw_message_metadata_from_row(&row)
 }
 
-fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
+fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
     let storage_kind_text: String = field!(row, 9)?;
     let storage_kind = storage_kind(&storage_kind_text)?;
-    let content: Option<String> = field!(row, 7)?;
-    let snippet: String = field!(row, 11)?;
-    Ok(LcmRawMessage {
+    Ok(LcmRawMessageMetadata {
         provider: field!(row, 0)?,
         message_id: field!(row, 1)?,
         session_id: field!(row, 2)?,
@@ -505,10 +506,6 @@ fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
         role: field!(row, 4)?,
         ordinal: field!(row, 5)?,
         timestamp: field!(row, 6)?,
-        content: match storage_kind {
-            LcmStorageKind::Inline => content.unwrap_or_default(),
-            LcmStorageKind::External => content.unwrap_or(snippet),
-        },
         content_hash: field!(row, 8)?,
         storage_kind,
         payload_ref: field!(row, 10)?,
@@ -623,7 +620,8 @@ async fn load_summary_sources(
                     content: String::new(),
                     content_range: None,
                     content_truncated: false,
-                    raw_message: Some(raw),
+                    raw_message: None,
+                    raw_message_metadata: Some(raw),
                     summary_node: None,
                 });
             }
@@ -642,6 +640,7 @@ async fn load_summary_sources(
                     content_range: None,
                     content_truncated: false,
                     raw_message: None,
+                    raw_message_metadata: None,
                     summary_node: Some(Box::new(child)),
                 });
             }
@@ -653,7 +652,7 @@ async fn load_summary_sources(
 async fn load_raw_messages(
     snapshot: &ReadSnapshot,
     store_ids: &BTreeSet<i64>,
-) -> Result<BTreeMap<i64, LcmRawMessage>, LcmError> {
+) -> Result<BTreeMap<i64, LcmRawMessageMetadata>, LcmError> {
     if store_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -673,7 +672,7 @@ async fn load_raw_messages(
     let mut rows = query(snapshot, &sql, params_from_iter(values)).await?;
     let mut out = BTreeMap::new();
     while let Some(row) = next_row(&mut rows).await? {
-        let raw = raw_message_from_row(&row)?;
+        let raw = raw_message_metadata_from_row(&row)?;
         out.insert(raw.store_id, raw);
     }
     Ok(out)
@@ -891,126 +890,5 @@ async fn next_row(
 }
 
 #[cfg(test)]
-mod tests {
-    use tempfile::tempdir;
-
-    use super::*;
-    use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-
-    #[tokio::test]
-    async fn registered_metadata_rendering_matches_the_canonical_fixture() {
-        let directory = tempdir().expect("temporary session store");
-        let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
-            .await
-            .expect("registered profile runtime");
-        runtime
-            .seed_lcm_render_fixture_for_test(HostAdmissionScope::Profile)
-            .await
-            .expect("canonical LCM render fixture");
-
-        let describe_requests = [
-            LcmDescribeRequest {
-                provider: "codex".to_string(),
-                session_id: "session-a".to_string(),
-                target: LcmDescribeTarget::Session,
-            },
-            LcmDescribeRequest {
-                provider: "codex".to_string(),
-                session_id: "session-a".to_string(),
-                target: LcmDescribeTarget::SummaryNode {
-                    node_id: "summary-parent".to_string(),
-                },
-            },
-            LcmDescribeRequest {
-                provider: "codex".to_string(),
-                session_id: "session-a".to_string(),
-                target: LcmDescribeTarget::ExternalPayload {
-                    payload_ref: "payload-a".to_string(),
-                },
-            },
-        ];
-        let expand_requests = [
-            LcmExpandRequest {
-                provider: "codex".to_string(),
-                session_id: "session-a".to_string(),
-                target: LcmExpandTarget::RawMessage { store_id: 11 },
-                content_slice: Some(LcmContentSlice {
-                    offset: 2,
-                    limit: 7,
-                }),
-                source_offset: 0,
-                source_limit: None,
-            },
-            LcmExpandRequest {
-                provider: "codex".to_string(),
-                session_id: "session-a".to_string(),
-                target: LcmExpandTarget::SummaryNode {
-                    node_id: "summary-parent".to_string(),
-                },
-                content_slice: Some(LcmContentSlice {
-                    offset: 1,
-                    limit: 9,
-                }),
-                source_offset: 0,
-                source_limit: Some(2),
-            },
-            LcmExpandRequest {
-                provider: "codex".to_string(),
-                session_id: "session-a".to_string(),
-                target: LcmExpandTarget::ExternalPayload {
-                    payload_ref: "payload-a".to_string(),
-                },
-                content_slice: Some(LcmContentSlice {
-                    offset: 3,
-                    limit: 8,
-                }),
-                source_offset: 0,
-                source_limit: None,
-            },
-        ];
-
-        let session = runtime
-            .lcm_describe_for_test(describe_requests[0].clone())
-            .await
-            .expect("registered session describe");
-        assert_eq!(session.target, "session");
-        assert_eq!(session.raw_message_count, 2);
-        assert_eq!(session.summary_node_count, 2);
-        assert_eq!(session.external_payload_count, 1);
-        assert_eq!(
-            (session.first_store_id, session.last_store_id),
-            (Some(11), Some(12))
-        );
-
-        let summary = runtime
-            .lcm_describe_for_test(describe_requests[1].clone())
-            .await
-            .expect("registered summary describe");
-        let summary_node = summary.summary_node.expect("summary metadata");
-        assert_eq!(summary_node.node_id, "summary-parent");
-        assert_eq!(summary_node.children.len(), 2);
-
-        let payload = runtime
-            .lcm_describe_for_test(describe_requests[2].clone())
-            .await
-            .expect("registered payload describe");
-        let external = payload.external_payload.expect("external payload metadata");
-        assert_eq!(external.payload_ref, "payload-a");
-        assert_eq!(external.content_preview, "canonical external payload");
-
-        let expected = [
-            ("raw_message", "nonical", 0usize),
-            ("summary_node", "anonical ", 2usize),
-            ("external_payload", "onical e", 0usize),
-        ];
-        for (request, (kind, content, source_count)) in expand_requests.into_iter().zip(expected) {
-            let expansion = runtime
-                .lcm_expand_for_test(request)
-                .await
-                .expect("registered expansion");
-            assert_eq!(expansion.kind, kind);
-            assert_eq!(expansion.content, content);
-            assert_eq!(expansion.summary_sources.len(), source_count);
-        }
-    }
-}
+#[path = "registered_lcm_render/tests.rs"]
+mod tests;

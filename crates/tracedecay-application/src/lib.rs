@@ -6,7 +6,6 @@
 #![forbid(unsafe_code)]
 
 pub mod advisory;
-pub mod api_migration;
 pub mod authorization;
 pub mod clock;
 pub mod configuration;
@@ -23,6 +22,9 @@ pub mod feedback;
 pub use tracedecay_domain::framed_log;
 pub mod git;
 pub mod handlers;
+pub mod handoff;
+pub mod handoff_catalog;
+pub mod hint_outcomes;
 pub mod historical_query;
 mod identity;
 pub mod invocation;
@@ -35,9 +37,12 @@ pub mod remote;
 pub mod result;
 pub mod retained_surfaces;
 pub mod retrieval;
+pub mod sdk_catalog;
+pub mod session_sync;
 pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
+pub mod wire;
 pub mod work;
 pub mod work_catalog;
 pub mod work_dispatch;
@@ -45,6 +50,9 @@ pub mod work_execution;
 pub mod work_read;
 pub mod workflow_catalog;
 pub mod workflow_coordination;
+pub mod workflow_effect;
+pub mod workflow_provider;
+pub mod workflow_run;
 pub mod workflow_runtime;
 
 mod error;
@@ -53,7 +61,6 @@ mod surface_binding;
 pub(crate) use surface_binding::{current_bindings, current_bindings_with_slug, surface_name};
 
 pub use advisory::*;
-pub use api_migration::*;
 pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
@@ -61,9 +68,15 @@ pub use authorization::{
 };
 pub use clock::now_micros;
 pub use configuration::{
-    ConfigurationGetRequestV1, ConfigurationSetRequestV1,
-    configuration_surface_catalog_contribution, configuration_surface_handler_descriptors,
-    configuration_surface_operation,
+    ConfigurationAuditRequestV1, ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1,
+    ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationObservedStateRequestV1,
+    ConfigurationProtectedApplyRequestV1, ConfigurationProtectedPreviewRequestV1,
+    ConfigurationResetConfirmationV1, ConfigurationResetOutcomeV1, ConfigurationResetRequestV1,
+    ConfigurationRollbackApplyRequestV1, ConfigurationRollbackPreviewRequestV1,
+    ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWireRequestV1,
+    ConfigurationWriteCredentialRequestV1, configuration_surface_catalog_contribution,
+    configuration_surface_handler_descriptors, configuration_surface_operation,
+    configuration_surface_request_schema, configuration_surface_result_schema,
 };
 pub use context::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
@@ -86,23 +99,20 @@ pub use doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
     AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
     CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
-    ConfigurationDriftV1, DoctorConfirmationRequirementV1, DoctorCoverageCompletenessV1,
+    ConfigurationDriftV1, DOCTOR_FINDING_FAMILIES, DoctorCoverageCompletenessV1,
     DoctorCoverageStatementV1, DoctorEvidenceRefV1, DoctorEvidenceReferenceV1,
     DoctorEvidenceStateV1, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
     DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorFindingV1,
-    DoctorOwningOperationRefV1, DoctorOwningSurfaceV1, DoctorRemediationDescriptorV1,
-    DoctorRemediationKindV1, DoctorRemediationRefV1, DoctorRemediationRegistryV1,
-    DoctorRemediationResolutionErrorV1, DoctorReportComposerV1, DoctorReportCoverageV1,
-    DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
-    DoctorStorageFindingKindV1, DoctorStorageFindingV1, HostConformanceV1,
-    HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
-    LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
-    ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
+    DoctorReportComposerV1, DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1,
+    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1,
+    DoctorStorageFindingV1, HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1,
+    LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort,
+    ObservabilityReadV1, ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
     ProfileAuthorityReadV1, RemoteAuthorityReadV1, RemoteListenerReadV1, RemoteOperationalReadV1,
     RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort,
     advisory_feedback_findings, code_index_finding, configuration_finding,
-    host_integration_finding, language_server_finding, observability_finding,
-    operational_audit_findings, runtime_health_finding,
+    doctor_finding_family_label, host_integration_finding, language_server_finding,
+    observability_finding, operational_audit_findings, runtime_health_finding,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
@@ -134,6 +144,9 @@ pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
 };
+pub use handoff::*;
+pub use handoff_catalog::*;
+pub use hint_outcomes::*;
 pub use invocation::{
     ApplicationInvocation, ApplicationInvocationBinding, ApplicationInvocationContext,
     ApplicationInvocationExecutor, ApplicationInvocationFuture, ApplicationRequest,
@@ -147,11 +160,12 @@ pub use memory::{
     converge_derived_memory,
 };
 pub use multi_root::{
-    AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
-    AuthorizedScopeSetError, MultiRootContinuationV1, MultiRootExecuteRequestV1,
-    MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1, MultiRootQueryPort,
-    MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
-    MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
+    AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootContinuationV1,
+    MultiRootExecuteRequestV1, MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1,
+    MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    RegisteredRootLocatorV1, RegisteredRootSelectorV1, SharedProfileStoreLocatorV1,
 };
 pub use observability::*;
 pub use policy::{
@@ -205,6 +219,7 @@ pub use retrieval::{
     callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
     callable_code_request_schema, callable_code_result_schema,
 };
+pub use sdk_catalog::sdk_executable_binding_registry;
 pub use settings_preview::{
     MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
     UserSettingsPatchInputV1, UserSettingsPreviewErrorV1, UserSettingsPreviewV1,
@@ -219,19 +234,22 @@ pub use source_edit::{
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
 pub use storage::{
-    BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
-    FreePageRatioV1, IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
-    OrphanStoreRecordV1, QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1,
-    RelativeArtifactPathV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1, StorageByteSizeV1,
-    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreKeyV1,
-    StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
-    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
-    stale_branch_dbs_finding,
+    CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
+    IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,
+    QuarantineContractV1, QuarantineLocationV1, QuarantinedArtifactV1, RelativeArtifactPathV1,
+    RetentionBacklogRecordV1, StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1,
+    StoreBudgetEvaluationV1, StoreKeyV1, StoreSizeBudgetV1, StoreSizeSampleV1,
+    StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1, incident_debris_finding,
+    orphan_store_finding, over_budget_finding, retention_backlog_finding,
 };
 pub use tracedecay_domain::framed_log::{
     DirectorySyncPolicy, append_durable, atomic_write, atomic_write_prepared, file_len,
     read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
+};
+pub use wire::{
+    ApplicationOwnerKind, ApplicationWireOperation, ApplicationWireSchemaRegistryV1,
+    ApplicationWireSchemaV1,
 };
 pub use work::*;
 pub use work_catalog::*;
@@ -240,4 +258,7 @@ pub use work_execution::*;
 pub use work_read::*;
 pub use workflow_catalog::*;
 pub use workflow_coordination::*;
+pub use workflow_effect::*;
+pub use workflow_provider::*;
+pub use workflow_run::*;
 pub use workflow_runtime::*;

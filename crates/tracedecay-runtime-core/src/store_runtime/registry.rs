@@ -12,6 +12,7 @@
 mod attachment;
 mod capacity;
 mod close;
+mod destructive;
 mod leases;
 mod open;
 mod ports;
@@ -41,9 +42,10 @@ pub use attachment::{PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, Publish
 pub use capacity::StoreRuntimeRegistryConfig;
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
+pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
 pub use leases::{
-    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeLeaseAcquireResult,
-    StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
+    StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
 };
 pub use open::StoreRuntimeOpenResult;
 pub(crate) use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin};
@@ -274,25 +276,6 @@ impl StoreRuntimeHandle {
             )?;
         self.validate_opened_file_identity("complete registered store-size telemetry")?;
         Ok(counts)
-    }
-
-    pub(crate) fn storage_table_bytes(
-        &self,
-        reader_wait: Duration,
-    ) -> Result<Vec<(String, u64)>, StoreRuntimeRegistryFailure> {
-        self.validate_opened_file_identity("authorize registered table-size telemetry")?;
-        let tables = self
-            .inner
-            .attachment
-            .storage_table_bytes(reader_wait)
-            .map_err(
-                |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "read registered table-size telemetry",
-                    message,
-                },
-            )?;
-        self.validate_opened_file_identity("complete registered table-size telemetry")?;
-        Ok(tables)
     }
 
     pub async fn run_bounded_incremental_compaction(
@@ -594,6 +577,17 @@ pub enum StoreRuntimeRegistryFailure {
     RuntimeEvictionInProgress {
         key: Box<StoreRuntimeKey>,
     },
+    DatabaseRuntimeIdentityConflict {
+        requested: Box<StoreRuntimeKey>,
+        retained: Box<StoreRuntimeKey>,
+        path: PathBuf,
+    },
+    DestructiveMaintenanceInProgress {
+        root: PathBuf,
+    },
+    DestructiveMaintenanceInvalidTarget {
+        message: String,
+    },
     RuntimeCloseBlocked {
         binding: Box<StoreRuntimeBindingV1>,
         external_handles: usize,
@@ -705,6 +699,12 @@ struct EvictingRuntime {
     handle: StoreRuntimeHandle,
 }
 
+struct DestructivePathReservation {
+    root: PathBuf,
+    database_paths: Vec<PathBuf>,
+    released: tokio::sync::watch::Sender<bool>,
+}
+
 enum RegistryEntry {
     Opening(open::OpeningRuntime),
     Ready(ReadyRuntime),
@@ -714,7 +714,9 @@ enum RegistryEntry {
 #[derive(Default)]
 struct RegistryState {
     entries: BTreeMap<StoreRuntimeKey, RegistryEntry>,
+    destructive_paths: BTreeMap<u64, DestructivePathReservation>,
     profile_authorities: BTreeMap<StoreShardIdV1, StoreRuntimeBindingV1>,
+    next_destructive_attempt: u64,
     next_open_attempt: u64,
     next_eviction_attempt: u64,
     next_publication: u64,

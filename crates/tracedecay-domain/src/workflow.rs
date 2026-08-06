@@ -69,7 +69,7 @@ pub enum WorkflowDefinitionError {
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowFanOutV1 {
+pub struct WorkflowFanOut {
     pub max_width: u32,
 }
 
@@ -77,40 +77,40 @@ pub struct WorkflowFanOutV1 {
     Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowOutputReferenceV1 {
+pub struct WorkflowOutputReference {
     pub producer_step_id: WorkflowStepId,
     pub output_name: WorkflowOutputName,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowStepV1 {
+pub struct WorkflowStep {
     pub step_id: WorkflowStepId,
     pub operation: WorkflowOperationRef,
     pub predecessors: BTreeSet<WorkflowStepId>,
-    pub inputs: Vec<WorkflowOutputReferenceV1>,
+    pub inputs: Vec<WorkflowOutputReference>,
     pub outputs: Vec<WorkflowOutputName>,
-    pub fan_out: Option<WorkflowFanOutV1>,
+    pub fan_out: Option<WorkflowFanOut>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowDefinitionV1 {
+pub struct WorkflowDefinition {
     definition_id: WorkflowDefinitionId,
     definition_version: u64,
     project_id: ProjectId,
-    steps: Vec<WorkflowStepV1>,
+    steps: Vec<WorkflowStep>,
     pinned_policy_digest: ManifestDigest,
     pinned_configuration_digest: ManifestDigest,
     pinned_catalog_digest: ManifestDigest,
 }
 
-impl WorkflowDefinitionV1 {
+impl WorkflowDefinition {
     pub fn new(
         definition_id: WorkflowDefinitionId,
         definition_version: u64,
         project_id: ProjectId,
-        steps: Vec<WorkflowStepV1>,
+        steps: Vec<WorkflowStep>,
         pinned_policy_digest: ManifestDigest,
         pinned_configuration_digest: ManifestDigest,
         pinned_catalog_digest: ManifestDigest,
@@ -140,7 +140,7 @@ impl WorkflowDefinitionV1 {
         &self.project_id
     }
 
-    pub fn steps(&self) -> &[WorkflowStepV1] {
+    pub fn steps(&self) -> &[WorkflowStep] {
         &self.steps
     }
 
@@ -184,8 +184,8 @@ impl WorkflowDefinitionV1 {
 
     fn validate_step(
         &self,
-        step: &WorkflowStepV1,
-        steps: &BTreeMap<WorkflowStepId, &WorkflowStepV1>,
+        step: &WorkflowStep,
+        steps: &BTreeMap<WorkflowStepId, &WorkflowStep>,
     ) -> Result<(), WorkflowDefinitionError> {
         if step.predecessors.len() > MAX_WORKFLOW_PREDECESSORS {
             return Err(WorkflowDefinitionError::TooManyPredecessors {
@@ -263,7 +263,7 @@ impl WorkflowDefinitionV1 {
 
     fn validate_acyclic(
         &self,
-        steps: &BTreeMap<WorkflowStepId, &WorkflowStepV1>,
+        steps: &BTreeMap<WorkflowStepId, &WorkflowStep>,
     ) -> Result<(), WorkflowDefinitionError> {
         let mut remaining_predecessors = steps
             .iter()
@@ -279,9 +279,9 @@ impl WorkflowDefinitionV1 {
             visited += 1;
             for (candidate_id, candidate) in steps {
                 if candidate.predecessors.contains(&step_id) {
-                    let count = remaining_predecessors
-                        .get_mut(candidate_id)
-                        .expect("all workflow steps have an indegree");
+                    let Some(count) = remaining_predecessors.get_mut(candidate_id) else {
+                        return Err(WorkflowDefinitionError::PredecessorCycle);
+                    };
                     *count -= 1;
                     if *count == 0 {
                         ready.insert(candidate_id.clone());
@@ -297,7 +297,7 @@ impl WorkflowDefinitionV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for WorkflowDefinitionV1 {
+impl<'de> Deserialize<'de> for WorkflowDefinition {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -308,7 +308,7 @@ impl<'de> Deserialize<'de> for WorkflowDefinitionV1 {
             definition_id: WorkflowDefinitionId,
             definition_version: u64,
             project_id: ProjectId,
-            steps: Vec<WorkflowStepV1>,
+            steps: Vec<WorkflowStep>,
             pinned_policy_digest: ManifestDigest,
             pinned_configuration_digest: ManifestDigest,
             pinned_catalog_digest: ManifestDigest,

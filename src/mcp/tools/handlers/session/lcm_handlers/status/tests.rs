@@ -6,16 +6,10 @@ use super::super::test_support::*;
 use super::*;
 
 #[tokio::test]
-async fn malformed_doctor_controls_are_rejected_before_storage_open() {
+async fn doctor_requires_a_specific_provider_before_storage_open() {
     for (args, field) in [
-        (
-            json!({"provider": "claude", "mode": false, "format": "json"}),
-            "mode",
-        ),
-        (
-            json!({"provider": "claude", "apply": "yes", "format": "json"}),
-            "apply",
-        ),
+        (json!({"format": "json"}), "provider"),
+        (json!({"provider": "all", "format": "json"}), "provider"),
     ] {
         let error = handle_lcm_doctor(
             LcmHandlerContext::user(Path::new("/missing"), None, None),

@@ -6,7 +6,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::json;
@@ -381,7 +380,6 @@ pub(crate) struct DaemonSessionRetrievalService {
     database: Arc<RegisteredGlobalDb>,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
-    calls: Arc<AtomicU64>,
     refresh_status: Option<SessionTemporalRefreshWake>,
 }
 
@@ -389,7 +387,6 @@ impl DaemonSessionRetrievalService {
     pub(crate) fn new(
         database: Arc<RegisteredGlobalDb>,
         root: DaemonSessionRetrievalRoot,
-        calls: Arc<AtomicU64>,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
         Some(Self {
@@ -400,7 +397,6 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            calls,
             refresh_status,
         })
     }
@@ -409,7 +405,6 @@ impl DaemonSessionRetrievalService {
         database: Arc<RegisteredGlobalDb>,
         registered_database: Arc<RegisteredGlobalDb>,
         root: DaemonSessionRetrievalRoot,
-        calls: Arc<AtomicU64>,
         refresh_status: Option<SessionTemporalRefreshWake>,
     ) -> Option<Self> {
         let expected = root.expected_runtime_shard.as_ref()?;
@@ -427,7 +422,6 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            calls,
             refresh_status,
         })
     }
@@ -576,10 +570,6 @@ impl DaemonSessionRetrievalService {
         {
             return SessionRetrievalServiceOutcome::Unavailable(unavailable);
         }
-        // Count commands the service answers past the fast-path gate,
-        // including wrong-scope rejections: the counter proves the transport
-        // selected this service for the answer.
-        self.calls.fetch_add(1, Ordering::Relaxed);
         if !self.root.owns(&command) {
             return SessionRetrievalServiceOutcome::WrongScope;
         }
@@ -951,7 +941,6 @@ impl DaemonSessionRetrievalService {
         if command.store_scope() != self.root.store_scope {
             return LcmDescribeServiceOutcome::WrongScope;
         }
-        self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
             Err(error) => return describe_execution_error(error, self.empty_temporal()),
@@ -1103,7 +1092,6 @@ impl DaemonSessionRetrievalService {
         if command.store_scope() != self.root.store_scope {
             return LcmExpandServiceOutcome::WrongScope;
         }
-        self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
             Err(error) => return expand_execution_error(error, self.empty_temporal()),

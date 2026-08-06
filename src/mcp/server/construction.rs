@@ -39,6 +39,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) user_session_db: Option<Arc<RegisteredGlobalDb>>,
     pub(crate) registered_session_db: Option<Arc<RegisteredGlobalDb>>,
     pub(crate) registered_user_session_db: Option<Arc<RegisteredGlobalDb>>,
+    pub(crate) session_sync_service:
+        Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     pub(crate) host_admission_broker:
         Option<crate::application::host_admission::SharedHostAdmissionBroker>,
     pub(crate) project_session_refresh_wake:
@@ -54,8 +56,6 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
-    pub(crate) dashboard_doctor_remediation_dispatcher:
-        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub(crate) dashboard_feedback_status_reader:
@@ -103,6 +103,8 @@ pub(crate) struct McpServerDaemonAuthority {
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
     pub(crate) user_session_refresh_wake:
         crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+    pub(crate) session_sync_service:
+        std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>,
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) writers: McpServerWriters,
@@ -147,6 +149,7 @@ impl McpServerConstructionContext {
             user_session_db: None,
             registered_session_db: None,
             registered_user_session_db: None,
+            session_sync_service: None,
             host_admission_broker: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
@@ -156,7 +159,6 @@ impl McpServerConstructionContext {
             database_owner_reconciler: None,
             dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
-            dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
@@ -205,6 +207,7 @@ impl McpServerConstructionContext {
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
+            session_sync_service,
             database_owner_reconciler,
             project_routes,
             writers,
@@ -224,6 +227,7 @@ impl McpServerConstructionContext {
             user_session_db: Some(databases.user_sessions),
             registered_session_db: Some(databases.registered_project_sessions),
             registered_user_session_db: Some(databases.registered_user_sessions),
+            session_sync_service: Some(session_sync_service),
             host_admission_broker,
             project_session_refresh_wake: Some(project_session_refresh_wake),
             user_session_refresh_wake: Some(user_session_refresh_wake),
@@ -233,7 +237,6 @@ impl McpServerConstructionContext {
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
-            dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
@@ -280,6 +283,7 @@ impl McpServerConstructionContext {
             user_session_db: None,
             registered_session_db: None,
             registered_user_session_db: None,
+            session_sync_service: None,
             host_admission_broker: None,
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
@@ -289,7 +293,6 @@ impl McpServerConstructionContext {
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
-            dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
@@ -380,14 +383,6 @@ impl McpServerConstructionContext {
         reader: crate::dashboard::DoctorReportReader,
     ) -> Self {
         self.dashboard_doctor_report_reader = Some(reader);
-        self
-    }
-
-    pub(crate) fn with_dashboard_doctor_remediation_dispatcher(
-        mut self,
-        dispatcher: crate::dashboard::DoctorRemediationDispatcherV1,
-    ) -> Self {
-        self.dashboard_doctor_remediation_dispatcher = Some(dispatcher);
         self
     }
 

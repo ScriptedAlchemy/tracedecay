@@ -24,7 +24,7 @@ use super::shard::{
 ///
 /// The aggregate still covers every supplied inventory entry and reports the
 /// number of omitted detail rows.
-pub(crate) const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
+pub const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
 
 /// One registry inventory item captured before telemetry projection.
 ///
@@ -63,7 +63,7 @@ pub struct RuntimeRegistryInventory {
 
 /// Counted leases held by a shard at one health-snapshot instant.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ShardRuntimeLeaseCounts {
+pub struct ShardRuntimeLeaseCounts {
     pub general_readers: u32,
     pub health_readers: u32,
     pub snapshots: u32,
@@ -87,7 +87,7 @@ impl ShardRuntimeLeaseCounts {
 
 /// Driver-neutral telemetry detail for one daemon-owned runtime publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ShardRuntimeTelemetry {
+pub struct ShardRuntimeTelemetry {
     /// The source binding carries the canonical shard, incarnation, and epoch.
     pub binding: StoreRuntimeBindingV1,
     pub state: RuntimeMaintenanceStateV1,
@@ -97,7 +97,10 @@ pub(crate) struct ShardRuntimeTelemetry {
     pub queued_bytes: u64,
     pub writer_present: bool,
     pub physical_reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
     pub leases: ShardRuntimeLeaseCounts,
+    pub writer_busy_events: u64,
     pub wal_bytes: u64,
     pub wal_budget: WalBudgetV1,
     pub memory_estimate_bytes: u64,
@@ -110,7 +113,7 @@ pub(crate) struct ShardRuntimeTelemetry {
 
 /// Fixed-shape, saturating counts of runtime states.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeStateCounts {
+pub struct RuntimeStateCounts {
     pub closed: u32,
     pub opening: u32,
     pub ready: u32,
@@ -137,7 +140,7 @@ impl RuntimeStateCounts {
 
 /// Fixed-shape, saturating counts of observed health states.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeHealthCounts {
+pub struct RuntimeHealthCounts {
     pub unknown: u32,
     pub healthy: u32,
     pub degraded: u32,
@@ -158,7 +161,7 @@ impl RuntimeHealthCounts {
 
 /// Bounded aggregate facts for every entry in a registry inventory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeTelemetryAggregate {
+pub struct RuntimeTelemetryAggregate {
     pub inventory_shards: u32,
     pub returned_shards: u32,
     pub omitted_shards: u32,
@@ -168,6 +171,9 @@ pub(crate) struct RuntimeTelemetryAggregate {
     pub eviction_eligible: u32,
     pub writer_present: u32,
     pub physical_reader_handles: u64,
+    pub general_reader_waiters: u64,
+    pub health_reader_waiters: u64,
+    pub writer_busy_events: u64,
     pub queued_operations: u64,
     pub queued_bytes: u64,
     pub general_reader_leases: u64,
@@ -199,6 +205,15 @@ impl RuntimeTelemetryAggregate {
         self.physical_reader_handles = self
             .physical_reader_handles
             .saturating_add(u64::from(entry.physical.reader_handles));
+        self.general_reader_waiters = self
+            .general_reader_waiters
+            .saturating_add(u64::from(entry.physical.general_reader_waiters));
+        self.health_reader_waiters = self
+            .health_reader_waiters
+            .saturating_add(u64::from(entry.physical.health_reader_waiters));
+        self.writer_busy_events = self
+            .writer_busy_events
+            .saturating_add(entry.physical.writer_busy_events);
         self.queued_operations = self
             .queued_operations
             .saturating_add(u64::from(health.queued_operations));
@@ -237,7 +252,7 @@ impl RuntimeTelemetryAggregate {
 
 /// Deterministically ordered bounded telemetry details plus full aggregates.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeTelemetryProjection {
+pub struct RuntimeTelemetryProjection {
     pub per_shard_queue_budget: QueueBudgetV1,
     pub global_queue_budget_bytes: u64,
     pub wal_budget: WalBudgetV1,
@@ -246,7 +261,7 @@ pub(crate) struct RuntimeTelemetryProjection {
 }
 
 /// Projects a registry inventory with the standard per-shard detail bound.
-pub(crate) fn project_runtime_telemetry(
+pub fn project_runtime_telemetry(
     inventory: &RuntimeRegistryInventory,
 ) -> RuntimeTelemetryProjection {
     project_runtime_telemetry_with_limit(inventory, MAX_PROJECTED_RUNTIME_SHARDS)
@@ -300,7 +315,10 @@ fn project_shard(
         queued_bytes: health.queued_bytes,
         writer_present: health.writer_present,
         physical_reader_handles: entry.physical.reader_handles,
+        general_reader_waiters: entry.physical.general_reader_waiters,
+        health_reader_waiters: entry.physical.health_reader_waiters,
         leases: ShardRuntimeLeaseCounts::from_health(health),
+        writer_busy_events: entry.physical.writer_busy_events,
         wal_bytes: health.wal_bytes,
         wal_budget: admission.wal.clone(),
         memory_estimate_bytes: health.memory_estimate_bytes,
@@ -453,6 +471,34 @@ mod tests {
             projection.global_queue_budget_bytes,
             inventory.admission.global_queue_max_bytes
         );
+    }
+
+    #[test]
+    fn projection_preserves_passive_writer_and_reader_contention() {
+        let health = fixture_health("project.contention", 1, RuntimeMaintenanceStateV1::Ready);
+        let projection =
+            project_runtime_telemetry(&inventory(vec![RuntimeRegistryInventoryEntry {
+                health,
+                eviction: ShardRuntimeEvictionEligibility {
+                    idle_for: Duration::ZERO,
+                    blockers: vec![],
+                },
+                physical: PhysicalRuntimeSnapshot {
+                    reader_handles: 3,
+                    general_reader_waiters: 5,
+                    health_reader_waiters: 2,
+                    writer_busy_events: 7,
+                    ..PhysicalRuntimeSnapshot::default()
+                },
+            }]));
+
+        let shard = projection.shards.first().unwrap();
+        assert_eq!(shard.general_reader_waiters, 5);
+        assert_eq!(shard.health_reader_waiters, 2);
+        assert_eq!(shard.writer_busy_events, 7);
+        assert_eq!(projection.aggregate.general_reader_waiters, 5);
+        assert_eq!(projection.aggregate.health_reader_waiters, 2);
+        assert_eq!(projection.aggregate.writer_busy_events, 7);
     }
 
     #[test]

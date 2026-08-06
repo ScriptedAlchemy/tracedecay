@@ -41,8 +41,9 @@ attempt.
 - Scope bindings and restrictive allow/deny policy use existing typed identity.
   Paths, labels, provider keys, host profiles, and source locators never create
   authority.
-- Doctor reads typed configuration and activation evidence; remediation invokes
-  an explicit authorized control-plane operation rather than a local write.
+- Doctor reads typed configuration and activation evidence and may describe
+  recovery guidance. Any mutation is a separately entered, explicitly
+  authorized control-plane operation; Doctor never surfaces or invokes it.
 - Analyzer, renderer, feedback, delivery, and workflow settings remain
   registered values. A surface or adapter cannot supply an unregistered local
   default.

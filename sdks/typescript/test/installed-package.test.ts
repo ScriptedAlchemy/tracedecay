@@ -235,13 +235,6 @@ import * as clientEntry from "@tracedecay/sdk/client";
 const callableOperations = new Set(sdk.OPERATIONS.map((operation) => operation.operation));
 if (typeof sdk.createClient !== "function" ||
     typeof clientEntry.createClient !== "function" ||
-    !Array.isArray(sdk.SERVER_OPERATIONS) ||
-    sdk.SERVER_OPERATIONS.length === 0 ||
-    !sdk.SERVER_OPERATIONS.every(
-      (operation) => operation.sdkAvailability === "unavailable" &&
-        operation.disposition === "schema_unavailable" &&
-        !callableOperations.has(operation.operation),
-    ) ||
     !Array.isArray(sdk.UNAVAILABLE_OPERATIONS)) {
   throw new Error("installed package exports are incomplete");
 }
@@ -252,6 +245,8 @@ const attemptFinishDescriptor = sdk.OPERATIONS.find(
 if (!attemptFinishDescriptor ||
     attemptFinishDescriptor.operationId !== "operation.work.attempt_finish" ||
     attemptFinishDescriptor.route !== "/application/work/attempt/finish" ||
+    attemptFinishDescriptor.effect !== "administrative" ||
+    attemptFinishDescriptor.idempotency !== "required" ||
     attemptFinishDescriptor.bindingId !== "binding.http.work.attempt_finish" ||
     attemptFinishDescriptor.requestSchema.schemaId !== "schema.work.attempt_finish.request" ||
     attemptFinishDescriptor.requestSchema.revision !== 1 ||
@@ -273,10 +268,11 @@ const availabilityClient = sdk.createClient({
 });
 if (!("work_snapshot" in availabilityClient.operations) ||
     !("work_attempt_finish" in availabilityClient.operations) ||
+    !("workflow_register_definition" in availabilityClient.operations) ||
     "test_results" in availabilityClient.operations ||
     "invoke" in availabilityClient ||
     "requestOperation" in availabilityClient) {
-  throw new Error("only schema-authorized Work operations may be callable");
+  throw new Error("only schema-authorized Work and Workflow operations may be callable");
 }
 
 const baseUrl = process.env.TRACEDECAY_SDK_BASE_URL;

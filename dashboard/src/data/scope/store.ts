@@ -237,7 +237,8 @@ export function scopeWritable(scope: DashboardScope): ScopeWritability {
  * with the authority's own `reason` — reworded per call site they would drift
  * apart, and the reason is the same fact everywhere — while `writable` is the
  * only state whose wording is genuinely local, because what is being written
- * differs (a scheduler toggle, a remediation) and the target has to be named.
+ * differs (a scheduler toggle or settings change) and the target has to be
+ * named.
  *
  * `writable` is answered rather than thrown on even where a call site cannot
  * reach it: producing a sentence is what this is for.
@@ -360,4 +361,20 @@ export const UNSCOPED_CACHE_KEY = 'unscoped';
  */
 export function requestScopeKey(scope: DashboardScope, url: string): string {
   return unscopedRoute(url) ? UNSCOPED_CACHE_KEY : scopeKey(scope);
+}
+
+/**
+ * The canonical React Query key for a request made under a dashboard scope.
+ *
+ * A scope is part of a key only when the request carries that scope. Registry
+ * and chrome routes deliberately do not, so they retain one cache entry while
+ * a project is selected instead of becoming stale copies that no registry
+ * invalidation can enumerate.
+ */
+export function scopedQueryKey(
+  scope: DashboardScope,
+  key: readonly unknown[],
+  url: string,
+): readonly unknown[] {
+  return [...key, requestScopeKey(scope, url)];
 }

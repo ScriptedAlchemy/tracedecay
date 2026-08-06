@@ -274,16 +274,19 @@ impl ShardRuntime {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn set_pinned_profile(&self, pinned_profile: bool) {
         self.lock_state().pinned_profile = pinned_profile;
     }
 
+    #[cfg(test)]
     pub(crate) fn record_storage_usage(&self, wal_bytes: u64, memory_estimate_bytes: u64) {
         let mut state = self.lock_state();
         state.wal_bytes = wal_bytes;
         state.memory_estimate_bytes = memory_estimate_bytes;
     }
 
+    #[cfg(test)]
     pub(crate) fn set_health(&self, health: ShardRuntimeHealth) -> Result<(), ShardRuntimeError> {
         let mut state = self.lock_state();
         if state.maintenance_state == RuntimeMaintenanceStateV1::Faulted {
@@ -331,6 +334,7 @@ impl ShardRuntime {
         Ok(lease)
     }
 
+    #[cfg(test)]
     pub(crate) fn release_runtime_lease(&self, lease_id: &RuntimeLeaseIdV1) -> bool {
         let mut state = self.lock_state();
         let released = state.runtime_leases.remove(lease_id).is_some();
@@ -340,6 +344,7 @@ impl ShardRuntime {
         released
     }
 
+    #[cfg(test)]
     pub(crate) fn prune_expired_runtime_leases(&self, now: UtcMicros) -> usize {
         self.lock_state().prune_expired_runtime_leases(now)
     }
@@ -360,6 +365,7 @@ impl ShardRuntime {
             .eviction
     }
 
+    #[cfg(test)]
     pub(crate) fn eviction_eligibility_at(
         &self,
         now: Instant,
@@ -386,6 +392,7 @@ impl ShardRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn acquire_writer_presence(
         &self,
     ) -> Result<ShardRuntimeWriterGuard<'_>, ShardRuntimeError> {
@@ -426,6 +433,7 @@ impl ShardRuntime {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn queue_work(
         &self,
         operations: u32,
@@ -446,6 +454,7 @@ impl ShardRuntime {
         })
     }
 
+    #[cfg(test)]
     fn release_writer_presence(&self) {
         let mut state = self.lock_state();
         debug_assert!(
@@ -462,6 +471,7 @@ impl ShardRuntime {
         state.touch();
     }
 
+    #[cfg(test)]
     fn release_queued_work(&self, operations: u32, bytes: u64) {
         let mut state = self.lock_state();
         state.release_queued_work(operations, bytes);
@@ -645,6 +655,7 @@ impl ShardRuntimeState {
         }
     }
 
+    #[cfg(test)]
     fn add_queued_work(&mut self, operations: u32, bytes: u64) -> Result<(), ShardRuntimeError> {
         let next_operations = self.queued_operations.checked_add(operations).ok_or(
             ShardRuntimeError::CounterOverflow {
@@ -662,6 +673,7 @@ impl ShardRuntimeState {
         Ok(())
     }
 
+    #[cfg(test)]
     fn release_queued_work(&mut self, operations: u32, bytes: u64) {
         match (
             self.queued_operations.checked_sub(operations),
@@ -677,20 +689,13 @@ impl ShardRuntimeState {
 }
 
 #[must_use = "dropping the guard releases writer-presence accounting"]
+#[cfg(test)]
 pub(crate) struct ShardRuntimeWriterGuard<'a> {
     runtime: &'a ShardRuntime,
     active: bool,
 }
 
-impl ShardRuntimeWriterGuard<'_> {
-    pub fn release(mut self) {
-        if self.active {
-            self.runtime.release_writer_presence();
-            self.active = false;
-        }
-    }
-}
-
+#[cfg(test)]
 impl Drop for ShardRuntimeWriterGuard<'_> {
     fn drop(&mut self) {
         if self.active {
@@ -722,6 +727,7 @@ impl Drop for ShardRuntimeLease<'_> {
 }
 
 #[must_use = "dropping the guard releases queued-work accounting"]
+#[cfg(test)]
 pub(crate) struct ShardRuntimeQueuedWork<'a> {
     runtime: &'a ShardRuntime,
     operations: u32,
@@ -729,6 +735,7 @@ pub(crate) struct ShardRuntimeQueuedWork<'a> {
     active: bool,
 }
 
+#[cfg(test)]
 impl ShardRuntimeQueuedWork<'_> {
     pub fn release(mut self) {
         if self.active {
@@ -739,6 +746,7 @@ impl ShardRuntimeQueuedWork<'_> {
     }
 }
 
+#[cfg(test)]
 impl Drop for ShardRuntimeQueuedWork<'_> {
     fn drop(&mut self) {
         if self.active {

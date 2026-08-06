@@ -265,23 +265,11 @@ impl FeedbackCycleRuntimePort for SwitchableFeedbackCycleRuntimeV1 {
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) database: Arc<crate::global_db::RegisteredGlobalDb>,
-    pub(super) runtime:
-        Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>>,
     pub(super) actor: ActorId,
     pub(super) grant: CapabilityGrantSnapshot,
     pub(super) authority_digest: ManifestDigest,
     pub(super) policy_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,
-}
-
-impl RegisteredWorkRuntime {
-    /// Takes the provider runtime out for shutdown, dropping the rest of the
-    /// registration with it.
-    pub(in crate::daemon::service) fn into_runtime(
-        self,
-    ) -> Arc<DaemonWorkRuntimeV1<tracedecay_rusqlite_runtime::work::WorkSqliteStorage>> {
-        self.runtime
-    }
 }
 
 pub(in crate::daemon::service) struct RegisteredFeedbackRuntime {
@@ -336,6 +324,203 @@ impl Drop for RuntimeLspSession {
         // subscriptions, publications, and queued frames before the actor is
         // discarded.
         self.actor.expire();
+    }
+}
+
+struct LspLeaseTask {
+    generation: u64,
+    cancellation: crate::application::context::CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl LspLeaseTask {
+    async fn stop(self) -> Result<(), DaemonInvocationProblem> {
+        self.cancellation.cancel();
+        self.handle
+            .await
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
+    }
+
+    fn abort(&self) {
+        self.cancellation.cancel();
+        self.handle.abort();
+    }
+}
+
+struct LspLeaseTaskRegistryState {
+    accepting: bool,
+    next_generation: u64,
+    tasks: BTreeMap<LspSessionId, LspLeaseTask>,
+}
+
+impl Default for LspLeaseTaskRegistryState {
+    fn default() -> Self {
+        Self {
+            accepting: true,
+            next_generation: 0,
+            tasks: BTreeMap::new(),
+        }
+    }
+}
+
+/// Owns one bounded expiry task per disconnected session.
+///
+/// Each task waits behind a start gate until its generation and handle are
+/// registered. This makes immediate completion observable by the owner rather
+/// than leaving a completed handle behind.
+///
+/// Generations prevent an older task from retiring its replacement, and each
+/// task holds only a weak registry reference so dropping the daemon aborts all
+/// remaining work without creating an ownership cycle.
+#[derive(Default)]
+pub(super) struct LspLeaseTaskRegistry {
+    state: StdMutex<LspLeaseTaskRegistryState>,
+}
+
+impl LspLeaseTaskRegistry {
+    pub(super) async fn start<F>(
+        self: &Arc<Self>,
+        session_id: LspSessionId,
+        task: F,
+    ) -> Result<(), DaemonInvocationProblem>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let current_session_id = session_id.clone();
+        let (previous, start, generation) = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if !state.accepting {
+                return Err(DaemonInvocationProblem::Unavailable);
+            }
+            let Some(generation) = state.next_generation.checked_add(1) else {
+                return Err(DaemonInvocationProblem::Unavailable);
+            };
+            state.next_generation = generation;
+            let cancellation = crate::application::context::CancellationToken::new();
+            let task_cancellation = cancellation.clone();
+            let task_registry = Arc::downgrade(self);
+            let task_session_id = session_id.clone();
+            let (start, started) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(async move {
+                let admitted = tokio::select! {
+                    result = started => result.is_ok(),
+                    () = task_cancellation.cancelled() => false,
+                };
+                if admitted {
+                    tokio::select! {
+                        () = task => {}
+                        () = task_cancellation.cancelled() => {}
+                    }
+                }
+                if let Some(task_registry) = task_registry.upgrade() {
+                    task_registry.finish(&task_session_id, generation);
+                }
+            });
+            let previous = state.tasks.insert(
+                session_id,
+                LspLeaseTask {
+                    generation,
+                    cancellation,
+                    handle,
+                },
+            );
+            (previous, start, generation)
+        };
+        if let Some(previous) = previous {
+            if previous.stop().await.is_err() {
+                self.stop_generation(&current_session_id, Some(generation))
+                    .await?;
+                return Err(DaemonInvocationProblem::Unavailable);
+            }
+        }
+        if start.send(()).is_err() {
+            self.stop_generation(&current_session_id, Some(generation))
+                .await?;
+            return Err(DaemonInvocationProblem::Unavailable);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn cancel(
+        &self,
+        session_id: &LspSessionId,
+    ) -> Result<(), DaemonInvocationProblem> {
+        self.stop_generation(session_id, None).await
+    }
+
+    pub(super) fn finish(&self, session_id: &LspSessionId, generation: u64) {
+        self.take_generation(session_id, Some(generation));
+    }
+
+    async fn stop_generation(
+        &self,
+        session_id: &LspSessionId,
+        generation: Option<u64>,
+    ) -> Result<(), DaemonInvocationProblem> {
+        if let Some(task) = self.take_generation(session_id, generation) {
+            task.stop().await?;
+        }
+        Ok(())
+    }
+
+    fn take_generation(
+        &self,
+        session_id: &LspSessionId,
+        generation: Option<u64>,
+    ) -> Option<LspLeaseTask> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let matches = generation.is_none_or(|generation| {
+            state
+                .tasks
+                .get(session_id)
+                .is_some_and(|task| task.generation == generation)
+        });
+        matches.then(|| state.tasks.remove(session_id)).flatten()
+    }
+
+    pub(super) async fn shutdown(&self) -> Result<(), DaemonInvocationProblem> {
+        let tasks = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state.accepting = false;
+            std::mem::take(&mut state.tasks)
+        };
+        let mut outcome = Ok(());
+        for task in tasks.into_values() {
+            if let Err(problem) = task.stop().await {
+                outcome = Err(problem);
+            }
+        }
+        outcome
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_tasks(&self) -> usize {
+        match self.state.lock() {
+            Ok(state) => state.tasks.len(),
+            Err(poisoned) => poisoned.into_inner().tasks.len(),
+        }
+    }
+}
+
+impl Drop for LspLeaseTaskRegistry {
+    fn drop(&mut self) {
+        let state = match self.state.get_mut() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.accepting = false;
+        for task in state.tasks.values() {
+            task.abort();
+        }
     }
 }
 

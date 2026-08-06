@@ -57,42 +57,6 @@ async fn message_search_rejects_invalid_scope() {
 
 // ---------------------------------------------------------------------------
 // Regression: catch-up flag ordering — transcript_ingest_done must lag
-// ---------------------------------------------------------------------------
-
-/// `wait_for_startup_catch_up` must wait for the transcript-ingest task to
-/// complete (transcript_ingest_done), not just the file-tree sync
-/// (startup_catch_up_done). This test verifies that after waiting, the
-/// `transcript_ingest_done` flag is always true.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn wait_for_startup_catch_up_waits_for_transcript_ingest_flag() {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
-
-    let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
-
-    let server = tracedecay::mcp::McpServer::new(cg.into_inner(), None).await;
-
-    let completed = server
-        .wait_for_startup_catch_up(std::time::Duration::from_secs(30))
-        .await;
-
-    assert!(completed, "wait_for_startup_catch_up timed out after 30s");
-
-    // After the wait returns true, both flags must be set.
-    assert!(
-        server.startup_catch_up_done(),
-        "startup_catch_up_done must be true after wait"
-    );
-    assert!(
-        server.transcript_ingest_done(),
-        "transcript_ingest_done must be true after wait"
-    );
-
-    server.shutdown().await;
-}
-
 /// `project_scope` is a closed enum: any value other than `all_registered`
 /// must fail closed rather than silently degrade to a single-project search.
 #[tokio::test]

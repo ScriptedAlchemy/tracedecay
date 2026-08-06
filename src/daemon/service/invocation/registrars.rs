@@ -535,6 +535,18 @@ impl DaemonFeedbackRuntimeRegistrar {
             .await
             .map_err(DaemonFeedbackRuntimeRegistrationError::from)
     }
+
+    pub(crate) async fn install_advisory_cycle_invocation(
+        &self,
+        project_root: &Path,
+        owner: DaemonAdvisoryCycleInvocationOwner,
+    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .register(project_root.to_path_buf(), owner)
+            .await
+            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
+    }
 }
 
 impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
@@ -563,84 +575,10 @@ pub(crate) struct DaemonConfigurationRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-pub(crate) enum DoctorConfigurationOutcomeV1 {
-    Preview {
-        preview_id: PreviewId,
-        execution: OperationReceipt,
-    },
-    Effect {
-        execution: OperationReceipt,
-        receipt: Box<EffectReceipt>,
-    },
-    Denied,
-    Unavailable,
-}
-
 impl DaemonConfigurationRuntimeRegistrar {
     pub(crate) fn new(service: &DaemonInvocationService) -> Self {
         Self {
             service: service.clone(),
-        }
-    }
-
-    pub(crate) async fn doctor_owner_mounted(&self, project_root: &Path) -> bool {
-        self.service
-            .configuration_runtime(Some(project_root))
-            .await
-            .is_some()
-    }
-
-    pub(crate) async fn doctor_execute(
-        &self,
-        project_root: &Path,
-        request_id: &RequestId,
-        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: ConfigurationSurfaceRequest,
-    ) -> DoctorConfigurationOutcomeV1 {
-        let Some(registered) = self.service.configuration_runtime(Some(project_root)).await else {
-            return DoctorConfigurationOutcomeV1::Unavailable;
-        };
-        let observed_at = current_micros();
-        let deadline = match Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000))) {
-            Ok(deadline) => deadline,
-            Err(_) => return DoctorConfigurationOutcomeV1::Unavailable,
-        };
-        let cancellation = match CancellationContext::active(format!(
-            "cancel.doctor-remediation.{}",
-            request_id.as_str()
-        )) {
-            Ok(cancellation) => cancellation,
-            Err(_) => return DoctorConfigurationOutcomeV1::Unavailable,
-        };
-        let response = execute_configuration(
-            request_id.as_str().to_owned(),
-            Some(registered),
-            surface_operation,
-            request,
-            observed_at,
-            deadline,
-            cancellation,
-        )
-        .await;
-        match response.outcome {
-            DaemonInvocationOutcome::Configuration {
-                outcome: ApplicationOutcome::Preview(preview),
-                ..
-            } => DoctorConfigurationOutcomeV1::Preview {
-                preview_id: preview.preview_id,
-                execution: preview.execution,
-            },
-            DaemonInvocationOutcome::Configuration {
-                outcome: ApplicationOutcome::Effect(effect),
-                ..
-            } => DoctorConfigurationOutcomeV1::Effect {
-                execution: effect.execution,
-                receipt: Box::new(effect.receipt),
-            },
-            DaemonInvocationOutcome::ApplicationProblem {
-                problem: ApplicationProblem::NotFoundOrNotAuthorized { .. },
-            } => DoctorConfigurationOutcomeV1::Denied,
-            _ => DoctorConfigurationOutcomeV1::Unavailable,
         }
     }
 
@@ -777,7 +715,6 @@ impl DaemonWorkRuntimeRegistrar {
         grant: CapabilityGrantSnapshot,
         policy_digest: ManifestDigest,
         configuration_digest: ManifestDigest,
-        config: crate::sessions::codex_app_server::CodexAppServerSummaryConfig,
     ) -> Result<(), TraceDecayError> {
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
@@ -786,12 +723,12 @@ impl DaemonWorkRuntimeRegistrar {
             || authority.policy_digest() != &grant.digest
         {
             return Err(TraceDecayError::Config {
-                message: "Work runtime authority does not match its registered grant".to_owned(),
+                message: "Workflow authority does not match its registered grant".to_owned(),
             });
         }
         let authority_digest =
             canonical_sha256(&authority).map_err(|error| TraceDecayError::Config {
-                message: format!("Work runtime authority digest failed: {error}"),
+                message: format!("Workflow authority digest failed: {error}"),
             })?;
         self.service
             .project_runtimes
@@ -816,19 +753,8 @@ impl DaemonWorkRuntimeRegistrar {
                     })
                 },
                 || {
-                    // Opening the provider runtime is deferred until the slot is
-                    // known to be free so a refused registration never starts one.
-                    let runtime = DaemonWorkRuntimeV1::new(
-                        authority,
-                        database.work_storage()?,
-                        config,
-                        configuration_digest.clone(),
-                        Arc::clone(&database),
-                        project_root.clone(),
-                    );
                     Ok(RegisteredWorkRuntime {
                         database,
-                        runtime: Arc::new(runtime),
                         actor: actor.clone(),
                         grant: grant.clone(),
                         authority_digest: authority_digest.clone(),
@@ -904,7 +830,7 @@ impl DaemonLspOwnerRegistrar {
         scope_grant: CapabilityGrantSnapshot,
         registered_database: Arc<crate::global_db::RegisteredGlobalDb>,
         database: Database,
-        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        code_index: Arc<crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
         runtime: tokio::runtime::Handle,
         diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
         languages: &[String],
@@ -928,6 +854,9 @@ impl DaemonLspOwnerRegistrar {
                 message: "production feedback cycle input is not registered for the project"
                     .to_owned(),
             })?;
+        let scope_set_storage = registered_database.authorized_scope_set_storage()?;
+        let mut gateway_capabilities = gateway_capabilities;
+        gateway_capabilities.supports_workspace_folders = true;
         let semantics = production_semantic_authorities(
             runtime.clone(),
             diagnostic_broker.clone(),
@@ -942,12 +871,18 @@ impl DaemonLspOwnerRegistrar {
             supports_diagnostics: semantics.analyzer_available,
             semantic: semantics.semantic_capabilities.clone(),
         };
+        let workspace_index = Arc::new(PublishedCodeIndexWorkspaceDocuments::new(
+            code_index.as_ref().clone(),
+            scope_grant.scope.clone(),
+            project_root.clone(),
+        ));
         let factory = Arc::new(
             lsp_session_factory(
                 runtime,
                 feedback_runtime,
                 database,
-                code_index,
+                code_index.clone() as Arc<dyn LspCodeIndexProjectionIdentityPort>,
+                workspace_index,
                 move |_| Arc::clone(&feedback_cycle_input),
                 semantics.semantics,
                 diagnostic_broker,
@@ -960,7 +895,6 @@ impl DaemonLspOwnerRegistrar {
                 message: format!("could not construct LSP session factory: {error:?}"),
             })?,
         );
-        let scope_set_storage = registered_database.authorized_scope_set_storage()?;
         self.register_lsp_owner(
             project_root,
             DaemonLspInvocationOwner::authorized(factory.clone(), scope_grant, scope_set_storage),
@@ -972,7 +906,7 @@ impl DaemonLspOwnerRegistrar {
 
 #[derive(Debug, Error)]
 pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
-    #[error("a PR13 advisory runtime is already mounted for this project")]
+    #[error("a advisory runtime is already mounted for this project")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
@@ -1005,6 +939,18 @@ impl DaemonAdvisoryRuntimeRegistrar {
         Self {
             service: service.clone(),
         }
+    }
+
+    pub(crate) async fn register_external_acquisition(
+        &self,
+        project_root: PathBuf,
+        runtime: Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .register(project_root, runtime)
+            .await
+            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)
     }
 
     pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(

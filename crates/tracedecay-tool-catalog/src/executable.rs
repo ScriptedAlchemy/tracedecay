@@ -4,8 +4,12 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::binding::SurfaceOperationName;
 use crate::id::{BindingId, CapabilityId, CatalogDigest, CodecBindingKey, OperationId, ServiceId};
-use crate::manifest::{CancellationContract, CapabilityManifestV1, SchemaRef};
+use crate::manifest::{
+    CancellationContract, CapabilityManifestV1, DeadlineContract, EffectClass, IdempotencyContract,
+    ReceiptContract, ReconciliationContract, SchemaRef,
+};
 use crate::validation::CatalogValidationError;
 
 /// Reviewed JSON Schema body generated from the Rust type that owns the wire.
@@ -117,7 +121,12 @@ pub struct ExecutableBindingV1 {
     result_schema: SchemaBodyAuthorityV1,
     codec: ExecutableCodecV1,
     exposure: RouteExposureV1,
+    effect: EffectClass,
+    idempotency: IdempotencyContract,
     cancellation: CancellationContract,
+    deadline: DeadlineContract,
+    reconciliation: ReconciliationContract,
+    receipt: ReceiptContract,
 }
 
 impl ExecutableBindingV1 {
@@ -205,7 +214,12 @@ impl ExecutableBindingV1 {
             result_schema,
             codec: ExecutableCodecV1::Json { binding_key },
             exposure,
+            effect: manifest.effect(),
+            idempotency: manifest.idempotency(),
             cancellation: manifest.cancellation().clone(),
+            deadline: manifest.deadline().clone(),
+            reconciliation: manifest.reconciliation(),
+            receipt: manifest.receipt(),
         })
     }
 
@@ -237,8 +251,28 @@ impl ExecutableBindingV1 {
         &self.exposure
     }
 
+    pub const fn effect(&self) -> EffectClass {
+        self.effect
+    }
+
+    pub const fn idempotency(&self) -> IdempotencyContract {
+        self.idempotency
+    }
+
     pub fn cancellation(&self) -> &CancellationContract {
         &self.cancellation
+    }
+
+    pub fn deadline(&self) -> &DeadlineContract {
+        &self.deadline
+    }
+
+    pub const fn reconciliation(&self) -> ReconciliationContract {
+        self.reconciliation
+    }
+
+    pub const fn receipt(&self) -> ReceiptContract {
+        self.receipt
     }
 }
 
@@ -317,6 +351,228 @@ impl ExecutableBindingRegistryV1 {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &ExecutableBindingAvailabilityV1> {
+        self.bindings.values()
+    }
+}
+
+/// The concrete transport a generated, named SDK method invokes.
+///
+/// This is deliberately distinct from [`RouteExposureV1`]. A capability can
+/// be executable through MCP without acquiring a synthetic HTTP route merely
+/// because an SDK also exposes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SdkTransportBindingV1 {
+    Http { route_path: String },
+    McpTool { tool_name: String },
+}
+
+impl SdkTransportBindingV1 {
+    fn validate(&self) -> Result<(), CatalogValidationError> {
+        match self {
+            Self::Http { route_path } => {
+                if !route_path.starts_with('/') || route_path.contains(['?', '#']) {
+                    return Err(CatalogValidationError::InvalidValue {
+                        field: "SDK HTTP route path",
+                        reason: "must be canonical and absolute",
+                    });
+                }
+            }
+            Self::McpTool { tool_name } => {
+                if tool_name.is_empty()
+                    || tool_name.trim() != tool_name
+                    || tool_name.len() > 192
+                    || !tool_name.is_ascii()
+                    || tool_name
+                        .bytes()
+                        .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'))
+                {
+                    return Err(CatalogValidationError::InvalidValue {
+                        field: "SDK MCP tool name",
+                        reason: "must be a bounded ASCII identifier",
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One public, named SDK method bound to a verified executable capability.
+///
+/// The embedded executable remains the authority for ownership, schemas, and
+/// lifecycle semantics. This wrapper contributes only the SDK spelling and
+/// concrete transport needed to invoke it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SdkExecutableBindingV1 {
+    executable: ExecutableBindingV1,
+    binding_id: BindingId,
+    sdk_method: SurfaceOperationName,
+    transport: SdkTransportBindingV1,
+}
+
+impl SdkExecutableBindingV1 {
+    pub fn new(
+        executable: ExecutableBindingV1,
+        binding_id: BindingId,
+        sdk_method: SurfaceOperationName,
+        transport: SdkTransportBindingV1,
+    ) -> Result<Self, CatalogValidationError> {
+        transport.validate()?;
+        match (&transport, executable.exposure()) {
+            (
+                SdkTransportBindingV1::Http { route_path },
+                RouteExposureV1::Public {
+                    binding_id: executable_binding_id,
+                    route_path: executable_route_path,
+                },
+            ) if binding_id == *executable_binding_id && route_path == executable_route_path => {}
+            (SdkTransportBindingV1::Http { .. }, _) => {
+                return Err(CatalogValidationError::InvalidValue {
+                    field: "SDK HTTP binding",
+                    reason: "must exactly match the executable public route",
+                });
+            }
+            (SdkTransportBindingV1::McpTool { .. }, RouteExposureV1::Internal) => {}
+            (SdkTransportBindingV1::McpTool { .. }, RouteExposureV1::Public { .. }) => {
+                return Err(CatalogValidationError::InvalidValue {
+                    field: "SDK MCP binding",
+                    reason: "must not alias an HTTP executable route",
+                });
+            }
+        }
+        Ok(Self {
+            executable,
+            binding_id,
+            sdk_method,
+            transport,
+        })
+    }
+
+    pub fn executable(&self) -> &ExecutableBindingV1 {
+        &self.executable
+    }
+
+    /// Canonical execution metadata retained by this SDK binding.
+    pub fn binding(&self) -> &ExecutableBindingV1 {
+        self.executable()
+    }
+
+    pub fn operation_id(&self) -> &OperationId {
+        self.executable.operation_id()
+    }
+
+    pub fn binding_id(&self) -> &BindingId {
+        &self.binding_id
+    }
+
+    pub fn sdk_method(&self) -> &SurfaceOperationName {
+        &self.sdk_method
+    }
+
+    pub fn transport(&self) -> &SdkTransportBindingV1 {
+        &self.transport
+    }
+
+    pub fn request_schema(&self) -> &SchemaBodyAuthorityV1 {
+        self.executable.request_schema()
+    }
+
+    pub fn result_schema(&self) -> &SchemaBodyAuthorityV1 {
+        self.executable.result_schema()
+    }
+
+    pub const fn effect(&self) -> EffectClass {
+        self.executable.effect()
+    }
+
+    pub const fn idempotency(&self) -> IdempotencyContract {
+        self.executable.idempotency()
+    }
+
+    pub fn cancellation(&self) -> &CancellationContract {
+        self.executable.cancellation()
+    }
+
+    pub fn deadline(&self) -> &DeadlineContract {
+        self.executable.deadline()
+    }
+
+    pub const fn reconciliation(&self) -> ReconciliationContract {
+        self.executable.reconciliation()
+    }
+
+    pub const fn receipt(&self) -> ReceiptContract {
+        self.executable.receipt()
+    }
+}
+
+/// Truthful SDK lookup state. Unsupported product capabilities remain
+/// explicit, while every available entry has a concrete named transport.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum SdkExecutableBindingAvailabilityV1 {
+    Available {
+        binding: Box<SdkExecutableBindingV1>,
+    },
+    Unavailable {
+        operation_id: OperationId,
+        disposition: ExecutableUnavailableDispositionV1,
+    },
+}
+
+impl SdkExecutableBindingAvailabilityV1 {
+    pub fn available(binding: SdkExecutableBindingV1) -> Self {
+        Self::Available {
+            binding: Box::new(binding),
+        }
+    }
+
+    pub fn operation_id(&self) -> &OperationId {
+        match self {
+            Self::Available { binding } => binding.operation_id(),
+            Self::Unavailable { operation_id, .. } => operation_id,
+        }
+    }
+
+    pub fn binding(&self) -> Option<&SdkExecutableBindingV1> {
+        match self {
+            Self::Available { binding } => Some(binding),
+            Self::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// Canonically ordered SDK executable lookup assembled by application
+/// composition from actual mounted surface bindings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SdkExecutableBindingRegistryV1 {
+    bindings: BTreeMap<OperationId, SdkExecutableBindingAvailabilityV1>,
+}
+
+impl SdkExecutableBindingRegistryV1 {
+    pub fn new(
+        bindings: Vec<SdkExecutableBindingAvailabilityV1>,
+    ) -> Result<Self, CatalogValidationError> {
+        let mut registry = BTreeMap::new();
+        for binding in bindings {
+            if registry
+                .insert(binding.operation_id().clone(), binding)
+                .is_some()
+            {
+                return Err(CatalogValidationError::DuplicateValue {
+                    field: "SDK executable operation IDs",
+                });
+            }
+        }
+        Ok(Self { bindings: registry })
+    }
+
+    pub fn get(&self, operation_id: &OperationId) -> Option<&SdkExecutableBindingAvailabilityV1> {
+        self.bindings.get(operation_id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &SdkExecutableBindingAvailabilityV1> {
         self.bindings.values()
     }
 }

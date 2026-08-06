@@ -24,6 +24,7 @@ fn round_trip_serialization() {
         last_version_check_at: 0,
         last_version_warning_at: 0,
         installed_agents: vec!["claude".to_string()],
+        agent_dashboard_enabled: Default::default(),
         watcher_debounce: "30s".to_string(),
         cached_country_flags: Vec::new(),
         last_flags_fetch_at: 0,
@@ -33,8 +34,6 @@ fn round_trip_serialization() {
         extraction_timeout_secs: 60,
         automation: Default::default(),
         memory_injection_enabled: true,
-        lcm_sensitive_redaction_enabled: true,
-        lcm_sensitive_redaction_patterns: vec!["api_key".to_string()],
         extra: Default::default(),
     };
     let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -42,8 +41,6 @@ fn round_trip_serialization() {
     assert!(!parsed.upload_enabled);
     assert_eq!(parsed.pending_upload, 12345);
     assert_eq!(parsed.last_worldwide_total, 2847561);
-    assert!(parsed.lcm_sensitive_redaction_enabled);
-    assert_eq!(parsed.lcm_sensitive_redaction_patterns, vec!["api_key"]);
 }
 
 #[test]

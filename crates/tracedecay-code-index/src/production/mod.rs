@@ -15,15 +15,20 @@ use std::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracedecay_code_extraction::LanguageExtractor as ParserLanguageExtractor;
+use tracedecay_code_extraction::incremental::{
+    ParseCompleteness, ParseDocumentIdentity, ParseError,
+};
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
-    ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
-    IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
-    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-    ProviderEvaluationStateV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    ExtractionBatchV1, ExtractionFailureV1, ExtractionResult, FileOccurrenceId,
+    GenerationTestAttributionV1, IntakeRejectionV1, ManifestDigest, PolicyRevisionId,
+    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
+    ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
+    RepositoryDirtyStateV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, ValidatedCodeFileV1,
     ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
@@ -35,9 +40,7 @@ use super::{
         ExtractionAdmittedCodeSearchChunkSetV1, ExtractionAdmittedCodeSearchChunkV1,
         content_digest,
     },
-    extract::{
-        ExtractionCancellation, LanguageExtractor, TreeSitterExtractor, rebind_extraction_batch,
-    },
+    extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{
         FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1, RebuildTriggerV1,
     },
@@ -59,6 +62,7 @@ use super::{
         GenerationProviderCoverageV1, GenerationProviderReadV1,
         GenerationTestAttributionJoinReadPort,
     },
+    retained_parse::{RetainedParsePoolStats, SharedRetainedParsePool},
     test_attribution::{
         GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
         TestAttributionWatermarkV1,
@@ -121,8 +125,18 @@ pub struct CodeIndexBuildRequestV1 {
     /// Additional conservative invalidations that the application boundary,
     /// rather than the sanitized snapshot, is authoritative to report.
     pub invalidations: BTreeSet<RebuildTriggerV1>,
+    /// Exact Git tree and dirty-state evidence paired with the snapshot's
+    /// repository/worktree/ref/commit identity. Missing tree is truthful for
+    /// unborn or unavailable Git state and never replaced with a digest.
+    pub repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
     pub sealed_at: UtcMicros,
     pub target_projection_key: ProjectionKeyV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexRepositoryParseIdentityV1 {
+    pub tree: Option<TreeId>,
+    pub dirty: RepositoryDirtyStateV1,
 }
 
 /// Synchronous checkpoints exposed by an application/daemon request.
@@ -273,6 +287,55 @@ where
             .collect::<Vec<Result<R, E>>>();
         results.into_iter().collect()
     })
+}
+
+fn parse_for_indexing(
+    retained_parses: &SharedRetainedParsePool,
+    config: &CodeIndexProductionConfigV1,
+    snapshot: &SanitizedCodeSnapshotV1,
+    repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
+    file: &SanitizedCodeFileV1,
+    captured: &CodeIndexCapturedFileV1,
+    parser: &dyn ParserLanguageExtractor,
+) -> Result<(ExtractionResult, usize), CodeIndexProductionErrorV1> {
+    let language = file.language.as_ref().ok_or_else(|| {
+        CodeIndexProductionErrorV1::Contract(
+            "present snapshot file has no declared language".to_owned(),
+        )
+    })?;
+    let source = std::str::from_utf8(&captured.sanitized_bytes).map_err(|error| {
+        CodeIndexProductionErrorV1::Contract(format!(
+            "admitted sanitized source is not UTF-8: {error}"
+        ))
+    })?;
+    let mut parsed_len = source
+        .len()
+        .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES);
+    while !source.is_char_boundary(parsed_len) {
+        parsed_len = parsed_len.saturating_sub(1);
+    }
+    let (report, mut extraction) = retained_parses.parse_and_extract(
+        ParseDocumentIdentity::Repository {
+            project_id: config.project_id.clone(),
+            repository_id: snapshot.repository.clone(),
+            worktree_id: snapshot.worktree.clone(),
+            reference: snapshot.reference.clone(),
+            commit: snapshot.source_revision.clone(),
+            tree: repository_parse_identity.tree.clone(),
+            dirty: repository_parse_identity.dirty,
+            logical_path: file.logical_path.clone(),
+        },
+        language.as_str(),
+        &source[..parsed_len],
+        parser,
+    )?;
+    if let ParseCompleteness::Partial { reasons } = report.completeness {
+        extraction
+            .result
+            .errors
+            .push(format!("retained parse incomplete: {reasons:?}"));
+    }
+    Ok((extraction.result, parsed_len))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1179,6 +1242,8 @@ pub enum CodeIndexProductionErrorV1 {
     Generation(GenerationPlanningErrorV1),
     #[error("language extraction failed: {0:?}")]
     Extraction(ExtractionFailureV1),
+    #[error("retained Tree-sitter parsing failed: {0}")]
+    RetainedParse(#[from] ParseError),
     #[error("chunking failed: {0}")]
     Chunk(ChunkingFailureV1),
     #[error("incremental materialization failed: {0}")]
@@ -1201,6 +1266,7 @@ pub struct CodeIndexProductionOwnerV1<P, S> {
     publication: P,
     projection: S,
     physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
+    retained_parses: SharedRetainedParsePool,
 }
 
 impl<P, S> CodeIndexProductionOwnerV1<P, S>
@@ -1219,6 +1285,7 @@ where
             publication,
             projection,
             physical_artifacts: SharedPhysicalCodeArtifactPoolV1::default(),
+            retained_parses: SharedRetainedParsePool::default(),
         })
     }
 
@@ -1228,6 +1295,15 @@ where
     ) -> Self {
         self.physical_artifacts = physical_artifacts;
         self
+    }
+
+    pub fn with_retained_parse_pool(mut self, retained_parses: SharedRetainedParsePool) -> Self {
+        self.retained_parses = retained_parses;
+        self
+    }
+
+    pub fn retained_parse_stats(&self) -> RetainedParsePoolStats {
+        self.retained_parses.stats()
     }
 
     /// Load the currently active immutable generation. A restart therefore
@@ -1357,6 +1433,7 @@ where
                 &manifest,
                 &extractor,
                 &chunker,
+                &request.repository_parse_identity,
                 active,
                 increment,
                 &captured_files,
@@ -1368,6 +1445,7 @@ where
                 &manifest,
                 &extractor,
                 &chunker,
+                &request.repository_parse_identity,
                 &validated.snapshot,
                 &captured_files,
                 control,
@@ -1473,11 +1551,13 @@ where
     fn extract_file(
         config: &CodeIndexProductionConfigV1,
         physical_artifacts: &SharedPhysicalCodeArtifactPoolV1,
+        retained_parses: &SharedRetainedParsePool,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
         extractor: &TreeSitterExtractor,
         chunker: &DeterministicCodeChunker,
+        repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
         file: &SanitizedCodeFileV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1515,9 +1595,46 @@ where
             Self::checkpoint(control)?;
             return Ok(reused);
         }
+        let snapshot = &capability.snapshot().snapshot;
+        let parser = extractor
+            .resolve_parser(receipt_bound.validated_file(), descriptor)
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Extraction(ExtractionFailureV1::GrammarUnavailable {
+                    language: descriptor.language.clone(),
+                })
+            })?;
+        if crate::languages::canonical_language_id(parser.language_name())
+            != descriptor.language.as_str()
+        {
+            return Err(CodeIndexProductionErrorV1::Extraction(
+                ExtractionFailureV1::IncompatibleDescriptor {
+                    detail: format!(
+                        "descriptor {} resolved to a {} parser",
+                        descriptor.language,
+                        parser.language_name()
+                    ),
+                },
+            ));
+        }
+        let (parse_artifacts, parsed_len) = parse_for_indexing(
+            retained_parses,
+            config,
+            snapshot,
+            repository_parse_identity,
+            file,
+            captured,
+            parser,
+        )?;
+        Self::checkpoint(control)?;
         let cancellation = ExtractionControlBridge { control };
         let extraction = extractor
-            .extract(&receipt_bound, descriptor, &cancellation)
+            .extract_preparsed(
+                &receipt_bound,
+                descriptor,
+                parse_artifacts,
+                parsed_len,
+                &cancellation,
+            )
             .map_err(|error| match error {
                 ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
                     Self::interruption_error(control)
@@ -1609,6 +1726,7 @@ where
         manifest: &CodeGenerationManifestV1,
         extractor: &TreeSitterExtractor,
         chunker: &DeterministicCodeChunker,
+        repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
         snapshot: &SanitizedCodeSnapshotV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1620,15 +1738,18 @@ where
             .collect::<Vec<_>>();
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
+        let retained_parses = &self.retained_parses;
         let files = collect_bounded_ordered(&present_files, |file| {
             Self::extract_file(
                 config,
                 physical_artifacts,
+                retained_parses,
                 intake,
                 capability,
                 manifest,
                 extractor,
                 chunker,
+                repository_parse_identity,
                 file,
                 captured_files,
                 control,
@@ -1661,6 +1782,7 @@ where
         manifest: &CodeGenerationManifestV1,
         extractor: &TreeSitterExtractor,
         chunker: &DeterministicCodeChunker,
+        repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
         active: &CodeIndexPublishedGenerationV1,
         increment: &super::generations::GenerationIncrementPlanV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
@@ -1685,6 +1807,7 @@ where
             .collect::<BTreeMap<_, _>>();
         let config = &self.config;
         let physical_artifacts = &self.physical_artifacts;
+        let retained_parses = &self.retained_parses;
         let file_materializations = collect_bounded_ordered(
             &increment.files,
             |file_plan| -> Result<IncrementFileMaterializationV1, CodeIndexProductionErrorV1> {
@@ -1734,11 +1857,13 @@ where
                             let artifact = Self::extract_file(
                                 config,
                                 physical_artifacts,
+                                retained_parses,
                                 intake,
                                 capability,
                                 manifest,
                                 extractor,
                                 chunker,
+                                repository_parse_identity,
                                 file,
                                 captured_files,
                                 control,
@@ -1755,11 +1880,13 @@ where
                         let artifact = Self::extract_file(
                             config,
                             physical_artifacts,
+                            retained_parses,
                             intake,
                             capability,
                             manifest,
                             extractor,
                             chunker,
+                            repository_parse_identity,
                             file,
                             captured_files,
                             control,

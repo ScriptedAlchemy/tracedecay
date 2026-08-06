@@ -68,12 +68,32 @@ function envelope<T>(
   };
 }
 
+/** A canonical read that has no safe payload until its owning authority mounts. */
+function unavailableEnvelope(reason: string): Record<string, unknown> {
+  return {
+    ...envelope(null, 'unknown', []),
+    coverage: {
+      completeness: 'unknown',
+      eligible: null,
+      examined: null,
+      matched: null,
+      excluded: null,
+      omitted: null,
+      unknown: null,
+      denominator: null,
+      unit: 'records',
+      omission_reasons: [reason],
+    },
+    freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
+  };
+}
+
 function projectEntry(
   id: string,
   label: string,
   root: string,
   ageSecs: number,
-  mass?: { stores: number; scopes: number; artifacts: number },
+  mass?: { stores: number; artifacts: number },
 ): Record<string, unknown> {
   return {
     project_id: id,
@@ -84,7 +104,6 @@ function projectEntry(
     default_branch: 'master',
     branches: ['master', 'codex/tracedecay-total-redesign-plan'],
     store_count: mass?.stores ?? 3,
-    graph_scope_count: mass?.scopes ?? 2,
     artifact_count: mass?.artifacts ?? 7,
     alias_count: 1,
     last_seen_at: nowSecs - ageSecs,
@@ -162,8 +181,7 @@ function syntheticGroup(repo: {
       {
         ...projectEntry(`proj_${repo.name}`, repo.name, root, repo.ageSecs, {
           stores: 1,
-          scopes: Math.max(1, Math.round(repo.mass * 0.35)),
-          artifacts: Math.max(1, Math.round(repo.mass * 0.65)),
+          artifacts: Math.max(1, repo.mass),
         }),
         kind: 'primary',
       },
@@ -171,8 +189,8 @@ function syntheticGroup(repo: {
   };
 }
 
-/** GET /api/projects — brain/delivery registry (ProjectsPayloadV1Schema;
- * src/dashboard/projects.rs `list`). */
+/** GET /api/projects — brain/delivery registry (`DashboardEnvelopeV1<
+ * ProjectsPayloadV1>`; src/dashboard/projects.rs `list`). */
 const projectTree: ReadonlyArray<Record<string, unknown>> = [
     {
       label: 'tracedecay',
@@ -226,7 +244,6 @@ const projectTree: ReadonlyArray<Record<string, unknown>> = [
         {
           ...projectEntry('proj_hermes_home', '.hermes', '/home/zack/.hermes', 20 * DAY, {
             stores: 1,
-            scopes: 0,
             artifacts: 3,
           }),
           kind: 'project',
@@ -243,7 +260,6 @@ const projectTree: ReadonlyArray<Record<string, unknown>> = [
         {
           ...projectEntry('proj_notes', 'notes', '/home/zack/notes', 3 * DAY, {
             stores: 1,
-            scopes: 0,
             artifacts: 1,
           }),
           kind: 'project',
@@ -273,7 +289,7 @@ const flatProjects: ReadonlyArray<Record<string, unknown>> = projectTree.flatMap
   })),
 );
 
-const projects: Record<string, unknown> = {
+const projectsPayload: Record<string, unknown> = {
   status: 'ok',
   limit: 100,
   truncated: false,
@@ -518,178 +534,6 @@ function memoryPayload(query = ''): Record<string, unknown> {
 }
 
 /* ==========================================================================
- * /api/plugins/hermes-lcm/* — LCM overview / timeline / search
- * (lcm_service.rs overview_payload / timeline_payload / search_payload;
- * lcm_queries.rs latest_sessions / timeline_message_buckets). Consumed by
- * SessionsPage, LoomPage (OverviewPayload/TimelinePayload) and ExplorerPage.
- *
- * NB: the live `latest_sessions` SQL (lcm_queries.rs:110-127) selects only
- * session_id / message_count / last_store_id / last_timestamp. LoomPage and
- * SessionsPage additionally read `provider` and `first_timestamp`, and the
- * fixture spec requires ≥30 sessions across 3 providers with both
- * timestamps in epoch seconds, so these rows are a superset of the current
- * wire shape (documented in the endpoint→fixture report).
- * ========================================================================== */
-
-const LCM_PROVIDERS = ['claude', 'codex', 'cursor'] as const;
-
-function lcmLatestSessions(count = 33): Record<string, unknown>[] {
-  return Array.from({ length: count }, (_, i) => {
-    const provider = LCM_PROVIDERS[i % LCM_PROVIDERS.length];
-    const last = nowSecs - i * 4 * 3600 - (i % 5) * 900;
-    const messageCount = 240 - i * 5 + (i % 4) * 18;
-    const durationSecs = 1800 + (i % 7) * 1200 + messageCount * 6;
-    return {
-      session_id: `${provider}-2026-07-${String(23 - (i % 21)).padStart(2, '0')}-${String(i).padStart(3, '0')}`,
-      provider,
-      source: provider,
-      message_count: Math.max(messageCount, 6),
-      last_store_id: 90_000 - i * 37,
-      first_timestamp: last - durationSecs,
-      last_timestamp: last,
-    };
-  });
-}
-
-function lcmSummaryNodes(count = 12): Record<string, unknown>[] {
-  return Array.from({ length: count }, (_, i) => ({
-    node_id: `node-${1000 + i}`,
-    session_id: `${LCM_PROVIDERS[i % 3]}-2026-07-${String(23 - (i % 12)).padStart(2, '0')}-${String(i).padStart(3, '0')}`,
-    depth: (i % 3) + 1,
-    category: 'general',
-    source_type: i % 2 === 0 ? 'messages' : 'nodes',
-    token_count: 480 - i * 12,
-    source_token_count: 2400 - i * 60,
-    latest_at: nowSecs - i * 6 * 3600,
-    created_at: nowSecs - i * 6 * 3600 - 1200,
-    expand_hint: '',
-    summary: `Session summary node ${i}: prompt → tool activity → outcome.`,
-  }));
-}
-
-function lcmOverviewPayload(query = ''): Record<string, unknown> {
-  const latestSessions = lcmLatestSessions();
-  const messagesTotal = latestSessions.reduce(
-    (sum, s) => sum + Number(s['message_count']),
-    0,
-  );
-  return {
-    path: '/fast/projects/tracedecay/.tracedecay/sessions.db',
-    storage_scope: 'project',
-    exists: true,
-    overview: {
-      messages_total: messagesTotal,
-      sessions_total: latestSessions.length,
-      summary_nodes_total: 214,
-      summary_node_sessions_total: 28,
-      max_summary_depth: 4,
-      role_counts: [
-        { role: 'assistant', count: Math.round(messagesTotal * 0.42) },
-        { role: 'user', count: Math.round(messagesTotal * 0.31) },
-        { role: 'tool', count: Math.round(messagesTotal * 0.27) },
-      ],
-      source_counts: LCM_PROVIDERS.map((source, i) => ({
-        source,
-        count: Math.round(messagesTotal / 3) - i * 40,
-      })),
-      depth_counts: [
-        { depth: 1, count: 96 },
-        { depth: 2, count: 74 },
-        { depth: 3, count: 32 },
-        { depth: 4, count: 12 },
-      ],
-      compression: {
-        source_token_count: 4_820_000,
-        token_count: 486_000,
-        ratio: 9.92,
-        node_count: 214,
-      },
-    },
-    latest_sessions: latestSessions,
-    latest_summary_nodes: lcmSummaryNodes(),
-    matches: { messages: [], summary_nodes: [] },
-    query,
-    limit: 200,
-    payload_health: null,
-  };
-}
-
-/** 46 day buckets (SessionsPage slices the last 46), token_estimate per bucket. */
-function lcmTimelinePayload(): Record<string, unknown> {
-  const buckets = Array.from({ length: 46 }, (_, i) => {
-    const day = new Date((nowSecs - (45 - i) * DAY) * 1000).toISOString().slice(0, 10);
-    // A believable activity curve: a mid-window ramp with a couple of spikes.
-    const base = 20 + Math.round(60 * Math.abs(Math.sin(i / 6)));
-    const spike = i === 18 || i === 33 ? 90 : 0;
-    const count = base + spike + (i % 4) * 6;
-    return { bucket: day, count, token_estimate: count * 1150 };
-  });
-  return {
-    path: '/fast/projects/tracedecay/.tracedecay/sessions.db',
-    storage_scope: 'project',
-    exists: true,
-    bucket: 'day',
-    session_id: null,
-    buckets,
-    node_buckets: buckets.slice(-24).map((b) => ({
-      bucket: b['bucket'],
-      count: Math.round(Number(b['count']) / 6),
-    })),
-    undated: { count: 4, token_estimate: 5200 },
-    // `lcm_service::timeline_payload` always attaches this alongside a real
-    // read — it is only absent when there is no LCM store at all, and this
-    // fixture says `exists: true`. `limit` is the route's own default
-    // (`coerce_limit(params.limit, 400, 2000)`), and with every dated bucket
-    // returned the window is untruncated, so there is no next page cursor.
-    coverage: {
-      limit: 400,
-      returned_buckets: buckets.length,
-      total_dated_buckets: buckets.length,
-      truncated: false,
-      ordering: 'most_recent',
-      next_before_bucket: null,
-    },
-  };
-}
-
-function lcmSearchPayload(query = ''): Record<string, unknown> {
-  const messages = Array.from({ length: 40 }, (_, i) => {
-    const provider = LCM_PROVIDERS[i % 3];
-    return {
-      store_id: 70_000 + i,
-      session_id: `${provider}-2026-07-${String(23 - (i % 20)).padStart(2, '0')}-${String(i).padStart(3, '0')}`,
-      role: i % 3 === 0 ? 'assistant' : i % 3 === 1 ? 'user' : 'tool',
-      source: provider,
-      timestamp: nowSecs - i * 5400,
-      token_estimate: 180 - i * 2,
-      content: `Match ${i}: ${pick(FACT_CONTENTS, i)}`,
-      snippet: `… ${pick(FACT_CONTENTS, i).slice(0, 120)} …`,
-      message_id: `msg-${i}`,
-      ordinal: i,
-      summary_node_ids: [],
-    };
-  });
-  const summaryNodes = lcmSummaryNodes(10);
-  return {
-    path: '/fast/projects/tracedecay/.tracedecay/sessions.db',
-    storage_scope: 'project',
-    exists: true,
-    query,
-    limit: 25,
-    offset: 0,
-    engine: 'fts',
-    engine_detail: { messages: 'fts', summary_nodes: 'fts' },
-    total: { messages: messages.length, summary_nodes: summaryNodes.length },
-    filters: { role: null, source: null, session_id: null, since: null, until: null },
-    // ExplorerPage's ListPayload reads results/items/nodes/facts; the wire
-    // response nests hits under `matches`. Both are provided so the fixture is
-    // wire-true AND the Explorer fan-out has rows to count when a query runs.
-    results: messages,
-    matches: { messages, summary_nodes: summaryNodes },
-  };
-}
-
-/* ==========================================================================
  * /api/plugins/graph/* — overview / search / subgraph
  * (graph_service.rs overview_payload / search_payload / subgraph_payload;
  * graph_queries.rs NODE_COLUMNS, edge_rows_for_ids, top_connected_rows).
@@ -709,7 +553,7 @@ const GRAPH_KINDS = [
 
 const GRAPH_FILES = [
   'src/dashboard/graph_service.rs',
-  'src/dashboard/lcm_service.rs',
+  'src/dashboard/lcm_api.rs',
   'src/dashboard/memory_api.rs',
   'src/dashboard/mod.rs',
   'src/storage/runtime.rs',
@@ -1440,6 +1284,7 @@ function analyticsHintsPayload(): Record<string, unknown> {
   return {
     available: true,
     source: 'analytics_events',
+    error: null,
     by_category: HINT_CATEGORIES.map((category, i) => ({
       category,
       emitted: 120 - i * 8,
@@ -1594,18 +1439,6 @@ const DOCTOR_FAMILIES = [
   'observability',
 ] as const;
 
-/** Owner operation references, verbatim from
- * `tracedecay_application::doctor::operations` (remediation.rs:30-53). The
- * dashboard route resolves a finding's reference through the kernel registry,
- * so a fixture naming an operation the registry does not seed would produce a
- * descriptor the real route can never emit. */
-const DOCTOR_OPERATIONS = {
-  retentionCollect: 'use-case.application.storage.retention-collect',
-  branchGc: 'use-case.application.storage.branch-gc',
-  protectedApply: 'use-case.application.configuration.protected-apply',
-  codeIndexRemount: 'use-case.application.code-index.remount',
-} as const;
-
 /**
  * `GET /api/doctor/findings` with an admitted report reader — the populated
  * report, not the empty one.
@@ -1624,11 +1457,8 @@ const DOCTOR_OPERATIONS = {
  * `DoctorFindingV1::new` enforces: missing or partial truth never presents as
  * healthy.
  *
- * The descriptors mirror the kernel's seeded registry verbatim (summary,
- * surface, preview_available, action_confirmation), and `target` follows
- * `DoctorRemediationTargetV1::for_operation` — null for the protected
- * configuration apply, which needs a concrete key, value and base revision the
- * route cannot build from a finding alone.
+ * The dashboard carries diagnosis evidence and coverage only. Corrective
+ * actions remain outside this read-only route.
  */
 function doctorFindingsEnvelope(): Record<string, unknown> {
   const entry = (
@@ -1637,16 +1467,13 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
     completeness: 'complete' | 'partial' | 'unknown',
     statement: string,
     evidence: ReadonlyArray<string>,
-    options: { storageKind?: string; operation?: string } = {},
+    options: { storageKind?: string } = {},
   ): Record<string, unknown> => ({
     finding: {
       family,
       state,
       coverage: { completeness, statement },
       evidence: evidence.map((reference) => ({ family, reference })),
-      remediation: options.operation
-        ? { kind: 'action', owning_operation: options.operation }
-        : null,
     },
     storage_kind: options.storageKind ?? null,
   });
@@ -1658,15 +1485,7 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'partial',
       'two of three stores reported a size; the third could not be opened for measurement',
       ['store:lcm:size-observation:wm-41', 'store:memory:size-observation:wm-41'],
-      { storageKind: 'over_budget_store', operation: DOCTOR_OPERATIONS.retentionCollect },
-    ),
-    entry(
-      'storage',
-      'stale',
-      'complete',
-      'branch databases were last reconciled against git refs 19 days ago',
-      ['store:branch-db:reconcile-watermark:wm-22'],
-      { storageKind: 'stale_branch_dbs', operation: DOCTOR_OPERATIONS.branchGc },
+      { storageKind: 'over_budget_store' },
     ),
     entry(
       'configuration',
@@ -1674,7 +1493,6 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'complete',
       'effective configuration diverges from the desired revision on two protected keys',
       ['configuration:revision:r-317', 'configuration:revision:r-318'],
-      { operation: DOCTOR_OPERATIONS.protectedApply },
     ),
     entry(
       'semantic_index',
@@ -1682,7 +1500,6 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'unknown',
       'the semantic index did not report a mount state, so its freshness is unknown',
       ['semantic-index:mount-probe:absent'],
-      { operation: DOCTOR_OPERATIONS.codeIndexRemount },
     ),
     entry(
       'storage_runtime',
@@ -1737,56 +1554,11 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
             },
       })),
     },
-    remediations: [
-      {
-        operation: DOCTOR_OPERATIONS.retentionCollect,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'collect retention-eligible rows or reclaim an over-budget store',
-        target: { owner_operation: 'storage_retention_collect' },
-      },
-      {
-        operation: DOCTOR_OPERATIONS.branchGc,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'remove branch-scoped databases whose git refs are gone',
-        target: { owner_operation: 'storage_branch_gc' },
-      },
-      {
-        operation: DOCTOR_OPERATIONS.protectedApply,
-        surface: 'configuration_control_plane',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'apply desired configuration to reconcile effective drift',
-        // `for_operation` returns None here: the owning surface supplies the
-        // key, value and base revision. The card says so instead of offering a
-        // button that could not be dispatched.
-        target: null,
-      },
-      {
-        operation: DOCTOR_OPERATIONS.codeIndexRemount,
-        surface: 'semantic_index_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'remount or rebuild a code/semantic index that is unmounted or stale',
-        target: { owner_operation: 'code_index_remount' },
-      },
-    ],
     known_families: [...DOCTOR_FAMILIES],
     note: 'five of seven finding families were consulted; two reported no evidence source',
   };
-  // `partial`, because two families were never reached. The owner authorizes a
-  // dry run and an apply on the three dispatchable operations; the protected
-  // configuration apply is authorized too, and is simply not dispatchable from
-  // here.
   return envelope(payload, 'partial', [
     { kind: 'refresh', operation: 'use-case.dashboard.doctor.findings.refresh' },
-    ...Object.values(DOCTOR_OPERATIONS).flatMap((operation) => [
-      { kind: 'request_dry_run', operation },
-      { kind: 'request_apply', operation },
-    ]),
   ]);
 }
 
@@ -1795,15 +1567,19 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
  * ========================================================================== */
 
 /** The owner setting a soft store budget comes from, and the wording the daemon
- * emits for the unset/baseline/coverage cases — copied verbatim from
- * `src/dashboard/storage_telemetry_api.rs` so these fixtures stay wire-true. */
+ * emits for an unset budget — copied verbatim from
+ * `storage_telemetry_api.rs` so these fixtures stay wire-true. */
 const BUDGET_SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
 const BUDGET_UNSET_REASON =
   'no soft size budget is configured by the owner for this store (set sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)';
-const GROWTH_COVERAGE =
-  'since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not a persisted historical series';
-const GROWTH_BASELINE_REASON =
-  'first watermark recorded in this daemon lifetime; a growth delta needs a second sample';
+const GROWTH_UNKNOWN_REASON =
+  'no execution-owned store-size watermark is available; dashboard reads never establish one';
+const GROWTH_NOTE =
+  'store growth requires bounded execution-owned watermarks; dashboard reads observe current size but never establish a baseline or a historical series';
+const storeGrowthUnknown = {
+  state: 'unknown',
+  reason: GROWTH_UNKNOWN_REASON,
+} as const;
 const TABLE_GROWTH_COVERAGE = {
   completeness: 'complete',
   eligible: 1,
@@ -1896,14 +1672,14 @@ const TABLE_GROWTH_STATES = [
  * One entry per distinct store *file*: the graph and project-memory roles share
  * a database in project storage mode and are therefore one card carrying both
  * roles, not two cards with byte-identical sizes. The five entries below model
- * every state the endpoint can emit: an evaluated budget within and over its
- * soft limit, an unset budget, an unknown budget, and the baseline / observed /
- * unknown growth states. */
+ * every budget state the endpoint can emit; per-store growth is always typed
+ * unknown on a dashboard read because execution-owned watermarks are required
+ * for a growth claim. Per-table growth below still exercises its own states. */
 const storageTelemetry = envelope({
   stores: [
     {
       // Shared store file: graph + project memory, budget within its soft
-      // limit, growth observed across the daemon-lifetime watermark ring.
+      // limit. A dashboard status read does not create a growth baseline.
       store: 'graph.db',
       role: 'graph',
       roles: ['graph', 'memory'],
@@ -1931,21 +1707,7 @@ const storageTelemetry = envelope({
         setting_key: BUDGET_SETTING_KEY,
         reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
       },
-      growth: {
-        state: 'observed',
-        coverage: GROWTH_COVERAGE,
-        first_measured_at: nowMicros - 3_600_000_000,
-        last_measured_at: nowMicros,
-        sample_count: 12,
-        first_total_bytes: 208_207_872,
-        current_total_bytes: 214_630_400,
-        growth_bytes: 6_422_528,
-        samples: [
-          { measured_at: nowMicros - 3_600_000_000, total_bytes: 208_207_872, free_bytes: 4_112_384 },
-          { measured_at: nowMicros - 1_800_000_000, total_bytes: 211_419_136, free_bytes: 4_820_992 },
-          { measured_at: nowMicros, total_bytes: 214_630_400, free_bytes: 5_242_880 },
-        ],
-      },
+      growth: storeGrowthUnknown,
     },
     {
       // Over its owner-configured soft limit, with a real overage.
@@ -1977,25 +1739,10 @@ const storageTelemetry = envelope({
         setting_key: BUDGET_SETTING_KEY,
         reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
       },
-      growth: {
-        state: 'observed',
-        coverage: GROWTH_COVERAGE,
-        first_measured_at: nowMicros - 7_200_000_000,
-        last_measured_at: nowMicros,
-        sample_count: 24,
-        first_total_bytes: 742_391_808,
-        current_total_bytes: 738_197_504,
-        // A shrinking store reports a negative delta rather than zero growth.
-        growth_bytes: -4_194_304,
-        samples: [
-          { measured_at: nowMicros - 7_200_000_000, total_bytes: 742_391_808, free_bytes: 12_582_912 },
-          { measured_at: nowMicros, total_bytes: 738_197_504, free_bytes: 8_388_608 },
-        ],
-      },
+      growth: storeGrowthUnknown,
     },
     {
-      // No owner entry: a missing *setting*, never a fabricated pass. First
-      // watermark of this daemon lifetime, so growth is baseline, not zero.
+      // No owner entry: a missing *setting*, never a fabricated pass.
       store: 'savings.db',
       role: 'savings',
       roles: ['savings'],
@@ -2018,13 +1765,7 @@ const storageTelemetry = envelope({
         reason: BUDGET_UNSET_REASON,
         setting_key: BUDGET_SETTING_KEY,
       },
-      growth: {
-        state: 'baseline',
-        coverage: GROWTH_COVERAGE,
-        measured_at: nowMicros,
-        total_bytes: 74_547_200,
-        reason: GROWTH_BASELINE_REASON,
-      },
+      growth: storeGrowthUnknown,
     },
     {
       // The configured budget is unreadable, so the budget is unknown — the
@@ -2051,13 +1792,7 @@ const storageTelemetry = envelope({
         reason:
           'the resolved runtime configuration could not be read, so a configured budget could not be determined',
       },
-      growth: {
-        state: 'baseline',
-        coverage: GROWTH_COVERAGE,
-        measured_at: nowMicros,
-        total_bytes: 39_321_600,
-        reason: GROWTH_BASELINE_REASON,
-      },
+      growth: storeGrowthUnknown,
     },
     {
       // The pragma read failed: sizes stay null and both dimensions are typed
@@ -2074,17 +1809,12 @@ const storageTelemetry = envelope({
         state: 'unknown',
         reason: 'no observed size sample, so a configured budget could not be evaluated',
       },
-      growth: {
-        state: 'unknown',
-        reason:
-          'no watermark could be recorded because the store size read did not produce a sample',
-      },
+      growth: storeGrowthUnknown,
     },
   ].map((store, index) => ({ ...store, table_growth: TABLE_GROWTH_STATES[index] })),
   budget_note:
     'budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store key; a store with no entry reports unset (no budget configured), never a fabricated pass',
-  growth_note:
-    'growth is measured over the store-size watermarks this daemon has recorded since it started; no persisted historical watermark series exists, so the window is not historical',
+  growth_note: GROWTH_NOTE,
   table_growth_threshold: {
     absolute_bytes: 67_108_864,
     relative_floor_bytes: 1_048_576,
@@ -2138,7 +1868,6 @@ const storageFindings = envelope({
   family_filter: 'storage',
   entries: [],
   report_coverage: null,
-  remediations: [],
   known_families: [
     'advisory',
     'configuration',
@@ -2152,21 +1881,15 @@ const storageFindings = envelope({
   kind_statuses: [
     {
       kind: 'over_budget_store',
-      state: 'unset',
+      state: 'partial',
       observed_entries: 0,
-      reason: 'No owner budget configured · sync.retention.v1 store_soft_budgets_bytes',
+      reason: 'the canonical report did not carry per-producer completion evidence',
     },
     {
       kind: 'orphan_store',
       state: 'real',
       observed_entries: 1,
       reason: 'canonical Doctor producer returned one observed entry with complete coverage',
-    },
-    {
-      kind: 'stale_branch_dbs',
-      state: 'partial',
-      observed_entries: 0,
-      reason: 'branch-store inventory was consulted but per-producer coverage was incomplete',
     },
     {
       kind: 'incident_debris_present',
@@ -2300,8 +2023,6 @@ const capabilities: Record<string, unknown> = {
   features: {
     memory: true,
     lcm: true,
-    lcm_gc: true,
-    lcm_payload_health: true,
     graph: true,
     analytics: true,
     code_diagnostics: true,
@@ -2571,7 +2292,7 @@ const COST_DESCRIPTOR = 'accounting-cost.v1';
  * resolver). Anything not listed resolves to the prefix table, then to {}.
  */
 export const FIXTURES: Readonly<Record<string, unknown>> = {
-  '/api/projects': projects,
+  '/api/projects': envelope(projectsPayload),
   '/api/storage/telemetry': storageTelemetryEnvelope,
   '/api/storage/findings': storageFindings,
   '/api/doctor/findings': doctorFindingsEnvelope(),
@@ -2579,29 +2300,37 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/capabilities': capabilities,
   // Memory (holographic) — consumed with a trailing slash by KnowledgePage and
   // ExplorerPage (`/api/plugins/holographic/?...`).
-  '/api/plugins/holographic/': memoryPayload(),
-  '/api/plugins/holographic': memoryPayload(),
-  '/api/plugins/holographic/overview': memoryPayload(),
-  // LCM.
-  '/api/plugins/hermes-lcm/overview': lcmOverviewPayload(),
-  '/api/plugins/hermes-lcm/timeline': lcmTimelinePayload(),
-  '/api/plugins/hermes-lcm/search': lcmSearchPayload(),
+  '/api/plugins/holographic/': envelope(memoryPayload()),
+  '/api/plugins/holographic': envelope(memoryPayload()),
+  '/api/plugins/holographic/overview': envelope(memoryPayload()),
+  // LCM browse reads remain explicitly unavailable until canonical temporal
+  // retrieval and redaction hydration are mounted.
+  '/api/plugins/hermes-lcm/overview': unavailableEnvelope(
+    'lcm_temporal_retrieval_not_mounted',
+  ),
+  '/api/plugins/hermes-lcm/timeline': unavailableEnvelope(
+    'lcm_temporal_retrieval_not_mounted',
+  ),
+  '/api/plugins/hermes-lcm/search': unavailableEnvelope(
+    'lcm_temporal_retrieval_not_mounted',
+  ),
   // Graph.
-  '/api/plugins/graph/overview': graphOverviewPayload(),
-  '/api/plugins/graph/search': graphSearchPayload(),
-  '/api/plugins/graph/subgraph': subgraphPayload(null),
+  '/api/plugins/graph/overview': envelope(graphOverviewPayload()),
+  '/api/plugins/graph/search': envelope(graphSearchPayload()),
+  '/api/plugins/graph/subgraph': envelope(subgraphPayload(null)),
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
-  '/api/plugins/savings/overview': savingsPayload(),
+  '/api/plugins/savings/overview': envelope(savingsPayload()),
   '/api/plugins/savings/sessions': loomSessionsPayload(),
   // Memory bank status (memory_api.rs::status) — the scoped Brain's fact and
   // entity readouts. Distinct from the overview payload above.
-  '/api/plugins/holographic/status': memoryStatusPayload(),
-  // Analytics.
-  '/api/plugins/analytics/overview': analyticsOverviewPayload(),
-  '/api/plugins/analytics/usage': analyticsUsagePayload(),
-  '/api/plugins/analytics/hints': analyticsHintsPayload(),
-  '/api/plugins/analytics/underused': analyticsUnderusedPayload(),
-  '/api/plugins/analytics/diagnostics': analyticsDiagnosticsPayload(),
+  '/api/plugins/holographic/status': envelope(memoryStatusPayload()),
+  // Analytics reads are envelope-only. Their generated inner contracts follow
+  // the backend schema floor; fixtures keep the same outer wire authority now.
+  '/api/plugins/analytics/overview': envelope(analyticsOverviewPayload()),
+  '/api/plugins/analytics/usage': envelope(analyticsUsagePayload()),
+  '/api/plugins/analytics/hints': envelope(analyticsHintsPayload()),
+  '/api/plugins/analytics/underused': envelope(analyticsUnderusedPayload()),
+  '/api/plugins/analytics/diagnostics': envelope(analyticsDiagnosticsPayload()),
   // Automation.
   '/api/automation/scheduler/status': schedulerStatusPayload(),
   '/api/automation/jobs': jobsPayload(),
@@ -2631,10 +2360,12 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
   // Dynamic: `/session/{session_id}` — the Loom thread chain. One transcript
   // answers for every id, which is what a fixture can honestly be.
-  ['/api/plugins/hermes-lcm/session/', loomChainPayload()],
-  ['/api/plugins/holographic', memoryPayload()],
-  ['/api/plugins/graph', graphOverviewPayload()],
-  ['/api/plugins/savings', savingsPayload()],
+  ['/api/plugins/hermes-lcm/session/', unavailableEnvelope(
+    'lcm_temporal_retrieval_not_mounted',
+  )],
+  ['/api/plugins/holographic', envelope(memoryPayload())],
+  ['/api/plugins/graph', envelope(graphOverviewPayload())],
+  ['/api/plugins/savings', envelope(savingsPayload())],
 ];
 
 /* ==========================================================================
@@ -3179,17 +2910,19 @@ function analyticsOverviewPayload(): Record<string, unknown> {
     available: true,
     db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
     scope: 'profile_sharded',
-    usage: {
+    hints: analyticsHintsPayload(),
+    usage: analyticsUsagePayload(),
+    agents: {
       available: true,
-      source: 'analytics_events',
-      event_count: 10_000,
-      message_count: 10_000,
-      by_category: [
-        { category: 'tracedecay_mcp', events: 6837, kind: 'tool' },
-        { category: 'memory', events: 610, kind: 'tool' },
-        { category: 'lcm_session', events: 22, kind: 'tool' },
+      source: 'sessions',
+      by_agent: [
+        { agent: 'Codex', sessions: 42 },
+        { agent: 'Claude', sessions: 31 },
+        { agent: 'Cursor', sessions: 7 },
       ],
     },
+    diagnostics: analyticsDiagnosticsPayload(),
+    underused_tool_families: analyticsUnderusedPayload()['families'],
     observatory: observatoryReadModel(),
   };
 }
@@ -3285,79 +3018,20 @@ function projectContextPayload(projectId: string): Record<string, unknown> {
   };
   const canonicalRoot = entry['canonical_root'] as string;
   const lastSeen = entry['last_seen_at'] as number;
-  const branches = ['master', 'codex/tracedecay-total-redesign-plan', 'release/2.4'];
-  return {
+  const linkedCheckouts = ['review', 'release'];
+  return envelope({
     status: 'ok',
     is_active: entry['is_active'] === true,
     project: entry,
     aliases: [
       { project_id: projectId, alias_path: canonicalRoot, last_seen_at: lastSeen },
-      ...branches.slice(1).map((branch, i) => ({
+      ...linkedCheckouts.map((checkout, i) => ({
         project_id: projectId,
-        alias_path: `${canonicalRoot}/.worktrees/${branch.replace(/\//g, '-')}`,
+        alias_path: `${canonicalRoot}/.worktrees/${checkout}`,
         last_seen_at: lastSeen - (i + 1) * 4 * 3600,
       })),
     ],
-    stores: [
-      {
-        store: {
-          store_id: `store:${projectId}:profile_sharded`,
-          project_id: projectId,
-          store_kind: 'code_project',
-          storage_mode: 'profile_sharded',
-          store_relpath: `projects/${projectId}`,
-          manifest_relpath: `projects/${projectId}/store_manifest.json`,
-          created_at: lastSeen - 90 * DAY,
-          last_verified_at: lastSeen,
-          last_write_at: lastSeen,
-        },
-        graph_scopes: branches.map((branch, i) => ({
-          graph_scope_id: `store:${projectId}:branch:${branch}`,
-          project_id: projectId,
-          store_id: `store:${projectId}:profile_sharded`,
-          branch_name: branch,
-          db_relpath: `projects/${projectId}/branches/${branch.replace(/\//g, '-')}.db`,
-          parent_scope_id: null,
-          last_synced_at: lastSeen - i * 6 * 3600,
-          writable: i === 0,
-        })),
-        artifacts: [
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'graph_db',
-            relpath: `projects/${projectId}/tracedecay.db`,
-            schema_version: null,
-            size_bytes: 131_088_384,
-            updated_at: lastSeen,
-          },
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'sessions_db',
-            relpath: `projects/${projectId}/sessions.db`,
-            schema_version: null,
-            size_bytes: 42_930_176,
-            updated_at: lastSeen,
-          },
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'memory_db',
-            relpath: `projects/${projectId}/memory.db`,
-            schema_version: null,
-            size_bytes: 9_027_584,
-            updated_at: lastSeen,
-          },
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'branch_meta',
-            relpath: `projects/${projectId}/branch-meta.json`,
-            schema_version: null,
-            size_bytes: 14_704,
-            updated_at: lastSeen,
-          },
-        ],
-      },
-    ],
-  };
+  });
 }
 
 /**
@@ -3382,7 +3056,7 @@ export function resolveFixture(pathname: string, search = ''): unknown {
 
   if (pathname === '/api/plugins/graph/subgraph') {
     const nodeId = new URLSearchParams(search).get('node_id');
-    return subgraphPayload(nodeId);
+    return envelope(subgraphPayload(nodeId));
   }
   // Must precede the FIXTURE_PREFIXES sweep: `/api/plugins/graph` is a prefix
   // fixture, so without this branch every neighbors read would resolve to the
@@ -3394,7 +3068,7 @@ export function resolveFixture(pathname: string, search = ''): unknown {
     // cap 200, and a non-positive or unparsable value falls back to default.
     const raw = Number(new URLSearchParams(search).get('limit'));
     const limit = Number.isFinite(raw) && raw > 0 ? Math.min(200, Math.trunc(raw)) : 50;
-    return neighborsPayload(decodeURIComponent(neighbors[1]!), limit);
+    return envelope(neighborsPayload(decodeURIComponent(neighbors[1]!), limit));
   }
   if (pathname in FIXTURES) return FIXTURES[pathname];
   for (const [prefix, payload] of FIXTURE_PREFIXES) {
@@ -3517,16 +3191,23 @@ function analyticsDiagnosticsPayload(): Record<string, unknown> {
    * screenshot pair. */
   const AGENT_TAPE_ANCHOR = nowSecs - 240;
   const toolCalls = AGENT_TOOL_CALLS.reduce((sum, [, count]) => sum + count, 0);
+  const hookCallCount = 444_038;
   return {
     available: true,
     source: 'analytics_events',
     event_count: 10_000,
     message_count: 10_000,
     events_per_hour: 135.36531714965764,
-    hook_call_count: 444_038,
+    hook_call_count: hookCallCount,
     mcp_tool_call_count: toolCalls,
     tool_call_count: toolCalls,
     tracedecay_call_count: toolCalls,
+    ratios: {
+      events_per_message: 1,
+      tool_calls_per_message: toolCalls / 10_000,
+      mcp_tool_calls_per_message: toolCalls / 10_000,
+      hook_calls_per_message: hookCallCount / 10_000,
+    },
     by_event_kind: [
       { event_kind: 'mcp_tool_call', count: toolCalls },
       { event_kind: 'hook_route', count: 10_000 - toolCalls },
@@ -3541,6 +3222,15 @@ function analyticsDiagnosticsPayload(): Record<string, unknown> {
     ],
     by_mcp_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
     by_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
+    hook_window: {
+      window_rows: 10_000,
+      rows_scanned: 10_000,
+      rows_included: 10_000,
+      truncated: true,
+      total_rows_known: false,
+      oldest_ts_unix_ms: (nowSecs - 3600) * 1000,
+      newest_ts_unix_ms: nowSecs * 1000,
+    },
     recent_events: AGENT_TAPE.map(([ago, tool_name, outcome]) => ({
       event_kind: 'mcp_tool_call',
       hook_name: '',

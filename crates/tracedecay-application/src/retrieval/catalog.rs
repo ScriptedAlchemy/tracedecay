@@ -50,7 +50,6 @@ pub fn application_catalog_contributions()
         crate::lsp_context_catalog::lsp_context_catalog_contribution()?,
         crate::retained_surfaces::retained_surface_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
-        crate::api_migration::api_migration_catalog_contribution()?,
     ])
 }
 
@@ -282,6 +281,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 TerminalState::Cancelled,
                 TerminalState::TimedOut,
                 TerminalState::Failed,
+                TerminalState::Unavailable,
                 TerminalState::Partial,
             ])?,
             availability: AvailabilityContract::Available,
@@ -401,6 +401,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
             TerminalState::Cancelled,
             TerminalState::TimedOut,
             TerminalState::Failed,
+            TerminalState::Unavailable,
             TerminalState::Partial,
         ])?,
         availability: AvailabilityContract::Available,

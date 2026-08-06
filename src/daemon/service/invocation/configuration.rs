@@ -921,6 +921,12 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
             code: "configuration.unavailable".to_owned(),
             message: "The configuration authority is unavailable".to_owned(),
         }),
+        ConfigurationError::ResetRequired { .. } => {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "configuration.reset_required".to_owned(),
+                message: "The configuration store must be reset before use".to_owned(),
+            })
+        }
     }
 }
 

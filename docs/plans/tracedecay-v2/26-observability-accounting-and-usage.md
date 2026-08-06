@@ -61,17 +61,18 @@ contracts below remain binding. They ship as instrumentation and read models on
 real product paths, not as schema-only, fixture-only, projector-only, or
 promotion-gate milestones.
 
-**PR14 finding → evidence → Doctor → confirmed remediation:** production
+**Finding → evidence → read-only Doctor diagnosis:** production
 operations emit through the canonical observability boundary; denominator-safe
 projectors build the exact read models consumed by CLI, MCP, HTTP, Observatory,
-Costs, Settings, and the one Doctor application kernel; the user drills from a
-finding to safe evidence, confirms an owner remediation, follows its receipt,
-and sees post-operation health, usage, latency, resource, token, cost, drop,
-coverage, and unavailable state reconcile at pinned watermarks. Every
+Costs, Settings, and the one Doctor application kernel. The user drills from a
+finding to safe evidence. Any separately entered owning
+workflow carries its own authorization and receipt; Doctor never previews or
+dispatches it. Post-operation health, usage, latency, resource, token, cost,
+drop, coverage, and unavailable state reconcile at pinned watermarks. Every
 retrieval, adoption, automation, performance, retention,
 rejected-argument, LSP, feedback-cycle, and provider measurement specified
 below remains attached to its owning production action and visible through the
-appropriate PR14 view.
+  appropriate product view.
 
 **PR17 work item → admitted execution → observed outcome → reviewed
 replanning:** Plan 24 work identity and evidence flow into a real Plan 32 run;
@@ -854,9 +855,9 @@ decision with collision, ambiguity, and maintenance review.
 
 ### Doctor and health
 
-- Doctor, Observatory, CLI, MCP, API, and dashboard consume one typed health and
-  remediation kernel owned by PR14. Doctor uses the kernel read-only for
-  detection and explanation; remediation remains explicit confirmed operations.
+- Doctor, Observatory, CLI, MCP, API, and dashboard consume one typed diagnostic
+  kernel. Doctor uses the kernel only for detection, explanation, and evidence.
+  It exposes no mutation operation.
   An alias reports kernel availability; it cannot substitute a private probe or
   claim health from binding presence.
 - Replace separate `session_start`/`session_end` baseline tools with one

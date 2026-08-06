@@ -20,8 +20,11 @@ pub struct PhysicalRuntimeSnapshot {
     pub healthy: bool,
     pub writer_present: bool,
     pub reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
     pub queued_operations: u32,
     pub queued_bytes: u64,
+    pub writer_busy_events: u64,
     pub wal_bytes: u64,
     pub memory_estimate_bytes: u64,
 }
@@ -72,17 +75,6 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
     fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
         let _ = reader_wait;
         Err("physical runtime has no store-size telemetry port".to_owned())
-    }
-
-    /// Reads per-table payload bytes from the retained attachment, so a store's
-    /// size can be attributed to the tables that hold it rather than reported
-    /// as one opaque total.
-    ///
-    /// Same constraints as [`Self::storage_page_counts`]: the already-open
-    /// reader pool only, no caller-provided SQL.
-    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
-        let _ = reader_wait;
-        Err("physical runtime has no table-size telemetry port".to_owned())
     }
 
     /// Runs one typed, page-bounded incremental compaction on the retained

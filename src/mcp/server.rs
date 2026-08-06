@@ -269,12 +269,10 @@ pub struct McpServer {
         Option<crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake>,
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     user_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
+    session_sync_service:
+        Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     project_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     user_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
-    #[cfg(test)]
-    project_session_retrieval_calls: Arc<AtomicU64>,
-    #[cfg(test)]
-    user_session_retrieval_calls: Arc<AtomicU64>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
     /// [`Self::shutdown`] so Unix and Windows drain the same way.
     project_host_admission_replay:
@@ -291,8 +289,6 @@ pub struct McpServer {
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     doctor_report_published: AtomicBool,
-    dashboard_doctor_remediation_dispatcher:
-        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
@@ -674,6 +670,7 @@ impl McpServer {
             user_session_db,
             registered_session_db,
             registered_user_session_db,
+            session_sync_service,
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
@@ -683,7 +680,6 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
-            dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
             diagnostics_lsp,
@@ -806,8 +802,6 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
         });
-        let project_session_retrieval_calls = Arc::new(AtomicU64::new(0));
-        let user_session_retrieval_calls = Arc::new(AtomicU64::new(0));
         let project_session_retrieval_service = session_db
             .as_ref()
             .zip(project_session_retrieval_root)
@@ -816,13 +810,11 @@ impl McpServer {
                     Arc::clone(database),
                     Arc::clone(registered),
                     root,
-                    Arc::clone(&project_session_retrieval_calls),
                     project_session_refresh_wake.clone(),
                 ),
                 None => DaemonSessionRetrievalService::new(
                     Arc::clone(database),
                     root,
-                    Arc::clone(&project_session_retrieval_calls),
                     project_session_refresh_wake.clone(),
                 ),
             })
@@ -836,15 +828,9 @@ impl McpServer {
                         Arc::clone(database),
                         Arc::clone(registered),
                         root,
-                        Arc::clone(&user_session_retrieval_calls),
                         None,
                     ),
-                    None => DaemonSessionRetrievalService::new(
-                        Arc::clone(database),
-                        root,
-                        Arc::clone(&user_session_retrieval_calls),
-                        None,
-                    ),
+                    None => DaemonSessionRetrievalService::new(Arc::clone(database), root, None),
                 },
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
@@ -880,19 +866,15 @@ impl McpServer {
             user_session_refresh_wake,
             project_session_refresh_service,
             user_session_refresh_service,
+            session_sync_service,
             project_session_retrieval_service,
             user_session_retrieval_service,
-            #[cfg(test)]
-            project_session_retrieval_calls,
-            #[cfg(test)]
-            user_session_retrieval_calls,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             doctor_report_published: AtomicBool::new(false),
-            dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
             hook_branch_writer,
@@ -971,24 +953,15 @@ impl McpServer {
         // D1: startup catch-up sync. Reconciles changes made while the server
         // was down (terminal `git pull`, IDE edits before launch, another
         // tool's writes) so read-only sessions start fresh instead of serving
-        // a stale index forever. `run_startup_catch_up_sync` is non-blocking-
-        // safe (detached transcript ingest, flags flipped on every exit path),
-        // so we spawn it detached and return immediately.
+        // a stale index forever. `run_startup_catch_up_sync` advances its
+        // state on every exit path, so we spawn it and return immediately.
         //
         // Gated on `SyncConfig.session_start_sync` (default true) and single-
         // flighted by the machine's dispatch claim so it runs at most once
         // per server even if two `new_with_dbs` paths overlap.
         //
-        // Claiming dispatch *is* the transition into `Syncing`, which is what
-        // used to require pre-clearing two default-`true` completion flags
-        // before the spawn. Without that pre-clear there was a window between
-        // the spawn and the task's first instruction where both flags still
-        // read `true`, so a caller that reached `wait_for_startup_catch_up`
-        // in that window observed "done" and returned immediately — then the
-        // detached catch-up sync ran concurrently with the caller's own work
-        // (e.g. racing it to index a just-written file). The window cannot
-        // reopen now: no state exists in which a claimed dispatch reads as
-        // settled.
+        // Claiming dispatch is the transition into `Syncing`, so no waiter
+        // can observe a claimed startup walk as already settled.
         if startup_catch_up_enabled
             && server.sync_config.session_start_sync
             && server.startup_catch_up.try_claim_dispatch()

@@ -14,8 +14,8 @@ use tracedecay_store::{
 };
 
 use super::{
-    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime, StoreRuntimeKey,
-    StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
+    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime,
+    StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
 };
 use crate::store_runtime::shard::{ShardRuntime, ShardRuntimeError};
 
@@ -196,6 +196,13 @@ impl LifecycleShardRuntimeAttachment {
                 request.locator.path().to_path_buf(),
                 admission,
             )
+        } else if request.access == StoreRuntimeAccessMode::ReadOnly {
+            self.repository.attach_read_only(
+                request.binding.clone(),
+                request.locator.verified().clone(),
+                request.locator.path().to_path_buf(),
+                admission,
+            )
         } else {
             self.repository.attach(
                 request.binding.clone(),
@@ -359,8 +366,11 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
             healthy: snapshot.healthy,
             writer_present: snapshot.writer_present,
             reader_handles: snapshot.reader_handles,
+            general_reader_waiters: snapshot.general_reader_waiters,
+            health_reader_waiters: snapshot.health_reader_waiters,
             queued_operations: snapshot.queued_operations,
             queued_bytes: snapshot.queued_bytes,
+            writer_busy_events: snapshot.writer_busy_events,
             wal_bytes: snapshot.wal_bytes,
             memory_estimate_bytes: 0,
         }
@@ -389,14 +399,6 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
 
     fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
         retained_storage_page_counts(
-            RepositoryRuntimePhysicalAttachment::exact_sql_handle(self)
-                .map_err(|error| error.to_string())?,
-            reader_wait,
-        )
-    }
-
-    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
-        retained_storage_table_bytes(
             RepositoryRuntimePhysicalAttachment::exact_sql_handle(self)
                 .map_err(|error| error.to_string())?,
             reader_wait,
@@ -502,25 +504,12 @@ fn retained_storage_page_counts(
     ))
 }
 
-fn retained_storage_table_bytes(
-    handle: tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
-    reader_wait: Duration,
-) -> Result<Vec<(String, u64)>, String> {
-    let samples = handle
-        .read_only_clone()
-        .table_size_telemetry(reader_wait, || None)
-        .map_err(|error| error.to_string())?;
-    Ok(samples
-        .into_iter()
-        .map(|sample| (sample.table_name, sample.bytes))
-        .collect())
-}
-
 #[derive(Clone, Debug)]
 pub struct ShardRuntimeBuildRequest {
     pub(super) binding: StoreRuntimeBindingV1,
     locator: RuntimeLocatorRecord,
     mode: StoreRuntimeOpenMode,
+    access: StoreRuntimeAccessMode,
     database_authority: Option<crate::db::DatabaseAuthority>,
 }
 
@@ -529,12 +518,14 @@ impl ShardRuntimeBuildRequest {
         binding: StoreRuntimeBindingV1,
         locator: RuntimeLocatorRecord,
         mode: StoreRuntimeOpenMode,
+        access: StoreRuntimeAccessMode,
         database_authority: Option<crate::db::DatabaseAuthority>,
     ) -> Self {
         Self {
             binding,
             locator,
             mode,
+            access,
             database_authority,
         }
     }
@@ -549,6 +540,10 @@ impl ShardRuntimeBuildRequest {
 
     pub const fn mode(&self) -> StoreRuntimeOpenMode {
         self.mode
+    }
+
+    pub const fn access(&self) -> StoreRuntimeAccessMode {
+        self.access
     }
 
     pub fn database_authority(&self) -> Option<&crate::db::DatabaseAuthority> {

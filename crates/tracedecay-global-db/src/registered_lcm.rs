@@ -9,15 +9,15 @@ use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord,
     lcm::{
-        LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
-        LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
-        LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
-        LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-        LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-        LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-        LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-        compression, dag, doctor, gc, payload, query, raw, schema,
+        LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
+        LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest,
+        LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters, LcmGrepOutcome,
+        LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
+        LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
+        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
+        LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+        LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, doctor, gc, payload,
+        query, raw,
     },
 };
 
@@ -262,13 +262,29 @@ impl RegisteredGlobalDb {
         query::session_replay_slice(&snapshot, request).await
     }
 
-    pub async fn lcm_load_raw_message(
+    /// Resolves only the persisted locator for admission and readiness checks.
+    ///
+    /// Production callers that do not need content must use this metadata-only
+    /// route. Content hydration remains owned by authorized temporal execution.
+    pub async fn lcm_raw_message_store_id(
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<LcmRawMessage> {
-        let snapshot = self.read_snapshot().await.ok()?;
-        schema::load_raw_message(&snapshot, provider, message_id).await
+    ) -> Result<Option<i64>, LcmError> {
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT store_id
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2",
+                params![provider, message_id],
+            )
+            .await?;
+        rows.next()
+            .await?
+            .map(|row| row.get(0))
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub async fn lcm_status_with_options(
@@ -401,6 +417,7 @@ impl RegisteredGlobalDb {
             );
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
+        let draft = tracedecay_sessions::runtime::lcm::dag::sanitize_summary_draft(draft)?;
         drop(snapshot);
 
         let transaction = self
@@ -441,69 +458,18 @@ impl RegisteredGlobalDb {
         &self,
         provider: &str,
         session_id: Option<&str>,
-        mode: &str,
-        apply: bool,
-        clean_config: LcmCleanConfig,
-        gc_config: LcmGcConfig,
     ) -> Result<serde_json::Value, LcmError> {
         let storage_root = self.lcm_storage_root()?;
-        let request = doctor::DoctorRequest {
-            storage_root,
-            db_path: self.db_path(),
-            provider,
-            session_id,
-            mode,
-            apply,
-            clean_config,
-            gc_config,
-        };
-        if !doctor::request_mutates(&request) {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let result = doctor::doctor(&transaction, request).await?;
-            transaction.rollback().await?;
-            return Ok(result);
-        }
-
-        let applies_payload_gc = apply && mode == "gc";
-        let mut gc_drain = if applies_payload_gc {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let drain =
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?;
-            transaction.commit().await?;
-            Some(drain)
-        } else {
-            None
-        };
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut result = doctor::doctor(&transaction, request).await?;
-        transaction.commit().await?;
-
-        if let Some(drain) = gc_drain.as_mut() {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            drain.merge(
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?,
-            );
-            if let Some(report) = result.pointer_mut("/repairs/gc_report") {
-                gc::finalize_gc_report_value(&transaction, report, std::mem::take(drain)).await?;
-            }
-            transaction.commit().await?;
-        }
-        Ok(result)
+        let snapshot = self.read_snapshot().await?;
+        doctor::doctor(
+            &snapshot,
+            doctor::DoctorRequest {
+                storage_root,
+                provider,
+                session_id,
+            },
+        )
+        .await
     }
 
     pub async fn lcm_session_boundary(

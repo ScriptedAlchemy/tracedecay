@@ -101,9 +101,9 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 
 ### Support bundles and storage diagnostics
 
-Storage status, doctor, quota, and support-bundle output must report the active project and store class (`project_local`, `profile_sharded`, global/accounting, or legacy) without exposing sensitive payloads by default. A redacted support bundle may include manifests, schema versions, aggregate counts, lock/dirty/quota state, and error codes; it must exclude source code, rendered `read_cache` bodies, transcript text, memory fact content, payload bodies, and response-handle bodies.
+Storage status, doctor, quota, and support-bundle output must report the active project, store class (`project_local`, `profile_sharded`, or global/accounting), and final-shape admission state without exposing sensitive payloads by default. A redacted support bundle may include aggregate counts, lock/dirty/quota state, and error codes; it must exclude source code, rendered `read_cache` bodies, transcript text, memory fact content, payload bodies, and response-handle bodies.
 
-Also redact credential-bearing git remotes, database overrides such as `TRACEDECAY_GLOBAL_DB`, private adapter config paths, response-handle identifiers that could retrieve plaintext, and error strings that embed local paths or secrets. Full paths or payload excerpts require an explicit opt-in flag and sensitive labeling. See [docs/PROFILE-STORAGE-SUPPORT.md](docs/PROFILE-STORAGE-SUPPORT.md) for the support-bundle and fixture contract.
+Also redact credential-bearing git remotes, database overrides such as `TRACEDECAY_GLOBAL_DB`, private adapter config paths, response-handle identifiers that could retrieve plaintext, and error strings that embed local paths or secrets. Full paths or payload excerpts require an explicit opt-in flag and sensitive labeling. See [docs/PROFILE-STORAGE-SUPPORT.md](docs/PROFILE-STORAGE-SUPPORT.md) for the support-bundle privacy boundary.
 
 **Test execution:**
 

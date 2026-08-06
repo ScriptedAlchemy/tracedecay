@@ -381,6 +381,8 @@ pub(crate) struct ManagedTestRunSnapshot {
     pub(crate) completed: u64,
     pub(crate) total: Option<u64>,
     pub(crate) termination: Option<OperationTermination>,
+    /// The terminal authority receipt, if the retained run has completed.
+    pub(crate) receipt: Option<OperationReceipt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1361,13 +1363,14 @@ fn managed_test_run_snapshot(
             _ => None,
         })
         .unwrap_or((0, None));
-    let termination = record
+    let receipt = record
         .terminal
         .as_ref()
         .and_then(|event| match &event.kind {
-            StreamEventKind::Terminal(terminal) => Some(terminal.termination),
+            StreamEventKind::Terminal(terminal) => Some(terminal.receipt.clone()),
             _ => None,
         });
+    let termination = receipt.as_ref().map(|receipt| receipt.termination);
     Ok(ManagedTestRunSnapshot {
         operation_id: record.binding.operation_id.clone(),
         generation: record.generation,
@@ -1402,6 +1405,7 @@ fn managed_test_run_snapshot(
         completed,
         total,
         termination,
+        receipt,
     })
 }
 
@@ -1774,7 +1778,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tracedecay_application::{
-        ApplicationProblemKind, Deadline, OpaqueCursor, PageRequest, RequestId,
+        ApplicationProblemKind, Deadline, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
+        OperationTermination, PageRequest, RequestId,
     };
     use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, UtcMicros};
 
@@ -1823,6 +1828,21 @@ mod tests {
             .await
             .expect("test result");
         emitter.progress(1, Some(1)).await.expect("test progress");
+        let receipt = OperationReceipt::completed(
+            UtcMicros(1),
+            UtcMicros(2),
+            Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            OperationBudgetUsage {
+                units_consumed: 1,
+                bytes_consumed: 37,
+                elapsed_micros: 1,
+            },
+        )
+        .expect("receipt");
+        emitter
+            .terminal(receipt.clone())
+            .await
+            .expect("terminal receipt");
 
         let snapshot = authority
             .latest_managed_test_run("file:///workspace")
@@ -1843,6 +1863,8 @@ mod tests {
         );
         assert_eq!(snapshot.deadline.expires_at, UtcMicros(10_000));
         assert_eq!(snapshot.completed, 1);
+        assert_eq!(snapshot.termination, Some(OperationTermination::Completed));
+        assert_eq!(snapshot.receipt, Some(receipt));
     }
 
     #[tokio::test]

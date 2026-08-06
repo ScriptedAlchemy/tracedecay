@@ -3,6 +3,14 @@
 
 use super::*;
 
+fn lsp_deadline() -> Deadline {
+    Deadline::new(UtcMicros(i64::MAX)).expect("LSP deadline")
+}
+
+fn lsp_cancellation() -> CancellationContext {
+    CancellationContext::active("cancel.lsp.dispatch-test").expect("LSP cancellation")
+}
+
 #[test]
 fn only_explicit_protocol_frames_select_the_invocation_route() {
     assert!(parse_daemon_invocation_request(r#"{"jsonrpc":"2.0","method":"ping"}"#).is_none());
@@ -11,12 +19,56 @@ fn only_explicit_protocol_frames_select_the_invocation_route() {
         "client.1",
         Some("file:///untrusted".to_owned()),
         Vec::new(),
+        lsp_deadline(),
+        lsp_cancellation(),
     );
     let encoded = serde_json::to_string(&request).expect("encode request");
     assert!(matches!(
         parse_daemon_invocation_request(&encoded),
         Some(Ok(_))
     ));
+}
+
+#[tokio::test]
+async fn lsp_gateway_control_terminates_before_owner_lookup() {
+    let service = DaemonInvocationService::default();
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+    let now = current_micros();
+    let requests = [
+        (
+            DaemonInvocationRequest::lsp_open(
+                "request.lsp.cancelled",
+                "client.1",
+                None,
+                Vec::new(),
+                Deadline::new(UtcMicros(now.0.saturating_add(30_000_000))).expect("deadline"),
+                CancellationContext::cancelled("cancel.lsp.cancelled", now).expect("cancellation"),
+            ),
+            ApplicationProblemKind::Cancelled,
+        ),
+        (
+            DaemonInvocationRequest::lsp_open(
+                "request.lsp.timed-out",
+                "client.1",
+                None,
+                Vec::new(),
+                Deadline::new(now).expect("deadline"),
+                CancellationContext::active("cancel.lsp.timed-out").expect("cancellation"),
+            ),
+            ApplicationProblemKind::TimedOut,
+        ),
+    ];
+
+    for (request, expected) in requests {
+        let response = service.invoke(&registry, None, None, None, request).await;
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::ApplicationProblem { problem }
+                if problem.kind() == expected
+        ));
+    }
+    assert_eq!(registry.lock().await.active_sessions(), 0);
+    assert!(service.lsp_sessions.lock().await.is_empty());
 }
 
 #[test]
@@ -357,6 +409,8 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
                 "client.1",
                 Some("file:///untrusted".to_owned()),
                 Vec::new(),
+                lsp_deadline(),
+                lsp_cancellation(),
             ),
         )
         .await;
@@ -371,7 +425,13 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_frame("request.2", session.clone(), initialize),
+            DaemonInvocationRequest::lsp_frame(
+                "request.2",
+                session.clone(),
+                initialize,
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     assert!(matches!(
@@ -385,7 +445,12 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_poll("request.3", session.clone()),
+            DaemonInvocationRequest::lsp_poll(
+                "request.3",
+                session.clone(),
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     let DaemonInvocationOutcome::LspFrame {
@@ -408,7 +473,12 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_acknowledge("request.4", session.clone()),
+            DaemonInvocationRequest::lsp_acknowledge(
+                "request.4",
+                session.clone(),
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     assert!(matches!(
@@ -423,7 +493,13 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_frame("request.5", session.clone(), initialize),
+            DaemonInvocationRequest::lsp_frame(
+                "request.5",
+                session.clone(),
+                initialize,
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     assert!(matches!(
@@ -440,7 +516,12 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_poll("request.6", session),
+            DaemonInvocationRequest::lsp_poll(
+                "request.6",
+                session,
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     let DaemonInvocationOutcome::LspFrame {
@@ -478,7 +559,13 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
             MultiRootScopeSetCasRequestV1::new(
                 scope_set_id.clone(),
                 None,
-                vec![ProjectId::new("project.quarantined").expect("project")],
+                vec![
+                    tracedecay_application::RegisteredRootSelectorV1::new(
+                        ProjectId::new("project.quarantined").expect("project"),
+                        project_root.clone(),
+                    )
+                    .expect("registered root selector"),
+                ],
             )
             .expect("CAS request"),
             observed_at,
@@ -563,7 +650,14 @@ async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
                 "file:///authoritative",
             ))),
             None,
-            DaemonInvocationRequest::lsp_open("request.revision", "3.17", None, Vec::new()),
+            DaemonInvocationRequest::lsp_open(
+                "request.revision",
+                "3.17",
+                None,
+                Vec::new(),
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
 
@@ -597,6 +691,8 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
                 env!("CARGO_PKG_VERSION"),
                 None,
                 Vec::new(),
+                lsp_deadline(),
+                lsp_cancellation(),
             ),
         )
     };
@@ -611,7 +707,12 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_detach("request.detach", session),
+            DaemonInvocationRequest::lsp_detach(
+                "request.detach",
+                session,
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     assert!(matches!(
@@ -637,7 +738,12 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_reconnect("request.reconnect", session.clone()),
+            DaemonInvocationRequest::lsp_reconnect(
+                "request.reconnect",
+                session.clone(),
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     let DaemonInvocationOutcome::LspReconnected {
@@ -655,6 +761,8 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             DaemonInvocationRequest::lsp_reconnect(
                 "request.reconnect-race",
                 reconnected_session.clone(),
+                lsp_deadline(),
+                lsp_cancellation(),
             ),
         )
         .await;
@@ -667,15 +775,28 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     service
         .disconnect_lsp_session(&registry, reconnected_session)
         .await;
-    assert_eq!(registry.lock().await.active_sessions(), 1);
-    assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+    assert_eq!(
+        registry.lock().await.active_sessions(),
+        1,
+        "a stale credential must not disconnect the current endpoint"
+    );
+    assert_eq!(
+        service.lsp_sessions.lock().await.len(),
+        1,
+        "a stale credential must not remove the current runtime"
+    );
     let stale_transport = service
         .invoke(
             &registry,
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_poll("request.stale", session),
+            DaemonInvocationRequest::lsp_poll(
+                "request.stale",
+                session,
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     assert!(matches!(
@@ -692,7 +813,12 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             None,
             None,
             None,
-            DaemonInvocationRequest::lsp_detach("request.detach.2", current_session),
+            DaemonInvocationRequest::lsp_detach(
+                "request.detach.2",
+                current_session,
+                lsp_deadline(),
+                lsp_cancellation(),
+            ),
         )
         .await;
     assert!(matches!(

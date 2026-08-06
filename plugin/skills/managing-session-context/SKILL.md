@@ -1,6 +1,6 @@
 ---
 name: managing-session-context
-description: 'Use when you need LCM, session search, transcript search, raw past-session replay, scoped/time grep, summary-DAG drill-down, branch/worktree/commit history, workflow recovery, or compaction recovery; and when driving host LCM lifecycle preflight/compress/boundary/repair.'
+description: 'Use when you need LCM, session search, transcript search, raw past-session replay, scoped/time grep, summary-DAG drill-down, branch/worktree/commit history, workflow recovery, compaction recovery, or read-only LCM diagnosis; and when driving host LCM lifecycle preflight/compress/boundary.'
 ---
 
 # Managing session context
@@ -9,8 +9,9 @@ One skill for both sides of the session store: **retrieval** (read-only, where
 you start when you need past-session content) and the **LCM compression and
 maintenance lifecycle** (the write/health side). Retrieval is cheap and safe;
 lifecycle tools are **host-agent integration tools** — invoke them only when the
-host is managing its own context window or the user explicitly asks to compress,
-repair, or inspect the store, never casually during recall.
+host is managing its own context window or the user explicitly asks to compress
+or establish a boundary. Doctor is separately safe for diagnosis, never casual
+recall.
 
 For durable *decisions and facts* (rather than raw conversation), start with
 `tracedecay:project-memory` instead — it owns the FTS → fact lane of
@@ -89,10 +90,11 @@ handle that `status` and `cancel` require. Use the authoritative selectors
 provided by the host/runtime; do not reconstruct refresh identity from chat
 text or a filesystem path.
 
-## Lifecycle tools (mutating — host/lifecycle intent only)
+## Lifecycle and diagnostic tools
 
 All take `--provider` and (except doctor/status) `--session-id`. They use the
-active registered project's user-profile session store.
+active registered project's user-profile session store. Compression and boundary
+calls mutate only with host/lifecycle intent; Doctor and Status are read-only.
 
 1. **Preflight → `tracedecay_lcm_preflight`** (`provider`, `session-id`, plus
    token knobs like `current-tokens`, `threshold-tokens`, `context-length`,
@@ -107,11 +109,10 @@ active registered project's user-profile session store.
    `session-id`, `old-session-id`, `bound-session-id`, `boundary-reason`):
    report that the host crossed a compression boundary. A mismatch between the
    bound and old session skips carry-over and starts a short cooldown.
-4. **Doctor → `tracedecay_lcm_doctor`** (`provider`, `mode`:
-   `diagnose`|`repair`|`retention`|`clean`|`gc`, `apply`, optional
-   `session-id`): bounded diagnostics and safe repairs. `diagnose`/`retention`
-   are read-only; `repair`/`clean`/`gc` **mutate only with `apply: true`** and
-   are further gated by safety flags/env for clean and gc.
+4. **Doctor → `tracedecay_lcm_doctor`** (`provider`, optional `session-id`):
+   bounded read-only diagnostics. It reports integrity findings, placeholders,
+   and retention or cleanup candidates without payload bodies; daemon-owned
+   maintenance owns any later action.
 5. **Status → `tracedecay_lcm_status`** (optional `provider`, `session-id`,
    `deep`): schema/message/summary/payload counts, token estimates, summary
    depth distribution + compression ratio, payload byte totals, and GC status.
@@ -121,22 +122,20 @@ active registered project's user-profile session store.
 
 Preflight → (if it requests compression) compress → status to confirm the ratio
 moved. On a real host session change, call session_boundary. If counts look
-wrong (missing sessions, stale FTS, orphaned payloads) run doctor
-`mode: "diagnose"` first, review, then repair/clean/gc with `apply: true` only
-on explicit user intent.
+wrong (missing sessions, stale FTS, orphaned payloads), run Doctor and use its
+evidence to identify the daemon-owned maintenance boundary.
 
 ## Guardrails
 
-- Retrieval rungs above, `preflight`, `status`, and doctor
-  `diagnose`/`retention` are read-only (grep/status may touch access counters).
-  `compress`, `session_boundary`, and doctor `repair`/`clean`/`gc` + `apply`
+- Retrieval rungs above, `preflight`, `status`, and Doctor are read-only
+  (grep/status may touch access counters). `compress` and `session_boundary`
   **mutate** durable session state — run them only with clear lifecycle or user
   intent, never speculatively during recall.
 - `provider` is required and `all` is rejected for the lifecycle tools; target
   one provider at a time.
 - For multi-step recall, dispatch scoped read-only subagents by session id, time
   window, provider, role, or query variant. Subagents must not drive
-  compression, boundaries, or repair; the parent agent validates cited
+  compression or boundaries; the parent agent validates cited
   messages/summaries and produces the final timeline.
 - Keep token knobs conservative; over-aggressive compression loses the replay
   fidelity the retrieval ladder depends on.

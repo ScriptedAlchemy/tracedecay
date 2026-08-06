@@ -82,34 +82,19 @@ impl PreparedBranchAdminMutation {
         self.commit_with_precommit_hook(None, || Ok(()), |_| Ok(()), || Ok(()), |_| Ok(()))
     }
 
-    pub(crate) fn commit_with_transaction<P, V, R, C>(
+    pub(crate) fn commit_registered<V>(
         self,
-        transaction_id: &str,
-        publish_deleting: P,
         validate_quarantined_stores: V,
-        rollback_deleting: R,
-        on_commit: C,
     ) -> crate::errors::Result<BranchAdminReport>
     where
-        P: FnOnce() -> crate::errors::Result<()>,
         V: FnOnce(&[PathBuf]) -> crate::errors::Result<()>,
-        R: FnOnce() -> crate::errors::Result<()>,
-        C: FnOnce() -> crate::errors::Result<()>,
     {
-        let mut on_commit = Some(on_commit);
         self.commit_with_precommit_hook(
-            Some(transaction_id),
-            publish_deleting,
+            None,
+            || Ok(()),
             validate_quarantined_stores,
-            rollback_deleting,
-            move |phase| {
-                if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup
-                    && let Some(on_commit) = on_commit.take()
-                {
-                    on_commit()?;
-                }
-                Ok(())
-            },
+            || Ok(()),
+            |_| Ok(()),
         )
     }
 
@@ -353,36 +338,24 @@ pub(super) fn rollback_published_branch_tracking(
     meta.remove_branch(branch_name);
     let metadata_after = Some(crate::branch_meta::serialize_branch_meta(&meta)?);
     let database_paths = vec![database_path.to_path_buf()];
-    let fence = crate::db::DatabaseDeletionFence::acquire(
-        &database_paths,
-        "roll back published branch SQLite family",
-    )?;
 
     #[cfg(test)]
     let validate_precommit = |_database_paths: &[PathBuf]| Ok(());
     #[cfg(not(test))]
     let validate_precommit = ensure_no_open_store_holders;
 
-    let mut promote_deleted = Some(|| fence.promote_deleted());
     transaction::commit_with_hook(
         transaction::CommitRequest {
             tracedecay_dir,
-            supplied_transaction_id: Some(fence.transaction_id()),
+            supplied_transaction_id: None,
             database_paths: &database_paths,
             metadata_before,
             metadata_after,
         },
-        || fence.publish_deleting(),
+        || Ok(()),
         validate_precommit,
-        || fence.rollback_deleting(),
-        |phase| {
-            if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup
-                && let Some(promote_deleted) = promote_deleted.take()
-            {
-                promote_deleted()?;
-            }
-            Ok(())
-        },
+        || Ok(()),
+        |_| Ok(()),
     )
 }
 
@@ -492,10 +465,6 @@ pub(crate) struct PreparedBranchAdminRecovery {
 }
 
 impl PreparedBranchAdminRecovery {
-    pub(crate) fn transaction_id(&self) -> &str {
-        self.pending.transaction_id()
-    }
-
     pub(crate) fn disposition(&self) -> BranchAdminRecoveryDisposition {
         match self.pending.disposition() {
             transaction::RecoveryDisposition::PreCommitRollback => {

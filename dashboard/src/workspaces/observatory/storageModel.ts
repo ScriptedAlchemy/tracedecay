@@ -11,22 +11,20 @@ import type {
   DashboardLegalActionRefV1,
 } from '../../contracts/generated.ts';
 
-const FINDING_LABELS: Record<DoctorStorageFindingKindV1, string> = {
+const FINDING_LABELS: Partial<Record<DoctorStorageFindingKindV1, string>> = {
   over_budget_store: 'Over-budget stores',
   orphan_store: 'Orphan stores',
-  stale_branch_dbs: 'Stale branch databases',
   incident_debris_present: 'Incident debris',
   retention_backlog: 'Retention backlog',
   table_growth: 'Table growth',
 };
 
 export function storageFindingLabel(kind: DoctorStorageFindingKindV1): string {
-  return FINDING_LABELS[kind];
+  return FINDING_LABELS[kind] ?? 'Unsupported storage finding';
 }
 
 const SOURCE_STATE_LABELS: Record<StorageFindingSourceStateV1, string> = {
   real: 'Observed',
-  unset: 'Unset',
   partial: 'Partial',
   unsupported: 'Unsupported',
 };
@@ -40,8 +38,6 @@ export function storageSourcePresentation(status: StorageFindingKindStatusV1): {
   switch (status.state) {
     case 'real':
       return { label, tokenClass: 'text-state-ready', dotClass: 'bg-state-ready' };
-    case 'unset':
-      return { label, tokenClass: 'text-state-locked', dotClass: 'bg-state-locked' };
     case 'partial':
       return { label, tokenClass: 'text-state-partial', dotClass: 'bg-state-partial' };
     case 'unsupported':
@@ -148,28 +144,6 @@ export function budgetPresentation(budget: StoreBudgetDimensionV1): DimensionPre
 
 export function growthPresentation(growth: StoreGrowthDimensionV1): DimensionPresentation {
   switch (growth.state) {
-    case 'baseline':
-      return {
-        state: 'baseline',
-        tone: 'baseline',
-        summary: `first sample this daemon lifetime — not zero growth · ${formatBytes(
-          growth.total_bytes,
-        )} measured`,
-        // `coverage` states that the window is since-daemon-start, not
-        // historical. It is surfaced verbatim.
-        notes: [growth.reason, growth.coverage],
-      };
-    case 'observed':
-      return {
-        state: 'observed',
-        // An observed delta is a measurement, not a verdict: growing is not
-        // itself unhealthy, so the tone stays "observed" in either direction.
-        tone: 'ready',
-        summary: `${formatSignedBytes(growth.growth_bytes)} over ${growth.sample_count} store-size watermarks · ${formatBytes(
-          growth.first_total_bytes,
-        )} → ${formatBytes(growth.current_total_bytes)}`,
-        notes: [growth.coverage],
-      };
     case 'unknown':
       return {
         state: 'unknown',
@@ -177,8 +151,6 @@ export function growthPresentation(growth: StoreGrowthDimensionV1): DimensionPre
         summary: 'growth could not be determined',
         notes: [growth.reason],
       };
-    default:
-      return assertNever(growth);
   }
 }
 

@@ -1,4 +1,4 @@
-//! Owned, daemon-reachable dispatch for the closed PR12 primitive set.
+//! Owned, daemon-reachable dispatch for the closed application primitive set.
 //!
 //! This module composes existing application ports. It never calls an MCP,
 //! CLI, HTTP, or handler registry and it opens no store or policy authority.
@@ -65,7 +65,7 @@ const MAX_CONCURRENT_PR12_PRIMITIVES: usize = 32;
 
 /// Validated once per process rather than on every paged primitive result.
 static PR12_PRIMITIVE_SORT_CONTRACT: LazyLock<SortContractId> = LazyLock::new(|| {
-    SortContractId::new("sort.application.pr12-primitive.v1")
+    SortContractId::new("sort.application.retrieval.stable")
         .unwrap_or_else(|_| panic!("static primitive sort contract is valid"))
 });
 
@@ -127,7 +127,7 @@ impl Pr12OperationalPrimitiveRequest {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         if !self.parameters.is_object() {
             return Err(ApplicationContractError::Inconsistent {
-                field: "PR12 operational parameter object",
+                field: "application operational parameter object",
             });
         }
         validate_no_scope_selector(&self.parameters)?;
@@ -712,7 +712,7 @@ fn transport_context(
     let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
     if observed_at.0 <= 0 || expires_at.0 <= observed_at.0 {
         return Err(ApplicationContractError::InvalidRange {
-            field: "PR12 primitive transport deadline",
+            field: "application primitive transport deadline",
         });
     }
     let grant = CapabilityGrantSnapshot::new(
@@ -737,7 +737,7 @@ fn transport_context(
     )
 }
 
-/// Concrete project-open factory for the complete owned PR12 primitive
+/// Concrete project-open factory for the complete owned application primitive
 /// runtime.
 ///
 /// Exact constructor signature:
@@ -771,7 +771,7 @@ pub fn open_pr12_primitive_project_runtime(
     validate_admitted_root_uri(&admitted_root_uri)?;
     if access.scope != scope {
         return Err(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive admitted project authority",
+            field: "application primitive admitted project authority",
         });
     }
     let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> = Arc::new(
@@ -816,12 +816,12 @@ pub fn open_pr12_primitive_project_runtime(
 fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), ApplicationContractError> {
     if admitted_root_uri.len() > MAX_ADMITTED_ROOT_URI_BYTES {
         return Err(ApplicationContractError::InvalidRange {
-            field: "PR12 primitive admitted root URI",
+            field: "application primitive admitted root URI",
         });
     }
     let uri =
         Url::parse(admitted_root_uri).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive admitted root URI",
+            field: "application primitive admitted root URI",
         })?;
     if uri.scheme() != "file"
         || !admitted_root_uri
@@ -833,7 +833,7 @@ fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), Application
         || uri.fragment().is_some()
     {
         return Err(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive admitted root URI",
+            field: "application primitive admitted root URI",
         });
     }
     Ok(())
@@ -1265,8 +1265,9 @@ fn retrieval_outcome<T: Serialize>(
         RetrievalPortOutcome::Partial(evidence) => (OperationTermination::Partial, evidence),
         RetrievalPortOutcome::Cancelled(evidence) => (OperationTermination::Cancelled, evidence),
         RetrievalPortOutcome::TimedOut(evidence) => (OperationTermination::TimedOut, evidence),
-        RetrievalPortOutcome::Failed(evidence) | RetrievalPortOutcome::Unavailable(evidence) => {
-            (OperationTermination::Failed, evidence)
+        RetrievalPortOutcome::Failed(evidence) => (OperationTermination::Failed, evidence),
+        RetrievalPortOutcome::Unavailable(evidence) => {
+            (OperationTermination::Unavailable, evidence)
         }
     };
     if evidence.cancellation.is_none()
@@ -1797,7 +1798,7 @@ async fn recent_test_results(
                 operation,
                 ApplicationProblem::stale(
                     SafeDiagnostic::new(
-                        "application.pr12-primitive.test-results-stale",
+                        "application.retrieval.test-results-stale",
                         "The retained managed test result does not match the current source identity.",
                     )
                     .unwrap_or_else(|_| panic!("static diagnostic is valid")),
@@ -1809,6 +1810,7 @@ async fn recent_test_results(
     let returned = snapshot.results.len() as u64;
     let available_results = snapshot.available_results as u64;
     let termination = snapshot.termination;
+    let receipt = snapshot.receipt;
     let next_cursor = snapshot.next_cursor;
     let partial = !matches!(termination, Some(OperationTermination::Completed))
         || next_cursor.is_some()
@@ -1831,6 +1833,7 @@ async fn recent_test_results(
         "completed": snapshot.completed,
         "total": snapshot.total,
         "termination": termination,
+        "receipt": receipt,
         "result_offset": snapshot.result_offset,
         "available_results": available_results,
     });
@@ -1880,7 +1883,7 @@ fn authority_receipt(
 ) -> Result<AuthorityReceipt, ApplicationProblemEnvelope> {
     let policy = PolicyDecisionRef::new(
         format!(
-            "route.pr12-primitive.{}",
+            "route.application.retrieval.{}",
             access.binding.binding_id.as_str()
         ),
         1,
@@ -1941,7 +1944,7 @@ fn grep_problem<T>(
             operation,
             ApplicationProblem::InvalidRequest {
                 diagnostic: SafeDiagnostic {
-                    code: "application.pr12-primitive.invalid-request".to_owned(),
+                    code: "application.retrieval.invalid-request".to_owned(),
                     message,
                 },
                 retry: RetryDirective::Never,
@@ -1974,7 +1977,7 @@ fn invalid_request<T>(
         operation,
         ApplicationProblem::InvalidRequest {
             diagnostic: SafeDiagnostic {
-                code: "application.pr12-primitive.invalid-request".to_owned(),
+                code: "application.retrieval.invalid-request".to_owned(),
                 message: "The primitive request is invalid.".to_owned(),
             },
             retry: RetryDirective::Never,
@@ -1992,7 +1995,7 @@ fn unavailable<T>(
         operation,
         ApplicationProblem::unavailable(
             SafeDiagnostic::new(
-                "application.pr12-primitive.unavailable",
+                "application.retrieval.unavailable",
                 "The admitted primitive authority is unavailable.",
             )
             .unwrap_or_else(|_| panic!("static diagnostic is valid")),
@@ -2009,7 +2012,7 @@ fn saturated<T>(
         operation,
         ApplicationProblem::Saturated {
             diagnostic: SafeDiagnostic::new(
-                "application.pr12-primitive.saturated",
+                "application.retrieval.saturated",
                 "The admitted primitive authority has reached its bounded capacity.",
             )
             .unwrap_or_else(|_| panic!("static diagnostic is valid")),
@@ -2040,7 +2043,7 @@ fn contract_problem(
         context.request_id().clone(),
         ApplicationProblem::unavailable(
             SafeDiagnostic::new(
-                "application.pr12-primitive.contract",
+                "application.retrieval.contract",
                 "The primitive authority returned an invalid result.",
             )
             .unwrap_or_else(|_| panic!("static diagnostic is valid")),
@@ -2052,14 +2055,14 @@ fn validate_no_scope_selector(value: &Value) -> Result<(), ApplicationContractEr
     let object = value
         .as_object()
         .ok_or(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive parameter object",
+            field: "application primitive parameter object",
         })?;
     if object.contains_key("project_id")
         || object.contains_key("project_path")
         || object.contains_key("project_selector")
     {
         return Err(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive request scope",
+            field: "application primitive request scope",
         });
     }
     Ok(())
@@ -2071,14 +2074,14 @@ fn validate_bounds(
 ) -> Result<(), ApplicationContractError> {
     let parameter_bytes =
         serde_json::to_vec(value).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive parameter serialization",
+            field: "application primitive parameter serialization",
         })?;
     if parameter_bytes.len() > MAX_OPERATION_PARAMETERS_BYTES
         || maximum_output_bytes == 0
         || maximum_output_bytes > MAX_OPERATION_OUTPUT_BYTES
     {
         return Err(ApplicationContractError::InvalidRange {
-            field: "PR12 primitive bounds",
+            field: "application primitive bounds",
         });
     }
     Ok(())

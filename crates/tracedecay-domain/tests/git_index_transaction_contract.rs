@@ -1,3 +1,4 @@
+use schemars::schema_for;
 use tracedecay_domain::git::repository_state::{
     RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
@@ -29,6 +30,16 @@ fn digest(byte: char) -> ManifestDigest {
         .expect("fixture digest is canonical")
 }
 
+#[test]
+fn receipt_outcome_schema_preserves_the_exact_wire_states() {
+    let schema =
+        serde_json::to_value(schema_for!(GitIndexReceiptOutcomeV1)).expect("outcome schema");
+    assert_eq!(
+        schema["enum"],
+        serde_json::json!(["committed", "aborted_no_change", "needs_inspection"])
+    );
+}
+
 fn snapshot() -> RepositoryStateSnapshotV1 {
     RepositoryStateSnapshotV1::new(
         id::<ProjectId>("project.fixture"),
@@ -53,6 +64,7 @@ fn snapshot() -> RepositoryStateSnapshotV1 {
             ignored_collision_digest: None,
         },
         GitOperationStateV1::None,
+        Some(digest('0')),
         Some(digest('1')),
         Some(digest('2')),
         Some(digest('3')),
@@ -562,6 +574,7 @@ fn snapshot_without_complete_native_identity_is_read_only() {
             ignored_collision_digest: None,
         },
         GitOperationStateV1::None,
+        Some(digest('0')),
         Some(digest('1')),
         Some(digest('2')),
         Some(digest('3')),

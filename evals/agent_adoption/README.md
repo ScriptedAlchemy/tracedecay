@@ -165,13 +165,13 @@ enriches the copied fixture at setup so more scenario tiers are gradable:
 ### Seeding prior sessions — a gap
 
 Scenarios like `session_recovery` want prior host sessions bound to the fixture
-path (for `message_search` / `sessions_for`). The `tracedecay sessions ingest`
+path (for `message_search` / `sessions_for`). The `tracedecay sessions import`
 CLI **sweeps provider directories under `HOME`** (`~/.claude/projects/...`,
 `~/.codex/...`); it has **no file-input mode**. Seeding a hermetic session would
 mean writing a synthetic transcript into the operator's real `~/.claude` (which
 the harness deliberately leaves untouched for auth) at the exact cwd-encoded
 path, then ingesting — not hermetic and not cheap. So session-recovery packs stay
-**deferred**. The clean fix is a `tracedecay sessions ingest --from-file <jsonl>`
+**deferred**. A future `tracedecay sessions import --from-file <jsonl>`
 affordance; until then this tier is a documented gap.
 
 ## Scenario schema

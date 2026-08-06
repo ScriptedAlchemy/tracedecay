@@ -100,18 +100,7 @@ pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
 }
 
 fn is_source_edit_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_str_replace"
-            | "tracedecay_multi_str_replace"
-            | "tracedecay_insert_at"
-            | "tracedecay_ast_grep_rewrite"
-            | "tracedecay_replace_symbol"
-            | "tracedecay_insert_at_symbol"
-            | "tracedecay_move_symbol"
-            | "tracedecay_api_migration_apply"
-            | "tracedecay_source_edit_reconcile"
-    )
+    crate::mcp::tools::tool_dispatches_source_edit_effect(tool_name)
 }
 
 /// Reads that walk a git tree or the whole code graph, and so must not run
@@ -915,6 +904,10 @@ impl McpServer {
                 self.scope_prefix(),
             )
         });
+        let session_sync_service = self
+            .session_sync_service
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
         let dispatch: std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
         > = handle_tool_call_with_registry_and_implicit_project(
@@ -937,7 +930,6 @@ impl McpServer {
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
                 doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
-                doctor_remediation_dispatcher: self.dashboard_doctor_remediation_dispatcher.clone(),
                 code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
                 feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
@@ -959,6 +951,7 @@ impl McpServer {
                     .cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
+                session_sync_service: session_sync_service.as_deref(),
                 preselected_project_reader,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),
@@ -1710,7 +1703,9 @@ impl McpServer {
     }
 
     fn message_search_worker_is_unavailable(&self, tool_name: &str, arguments: &Value) -> bool {
-        if tool_name != "tracedecay_message_search" {
+        if tool_name != "tracedecay_message_search"
+            || arguments.get("catch_up").and_then(Value::as_bool) != Some(true)
+        {
             return false;
         }
         let user_scope = arguments.get("storage_scope").and_then(Value::as_str) == Some("user");
@@ -1838,6 +1833,7 @@ mod git_read_control_tests {
         assert!(tool_supports_live_cancellation(
             "tracedecay_run_affected_tests"
         ));
+        assert!(tool_supports_live_cancellation("tracedecay_admin_cli"));
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
             "tracedecay_git_status",
@@ -1868,7 +1864,6 @@ mod git_read_control_tests {
             "tracedecay_replace_symbol",
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
-            "tracedecay_api_migration_apply",
             "tracedecay_source_edit_reconcile",
         ] {
             assert!(is_source_edit_tool(tool_name));

@@ -17,6 +17,9 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value, params
 
 use super::SessionMessageRecord;
 
+mod error;
+pub use error::GitCorrelationError;
+
 /// Schema version recorded in `session_schema_migrations`.
 ///
 /// v4 adds no columns: it is the one-shot [`compact_session_git_spans`] repair
@@ -50,32 +53,9 @@ pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
 /// the highest session-activity timestamp the incremental backfill has already
 /// attempted. See [`run_incremental_backfill`].
 pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
-
-/// Errors from the git-correlation store.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitCorrelationError {
-    /// Underlying database failure.
-    Db(String),
-    /// Caller-supplied argument was invalid (bad ref kind, empty value, …).
-    InvalidArgument(String),
-}
-
-impl std::fmt::Display for GitCorrelationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Db(message) => write!(f, "git correlation db error: {message}"),
-            Self::InvalidArgument(message) => write!(f, "{message}"),
-        }
-    }
-}
-
-impl std::error::Error for GitCorrelationError {}
-
-impl From<tracedecay_runtime_core::db::engine::Error> for GitCorrelationError {
-    fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
-        Self::Db(err.to_string())
-    }
-}
+/// Row-id tie-breaker paired with [`AUTO_BACKFILL_WATERMARK_KEY`] so sessions
+/// sharing one activity timestamp resume without duplication or omission.
+pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
 
 /// Where a span row came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -593,6 +573,8 @@ pub async fn ensure_git_correlation_schema_in_transaction(
             GIT_CORRELATION_SCHEMA_VERSION
         )));
     }
+    backfill::history_progress::install_final_schema(conn).await?;
+    backfill::history_failures::install_final_schema(conn).await?;
     if version == Some(GIT_CORRELATION_SCHEMA_VERSION) {
         return Ok(());
     }
@@ -1889,9 +1871,11 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 mod backfill;
 mod store;
 pub use backfill::{
-    BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry,
-    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
-    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
+    BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
+    BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry,
+    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitHistoryIndexFrontier, GitReflogSource,
+    SessionActivityRow, SystemGit, WindowBranchSegment, branch_timeline_from_reflog,
+    parse_commit_log, run_bounded_history_index_page, window_branch_segments,
 };
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use store::AnalyticsSessionTimestamp;

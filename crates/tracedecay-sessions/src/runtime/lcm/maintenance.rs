@@ -13,14 +13,12 @@ use super::{LCM_SCAN_PAGE_ROWS, LcmError};
 
 #[derive(Clone, Copy)]
 pub(super) enum BackupKind {
-    Clean,
     Gc,
 }
 
 impl BackupKind {
     fn name(self) -> &'static str {
         match self {
-            Self::Clean => "clean",
             Self::Gc => "gc",
         }
     }

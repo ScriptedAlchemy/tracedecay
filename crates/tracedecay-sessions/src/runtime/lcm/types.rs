@@ -14,7 +14,8 @@ pub use crate::lcm::contracts::{
     LcmDescribeResponse, LcmDescribeSourceOverview, LcmDescribeSummaryNode, LcmDescribeTarget,
     LcmError, LcmExpandRequest, LcmExpandResponse, LcmExpandSourcePagination, LcmExpandTarget,
     LcmExpandedSummarySource, LcmPayloadExpansion, LcmPayloadRef, LcmRawMessage,
-    LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode, LcmSummaryNodeOverview,
+    LcmRawMessageMetadata, LcmRawMessageOverview, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
+    LcmSummaryNodeOverview,
 };
 
 impl From<tracedecay_runtime_core::db::engine::Error> for LcmError {
@@ -436,7 +437,7 @@ pub struct LcmConfigStatus {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmCleanConfig {
+pub struct LcmNoiseClassificationConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

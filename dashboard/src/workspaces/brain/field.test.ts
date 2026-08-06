@@ -18,7 +18,7 @@ const DAY = 86_400;
 function project(
   id: string,
   ageDays: number,
-  mass: { stores: number; scopes: number; artifacts: number },
+  mass: { stores: number; artifacts: number },
 ): ProjectRegistryEntry {
   return {
     project_id: id,
@@ -29,7 +29,6 @@ function project(
     default_branch: 'main',
     branches: ['main'],
     store_count: mass.stores,
-    graph_scope_count: mass.scopes,
     artifact_count: mass.artifacts,
     alias_count: 1,
     last_seen_at: NOW - ageDays * DAY,
@@ -46,11 +45,11 @@ function group(label: string, projects: ProjectRegistryEntry[]): ProjectRepoGrou
   };
 }
 
-const SINGLE = { stores: 1, scopes: 1, artifacts: 1 };
+const SINGLE = { stores: 1, artifacts: 1 };
 
 describe('indexedMass', () => {
-  it('sums exactly the three registry counts it names', () => {
-    expect(indexedMass(project('a', 0, { stores: 2, scopes: 3, artifacts: 7 }))).toBe(12);
+  it('sums exactly the project-level registry counts it names', () => {
+    expect(indexedMass(project('a', 0, { stores: 2, artifacts: 7 }))).toBe(9);
   });
 });
 
@@ -87,7 +86,7 @@ describe('recencyVitality', () => {
 describe('composeRegistryField', () => {
   it('preserves an explicit zero indexed mass instead of making it one', () => {
     const field = composeRegistryField(
-      [group('empty', [project('empty', 0, { stores: 0, scopes: 0, artifacts: 0 })])],
+      [group('empty', [project('empty', 0, { stores: 0, artifacts: 0 })])],
       NOW,
     );
     expect(field.nodes[0]!.degree).toBe(0);
@@ -169,7 +168,7 @@ describe('composeRegistryField', () => {
   it('reads mass as height, heaviest highest', () => {
     const field = composeRegistryField(
       [
-        group('heavy', [project('heavy', 0, { stores: 4, scopes: 40, artifacts: 200 })]),
+        group('heavy', [project('heavy', 0, { stores: 4, artifacts: 200 })]),
         group('light', [project('light', 0, SINGLE)]),
       ],
       NOW,
@@ -205,7 +204,7 @@ describe('composeRegistryField', () => {
 
   it('is deterministic for the same payload and clock', () => {
     const groups = [0, 0, 0, 5, 5, 40].map((days, i) =>
-      group(`g${i}`, [project(`p${i}`, days, { stores: 1, scopes: i, artifacts: i * 2 })]),
+      group(`g${i}`, [project(`p${i}`, days, { stores: 1, artifacts: i * 2 })]),
     );
     const a = composeRegistryField(groups, NOW);
     const b = composeRegistryField([...groups].reverse(), NOW);
@@ -228,18 +227,17 @@ describe('composeRegistryField', () => {
 
 /**
  * The owner's real registry, in shape: forty-four projects, all seen inside ten
- * days, every one holding exactly one store, artifacts only ever 3-5, and graph
- * scopes spanning zero to two hundred and forty-two.
+ * days, every one holding exactly one store, with project artifacts spanning
+ * zero to two hundred and forty-two.
  */
 function liveRegistry(): ProjectRepoGroup[] {
   const ages = [0.01, 0.11, 0.17, 0.19, ...Array.from({ length: 40 }, (_, i) => 1.3 + i * 0.22)];
-  const scopes = [1, 0, 2, 56, 242, 36, 71, 20, 10, 8, 5, 3, 4];
+  const artifacts = [1, 0, 2, 56, 242, 36, 71, 20, 10, 8, 5, 3, 4];
   return ages.map((age, i) =>
     group(`g${i}`, [
       project(`p${i}`, age, {
         stores: 1,
-        scopes: scopes[i % scopes.length]!,
-        artifacts: [4, 4, 5, 3][i % 4]!,
+        artifacts: artifacts[i % artifacts.length]!,
       }),
     ]),
   );
@@ -267,7 +265,7 @@ describe('recencyVitality horizon', () => {
   });
 
   it('clamps the horizon so a registry seen minutes ago is not all-or-nothing', () => {
-    expect(vitalityHorizon([project('a', 0.002, { stores: 1, scopes: 1, artifacts: 1 })], NOW)).toBe(1);
+    expect(vitalityHorizon([project('a', 0.002, { stores: 1, artifacts: 1 })], NOW)).toBe(1);
     // Everything inside the clamp still reads as fully lit rather than as a
     // scale invented out of minutes of drift.
     expect(recencyVitality(NOW - 0.002 * DAY, NOW, 0.002)).toBeGreaterThan(0.99);
@@ -276,12 +274,12 @@ describe('recencyVitality horizon', () => {
   it('is not dragged to a century by one ancient registry entry', () => {
     const projects = [
       ...Array.from({ length: 20 }, (_, i) =>
-        project(`p${i}`, 1 + i * 0.4, { stores: 1, scopes: 1, artifacts: 1 }),
+        project(`p${i}`, 1 + i * 0.4, { stores: 1, artifacts: 1 }),
       ),
       // Last seen in 2019. Taking the maximum would set the horizon at ~94
       // years and push every other body back to indistinguishable full
       // brightness — the exact compression this parameter removes.
-      project('ancient', 34_000, { stores: 1, scopes: 1, artifacts: 1 }),
+      project('ancient', 34_000, { stores: 1, artifacts: 1 }),
     ];
     const horizon = vitalityHorizon(projects, NOW);
     expect(horizon).toBeLessThan(12);
@@ -295,7 +293,7 @@ describe('recencyVitality horizon', () => {
 
   it('never stretches the scale past the quarter the field calls dormant', () => {
     const projects = Array.from({ length: 10 }, (_, i) =>
-      project(`p${i}`, 200 + i * 50, { stores: 1, scopes: 1, artifacts: 1 }),
+      project(`p${i}`, 200 + i * 50, { stores: 1, artifacts: 1 }),
     );
     expect(vitalityHorizon(projects, NOW)).toBe(90);
   });
@@ -340,26 +338,21 @@ describe('mass axis frame', () => {
 describe('summarizeHoldings', () => {
   const projects = liveRegistry().flatMap((g) => g.projects);
 
-  it('states the constant channels once and keeps the one that varies', () => {
+  it('states the constant channel once and keeps the one that varies', () => {
     const holdings = summarizeHoldings(projects)!;
     expect(holdings.total).toBe(44);
     expect(holdings.stores.uniform).toBe(1);
     expect(holdings.artifacts.uniform).toBeNull();
-    expect(holdings.artifacts.min).toBe(3);
-    expect(holdings.artifacts.max).toBe(5);
-    // Scopes are the only channel with real range, and the only one that
-    // belongs on a row.
-    expect(holdings.scopes.uniform).toBeNull();
-    expect(holdings.scopes.max - holdings.scopes.min).toBeGreaterThan(200);
+    expect(holdings.artifacts.min).toBe(0);
+    expect(holdings.artifacts.max).toBe(242);
     expect(holdings.uniformLine).toContain('exactly 1 store');
-    expect(holdings.uniformLine).toContain('3–5 artifacts');
-    expect(holdings.uniformLine).not.toContain('scope');
+    expect(holdings.uniformLine).not.toContain('artifact');
   });
 
   it('has no uniform line when every channel genuinely varies', () => {
     const holdings = summarizeHoldings([
-      project('a', 1, { stores: 1, scopes: 1, artifacts: 1 }),
-      project('b', 1, { stores: 9, scopes: 40, artifacts: 30 }),
+      project('a', 1, { stores: 1, artifacts: 1 }),
+      project('b', 1, { stores: 9, artifacts: 30 }),
     ])!;
     expect(holdings.uniformLine).toBeNull();
   });

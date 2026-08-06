@@ -5,8 +5,9 @@ use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity, GraphEntityId,
     GraphFormatVersion, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
-    GraphPublication, GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark,
-    GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
+    GraphPublication, GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
+    GraphWatermark, GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration,
+    TraversalRequest,
 };
 
 fn identity(value: &str) -> GraphEntityId {
@@ -53,6 +54,7 @@ fn traversal(start: &str) -> TraversalRequest {
         namespace: GraphNamespace::new("workspace").unwrap(),
         start: identity(start),
         relation_kinds: BTreeSet::new(),
+        direction: GraphTraversalDirection::Outgoing,
         max_depth: 1,
         max_visits: 2,
         max_results: 2,
@@ -120,6 +122,7 @@ fn replacing_entity_owner_preserves_foreign_edge_in_live_snapshot_and_reopen() {
         visit_identities(snapshot.traverse(traversal("source")).unwrap()),
         expected
     );
+    drop(snapshot);
     db.close().unwrap();
     let reopened = GraphDb::open(options()).unwrap();
     assert_eq!(
@@ -178,6 +181,7 @@ fn direct_apply_delete_then_upsert_preserves_foreign_edge_through_reopen() {
         visit_identities(snapshot.traverse(traversal("source")).unwrap()),
         expected
     );
+    drop(snapshot);
     db.close().unwrap();
     let reopened = GraphDb::open(options()).unwrap();
     assert_eq!(
@@ -245,6 +249,7 @@ fn publish_delete_then_upsert_preserves_foreign_edge_through_reopen() {
         visit_identities(snapshot.traverse(traversal("source")).unwrap()),
         expected
     );
+    drop(snapshot);
     db.close().unwrap();
     let reopened = GraphDb::open(options()).unwrap();
     assert_eq!(

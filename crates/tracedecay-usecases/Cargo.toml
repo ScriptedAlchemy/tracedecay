@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-usecases"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and daemon adapters"
@@ -36,6 +37,7 @@ getrandom = "0.2"
 fs2 = "0.4"
 gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
 glob = "0.3"
+hmac = { version = "0.13.0", features = ["zeroize"] }
 hex = "0.4"
 regex = "1"
 same-file = "1"

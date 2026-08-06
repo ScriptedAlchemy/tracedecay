@@ -60,7 +60,6 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             .map(|capability| capability.capability_id().as_str())
             .collect::<Vec<_>>(),
         vec![
-            "capability.application.api-migration.plan",
             "capability.application.code-query.callees",
             "capability.application.code-query.declaration",
             "capability.application.code-query.definition",
@@ -145,7 +144,6 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.retained.session-start",
             "capability.application.retained.sessions-for",
             "capability.application.retained.workflows",
-            "capability.application.source-edit.api-migration-apply",
             "capability.application.source-edit.ast-grep-rewrite",
             "capability.application.source-edit.insert-at",
             "capability.application.source-edit.insert-at-symbol",
@@ -176,7 +174,7 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.administrative",
             ProfileKind::Administrative,
-            ProfileBudget::new(40, 8_000).unwrap(),
+            ProfileBudget::new(48, 8_000).unwrap(),
         ),
         (
             "profile.host-limited",

@@ -286,6 +286,38 @@ fn subagent_provider_metadata_is_sanitized_before_persistence() {
 }
 
 #[test]
+fn subagent_metadata_exceeding_structural_limits_is_denied_as_a_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir
+        .path()
+        .join("parent-session")
+        .join("subagents")
+        .join("agent-deep.jsonl");
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(&transcript, "").unwrap();
+
+    let mut nested = json!(true);
+    for _ in 0..=tracedecay_capture::ParseLimits::default_policy().depth {
+        nested = json!({"next": nested});
+    }
+    std::fs::write(
+        transcript.with_file_name("agent-deep.meta.json"),
+        serde_json::to_vec(&json!({
+            "agentType": "must-not-survive-partial-scan",
+            "nested": nested,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let info = claude_subagent_identity(&transcript).expect("subagent identity");
+
+    assert_eq!(info.agent_type, None);
+    assert_eq!(info.description, None);
+    assert_eq!(info.spawn_depth, None);
+}
+
+#[test]
 fn cursor_key_round_trips_native_bytes_without_collisions() {
     let native_path: Vec<u8> = r"C:\Users\zack\.claude\projects\session.jsonl"
         .encode_utf16()
@@ -661,7 +693,7 @@ fn redacted_marker_ids_do_not_collide() {
 #[test]
 fn claude_checked_in_assistant_fixture_crosses_the_canonical_boundary() {
     let path = format!(
-        "{}/tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
+        "{}/../../tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
         env!("CARGO_MANIFEST_DIR")
     );
     let bytes = std::fs::read(&path).unwrap();
@@ -791,7 +823,7 @@ fn claude_checked_in_mixed_blocks_keep_authored_message_and_typed_order() {
 #[test]
 fn claude_workflow_lookalike_emits_no_workflow_lifecycle() {
     let path = format!(
-        "{}/tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json",
+        "{}/../../tests/fixtures/provider_normalization/claude/workflow_lookalike.input.json",
         env!("CARGO_MANIFEST_DIR")
     );
     let bytes = std::fs::read(&path).unwrap();

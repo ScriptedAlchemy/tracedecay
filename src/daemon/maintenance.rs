@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -5,8 +6,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
+use tracedecay_application::storage::{
+    StoreKeyV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
+};
+use tracedecay_application::{
+    ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
+    Deadline, DisclosureClass, RequestContext, ResolvedScope, now_micros,
+};
+use tracedecay_domain::ManifestDigest;
 
 use super::branch_admin::StoreAdministration;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const COLD_STORE_PAGE_LIMIT: usize = 8;
 /// Upper bound on mounted session databases + project graphs a single
@@ -17,6 +27,176 @@ const COLD_STORE_PAGE_LIMIT: usize = 8;
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 const CHECKPOINT_DIRECTORY: &str = "maintenance";
 const CHECKPOINT_FILE: &str = "retention-cold-store-cursor-v1.json";
+const STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
+const STORAGE_TELEMETRY_CAPABILITY: &str = "capability.application.storage.telemetry";
+const STORAGE_TELEMETRY_USE_CASE: &str = "use-case.application.storage.telemetry.read";
+
+#[derive(Clone)]
+struct CachedStoreTelemetryPort {
+    scope: ResolvedScope,
+    store: StoreKeyV1,
+    port: tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+}
+
+/// Daemon-owned table-growth baseline authority shared by maintenance and
+/// read-only diagnostic projections.
+#[derive(Clone, Default)]
+pub(super) struct StoreTelemetrySamplingRegistry {
+    ports: Arc<std::sync::Mutex<HashMap<PathBuf, CachedStoreTelemetryPort>>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct StoreTelemetrySamplingOutcome {
+    observed: u64,
+    unavailable: u64,
+}
+
+impl StoreTelemetrySamplingRegistry {
+    pub(super) fn register_port<E>(
+        &self,
+        path: &Path,
+        scope: &ResolvedScope,
+        open: impl FnOnce() -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, E>,
+    ) -> bool {
+        let Some(store_name) = path.file_name().and_then(std::ffi::OsStr::to_str) else {
+            return false;
+        };
+        let Ok(store) = StoreKeyV1::new(store_name.to_owned()) else {
+            return false;
+        };
+        let Ok(handle) = open() else {
+            return false;
+        };
+        let mut ports = self
+            .ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = ports.get_mut(path) {
+            cached.scope = scope.clone();
+            cached.store = store;
+            cached.port = cached.port.rebind(handle, scope.clone());
+            return true;
+        }
+        let port = tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort::new(
+            handle,
+            store.clone(),
+            scope.clone(),
+            Duration::from_secs(5),
+        );
+        ports.insert(
+            path.to_path_buf(),
+            CachedStoreTelemetryPort {
+                scope: scope.clone(),
+                store,
+                port,
+            },
+        );
+        true
+    }
+
+    pub(super) fn registered_port(
+        &self,
+        path: &Path,
+        scope: &ResolvedScope,
+    ) -> Option<(
+        StoreKeyV1,
+        tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+    )> {
+        let ports = self
+            .ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cached = ports.get(path)?;
+        Some((cached.store.clone(), cached.port.for_scope(scope.clone())))
+    }
+
+    async fn advance_registered(
+        &self,
+        active_paths: &BTreeSet<PathBuf>,
+        sampled_paths: &BTreeSet<PathBuf>,
+    ) -> StoreTelemetrySamplingOutcome {
+        let ports = {
+            let mut ports = self
+                .ports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            ports.retain(|path, _| active_paths.contains(path));
+            ports
+                .iter()
+                .filter(|(path, _)| sampled_paths.contains(*path))
+                .map(|(_, cached)| cached.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut outcome = StoreTelemetrySamplingOutcome::default();
+        for cached in ports {
+            let Ok(context) = storage_telemetry_request_context(cached.scope.clone()) else {
+                outcome.unavailable = outcome.unavailable.saturating_add(1);
+                continue;
+            };
+            match cached.port.table_growth(&context, &cached.store).await {
+                TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+                | TableGrowthTelemetryReadV1::Observed { .. } => {
+                    outcome.observed = outcome.observed.saturating_add(1);
+                }
+                TableGrowthTelemetryReadV1::Unsupported { .. }
+                | TableGrowthTelemetryReadV1::Denied { .. }
+                | TableGrowthTelemetryReadV1::Unknown { .. } => {
+                    outcome.unavailable = outcome.unavailable.saturating_add(1);
+                }
+            }
+        }
+        outcome
+    }
+}
+
+fn storage_telemetry_request_context(
+    scope: ResolvedScope,
+) -> Result<RequestContext, ApplicationContractError> {
+    let observed_at = now_micros();
+    let expires_at = tracedecay_domain::UtcMicros(
+        observed_at
+            .0
+            .saturating_add(STORAGE_TELEMETRY_CONTEXT_HORIZON_MICROS),
+    );
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::DaemonStorageTelemetry).map_err(|_| {
+            ApplicationContractError::Inconsistent {
+                field: "storage telemetry request identity",
+            }
+        })?;
+    let suffix = request_id.as_str().to_owned();
+    let actor = tracedecay_domain::ActorId::new("actor.tracedecay-daemon-storage-telemetry")?;
+    let capability =
+        tracedecay_tool_catalog::CapabilityId::new(STORAGE_TELEMETRY_CAPABILITY.to_owned())?;
+    let use_case = tracedecay_tool_catalog::UseCaseId::new(STORAGE_TELEMETRY_USE_CASE.to_owned())?;
+    let manifest: ManifestDigest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.daemon.storage-telemetry-grant.v1",
+        &scope,
+        &capability,
+        &use_case,
+        expires_at,
+    ))?;
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!("grant.daemon.storage-telemetry.{suffix}"))?,
+        1,
+        manifest,
+        actor.clone(),
+        observed_at,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([capability]),
+        BTreeSet::from([use_case]),
+        DisclosureClass::Metadata,
+    )?;
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        request_id,
+        Deadline::new(expires_at)?,
+        CancellationContext::active(format!("cancel.daemon.storage-telemetry.{suffix}"))?,
+    )
+}
 
 #[derive(Debug)]
 pub(super) struct MaintenanceCadence {
@@ -134,6 +314,15 @@ enum MaintenanceStoreWork {
     Graph(Arc<crate::tracedecay::TraceDecay>),
 }
 
+impl MaintenanceStoreWork {
+    fn database_path(&self) -> &Path {
+        match self {
+            Self::Session(database) => database.db_path(),
+            Self::Graph(graph) => graph.db().database_path(),
+        }
+    }
+}
+
 /// Pure round-robin window selection over stably-sorted store keys.
 ///
 /// Returns the indices to process this tick (at most `budget`, always
@@ -249,7 +438,17 @@ impl MaintenanceCoordinator {
     ) -> bool {
         let session_databases = administration.mounted_registered_session_databases().await;
         let project_graphs = administration.mounted_project_graphs().await;
-
+        let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
+        active_telemetry_paths.extend(
+            session_databases
+                .iter()
+                .map(|database| database.db_path().to_path_buf()),
+        );
+        active_telemetry_paths.extend(
+            project_graphs
+                .iter()
+                .map(|graph| graph.db().database_path().to_path_buf()),
+        );
         // Build one stably-sorted work list across both store kinds so the
         // per-tick budget and round-robin cursor bound the total work, not each
         // loop independently. Keys are unique on-disk identities (session db
@@ -278,6 +477,17 @@ impl MaintenanceCoordinator {
         let after = self.store_cursor.lock().await.clone();
         let (window, next_cursor) =
             select_store_window(&keys, after.as_deref(), MAINTENANCE_STORE_PAGE_LIMIT);
+        let mut sampled_telemetry_paths =
+            BTreeSet::from([profile_database.db_path().to_path_buf()]);
+        sampled_telemetry_paths.extend(
+            window
+                .iter()
+                .map(|index| work[*index].1.database_path().to_path_buf()),
+        );
+        let telemetry_sampling = administration
+            .store_telemetry_sampling()
+            .advance_registered(&active_telemetry_paths, &sampled_telemetry_paths)
+            .await;
 
         let admitted = administration
             .try_with_writer(|| async {
@@ -382,6 +592,11 @@ impl MaintenanceCoordinator {
                 ("deferred_stores", metrics.deferred_stores.to_string()),
                 ("unavailable_stores", metrics.unavailable_stores.to_string()),
                 ("reclaimed_bytes", metrics.reclaimed_bytes.to_string()),
+                ("telemetry_samples", telemetry_sampling.observed.to_string()),
+                (
+                    "telemetry_unavailable",
+                    telemetry_sampling.unavailable.to_string(),
+                ),
             ],
         );
         succeeded

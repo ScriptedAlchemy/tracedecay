@@ -1,5 +1,10 @@
 //! Canonical, payload-safe Plan 26 observability contracts.
 
+mod activity;
+#[cfg(test)]
+mod activity_tests;
+mod mcp_dispatch;
+
 pub mod accounting {
     /// A single parsed turn from a Claude Code session transcript, ready for
     /// insertion into the `turns` accounting projection.
@@ -20,6 +25,10 @@ pub mod accounting {
 }
 
 pub use accounting::CostTurn;
+pub use activity::ActivityObservedV1;
+pub use mcp_dispatch::{
+    McpDispatchCancellationV1, McpDispatchDeadlineV1, McpDispatchObservedV1, McpDispatchTerminalV1,
+};
 
 use std::collections::BTreeMap;
 
@@ -108,6 +117,7 @@ pub enum ObservabilityPayloadV1 {
     TelemetryDrop(TelemetryDropObservedV1),
     HealthSnapshot(HealthSnapshotObservedV1),
     Activity(ActivityObservedV1),
+    McpDispatch(McpDispatchObservedV1),
 }
 
 impl ObservabilityPayloadV1 {
@@ -127,6 +137,7 @@ impl ObservabilityPayloadV1 {
             Self::TelemetryDrop(_) => "telemetry.drop.observed.v1",
             Self::HealthSnapshot(_) => "health.snapshot.observed.v1",
             Self::Activity(_) => "activity.observed.v1",
+            Self::McpDispatch(_) => "mcp.dispatch.observed.v1",
         }
     }
 }
@@ -187,17 +198,12 @@ impl ObservabilityEnvelopeV1 {
                 }
             }
             ObservabilityPayloadV1::Activity(activity) => {
-                if activity.units == 0
-                    || !matches!(
-                        activity.family.as_str(),
-                        "hook" | "session_ingest" | "code_index" | "tool_call" | "task"
-                    )
-                    || activity.detail.as_deref().is_some_and(|detail| {
-                        !crate::canonical_text::is_canonical_text_within(detail, 128)
-                    })
-                {
+                if !activity.is_valid() {
                     return Err("activity");
                 }
+            }
+            ObservabilityPayloadV1::McpDispatch(dispatch) => {
+                dispatch.validate(self.terminal_result)?;
             }
             ObservabilityPayloadV1::HealthSnapshot(snapshot)
                 if snapshot.scope_digest != self.scope_ref
@@ -560,15 +566,6 @@ pub struct HealthSnapshotObservedV1 {
     pub files_analyzed: u64,
     pub function_denominator: u64,
     pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
-}
-
-/// One bounded project activity observation. `family` and `detail` are
-/// producer-controlled finite labels; paths, source, and messages are excluded.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ActivityObservedV1 {
-    pub family: String,
-    pub units: u64,
-    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1165,5 +1162,89 @@ mod tests {
             }),
         };
         assert_eq!(envelope.validate(), Err("event_kind"));
+    }
+
+    #[test]
+    fn mcp_dispatch_telemetry_keeps_terminal_and_control_states_typed() {
+        let payload = McpDispatchObservedV1 {
+            route_admission_micros: 4,
+            handler_micros: 16,
+            result_materialization_micros: 3,
+            total_micros: 23,
+            deadline: McpDispatchDeadlineV1::Enforced,
+            cancellation: McpDispatchCancellationV1::NotRequested,
+            terminal: McpDispatchTerminalV1::Completed,
+        };
+        let mut envelope = ObservabilityEnvelopeV1 {
+            event_id: "event:mcp-dispatch:1".into(),
+            event_kind: "mcp.dispatch.observed.v1".into(),
+            schema_revision: 1,
+            idempotency_key: "idempotency:mcp-dispatch:1".into(),
+            trace_id: "trace:mcp-dispatch:1".into(),
+            scope_ref: "scope:mcp-dispatch".into(),
+            capability: "mcp".into(),
+            operation: "dispatch".into(),
+            event_time_micros: 1,
+            observation_time_micros: 1,
+            valid_from_micros: None,
+            valid_until_micros: None,
+            quantity: None,
+            unit: None,
+            terminal_result: Some(ObservabilityTerminalResultV1::Succeeded),
+            producer_revision: "mcp-dispatch-observer.v1".into(),
+            configuration_revision: "registered-project-session.v1".into(),
+            policy_revision: "mcp-dispatch-deadline.v1".into(),
+            watermark: "mcp-dispatch:1".into(),
+            coverage: CoverageStateV1::Known,
+            sampling_probability: None,
+            retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+            emitted_count: 1,
+            delayed_count: 0,
+            dropped_count: 0,
+            process_boot_id: "boot:mcp-dispatch".into(),
+            producer_sequence: 1,
+            payload: ObservabilityPayloadV1::McpDispatch(payload.clone()),
+        };
+
+        assert_eq!(envelope.validate(), Ok(()));
+
+        envelope.terminal_result = Some(ObservabilityTerminalResultV1::TimedOut);
+        assert_eq!(envelope.validate(), Err("mcp_dispatch_terminal"));
+
+        envelope.terminal_result = Some(ObservabilityTerminalResultV1::Succeeded);
+        if let ObservabilityPayloadV1::McpDispatch(payload) = &mut envelope.payload {
+            payload.total_micros = 22;
+        }
+        assert_eq!(envelope.validate(), Err("mcp_dispatch_timings"));
+
+        if let ObservabilityPayloadV1::McpDispatch(payload) = &mut envelope.payload {
+            payload.total_micros = 23;
+            payload.deadline = McpDispatchDeadlineV1::Expired;
+            payload.cancellation = McpDispatchCancellationV1::DeadlineTriggered;
+            payload.terminal = McpDispatchTerminalV1::TimedOut;
+        }
+        envelope.terminal_result = Some(ObservabilityTerminalResultV1::TimedOut);
+        assert_eq!(envelope.validate(), Ok(()));
+
+        let failed = McpDispatchObservedV1 {
+            deadline: McpDispatchDeadlineV1::Enforced,
+            cancellation: McpDispatchCancellationV1::NotRequested,
+            terminal: McpDispatchTerminalV1::Failed,
+            ..payload
+        };
+        assert_eq!(
+            failed.validate(Some(ObservabilityTerminalResultV1::Failed)),
+            Ok(())
+        );
+
+        let shutdown = McpDispatchObservedV1 {
+            cancellation: McpDispatchCancellationV1::ShutdownTriggered,
+            terminal: McpDispatchTerminalV1::Shutdown,
+            ..failed
+        };
+        assert_eq!(
+            shutdown.validate(Some(ObservabilityTerminalResultV1::Cancelled)),
+            Ok(())
+        );
     }
 }

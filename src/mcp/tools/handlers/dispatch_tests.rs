@@ -829,6 +829,56 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
     .expect("deadline")
 }
 
+/// Cancellation is carried from MCP dispatch into the graph-runtime read.
+/// Replacing the port call with a handler-local database open makes this
+/// return a successful hint instead of the typed cancellation below.
+#[tokio::test]
+async fn dependency_hint_dispatch_preserves_transport_cancellation() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("dependency-hint-cancelled");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/app.ts"),
+        "import type { BranchOnly } from \"branch-pkg\";\nexport const value = 1;\n",
+    )
+    .unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-dependency-hint-cancelled",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancel.dependency-hint-dispatch")
+            .unwrap();
+    assert!(cancellation.cancel(tracedecay_domain::UtcMicros(1)));
+
+    let error = dispatch_graph_tools(
+        "tracedecay_find_exact_symbol",
+        &cg,
+        json!({
+            "name": "BranchOnly",
+            "lazy_index_ignored_dependencies": true,
+        }),
+        None,
+        None,
+        None,
+        None,
+        Some(cancellation),
+    )
+    .await
+    .expect_err("cancelled dependency hint dispatch");
+    assert_eq!(
+        error.project_route_context().map(|context| context.0),
+        Some("dependency_hint_cancelled")
+    );
+
+    cg.close();
+}
+
 /// An already-elapsed deadline must short-circuit *before* the expensive body
 /// runs, so neither the `pr_context` walk nor the `admin_branch_add` index
 /// build can proceed once the horizon is gone.
@@ -1482,16 +1532,8 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
 }
 
 #[test]
-fn unavailable_effect_contract_fails_before_handler_dispatch() {
-    let error = super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").unwrap_err();
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
-    );
+fn read_only_lcm_doctor_is_available_for_dispatch() {
+    assert!(super::ensure_mcp_dispatch_available("tracedecay_lcm_doctor").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
 }
@@ -1549,7 +1591,7 @@ async fn unavailable_application_effect_is_rejected_before_canonical_executor_in
 }
 
 #[tokio::test]
-async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
+async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
     let _env = SelectorEnv::new(dir.path());
@@ -1565,14 +1607,12 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     let profile_root = dir.path().join("unavailable-user-lcm-profile");
     let sessions_db = crate::sessions::user_sessions_db_path(&profile_root);
 
-    let error = handle_tool_call_with_registry_and_implicit_project(
+    let result = handle_tool_call_with_registry_and_implicit_project(
         &cg,
         "tracedecay_lcm_doctor",
         json!({
             "storage_scope": "user",
             "provider": "codex",
-            "mode": "repair",
-            "apply": true,
         }),
         None,
         None,
@@ -1582,19 +1622,18 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
         },
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(
-        error.project_route_context(),
-        Some((
-            "mcp_dispatch_effect_journey_unverified",
-            false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
-        ))
-    );
+    let payload: serde_json::Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("LCM Doctor text response"),
+    )
+    .expect("LCM Doctor unavailable payload");
+    assert_eq!(payload["status"], "unavailable");
     assert!(
         !sessions_db.exists(),
-        "unavailable LCM must not open its profile store"
+        "read-only LCM Doctor must not open a missing profile store"
     );
     cg.close();
 }
