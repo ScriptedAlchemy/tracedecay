@@ -1,5 +1,5 @@
 {
-  "command": "scripts/run-pr8-temporal-benchmark.sh --run",
+  "command": "cargo bench --bench session_temporal -- --run",
   "file_inventory": [
     {
       "path": "benches/session_temporal.rs",
@@ -8,10 +8,6 @@
     {
       "path": "src/sessions/session_temporal_benchmark.rs",
       "sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72"
-    },
-    {
-      "path": "scripts/run-pr8-temporal-benchmark.sh",
-      "sha256": "d1d321db6c3e4d372017a50245da8bd69df0b108f755696539bce21fe0a80306"
     },
     {
       "path": "Cargo.toml",

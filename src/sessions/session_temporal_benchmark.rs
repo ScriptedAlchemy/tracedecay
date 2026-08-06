@@ -65,7 +65,6 @@ const WORKLOAD_ID: &str = "pr8-session-temporal-v1";
 const WORKLOAD_PATH: &str = "benchmarks/pr8-temporal/workload-v1.json";
 const EVIDENCE_INDEX_PATH: &str = "benchmarks/pr8-temporal/evidence-index.json";
 const RESULT_PATH: &str = "benchmarks/pr8-temporal/result-provisional.json";
-const RUNNER_PATH: &str = "scripts/run-pr8-temporal-benchmark.sh";
 const HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
 const SANITIZATION_RECEIPT_PATH: &str =
     "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json";
@@ -402,21 +401,6 @@ pub fn validate_contract() -> BenchResult<()> {
         "result measured record count",
     )?;
 
-    let runner = fs::read_to_string(root.join(RUNNER_PATH))
-        .map_err(|error| format!("read runner: {error}"))?;
-    for token in [
-        "--dry-run",
-        "--run",
-        "--refresh-contract",
-        "Linux-hosted",
-        "CI nextest durable coverage",
-        "HOME",
-        "TRACEDECAY_DATA_DIR",
-    ] {
-        if !runner.contains(token) {
-            return Err(format!("runner is missing required token {token:?}"));
-        }
-    }
     Ok(())
 }
 
@@ -1007,8 +991,6 @@ fn current_state_identity(root: &Path, workload_manifest_sha256: &str) -> BenchR
         "workload_manifest_sha256": workload_manifest_sha256,
         "harness": HARNESS_PATH,
         "harness_sha256": sha256_file(&root.join(HARNESS_PATH))?,
-        "runner": RUNNER_PATH,
-        "runner_sha256": sha256_file(&root.join(RUNNER_PATH))?,
         "sanitization_receipt": SANITIZATION_RECEIPT_PATH,
         "sanitization_receipt_sha256": sha256_file(&root.join(SANITIZATION_RECEIPT_PATH))?,
         "binary": std::env::current_exe()
@@ -1173,7 +1155,9 @@ fn refresh_workload_manifest(
         .as_object_mut()
         .ok_or_else(|| "workload manifest must be an object".to_owned())?;
     workload_object["implementation"]["sha256"] = json!(sha256_file(&root.join(HARNESS_PATH))?);
-    workload_object["runner"]["sha256"] = json!(sha256_file(&root.join(RUNNER_PATH))?);
+    // The measurement entry points are the cargo bench harness itself; the
+    // former wrapper script was deleted with the boundary-guard cleanup.
+    workload_object.remove("runner");
     workload_object["profile"]["manifest_sha256"] = json!(sha256_file(&root.join("Cargo.toml"))?);
     let inventory = workload_object["file_inventory"]
         .as_array_mut()
@@ -1391,10 +1375,7 @@ mod tests {
             refreshed["implementation"]["sha256"],
             json!(sha256_file(&root.join(HARNESS_PATH)).unwrap())
         );
-        assert_eq!(
-            refreshed["runner"]["sha256"],
-            json!(sha256_file(&root.join(RUNNER_PATH)).unwrap())
-        );
+        assert_eq!(refreshed.get("runner"), None);
     }
 
     #[test]
@@ -1493,11 +1474,4 @@ mod tests {
         assert_eq!(env::var_os("TRACEDECAY_DATA_DIR"), prior_data);
     }
 
-    #[test]
-    fn runner_keeps_linux_hosted_measurement_entrypoint() {
-        let runner = fs::read_to_string(repository_root().join(RUNNER_PATH)).unwrap();
-        assert!(runner.contains("exit 64"));
-        assert!(runner.contains("Linux-hosted"));
-        assert!(runner.contains("CI nextest durable coverage"));
-    }
 }
