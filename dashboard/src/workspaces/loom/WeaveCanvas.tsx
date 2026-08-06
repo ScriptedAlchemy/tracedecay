@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { cn } from '../../ui/cn';
-import { axisTicks, dayBands } from './tracks.ts';
+import {
+  axisTicks,
+  clampWindow,
+  dayBands,
+  fittedWindow,
+  formatMoment,
+  isFitted,
+  zoomWindow,
+  type LoomWindow,
+} from './tracks.ts';
 import type { PlacedThread, Weave } from './weave.ts';
 
 /**
@@ -76,13 +85,36 @@ export function WeaveCanvas({
   const fieldWidth = Math.max(width - GUTTER - RIGHT_PAD, 80);
   const extent = weave.extent;
 
+  // The viewport over time. `null` means fitted — the whole extent with its
+  // margin — so new data keeps refitting until the reader deliberately zooms.
+  const [zoomed, setZoomed] = useState<LoomWindow | null>(null);
+  useEffect(() => {
+    setZoomed(null);
+  }, [extent?.start, extent?.end]);
+  const view = extent ? (zoomed ?? fittedWindow(extent)) : null;
+
+  const applyZoom = (factor: number) => {
+    if (!extent || !view) return;
+    const next = zoomWindow(view, extent, factor, (view.start + view.end) / 2);
+    setZoomed(isFitted(next, extent) ? null : next);
+  };
+  const pan = (direction: 1 | -1) => {
+    if (!extent || !view) return;
+    const shift = direction * (view.end - view.start) * 0.25;
+    const next = clampWindow(
+      { start: view.start + shift, end: view.end + shift },
+      extent,
+    );
+    setZoomed(isFitted(next, extent) ? null : next);
+  };
+
   const geometry = useMemo(() => {
-    if (!extent) return null;
-    const span = Math.max(extent.end - extent.start, 1);
+    if (!extent || !view) return null;
+    const span = Math.max(view.end - view.start, 1);
     const plotTop = HEAD + TOP_PAD;
     const plotHeight = Math.max(FIELD_HEIGHT - TOP_PAD - BOTTOM_PAD, 1);
     const y = (time: number) =>
-      plotTop + ((time - extent.start) / span) * plotHeight;
+      plotTop + ((time - view.start) / span) * plotHeight;
 
     // Every host column gets the same share of the field; inside it, each
     // packed sub-column gets an equal slice of that share. A column with one
@@ -103,28 +135,68 @@ export function WeaveCanvas({
       return Math.max(columnWidth / lanes - 8, 2);
     };
     return { y, columnWidth, centerOf, maxThickness, plotTop, plotHeight, span };
-  }, [extent, fieldWidth, weave.hosts]);
+  }, [extent, view, fieldWidth, weave.hosts]);
 
   // The axis helpers are written for a horizontal track engine, so they are
   // handed the field's HEIGHT as their length and their `x` output is read as
   // a `y`. The arithmetic is orientation-free; only the name is horizontal.
   const ticks = useMemo(
     () =>
-      geometry && extent
-        ? axisTicks({ start: extent.start, end: extent.end }, geometry.plotHeight)
+      geometry && view
+        ? axisTicks({ start: view.start, end: view.end }, geometry.plotHeight)
         : [],
-    [geometry, extent],
+    [geometry, view],
   );
   const bands = useMemo(
     () =>
-      geometry && extent
-        ? dayBands({ start: extent.start, end: extent.end }, geometry.plotHeight)
+      geometry && view
+        ? dayBands({ start: view.start, end: view.end }, geometry.plotHeight)
         : [],
-    [geometry, extent],
+    [geometry, view],
   );
 
   return (
     <div ref={hostRef} className="td-well relative w-full border border-edge-subtle">
+      {extent && view ? (
+        <div
+          role="toolbar"
+          aria-label="Time window"
+          className="flex flex-wrap items-center gap-1 border-b border-edge-subtle bg-surface-1 px-2 py-1"
+        >
+          <ZoomButton label="Zoom in" onClick={() => applyZoom(0.5)}>
+            +
+          </ZoomButton>
+          <ZoomButton label="Zoom out" onClick={() => applyZoom(2)}>
+            −
+          </ZoomButton>
+          <ZoomButton
+            label="Pan to earlier sessions"
+            disabled={zoomed == null}
+            onClick={() => pan(-1)}
+          >
+            ↑
+          </ZoomButton>
+          <ZoomButton
+            label="Pan to later sessions"
+            disabled={zoomed == null}
+            onClick={() => pan(1)}
+          >
+            ↓
+          </ZoomButton>
+          <ZoomButton
+            label="Fit the whole extent"
+            disabled={zoomed == null}
+            onClick={() => setZoomed(null)}
+          >
+            fit
+          </ZoomButton>
+          <span className="min-w-0 truncate pl-1 text-3xs tabular-nums text-text-muted">
+            {zoomed == null
+              ? 'whole extent'
+              : `${formatMoment(view.start)} – ${formatMoment(view.end)}`}
+          </span>
+        </div>
+      ) : null}
       <svg
         role="img"
         aria-label={ariaLabel}
@@ -251,22 +323,34 @@ export function WeaveCanvas({
             ))
           : null}
 
-        {/* The threads. */}
-        {geometry
-          ? weave.threads.map((thread) => (
-              <Thread
-                key={thread.id}
-                thread={thread}
-                x={geometry.centerOf(thread)}
-                y0={geometry.y(thread.start)}
-                y1={thread.end != null ? geometry.y(thread.end) : null}
-                maxThickness={geometry.maxThickness(thread)}
-                selected={selectedId === thread.id}
-                dimmed={selectedId != null && selectedId !== thread.id}
-                onSelect={onSelect}
-              />
-            ))
-          : null}
+        {/* The threads, clipped to the field: a zoomed window puts some
+          * threads outside the visible span of time, and a mark escaping into
+          * the header would claim a time the axis does not show. */}
+        <clipPath id="weave-plot">
+          <rect x={GUTTER} y={HEAD} width={fieldWidth} height={FIELD_HEIGHT} />
+        </clipPath>
+        {geometry && view ? (
+          <g clipPath="url(#weave-plot)">
+            {weave.threads
+              .filter(
+                (thread) =>
+                  thread.start <= view.end && (thread.end ?? thread.start) >= view.start,
+              )
+              .map((thread) => (
+                <Thread
+                  key={thread.id}
+                  thread={thread}
+                  x={geometry.centerOf(thread)}
+                  y0={geometry.y(thread.start)}
+                  y1={thread.end != null ? geometry.y(thread.end) : null}
+                  maxThickness={geometry.maxThickness(thread)}
+                  selected={selectedId === thread.id}
+                  dimmed={selectedId != null && selectedId !== thread.id}
+                  onSelect={onSelect}
+                />
+              ))}
+          </g>
+        ) : null}
       </svg>
     </div>
   );
@@ -275,6 +359,42 @@ export function WeaveCanvas({
 /** Narrowest column that can carry a host name and its count without cutting
  * either. Below this the header is dropped rather than clipped. */
 const HEADER_MIN_WIDTH = 96;
+
+/** One window-toolbar control: a real button, 44px hit target via `td-hit`,
+ * named for a screen reader rather than by its glyph. */
+function ZoomButton({
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="td-hit group"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <span
+        className={cn(
+          'inline-flex min-w-6 items-center justify-center border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs',
+          disabled
+            ? 'text-text-muted'
+            : 'text-text-secondary group-hover:text-text-primary',
+        )}
+      >
+        {children}
+      </span>
+    </button>
+  );
+}
 
 /** Letterspaced 9px small caps run about 7.4px per character; the count and its
  * gap need roughly 42px more. Trimmed to at least three characters so a column
@@ -339,6 +459,7 @@ function Thread({
 
   return (
     <g
+      data-thread={thread.id}
       style={kindColorVars(thread.host)}
       className={cn(
         'cursor-pointer',
