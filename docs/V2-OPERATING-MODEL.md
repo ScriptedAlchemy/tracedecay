@@ -11,23 +11,27 @@ Runtime status remains the truth for capabilities not yet delivered.
 ## Authorities
 
 - `tracedecay-graph-db` is the only TraceDecay boundary for the workspace-pinned
-  embedded Grafeo `0.5.42` runtime. It exposes typed TraceDecay identities,
+  embedded Grafeo `=0.5.42` runtime. It exposes typed TraceDecay identities,
   operations, snapshots, generations, and outcomes; Grafeo handles and types
   do not escape it.
 - Grafeo is in-process and embedded. It has no graph server, sidecar, network
   transport, or separately managed process. `petgraph` and other graph/vector
   stores are not product authorities.
-- Grafeo is the sole authority for graph/vector data: code symbol, file, and
-  chunk nodes; relation and traversal indexes; admitted vectors; Git/evidence,
-  session, memory, work, and workflow relation topology.
+- Grafeo is the sole persisted/query graph and vector projection: code symbol,
+  file, and chunk nodes; relation and traversal indexes; admitted vectors;
+  Git/evidence, session, memory, work, and workflow relation topology.
+  Canonical events, facts, source content, and reconstruction manifests remain
+  in their domain stores and are sufficient to rebuild every projection.
 - SQLite is relational only: registry/configuration, source cursors, admission,
   idempotency, inbox/outbox, journals, leases, receipts, redaction, retention,
   raw content and exact evidence spans, manifests, and accounting. It neither
   shadows graph/vector data nor gains a graph-shaped compatibility table.
 - Every datum has one canonical authority. A rebuildable projection records its
   source generation and watermark; it never becomes a second canonical copy.
-  Canonical events and idempotent graph publication advance one acknowledged
-  watermark, so replay cannot manufacture a second event.
+  A canonical event plus complete replay input is durable before graph
+  convergence starts. The graph watermark advances only after close/reopen and
+  a full digest over recovered entities, relations, source generation, and
+  watermark matches that input, so replay cannot manufacture a second event.
 
 ## Exact final stores
 
@@ -37,16 +41,22 @@ projection admits only its exact final V2 shape. Any other shape returns typed
 The operator may explicitly reset or recreate that exact target; preserved
 bytes are inspection-only.
 
-There is no V1 or earlier-V2 reader, migration, conversion, backfill, census,
-fallback, shadow read, dual write, staging state, cutover receipt, recovery
-route, or transition dashboard. A released public wire/API contract may
-delegate to the canonical operation only when independent release evidence
-proves it; it owns no storage or lifecycle behavior.
+There is no V1 or earlier-V2 database reader, migration, conversion,
+database-format backfill, census, fallback, shadow read, dual write, staging
+state, cutover receipt, recovery route, or transition dashboard. Historical
+host transcripts, repositories, and other source material remain ordinary V2
+ingress. A released public wire/API contract may delegate to the canonical
+operation only when independent release evidence proves it; it owns no storage
+or lifecycle behavior.
 
 One daemon authority owns a local mutable store; clients reach it through the
-application boundary. Validation failures leave the prior graph readable. A
-post-commit durability failure returns typed `DurabilityUncertain`, closes that
-handle, and requires exact reopen/recovery validation before further reads.
+application boundary. Validation failures leave the prior verified graph
+readable. Grafeo `0.5.42` does not surface every mutation WAL append failure,
+so `WalSync` is a flush request, not a publication receipt. Observable
+sync/close/recovery failures return typed `DurabilityUncertain` and close the
+runtime. Successful convergence remains unservable until close/reopen and full
+recovered-projection digest verification; mismatch resets and rebuilds the
+derived projection from canonical input.
 Cancellation, staleness, denial, unavailability, reset-required, corruption,
 and budget exhaustion stay typed through every surface.
 
