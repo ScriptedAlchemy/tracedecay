@@ -1055,6 +1055,31 @@ export const FeedbackSystemQualityReadModelV1Schema = z.object({
 });
 export type FeedbackSystemQualityReadModelV1 = z.infer<typeof FeedbackSystemQualityReadModelV1Schema>;
 
+/** One explained, read-only proposal. The digest binds acceptance to the
+evaluated decision content, so a stale or altered proposal cannot be
+accepted against a moved Work version. */
+export const GeneratedWorkProposalSchema = z.object({
+  based_on_version: z.number().int(),
+  decision: z.lazy(() => WorkProposalDecisionV1Schema),
+  proposal_digest: z.lazy(() => ManifestDigestSchema),
+  proposal_id: z.lazy(() => ProposalIdSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type GeneratedWorkProposal = z.infer<typeof GeneratedWorkProposalSchema>;
+
+/** Read-only proposal generation is pinned to the current Work version.
+
+The optional live Git frontier is supplied by the caller's Git evidence
+authority; the application never derives it from the Work history, and the
+evaluator never merges it with the local frontier. */
+export const GenerateProposalRequestSchema = z.object({
+  live_git_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
+  occurred_at: z.lazy(() => UtcMicrosSchema),
+  proposal_id: z.lazy(() => ProposalIdSchema),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type GenerateProposalRequest = z.infer<typeof GenerateProposalRequestSchema>;
+
 export const GraphCappedV1Schema = z.object({
   edges: z.boolean(),
   nodes: z.boolean(),
@@ -1930,6 +1955,13 @@ export type ObservatoryReadModelV1 = z.infer<typeof ObservatoryReadModelV1Schema
 
 export const Plan26CoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 export type Plan26CoverageV1 = z.infer<typeof Plan26CoverageV1Schema>;
+
+/** A bounded, canonical identifier owned by the policy input schema.
+
+It represents immutable references only; it is never a path, display
+label, provider account, branch name, or native object identifier. */
+export const PolicyIdentifierV1Schema = z.string();
+export type PolicyIdentifierV1 = z.infer<typeof PolicyIdentifierV1Schema>;
 
 export const PrAutoTrackEntryV1Schema = z.object({
   branch: z.string(),
@@ -2840,6 +2872,20 @@ export type WorkAuthority = z.infer<typeof WorkAuthoritySchema>;
 export const WorkCommandIdSchema = z.string();
 export type WorkCommandId = z.infer<typeof WorkCommandIdSchema>;
 
+/** One immutable evidence frontier. Local code/session evidence and live Git
+evidence each carry their own frontier; the evaluator never merges,
+substitutes, or advances one from the other. */
+export const WorkEvidenceFrontierV1Schema = z.object({
+  digest: z.lazy(() => ManifestDigestSchema),
+  watermark: z.lazy(() => UtcMicrosSchema),
+});
+export type WorkEvidenceFrontierV1 = z.infer<typeof WorkEvidenceFrontierV1Schema>;
+
+/** Recorded relation between the two supplied frontiers. `Incomparable` means
+at least one side was absent; it is not collapsed into agreement. */
+export const WorkFrontierComparisonV1Schema = z.enum(["agree", "disagree", "incomparable"]);
+export type WorkFrontierComparisonV1 = z.infer<typeof WorkFrontierComparisonV1Schema>;
+
 export const WorkProjectionSchema = z.object({
   accepted_proposal: z.union([z.lazy(() => ProposalIdSchema), z.null()]),
   authority: z.lazy(() => WorkAuthoritySchema),
@@ -2917,6 +2963,38 @@ export const WorkProjectionSnapshotV1Schema = z.object({
   sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
 });
 export type WorkProjectionSnapshotV1 = z.infer<typeof WorkProjectionSnapshotV1Schema>;
+
+/** The explicit command the decision recommends next. A recommendation never
+executes; each action names a separate version-checked application command. */
+export const WorkProposalActionV1Schema = z.enum(["admit_execution", "hold_for_dependencies", "proceed_to_acceptance", "replan"]);
+export type WorkProposalActionV1 = z.infer<typeof WorkProposalActionV1Schema>;
+
+/** One explained, replayable work-loop decision. */
+export const WorkProposalDecisionV1Schema = z.object({
+  based_on_version: z.number().int(),
+  configuration_digest: z.lazy(() => ManifestDigestSchema),
+  deterministic_fallback: z.boolean(),
+  disposition: z.lazy(() => WorkProposalDispositionV1Schema),
+  evaluator_id: z.lazy(() => PolicyIdentifierV1Schema),
+  evaluator_revision: z.number().int(),
+  frontier_comparison: z.lazy(() => WorkFrontierComparisonV1Schema),
+  input_digest: z.lazy(() => ManifestDigestSchema),
+  live_git_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
+  local_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
+  ordered_reason_codes: z.array(z.lazy(() => WorkProposalReasonV1Schema)),
+  policy_digest: z.lazy(() => ManifestDigestSchema),
+  policy_revision: z.number().int(),
+  recommended_action: z.union([z.lazy(() => WorkProposalActionV1Schema), z.null()]),
+  task_id: z.lazy(() => TaskIdSchema),
+});
+export type WorkProposalDecisionV1 = z.infer<typeof WorkProposalDecisionV1Schema>;
+
+/** Exactly one disposition per decision. */
+export const WorkProposalDispositionV1Schema = z.enum(["abstain", "allow", "deny", "indeterminate"]);
+export type WorkProposalDispositionV1 = z.infer<typeof WorkProposalDispositionV1Schema>;
+
+export const WorkProposalReasonV1Schema = z.enum(["deadline_exceeded", "dependencies_unresolved", "execution_in_flight", "frontier_agreement", "frontier_disagreement", "frontier_incomparable", "invalid_request", "proposal_accepted", "ready", "request_cancelled", "task_accepted", "terminal_evidence_observed"]);
+export type WorkProposalReasonV1 = z.infer<typeof WorkProposalReasonV1Schema>;
 
 /** Strongly typed canonical identity: `WorktreeId`. */
 export const WorktreeIdSchema = z.string();

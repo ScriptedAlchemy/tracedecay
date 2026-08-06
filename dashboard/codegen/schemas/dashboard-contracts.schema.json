@@ -5278,6 +5278,70 @@
       ],
       "type": "object"
     },
+    "GenerateProposalRequest": {
+      "additionalProperties": false,
+      "description": "Read-only proposal generation is pinned to the current Work version.\n\nThe optional live Git frontier is supplied by the caller's Git evidence\nauthority; the application never derives it from the Work history, and the\nevaluator never merges it with the local frontier.",
+      "properties": {
+        "live_git_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkEvidenceFrontierV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ProposalId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "proposal_id",
+        "live_git_evidence",
+        "occurred_at"
+      ],
+      "type": "object"
+    },
+    "GeneratedWorkProposal": {
+      "additionalProperties": false,
+      "description": "One explained, read-only proposal. The digest binds acceptance to the\nevaluated decision content, so a stale or altered proposal cannot be\naccepted against a moved Work version.",
+      "properties": {
+        "based_on_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "decision": {
+          "$ref": "#/$defs/WorkProposalDecisionV1"
+        },
+        "proposal_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ProposalId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "proposal_id",
+        "proposal_digest",
+        "based_on_version",
+        "decision"
+      ],
+      "type": "object"
+    },
     "GraphCappedV1": {
       "properties": {
         "edges": {
@@ -8749,6 +8813,10 @@
       ],
       "type": "string"
     },
+    "PolicyIdentifierV1": {
+      "description": "A bounded, canonical identifier owned by the policy input schema.\n\nIt represents immutable references only; it is never a path, display\nlabel, provider account, branch name, or native object identifier.",
+      "type": "string"
+    },
     "PrAutoTrackEntryV1": {
       "properties": {
         "branch": {
@@ -12044,6 +12112,32 @@
       "description": "Strongly typed canonical identity: `WorkCommandId`.",
       "type": "string"
     },
+    "WorkEvidenceFrontierV1": {
+      "additionalProperties": false,
+      "description": "One immutable evidence frontier. Local code/session evidence and live Git\nevidence each carry their own frontier; the evaluator never merges,\nsubstitutes, or advances one from the other.",
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "watermark": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "watermark",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "WorkFrontierComparisonV1": {
+      "description": "Recorded relation between the two supplied frontiers. `Incomparable` means\nat least one side was absent; it is not collapsed into agreement.",
+      "enum": [
+        "agree",
+        "disagree",
+        "incomparable"
+      ],
+      "type": "string"
+    },
     "WorkProjection": {
       "additionalProperties": false,
       "properties": {
@@ -12340,6 +12434,145 @@
       ],
       "type": "object"
     },
+    "WorkProposalActionV1": {
+      "description": "The explicit command the decision recommends next. A recommendation never\nexecutes; each action names a separate version-checked application command.",
+      "enum": [
+        "proceed_to_acceptance",
+        "hold_for_dependencies",
+        "admit_execution",
+        "replan"
+      ],
+      "type": "string"
+    },
+    "WorkProposalDecisionV1": {
+      "additionalProperties": false,
+      "description": "One explained, replayable work-loop decision.",
+      "properties": {
+        "based_on_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "deterministic_fallback": {
+          "description": "True when the recommendation is the declared deterministic baseline\nselected because the evidence cannot support a stronger claim.",
+          "type": "boolean"
+        },
+        "disposition": {
+          "$ref": "#/$defs/WorkProposalDispositionV1"
+        },
+        "evaluator_id": {
+          "$ref": "#/$defs/PolicyIdentifierV1"
+        },
+        "evaluator_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frontier_comparison": {
+          "$ref": "#/$defs/WorkFrontierComparisonV1"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "live_git_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkEvidenceFrontierV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The live Git frontier, returned exactly as supplied."
+        },
+        "local_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkEvidenceFrontierV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The local code/session frontier, returned exactly as supplied."
+        },
+        "ordered_reason_codes": {
+          "items": {
+            "$ref": "#/$defs/WorkProposalReasonV1"
+          },
+          "type": "array"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "recommended_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkProposalActionV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "evaluator_id",
+        "evaluator_revision",
+        "input_digest",
+        "task_id",
+        "based_on_version",
+        "policy_revision",
+        "policy_digest",
+        "configuration_digest",
+        "disposition",
+        "recommended_action",
+        "deterministic_fallback",
+        "ordered_reason_codes",
+        "local_evidence",
+        "live_git_evidence",
+        "frontier_comparison"
+      ],
+      "type": "object"
+    },
+    "WorkProposalDispositionV1": {
+      "description": "Exactly one disposition per decision.",
+      "enum": [
+        "allow",
+        "deny",
+        "abstain",
+        "indeterminate"
+      ],
+      "type": "string"
+    },
+    "WorkProposalReasonV1": {
+      "enum": [
+        "invalid_request",
+        "request_cancelled",
+        "deadline_exceeded",
+        "frontier_agreement",
+        "frontier_disagreement",
+        "frontier_incomparable",
+        "task_accepted",
+        "terminal_evidence_observed",
+        "execution_in_flight",
+        "proposal_accepted",
+        "dependencies_unresolved",
+        "ready"
+      ],
+      "type": "string"
+    },
     "WorktreeId": {
       "description": "Strongly typed canonical identity: `WorktreeId`.",
       "type": "string"
@@ -12523,6 +12756,12 @@
     "work_create_command": {
       "$ref": "#/$defs/CreateWorkCommand"
     },
+    "work_generate_proposal_request": {
+      "$ref": "#/$defs/GenerateProposalRequest"
+    },
+    "work_generated_proposal": {
+      "$ref": "#/$defs/GeneratedWorkProposal"
+    },
     "work_projection": {
       "$ref": "#/$defs/WorkProjection"
     },
@@ -12596,6 +12835,8 @@
     "work_projection_snapshot",
     "work_projection_delta_request",
     "work_projection_delta",
+    "work_generate_proposal_request",
+    "work_generated_proposal",
     "work_create_command",
     "work_replan_dependencies_command",
     "work_review_proposal_request",
