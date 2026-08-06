@@ -24,8 +24,8 @@ mod transitions;
 pub use reclaim::VectorGenerationReclaimReceiptV1;
 
 use native_records::{
-    read_build_records, read_cataloged_generation_records, read_generation_metadata,
-    read_optional_state_metadata, read_state_metadata,
+    read_build_records, read_cataloged_generation_records, read_generation_catalog,
+    read_generation_metadata, read_optional_state_metadata, read_state_metadata,
 };
 use persistence::{
     check_cancelled, generation_label, graph_namespace, graph_projection, map_graph_error,
@@ -126,6 +126,30 @@ impl ActiveVectorGenerationPublicationGuardV1 {
 
     pub fn embedding_key(&self) -> &AdmittedEmbeddingProjectionKeyV1 {
         &self.embedding_key
+    }
+}
+
+/// Identity-only snapshot of every cataloged vector generation plus the
+/// record revision that produced it.
+///
+/// This is the graph-side liveness authority for code-generation retention
+/// and Doctor's collectable-byte census (Plan 31 semantics: a sweep must
+/// never delete code generations vectors still read from). Retention pins the
+/// inventory by comparing two reads for equality — any vector mutation in
+/// between moves the revision and refuses the sweep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphVectorRetentionInventoryV1 {
+    /// `None` when the semantic-vector projection was never installed: no
+    /// vectors exist, so nothing pins a source generation.
+    revision: Option<u64>,
+    active_generation: Option<VectorGenerationIdV1>,
+    readable_sources: BTreeSet<CodeGenerationId>,
+}
+
+impl GraphVectorRetentionInventoryV1 {
+    /// Code generations still named by cataloged vector generations.
+    pub fn retained_readable_sources(&self) -> BTreeSet<CodeGenerationId> {
+        self.readable_sources.clone()
     }
 }
 
@@ -382,6 +406,43 @@ impl GraphVectorGenerationStoreV1 {
                     && metadata.active_generation.as_ref() == Some(generation_id)
             }),
         )
+    }
+
+    /// Snapshot cataloged generation identities without reading any vector
+    /// payload. See [`GraphVectorRetentionInventoryV1`].
+    pub async fn retention_inventory(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<GraphVectorRetentionInventoryV1, VectorGenerationStoreErrorV1> {
+        let snapshot = self.graph.snapshot().map_err(map_graph_error)?;
+        let Some(metadata) = read_optional_state_metadata(&snapshot, Arc::clone(&cancellation))?
+        else {
+            return Ok(GraphVectorRetentionInventoryV1 {
+                revision: None,
+                active_generation: None,
+                readable_sources: BTreeSet::new(),
+            });
+        };
+        let catalog = read_generation_catalog(&snapshot, Arc::clone(&cancellation))?;
+        let mut readable_sources = BTreeSet::new();
+        for entry in catalog {
+            let generation = read_generation_metadata(
+                &snapshot,
+                &entry.generation_id,
+                Arc::clone(&cancellation),
+            )?
+            .ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Corrupt(
+                    "cataloged semantic vector generation metadata is missing".to_owned(),
+                )
+            })?;
+            readable_sources.insert(generation.source_generation);
+        }
+        Ok(GraphVectorRetentionInventoryV1 {
+            revision: Some(metadata.revision),
+            active_generation: metadata.active_generation,
+            readable_sources,
+        })
     }
 
     pub async fn staged_checkpoint(

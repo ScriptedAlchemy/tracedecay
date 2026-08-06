@@ -881,6 +881,17 @@ impl ProductionSemanticRuntimeV1 {
         Ok(SemanticVectorPublicationLeaseV1 { _writer: writer })
     }
 
+    /// Freeze every vector-mutation path without validating a revision.
+    ///
+    /// Code-generation retention holds this while it pins the vector
+    /// inventory and deletes superseded sealed generations, so no vector
+    /// publication can begin referencing a generation mid-sweep.
+    pub async fn freeze_vector_mutations(&self) -> SemanticVectorPublicationLeaseV1 {
+        SemanticVectorPublicationLeaseV1 {
+            _writer: Arc::clone(&self.vector_writer).lock_owned().await,
+        }
+    }
+
     fn schedule_saved_generation_fair(
         &self,
         generation: &CodeIndexPublishedGenerationV1,

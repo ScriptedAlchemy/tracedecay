@@ -903,7 +903,6 @@ pub async fn collect_retention_backlog_findings(
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
 pub async fn collect_code_generation_retention_findings(
-    graph: &crate::db::Database,
     code_index_store_root: &Path,
     project_root: &Path,
 ) -> DoctorStorageFamilyReadV1 {
@@ -912,8 +911,7 @@ pub async fn collect_code_generation_retention_findings(
         GenerationDigestVerificationV1, ScopeRootRetentionPlanV1,
         plan_code_generation_retention_with_verification, plan_scope_root_retention,
     };
-    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
-    use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
+    use crate::store::vector_generations::GraphVectorGenerationStoreV1;
     use tracedecay_application::storage::{
         CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
         code_generation_retention_finding,
@@ -928,13 +926,24 @@ pub async fn collect_code_generation_retention_findings(
     if !permits_synchronous_generation_census(&code_index_store_root.join("code-generations-v1")) {
         return DoctorStorageFamilyReadV1::Unknown;
     }
-    let Ok(store) = DatabaseVectorGenerationStoreV1::open(graph).await else {
+    // Published vectors live in the mounted code graph; without it the
+    // protection set cannot be proven and the census reads as Unknown rather
+    // than "nothing is pinned".
+    let Some(provider) =
+        super::code_index_scheduler::semantic_vector_graph::project_semantic_vector_graph_provider(
+            project_root,
+        )
+    else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let Ok(inventory) = store.read_legacy_inventory().await else {
+    let Ok(retained) = provider.graph_for_current().await else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
-    let Ok(inventory) = inventory.read_only_inventory() else {
+    let store = GraphVectorGenerationStoreV1::read_only(Arc::clone(retained.graph()));
+    let Ok(inventory) = store
+        .retention_inventory(Arc::clone(retained.cancellation()))
+        .await
+    else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
     let vector_readable_sources = inventory.retained_readable_sources();
@@ -1261,11 +1270,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
                 collect_retention_backlog_findings(profile_sessions.as_ref(), &retention, now),
                 collect_retention_backlog_findings(project_sessions.as_ref(), &retention, now),
-                collect_code_generation_retention_findings(
-                    &graph,
-                    &code_index_store_root,
-                    &project_root,
-                ),
+                collect_code_generation_retention_findings(&code_index_store_root, &project_root),
                 language_server_read_from_broker(&diagnostic_broker),
                 crate::application::feedback::concrete::plan26_feedback_observation_read_model(
                     &graph,
