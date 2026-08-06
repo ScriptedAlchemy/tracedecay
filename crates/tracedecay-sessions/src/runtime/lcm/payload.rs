@@ -21,7 +21,7 @@ pub use delete_recovery::{DeleteOpts, DeleteOutcome};
 pub use delete_recovery::{reconcile_committed_payload_drain, remove_committed_payload_file_with};
 pub use filesystem_authority::VerifiedPayloadAuthority;
 use filesystem_authority::{
-    PayloadFileWrite, prepare_payload_dir, read_verified_payload_file, write_private_file,
+    PayloadFileWrite, prepare_payload_dir, read_verified_payload_text, write_private_file,
 };
 pub use filesystem_authority::{ensure_contained, existing_payload_dir, existing_payload_dir_opt};
 pub use rollback::PayloadFileRollback;
@@ -252,16 +252,16 @@ pub async fn expand_payload(
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
-    let (content, _authority) = read_verified_payload_file(
+    let (content, _authority) = read_verified_payload_text(
         &path,
         &payload.content_hash,
         payload.byte_count,
         payload.char_count,
     )?
     .ok_or(LcmError::PayloadMissing)?;
-    let content = String::from_utf8(content).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
 
-    let total_char_count = content.chars().count();
+    let total_char_count =
+        usize::try_from(payload.char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     let start = offset.min(total_char_count);
     let slice = content.chars().skip(start).take(limit).collect::<String>();
     let char_count = slice.chars().count();
@@ -286,16 +286,41 @@ pub fn read_verified_payload_content(
     byte_count: usize,
     char_count: usize,
 ) -> Result<String, LcmError> {
+    read_verified_payload_content_with_checkpoint(
+        storage_root,
+        payload_ref,
+        content_hash,
+        byte_count,
+        char_count,
+        &mut || Ok(()),
+    )
+}
+
+pub fn read_verified_payload_content_with_checkpoint(
+    storage_root: &Path,
+    payload_ref: &str,
+    content_hash: &str,
+    byte_count: usize,
+    char_count: usize,
+    checkpoint: &mut impl FnMut() -> Result<(), LcmError>,
+) -> Result<String, LcmError> {
+    checkpoint()?;
     validate_payload_ref(payload_ref)?;
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);
     ensure_contained(&dir, &path)?;
     let byte_count = u64::try_from(byte_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
     let char_count = u64::try_from(char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
-    let (content, _authority) =
-        read_verified_payload_file(&path, content_hash, byte_count, char_count)?
-            .ok_or(LcmError::PayloadMissing)?;
-    String::from_utf8(content).map_err(|_| LcmError::PayloadIntegrityMismatch)
+    let (content, _authority) = filesystem_authority::read_verified_payload_text_with_checkpoint(
+        &path,
+        content_hash,
+        byte_count,
+        char_count,
+        checkpoint,
+    )?
+    .ok_or(LcmError::PayloadMissing)?;
+    checkpoint()?;
+    Ok(content)
 }
 
 async fn validate_expand_payload_owner(

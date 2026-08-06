@@ -12,6 +12,7 @@ use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_sessions::runtime::lcm::types::{LcmError, LcmSourceRef, LcmSummaryNodeDraft};
 
+pub(in crate::session_temporal) use publication::load_and_verify_receipt;
 pub use publication::{GlobalDbLcmSummaryPublication, publish_immutable_summary};
 
 pub(super) const PUBLICATION_ROUTE: &str = "lcm_summary_lineage_v1";
