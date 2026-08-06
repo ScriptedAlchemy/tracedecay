@@ -12,6 +12,7 @@ use tracedecay::sessions::git_correlation::{
     DEFAULT_SPAN_MERGE_GAP_SECS, SpanObservation, SpanSource,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
+use tracedecay::storage::PrivateStoreIo;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
 
@@ -147,7 +148,8 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     let (project_root, _worktree_root) = setup_linked_worktree_under(&base);
 
     let profile_root = base.join("profile");
-    std::fs::create_dir_all(&profile_root).unwrap_or_else(|e| panic!("create profile root: {e}"));
+    PrivateStoreIo::create_dir_all(&profile_root)
+        .unwrap_or_else(|e| panic!("create profile root: {e}"));
     let profile_root = profile_root
         .canonicalize()
         .unwrap_or_else(|e| panic!("canonicalize profile root: {e}"));

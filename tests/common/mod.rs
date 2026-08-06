@@ -732,7 +732,7 @@ pub fn spawn_tracedecay_daemon_with(
     configure: impl FnOnce(&mut Command),
 ) -> DaemonProcess {
     let profile_root = canonical_existing_path(home).join(".tracedecay");
-    std::fs::create_dir_all(&profile_root).expect("daemon profile should be created");
+    PrivateStoreIo::create_dir_all(&profile_root).expect("daemon profile should be created");
     #[cfg(unix)]
     let socket_path = daemon_socket_path(home);
     let authority_path = daemon_authority_path(&profile_root);
