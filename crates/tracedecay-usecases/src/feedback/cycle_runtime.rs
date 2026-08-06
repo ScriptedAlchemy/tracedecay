@@ -5,6 +5,7 @@
 //! store.
 
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,9 +45,7 @@ use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_in
 use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 
-use super::concrete::{
-    FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore,
-};
+use super::concrete::{FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore};
 use super::diagnostics::{DatabaseDiagnosticStore, DiagnosticStoreFeedbackProvider};
 use super::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
@@ -603,33 +602,47 @@ impl DirectFeedbackImpactAdapter {
         generation: &tracedecay_domain::CodeGenerationId,
         file_paths: &[String],
     ) -> ResolvedAffectedFiles {
-        let Some(resolver) = self.code_index_identity.as_ref() else {
-            return ResolvedAffectedFiles::IdentityUnavailable;
-        };
-        let root = self.graph.project_root().to_path_buf();
-        let Some(identity) = resolver.resolve(root.clone()).await else {
-            return ResolvedAffectedFiles::IdentityUnavailable;
-        };
-        if identity.generation_id() != generation {
-            return ResolvedAffectedFiles::GenerationMismatch;
+        resolve_affected_files_for_published_generation(
+            self.code_index_identity.as_deref(),
+            self.graph.project_root(),
+            generation,
+            file_paths,
+        )
+        .await
+    }
+}
+
+async fn resolve_affected_files_for_published_generation(
+    resolver: Option<&dyn CodeIndexPublicationIdentityPortV1>,
+    root: &Path,
+    generation: &tracedecay_domain::CodeGenerationId,
+    file_paths: &[String],
+) -> ResolvedAffectedFiles {
+    let Some(resolver) = resolver else {
+        return ResolvedAffectedFiles::IdentityUnavailable;
+    };
+    let Some(identity) = resolver.resolve(root.to_path_buf()).await else {
+        return ResolvedAffectedFiles::IdentityUnavailable;
+    };
+    if identity.generation_id() != generation {
+        return ResolvedAffectedFiles::GenerationMismatch;
+    }
+    let mut resolved_every_path = true;
+    let mut files = Vec::with_capacity(file_paths.len());
+    for path in file_paths {
+        let file = code_index_logical_path(root, path)
+            .and_then(|logical| identity.file(&logical).map(|(file, _)| file.clone()));
+        match file {
+            Some(file) => files.push(file),
+            None => resolved_every_path = false,
         }
-        let mut resolved_every_path = true;
-        let mut files = Vec::with_capacity(file_paths.len());
-        for path in file_paths {
-            let file = code_index_logical_path(&root, path)
-                .and_then(|logical| identity.file(&logical).map(|(file, _)| file.clone()));
-            match file {
-                Some(file) => files.push(file),
-                None => resolved_every_path = false,
-            }
-        }
-        files.sort();
-        files.dedup();
-        if resolved_every_path {
-            ResolvedAffectedFiles::Complete(files)
-        } else {
-            ResolvedAffectedFiles::Partial(files)
-        }
+    }
+    files.sort();
+    files.dedup();
+    if resolved_every_path {
+        ResolvedAffectedFiles::Complete(files)
+    } else {
+        ResolvedAffectedFiles::Partial(files)
     }
 }
 
@@ -660,19 +673,19 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
         request: &'a FeedbackImpactRequest,
     ) -> FeedbackPortFuture<'a, FeedbackImpactPortOutcome> {
         Box::pin(async move {
-            if request.validate().is_err()
-                || !self.authorization.allows(
-                    context,
-                    &self.graph_operation,
-                    request.input.observed_at,
-                )
-            {
+            if request.validate().is_err() {
                 return FeedbackImpactPortOutcome::Unavailable;
             }
             match context.admission_at(request.input.observed_at) {
                 RequestAdmission::Admitted => {}
                 RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                 RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+            }
+            if !self
+                .authorization
+                .allows(context, &self.graph_operation, request.input.observed_at)
+            {
+                return FeedbackImpactPortOutcome::Unavailable;
             }
             let Some(symbol) = request.input.target.symbol.clone() else {
                 return FeedbackImpactPortOutcome::Unavailable;
@@ -681,6 +694,14 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 return FeedbackImpactPortOutcome::Unavailable;
             };
             let Ok(subgraph) = self.graph.get_impact_radius(symbol.as_str(), 3).await else {
+                return FeedbackImpactPortOutcome::Unavailable;
+            };
+            match context.admission_at(request.input.observed_at) {
+                RequestAdmission::Admitted => {}
+                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
+                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+            }
+            let Ok(callers) = self.graph.get_callers(symbol.as_str(), 3).await else {
                 return FeedbackImpactPortOutcome::Unavailable;
             };
             match context.admission_at(request.input.observed_at) {
@@ -712,21 +733,27 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                 RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
             }
-            let mut affected_callers = subgraph
-                .nodes
-                .iter()
-                .filter(|node| node.id.as_str() != symbol.as_str())
+            let mut affected_callers = callers
+                .into_iter()
+                .map(|(node, _)| node)
                 .filter_map(|node| SymbolOccurrenceId::new(node.id.clone()).ok())
                 .collect::<Vec<_>>();
             affected_callers.sort();
             affected_callers.dedup();
 
+            let Ok(page) = PageRequest::first(100) else {
+                return FeedbackImpactPortOutcome::Unavailable;
+            };
             let meta = RetrievalRequestMeta::current(
-                PageRequest::first(100)
-                    .unwrap_or_else(|_| panic!("static feedback page size is valid")),
+                page,
                 ResultProjection::ReferencesOnly,
                 RetrievalOrder::StableIdentity,
             );
+            match context.admission_at(request.input.observed_at) {
+                RequestAdmission::Admitted => {}
+                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
+                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+            }
             if !self
                 .authorization
                 .allows(context, &self.tests_operation, request.input.observed_at)
@@ -755,12 +782,12 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 DirectAffectedTestsOutcome::Stale => return FeedbackImpactPortOutcome::Stale,
             };
 
-            // Folded exactly like `GraphImpactFeedbackAdapter`: the impact is
-            // complete only when both the graph and the affected-test evidence
-            // report complete coverage. `evidence_anchors` stays empty because
-            // this runtime binds no anchor authority — the graph traversal
-            // yields nodes, not retrieval anchors — and an invented anchor would
-            // be worse than none.
+            // The impact is complete only when both the graph and the
+            // affected-test evidence report complete coverage.
+            // `evidence_anchors` stays empty because this runtime binds no
+            // anchor authority — the graph traversal yields nodes, not
+            // retrieval anchors — and an invented anchor would be worse than
+            // none.
             let state = if graph_state == FeedbackImpactStateV1::Complete
                 && affected_tests_state == FeedbackImpactStateV1::Complete
             {
@@ -903,165 +930,5 @@ fn lsp_method_state_event(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tracedecay_application::feedback::FeedbackBudgetUsage;
-    use tracedecay_domain::feedback::{
-        FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
-        FeedbackCycleResultV1, FeedbackCycleTerminationV1, FeedbackDiagnosticClassificationV1,
-        FeedbackFindingLifecycleV1, FeedbackScopeV1, ProviderEvaluationStateV1,
-    };
-    use tracedecay_domain::{
-        CommitId, HostInstanceId, ManifestDigest, ProjectId, RepositoryId, SessionId, UtcMicros,
-        WorktreeId,
-    };
-
-    const SHA_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const SHA_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-    fn digest(value: &str) -> ManifestDigest {
-        ManifestDigest::new(value).expect("digest")
-    }
-
-    fn scope() -> FeedbackScopeV1 {
-        FeedbackScopeV1 {
-            project_id: ProjectId::new("project.canonical-feedback").unwrap(),
-            repository_id: RepositoryId::new("repository.canonical-feedback").unwrap(),
-            worktree_id: WorktreeId::new("worktree.canonical-feedback").unwrap(),
-            branch_ref: "refs/heads/canonical-feedback".to_owned(),
-            head_commit_id: CommitId::new("commit.canonical-feedback").unwrap(),
-        }
-    }
-
-    fn request(content: FeedbackContentIdentityV1) -> FeedbackCycleRequestV1 {
-        FeedbackCycleRequestV1::new(
-            FeedbackCycleId::new("cycle.canonical-feedback").unwrap(),
-            scope(),
-            content,
-            FeedbackTriggerV1::ExplicitDiagnostics,
-            digest(SHA_A),
-            digest(SHA_B),
-            FeedbackBudgetV1::bounded(100, 100, 1_024, 100),
-        )
-        .unwrap()
-    }
-
-    fn execution(cycle: FeedbackCycleResultV1) -> FeedbackCycleExecutionResult {
-        FeedbackCycleExecutionResult {
-            cycle,
-            dedupe_key: None,
-            authority: None,
-            usage: FeedbackBudgetUsage {
-                completed_at: UtcMicros(10),
-                tokens_consumed: 0,
-                cost_microunits: 0,
-            },
-            publication: None,
-        }
-    }
-
-    #[test]
-    fn lsp_method_state_event_is_bounded_and_measured() {
-        assert_eq!(
-            lsp_method_state_event(
-                Plan26LspStateV1::MethodCompleted,
-                Plan26FeedbackOutcomeV1::Completed,
-                1,
-                42,
-            ),
-            Plan26FeedbackSourceEventV1::LspState {
-                state: Plan26LspStateV1::MethodCompleted,
-                method: Some(Plan26LspMethodClassV1::Diagnostics),
-                outcome: Plan26FeedbackOutcomeV1::Completed,
-                item_count: 1,
-                duration_micros: Some(42),
-            }
-        );
-    }
-
-    #[test]
-    fn dirty_overlay_result_cannot_gain_durable_outputs_or_handles() {
-        let request = request(FeedbackContentIdentityV1::EphemeralOverlay {
-            session_id: SessionId::new("session.overlay").unwrap(),
-            owner_client_id: HostInstanceId::new("host.overlay").unwrap(),
-            agent_id: None,
-            document_version: 1,
-            overlay_digest: digest(SHA_A),
-        });
-        let cycle = FeedbackCycleResultV1::new(
-            &request,
-            FeedbackCycleTerminationV1::UserStop,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            None,
-            Vec::new(),
-            0,
-            0,
-            0,
-        )
-        .unwrap();
-        let execution = execution(cycle);
-        assert!(
-            CanonicalFeedbackResultV1::new(execution.clone(), Vec::new()).is_ok(),
-            "session-only results remain usable in their owner session"
-        );
-
-        let mut leaked = execution;
-        leaked.dedupe_key =
-            Some(tracedecay_domain::feedback::FeedbackDedupeKeyV1::new("dedupe.overlay").unwrap());
-        assert!(CanonicalFeedbackResultV1::new(leaked, Vec::new()).is_err());
-    }
-
-    #[test]
-    fn durable_finding_expansion_preserves_identity_and_exact_anchor() {
-        let request = request(FeedbackContentIdentityV1::SavedContent {
-            generation_digest: digest(SHA_A),
-            file_digest: digest(SHA_B),
-        });
-        let anchor = RetrievalAnchorId::new("anchor.canonical-feedback").unwrap();
-        let finding = FeedbackFindingV1 {
-            finding_id: FeedbackFindingId::new("finding.canonical-feedback").unwrap(),
-            classification: FeedbackDiagnosticClassificationV1::New,
-            lifecycle: FeedbackFindingLifecycleV1::Active,
-            retrieval_anchor_id: Some(anchor.clone()),
-            provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
-            safe_bounded_preview: None,
-            diagnostic_projection: None,
-        };
-        let cycle = FeedbackCycleResultV1::new(
-            &request,
-            FeedbackCycleTerminationV1::Blocked,
-            vec![ProviderEvaluationStateV1::SupportedCompletedComplete],
-            Vec::new(),
-            None,
-            None,
-            None,
-            vec![finding.clone()],
-            1,
-            1,
-            0,
-        )
-        .unwrap();
-        let execution = execution(cycle);
-        let expansion = feedback_expansion_request(&finding)
-            .unwrap()
-            .expect("anchored finding expands");
-
-        assert_eq!(expansion.finding_id, finding.finding_id);
-        assert_eq!(expansion.expansion.anchor, anchor);
-        assert_eq!(
-            expansion.expansion.meta.projection,
-            ResultProjection::ReferencesOnly
-        );
-        assert_eq!(
-            feedback_handle_request_id("get", &execution, &finding).unwrap(),
-            feedback_handle_request_id("get", &execution, &finding).unwrap()
-        );
-        assert_ne!(
-            feedback_handle_request_id("get", &execution, &finding).unwrap(),
-            feedback_handle_request_id("expand", &execution, &finding).unwrap()
-        );
-    }
-}
+#[path = "cycle_runtime/tests.rs"]
+mod tests;

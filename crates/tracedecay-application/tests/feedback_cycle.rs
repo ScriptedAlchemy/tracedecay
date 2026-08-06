@@ -15,11 +15,6 @@ use tracedecay_application::feedback::{
     FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
     FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
     FeedbackRuntimeStatePort, FeedbackRuntimeStateV1, GenerationBoundFeedbackDiagnosticsAdapter,
-    GraphImpactFeedbackAdapter,
-};
-use tracedecay_application::retrieval::{
-    AffectedTestsRequest, AffectedTestsResult, AffectedTestsRetrievalPort, GraphImpactRequest,
-    GraphImpactResult, GraphImpactRetrievalPort, RetrievalPortContext, RetrievalPortOutcome,
 };
 use tracedecay_application::{
     AnalyzerAdmittedDiagnosticProviderV1, AuthorizationService, CancellationContext,
@@ -72,16 +67,6 @@ fn application_feedback_ports_are_object_safe(
     observations: &dyn FeedbackObservationPort,
 ) {
     let _ = (runtime, diagnostics, impact, dedupe, observations);
-}
-
-#[allow(dead_code)]
-fn application_feedback_evidence_ports_are_object_safe(
-    provider: &dyn DiagnosticProviderPort,
-    history: &dyn GenerationDiagnosticHistoryPort,
-    graph: &dyn GraphImpactRetrievalPort,
-    tests: &dyn AffectedTestsRetrievalPort,
-) {
-    let _ = (provider, history, graph, tests);
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -214,40 +199,6 @@ impl FeedbackImpactPort for ImpactFixture {
         self.calls.set(self.calls.get() + 1);
         let outcome = self.outcome.clone();
         Box::pin(async move { outcome })
-    }
-}
-
-#[derive(Clone)]
-struct GraphImpactSourceFixture {
-    calls: Arc<AtomicUsize>,
-    outcome: RetrievalPortOutcome<GraphImpactResult>,
-}
-
-impl GraphImpactRetrievalPort for GraphImpactSourceFixture {
-    fn graph_impact(
-        &self,
-        _context: &RetrievalPortContext<'_>,
-        _request: &GraphImpactRequest,
-    ) -> RetrievalPortOutcome<GraphImpactResult> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.outcome.clone()
-    }
-}
-
-#[derive(Clone)]
-struct AffectedTestsImpactSourceFixture {
-    calls: Arc<AtomicUsize>,
-    outcome: RetrievalPortOutcome<AffectedTestsResult>,
-}
-
-impl AffectedTestsRetrievalPort for AffectedTestsImpactSourceFixture {
-    fn affected_tests(
-        &self,
-        _context: &RetrievalPortContext<'_>,
-        _request: &AffectedTestsRequest,
-    ) -> RetrievalPortOutcome<AffectedTestsResult> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        self.outcome.clone()
     }
 }
 
@@ -862,24 +813,16 @@ fn partial_provider_coverage_is_not_promoted_by_analyzer_admission() {
 }
 
 #[test]
-fn adapters_short_circuit_cancellation_and_deadline_before_source_reads() {
+fn diagnostics_adapter_short_circuits_cancellation_and_deadline_before_source_reads() {
     let operation = common::operation();
     let cancelled = common::context(&operation).with_cancellation(
         CancellationContext::cancelled("cancel.feedback.adapter", UtcMicros(1)).unwrap(),
     );
     let timed_out = common::context(&operation).with_deadline(Deadline::new(UtcMicros(2)).unwrap());
 
-    for (context, expected_diagnostic_state, expected_impact) in [
-        (
-            cancelled,
-            DiagnosticProviderState::Cancelled,
-            FeedbackImpactPortOutcome::Cancelled,
-        ),
-        (
-            timed_out,
-            DiagnosticProviderState::TimedOut,
-            FeedbackImpactPortOutcome::TimedOut,
-        ),
+    for (context, expected_diagnostic_state) in [
+        (cancelled, DiagnosticProviderState::Cancelled),
+        (timed_out, DiagnosticProviderState::TimedOut),
     ] {
         let input = saved_input();
         let runtime = runtime_state(&input);
@@ -924,114 +867,7 @@ fn adapters_short_circuit_cancellation_and_deadline_before_source_reads() {
         assert!(history.is_empty());
         assert_eq!(current_calls.load(Ordering::Relaxed), 0);
         assert_eq!(history_calls.load(Ordering::Relaxed), 0);
-
-        let graph_calls = Arc::new(AtomicUsize::new(0));
-        let test_calls = Arc::new(AtomicUsize::new(0));
-        let impact = GraphImpactFeedbackAdapter::new(
-            GraphImpactSourceFixture {
-                calls: graph_calls.clone(),
-                outcome: RetrievalPortOutcome::Completed(common::evidence(GraphImpactResult {
-                    affected_files: Vec::new(),
-                    affected_callers: Vec::new(),
-                    evidence_anchors: Vec::new(),
-                })),
-            },
-            AffectedTestsImpactSourceFixture {
-                calls: test_calls.clone(),
-                outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
-                    tests: Vec::new(),
-                    attributions: Vec::new(),
-                })),
-            },
-            common::operation(),
-            common::operation(),
-        );
-        assert_eq!(
-            block_on(impact.impact(&context, &FeedbackImpactRequest { input })),
-            expected_impact
-        );
-        assert_eq!(graph_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(test_calls.load(Ordering::Relaxed), 0);
     }
-}
-
-#[test]
-fn graph_impact_adapter_preserves_partial_graph_coverage_and_test_evidence() {
-    let input = saved_input();
-    let graph_calls = Arc::new(AtomicUsize::new(0));
-    let test_calls = Arc::new(AtomicUsize::new(0));
-    let graph = GraphImpactSourceFixture {
-        calls: graph_calls.clone(),
-        outcome: RetrievalPortOutcome::Partial(common::evidence(GraphImpactResult {
-            affected_files: vec![common::id::<FileOccurrenceId>("file.affected.feedback")],
-            affected_callers: vec![common::id::<SymbolOccurrenceId>("symbol.caller.feedback")],
-            evidence_anchors: vec![common::id::<RetrievalAnchorId>(
-                "anchor.impact.partial.feedback",
-            )],
-        })),
-    };
-    let tests = AffectedTestsImpactSourceFixture {
-        calls: test_calls.clone(),
-        outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
-            tests: vec![common::id::<SymbolOccurrenceId>("symbol.test.feedback")],
-            attributions: Vec::new(),
-        })),
-    };
-    let adapter =
-        GraphImpactFeedbackAdapter::new(graph, tests, common::operation(), common::operation());
-
-    let result = block_on(adapter.impact(
-        &common::context(&common::operation()),
-        &FeedbackImpactRequest {
-            input: input.clone(),
-        },
-    ));
-
-    assert_eq!(graph_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(test_calls.load(Ordering::Relaxed), 1);
-    let FeedbackImpactPortOutcome::Partial(impact) = result else {
-        panic!("partial graph coverage must remain partial feedback evidence");
-    };
-    assert_eq!(impact.target, input.target);
-    assert_eq!(impact.state, FeedbackImpactStateV1::Partial);
-    assert_eq!(impact.affected_tests_state, FeedbackImpactStateV1::Complete);
-    assert_eq!(
-        impact.affected_tests,
-        vec![common::id::<SymbolOccurrenceId>("symbol.test.feedback")]
-    );
-}
-
-#[test]
-fn failed_graph_outcome_cannot_promote_its_payload_to_partial_evidence() {
-    let input = saved_input();
-    let graph_calls = Arc::new(AtomicUsize::new(0));
-    let test_calls = Arc::new(AtomicUsize::new(0));
-    let graph = GraphImpactSourceFixture {
-        calls: graph_calls.clone(),
-        outcome: RetrievalPortOutcome::Failed(common::evidence(GraphImpactResult {
-            affected_files: vec![common::id::<FileOccurrenceId>("file.failed.feedback")],
-            affected_callers: Vec::new(),
-            evidence_anchors: Vec::new(),
-        })),
-    };
-    let tests = AffectedTestsImpactSourceFixture {
-        calls: test_calls.clone(),
-        outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
-            tests: Vec::new(),
-            attributions: Vec::new(),
-        })),
-    };
-    let adapter =
-        GraphImpactFeedbackAdapter::new(graph, tests, common::operation(), common::operation());
-
-    let result = block_on(adapter.impact(
-        &common::context(&common::operation()),
-        &FeedbackImpactRequest { input },
-    ));
-
-    assert_eq!(graph_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(test_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(result, FeedbackImpactPortOutcome::Unavailable);
 }
 
 fn matching_baseline(

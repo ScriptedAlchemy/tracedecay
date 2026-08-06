@@ -14,10 +14,9 @@ use tracedecay_runtime_core::db::Database;
 use super::github_runtime::GitHubSourceAccessAuthorityV1;
 use super::proximity_runtime::production_proximity_evidence_authority_v1;
 use super::{
-    CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
-    AdvisoryDaemonStartupRegistrationV1, AdvisoryHookLookupNoticeV1,
-    AdvisoryHookNoticeSinkV1, AdvisoryProviderAuthoritiesV1, ProductionCiArchiveHandleV1,
-    ProductionCiExactEvidenceHandleV1, ProductionCiProviderConfigV1,
+    AdvisoryDaemonStartupRegistrationV1, AdvisoryHookLookupNoticeV1, AdvisoryHookNoticeSinkV1,
+    AdvisoryProviderAuthoritiesV1, CiCodeAnchorStoreV1, CiRetainedProviderObservationAuthorityV1,
+    ProductionCiArchiveHandleV1, ProductionCiExactEvidenceHandleV1, ProductionCiProviderConfigV1,
     ProjectGitHubAnchorAuthorityV1, SharedCanonicalProximityEvidenceAuthorityV1,
     github_anchor_authorities_arc_v1, new_advisory_hook_delivery_port,
     open_production_ci_provider_authorities_v1, unavailable_production_ci_provider_authorities_v1,
@@ -136,8 +135,7 @@ pub fn open_advisory_production_authorities(
         None => unavailable_production_ci_provider_authorities_v1(),
     };
     let (ci_source, ci_exact_evidence) = ci.into_registrar_parts();
-    let hook_delivery_port =
-        new_advisory_hook_delivery_port(feedback_scope, hook_v2, legacy_hook);
+    let hook_delivery_port = new_advisory_hook_delivery_port(feedback_scope, hook_v2, legacy_hook);
 
     Ok(AdvisoryProductionAuthoritiesV1 {
         providers: AdvisoryProviderAuthoritiesV1 {

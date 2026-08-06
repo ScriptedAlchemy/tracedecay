@@ -1689,8 +1689,7 @@ fn encode_bounded_observation_ledger(
         retain_removed_boot_accounting(ledger, 0);
     }
     loop {
-        let encoded =
-            serde_json::to_string(ledger).map_err(|_| FeedbackRuntimeError::Corrupt)?;
+        let encoded = serde_json::to_string(ledger).map_err(|_| FeedbackRuntimeError::Corrupt)?;
         if encoded.len() <= max_bytes {
             return Ok(encoded);
         }

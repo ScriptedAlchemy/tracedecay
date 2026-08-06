@@ -44,9 +44,7 @@ use super::ci_runtime::{
     ProductionCiFailureDiscoveryOutcomeV1,
 };
 use super::github_runtime::GitHubSourceAccessAuthorityV1;
-use super::proximity_runtime::{
-    ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1,
-};
+use super::proximity_runtime::{ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1};
 use super::{
     CanonicalProximityEvidenceAuthorityV1, GitHubCanonicalReviewAnchorAuthorityV1,
     GitHubCurrentBranchRemapper, GitHubReviewRefreshOutcomeV1, GitHubReviewRuntimeOwnerConfigV1,
@@ -60,7 +58,7 @@ mod registration;
 
 pub use cycle::AdvisoryRuntime;
 pub use model::{
-    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, AdvisoryContributionsV1,
+    AdvisoryContributionsV1, AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
     AdvisoryProviderAuthoritiesV1, AdvisoryProviderStateV1, AdvisoryProviderV1,
     AdvisoryRuntimeOpenErrorV1, AdvisoryRuntimeOpenV1,
 };
