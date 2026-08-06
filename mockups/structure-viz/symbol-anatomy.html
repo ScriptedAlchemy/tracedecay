@@ -349,7 +349,7 @@ td, th { padding: 0; text-align: left; font-weight: inherit; }
               struck 4 min ago · <span style="color:var(--raw-text-secondary)">write</span>
             </div>
             <div class="td-legend" style="text-transform:none;letter-spacing:normal;margin-top:5px">
-              by <span class="td-value" style="font-size:var(--text-2xs)">PR14 code spine redesign</span>
+              by <span class="td-value" style="font-size:var(--text-2xs)">code spine redesign</span>
               on claude-code · this thread is open now
             </div>
           </div>
@@ -426,7 +426,7 @@ const BAR_UNIT = 15;                /* px per call site */
 const BAR_BASE = 10;                /* px floor, so 1 site is still a body */
 
 const SESSIONS = [
-  { title: 'PR14 code spine redesign', host: 'claude-code', date: '2026-07-24', days: 0,  msgs: 214, open: true },
+  { title: 'code spine redesign', host: 'claude-code', date: '2026-07-24', days: 0,  msgs: 214, open: true },
   { title: 'graph_overview scope leak', host: 'codex',      date: '2026-07-11', days: 13, msgs: 96 },
   { title: 'retrieval catalog parity',  host: 'claude-code', date: '2026-06-28', days: 26, msgs: 148 },
   { title: 'doctor probe wiring',       host: 'cursor',     date: '2026-06-19', days: 35, msgs: 41 },
@@ -439,7 +439,7 @@ const FACTS = [
   { trust: 0.98, kind: 'decision', text: 'graph_overview must admit scope through policy::routing before it touches the store; the store layer trusts its caller.' },
   { trust: 0.94, kind: 'project',  text: 'top_connected_rows serves exactly twelve rows and five fields — id, name, kind, file_path, degree.' },
   { trust: 0.81, kind: 'decision', text: 'the overview is unseeded; reseeding happens only on symbol selection.' },
-  { trust: 0.46, kind: 'project',  text: 'kind_histogram was moved out of the overview payload in PR12.' },
+  { trust: 0.46, kind: 'project',  text: 'kind_histogram is no longer part of the overview payload.' },
 ];
 
 const TESTS = [

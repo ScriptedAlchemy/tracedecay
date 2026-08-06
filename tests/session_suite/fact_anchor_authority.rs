@@ -26,7 +26,7 @@ use tracedecay_domain::{
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
-    ProjectId, ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
+    ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1, RetentionClass,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     ScopeResolutionId, SensitivityV1, UtcMicros, VectorWatermark,
@@ -65,7 +65,7 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
             SanitizationReceiptId::new(receipt_id).unwrap(),
-            ComponentVersion::new("sanitizer.pr7.authority.v1").unwrap(),
+            ComponentVersion::new("sanitizer.fact-anchor-authority.v1").unwrap(),
         )
         .unwrap(),
         SanitizerDispositionV1::Accepted,
@@ -80,7 +80,7 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
         vec!["TraceDecay".to_owned()],
         json!({}),
         receipt,
-        RetentionClass::new("retention.pr7.authority").unwrap(),
+        RetentionClass::new("retention.fact-anchor-authority").unwrap(),
     )
     .unwrap()
 }
@@ -101,20 +101,21 @@ fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> Retri
         ingested_at: UtcMicros(ingested_at),
         evidence_class: EvidenceClass::Observed,
         source_generation: AnchorSourceGenerationV2::Unknown,
-        projection_generation: ProjectionGenerationId::new("projection.pr7.authority").unwrap(),
+        projection_generation: ProjectionGenerationId::new("projection.fact-anchor-authority")
+            .unwrap(),
         projection_watermark: VectorWatermark::default(),
         coverage: CoverageReportV1::default(),
         source_observations: vec![],
         source_anchors: vec![],
         authorization: ResolutionAuthorizationV1 {
-            resolved_scope_id: ScopeResolutionId::new("scope.pr7.authority").unwrap(),
-            privacy_domain_id: PrivacyDomainId::new("privacy.pr7.authority").unwrap(),
+            resolved_scope_id: ScopeResolutionId::new("scope.fact-anchor-authority").unwrap(),
+            privacy_domain_id: PrivacyDomainId::new("privacy.fact-anchor-authority").unwrap(),
             access_policy_digest: AccessPolicyDigest::new(DIGEST_A).unwrap(),
             capability_id: CapabilityId::new("capability.fact-anchor-authority").unwrap(),
             canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
         },
         payload_access: PayloadAccessState::Eligible,
-        retention_class: RetentionClass::new("retention.pr7.authority").unwrap(),
+        retention_class: RetentionClass::new("retention.fact-anchor-authority").unwrap(),
         durability: AnchorDurabilityClass::DurableEvidence,
     })
     .unwrap()
@@ -273,8 +274,7 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
-    let lease =
-        acquire_exclusive_for_profile(&profile_root, "revoked authority fixture").unwrap();
+    let lease = acquire_exclusive_for_profile(&profile_root, "revoked authority fixture").unwrap();
     let scope =
         enter_maintenance_database_scope(&lease, &profile_root, "revoked authority fixture")
             .unwrap();
@@ -473,14 +473,14 @@ async fn register_project(
 async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical_identity() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
-    let remote = "https://github.com/pr7/ambiguous.git";
+    let remote = "https://github.com/tracedecay-fixture/ambiguous.git";
     let root_a = tmp.path().join("project-a");
     let common_a = root_a.join(".git");
     let root_b = tmp.path().join("project-b");
     let common_b = root_b.join(".git");
     register_project(
         &runtime,
-        "pr7.project.ambiguity-a",
+        "fact-anchor.project.ambiguity-a",
         &root_a,
         &common_a,
         remote,
@@ -491,11 +491,11 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         .resolve_unique_project_store_by_git_remote(remote)
         .await
         .expect("a single registered project must resolve through its remote");
-    assert_eq!(unique.project.project_id, "pr7.project.ambiguity-a");
+    assert_eq!(unique.project.project_id, "fact-anchor.project.ambiguity-a");
 
     register_project(
         &runtime,
-        "pr7.project.ambiguity-b",
+        "fact-anchor.project.ambiguity-b",
         &root_b,
         &common_b,
         remote,
@@ -516,8 +516,14 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         .await
         .unwrap()
         .expect("project A must keep its canonical identity resolution");
-    assert_eq!(still_a.project.project_id, "pr7.project.ambiguity-a");
-    assert_eq!(still_a.store.store_id, "store_pr7.project.ambiguity-a");
+    assert_eq!(
+        still_a.project.project_id,
+        "fact-anchor.project.ambiguity-a"
+    );
+    assert_eq!(
+        still_a.store.store_id,
+        "store_fact-anchor.project.ambiguity-a"
+    );
 
     // A linked worktree has no marker and no path alias of its own; it must
     // resolve to the primary checkout's canonical project identity through
@@ -528,7 +534,7 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         .await
         .unwrap()
         .expect("a linked worktree must resolve through the canonical project identity");
-    assert_eq!(linked.project.project_id, "pr7.project.ambiguity-a");
+    assert_eq!(linked.project.project_id, "fact-anchor.project.ambiguity-a");
     assert_eq!(linked.store.store_id, still_a.store.store_id);
 
     // Unknown scope fails closed too: no identity, no store, and no alias or
@@ -755,8 +761,7 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
     let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
     let lease = acquire_exclusive_for_profile(&profile_root, "single writer fixture").unwrap();
     let scope =
-        enter_maintenance_database_scope(&lease, &profile_root, "single writer fixture")
-            .unwrap();
+        enter_maintenance_database_scope(&lease, &profile_root, "single writer fixture").unwrap();
     let authority = DatabaseAuthority::for_runtime(&db_path, "single writer fixture")
         .expect("a live maintenance scope must grant the write authority");
     let db = Database::publish_maintenance_test_runtime(

@@ -587,7 +587,7 @@ fn review_version_digest(
     (!updated_at.is_empty() && updated_at.len() <= 64 && !updated_at.chars().any(char::is_control))
         .then_some(())?;
     tracedecay_domain::canonical_sha256(&(
-        "tracedecay.pr13.github.review-version.v1",
+        "tracedecay.advisory.github.review-version.v1",
         comment_id,
         updated_at,
         body_digest,

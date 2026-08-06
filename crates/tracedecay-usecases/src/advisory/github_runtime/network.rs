@@ -28,7 +28,7 @@ use super::{
 };
 
 pub const GITHUB_REVIEW_THREADS_QUERY_V1: &str = r"
-query TraceDecayReviewThreads(
+query TraceDecayGitHubReviewThreads(
   $owner: String!
   $repository: String!
   $number: Int!

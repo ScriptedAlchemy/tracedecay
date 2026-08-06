@@ -244,7 +244,7 @@ pub fn load_advisory_source_backed_composite_fixture_v1()
     )?;
     require_eq(
         str_at(&thread, "/capture/operation_name")?,
-        "TraceDecayReviewThreads".to_owned(),
+        "TraceDecayGitHubReviewThreads".to_owned(),
         "review-thread operation name",
     )?;
     require_eq(
@@ -459,7 +459,7 @@ pub fn load_advisory_source_backed_composite_fixture_v1()
             comment_id: GitHubReviewCommentIdV1::new(comment_id.to_string())
                 .map_err(|_| inconsistent("review comment id"))?,
             version_digest: canonical_sha256(&(
-                "tracedecay.pr13.github.review-version.v1",
+                "tracedecay.advisory.github.review-version.v1",
                 GitHubReviewCommentIdV1::new(comment_id.to_string())
                     .map_err(|_| inconsistent("review comment version id"))?,
                 str_at(&comment, "/response/updated_at")?,

@@ -38,9 +38,10 @@ pub use authority::{
     ProductionProximityEvidenceAuthorityV1, SharedCanonicalProximityEvidenceAuthorityV1,
 };
 
-const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str = "tracedecay.pr13.proximity.contribution-id.v1";
+const PROXIMITY_CONTRIBUTION_ID_DOMAIN_V1: &str =
+    "tracedecay.advisory.proximity.contribution-id.v1";
 const PROXIMITY_CONFIGURATION_REVISION_DOMAIN_V1: &str =
-    "tracedecay.pr13.proximity.configuration-revision.v1";
+    "tracedecay.advisory.proximity.configuration-revision.v1";
 
 /// Exact Plan 20 threshold input for one evaluation. Revision and effective
 /// behavior digest are pinned together before provider evidence is read.
@@ -371,8 +372,7 @@ where
             };
             contributions.push(contribution);
         }
-        let Some(contributor) =
-            ProximityFindingContributorV1::new(contributions, batch.coverage)
+        let Some(contributor) = ProximityFindingContributorV1::new(contributions, batch.coverage)
         else {
             return ProximityRuntimeOutcomeV1::Unavailable;
         };

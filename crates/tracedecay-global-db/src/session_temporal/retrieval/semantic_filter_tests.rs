@@ -90,7 +90,7 @@ fn goal_only_time_filter_uses_canonical_observation_timestamp() {
         item_order: None,
         revision: None,
         event_sequence: None,
-        content: Some(json!({"objective": "finish PR8"})),
+        content: Some(json!({"objective": "finish temporal retrieval"})),
     };
     let encoded = encoded_observation_at(vec![goal.clone()], Some(42));
     let filter = TemporalCandidateFilterV1 {
@@ -123,7 +123,7 @@ fn goal_role_and_time_eligibility_are_conjunctive_before_ranking() {
     let encoded = encoded_observation(vec![
         CanonicalObservationFactV1::Message {
             role: CanonicalMessageRoleV1::User,
-            content: json!({"text": "ship PR8"}),
+            content: json!({"text": "ship temporal retrieval"}),
             model: None,
             timestamp: Some(42),
         },
@@ -138,7 +138,7 @@ fn goal_role_and_time_eligibility_are_conjunctive_before_ranking() {
             item_order: None,
             revision: None,
             event_sequence: None,
-            content: Some(json!({"text": "ship PR8"})),
+            content: Some(json!({"text": "ship temporal retrieval"})),
         },
     ]);
     let filter = TemporalCandidateFilterV1 {

@@ -1,4 +1,4 @@
-//! Bounded Context Scout host-facing contracts (Plan 22 / PR13).
+//! Bounded Context Scout host-facing contracts.
 //!
 //! The daemon owns retrieval, policy persistence, model execution, and every
 //! side effect. This module is deliberately limited to deterministic candidate

@@ -1,5 +1,4 @@
-//! `GET /api/doctor/findings` — root composition for the Doctor finding family
-//! (plan 09 §PR14 / plan 11 §"Typed presentation contracts").
+//! `GET /api/doctor/findings` — root composition for the Doctor finding family.
 //!
 //! An admitted daemon owner injects the canonical composed report reader into
 //! [`DashboardState`]. This module only resolves scope and invokes that reader.
