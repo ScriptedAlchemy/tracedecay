@@ -2,9 +2,9 @@
 
 ## Status and existing foundation
 
-PR6 established one host-neutral integration manifest, native observation
+The provider-capture delivery established one host-neutral integration manifest, native observation
 adapters for Claude Code, Codex, Cursor, Hermes, and Kiro, explicit
-Cline-family capability evidence, and daemon host admission. PR13 adds the
+Cline-family capability evidence, and daemon host admission. The advisory feedback delivery adds the
 verified Kimi Code and OpenCode capabilities and turns that foundation into
 installable, repairable host integrations that deliver the working feedback
 journey. It does not add a second catalog or a generic connector framework.
@@ -33,7 +33,7 @@ matrices, and intermediate registration scaffolding are historical evidence,
 not acceptance requirements.
 
 Only actually independently released host/provider protocols and names retain
-compatibility. Pure transient PR13 source-only/internal helpers and
+compatibility. Pure transient source-only/internal helpers and
 wire-visible V2 request revisions change in place. Generated host files, local
 queues, checkpoints, receipts, and every other persisted V2 state accept only
 their exact final shape; any other database, store, spool, file, or projection
@@ -41,7 +41,7 @@ returns typed `ResetRequired` and requires explicit reset or recreation. No
 storage reader, migration, backfill, dual write, or census path exists.
 Bundle/protocol negotiation remains separate for actual released-version skew.
 
-## PR13 user outcome
+## Host feedback user outcome
 
 A user can install TraceDecay into every supported host, make an edit or stop
 an agent, and receive the same authorized feedback through the best native
@@ -112,18 +112,18 @@ may use HTTP `POST` only for the one shipped compile-time static audited
 allowlisted `query`. Mutation documents, write-capable methods, and
 write-capable or indeterminate credential scopes fail before network access.
 
-## PR13 implementation slices
+## Host feedback implementation slices
 
 ### Package the supported host paths
 
 - Generate thin host-native artifacts from the existing integration manifest
   and pin them to compatible TraceDecay protocol and catalog revisions.
-- Ship every PR13 first-party host bundle as a versioned embedded asset in the
-  trusted TraceDecay binary. PR13 has no detached bundle signature, bundle trust
+- Ship every first-party host bundle as a versioned embedded asset in the
+  trusted TraceDecay binary. There is no detached bundle signature, bundle trust
   root, delegated release key, or bundle-key revocation path. Content digests
   detect accidental corruption; schema, version, and capability checks enforce
   compatibility.
-- Reject external and third-party bundle loading in PR13. If a real external
+- Reject external and third-party bundle loading. If a real external
   distribution path is added later, that feature defines and validates its own
   trust model instead of predeclaring one here.
 - Keep a mandatory MCP-free core path with CLI, hooks, skills, and daemon API
@@ -141,7 +141,7 @@ write-capable or indeterminate credential scopes fail before network access.
   native adapter.
 - Package Kimi Code's documented plugin manifest and global-hook forms without
   conflating their ownership or scope. Register only `PostToolUse` and `Stop`
-  for PR13 feedback, install MCP and skills/commands through their native
+  for advisory feedback, install MCP and skills/commands through their native
   mechanisms, and preserve unrelated global hooks and plugin state.
 - Package an OpenCode local JS/TS plugin for `file.edited`,
   `tool.execute.after`, `session.idle`/`session.status`, and LSP events, plus
@@ -203,7 +203,7 @@ write-capable or indeterminate credential scopes fail before network access.
   generation.
 - Do not add Octocrab, `backon`, or `graphql-parser`; the refresh owner keeps
   its explicit bounded retry and `Retry-After` behavior.
-- Implement the one concrete read-only GitHub review refresh needed by PR13.
+- Implement the one concrete read-only GitHub review refresh advisory feedback needs.
   Do not introduce provider-neutral source connector catalogs, generic query
   capability projections, signed connector-selection schemas, or planner
   manifests for hypothetical providers.
@@ -275,12 +275,12 @@ the host observation replay spool.
   templates), and instruction/rules content independently; one healthy
   surface never conceals another surface's conflict or unavailable state.
 - Emit host registration, version-skew, endpoint, hook-delivery, and protocol
-  conformance evidence for PR14 Doctor consumption. PR13 owns the actual
-  repair mechanics; PR14 owns diagnosis and orchestration.
+  conformance evidence for Doctor consumption. Host lifecycle owns the actual
+  repair mechanics; Doctor owns diagnosis and orchestration.
 
 ## Replacement and deletion
 
-- Delete source-only PR6 compatibility generators and duplicate integration
+- Delete source-only provider-capture compatibility generators and duplicate integration
   scaffolds once all package projections consume the single existing manifest.
   Actual independently released protocol names and revisions follow their
   public support policy. Persisted manifests, generated host files, queues,
@@ -362,20 +362,20 @@ the host observation replay spool.
 
 ## Later callable extensions
 
-- **PR14:** Dashboard and Doctor call the shipped host status and confirmed
+- **Dashboard and Doctor:** call the shipped host status and confirmed
   lifecycle operations. They do not redefine install/repair mechanics.
-- **PR15:** A callable read-only capability probe may expose optional GitHub
+- **Multi-root/stack signals:** A callable read-only capability probe may expose optional GitHub
   Stacked PR preview state and hand off to standard Git/forge reads when it is
   absent or degraded. It never invokes provider mutation, rebase, or
   force-push.
-- **PR17:** Host packages may add the callable Plan 24 work surface and Plan 32
+- **Work and runtime capabilities:** Host packages may add the callable Plan 24 work surface and Plan 32
   native Claude Code/Codex execution adapters, including the independently
   installable Work MCP companion. Discovery reports configured executables and
   protocol capability; Plan 32 alone admits, invokes, supervises, cancels, and
   records execution. No backend substitution, ambient-`PATH` authority, or
   host-local scheduler is allowed.
 
-  The retained PR17 host projection includes canonical worktree context,
+  The retained work-capability host projection includes canonical worktree context,
   addressed task-event ingress/delivery, hook/LSP/native-diagnostics fanout,
   CLI fallback, Plan 36 native-integration preflight/apply availability, and
   independently reported Claude Code CLI, Codex app-server, and policy-eligible
