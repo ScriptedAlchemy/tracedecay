@@ -15,11 +15,6 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
-  "files": [
-    "dist/**",
-    "README.md",
-    "LICENSE"
-  ],
   "contributes": {
     "configuration": {
       "title": "TraceDecay",
@@ -33,11 +28,10 @@
     }
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.js",
+    "build": "node scripts/build-extension.mjs",
+    "check:embedded": "node scripts/build-extension.mjs --check",
     "check": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts",
-    "prepackage": "node -e \"require('node:fs').rmSync('dist/tracedecay-cursor-native.vsix', { force: true })\"",
-    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out dist/tracedecay-cursor-native.vsix"
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "vscode-languageclient": "^10.1.0"
@@ -45,7 +39,6 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/vscode": "^1.125.0",
-    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"
