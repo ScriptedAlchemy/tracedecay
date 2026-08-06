@@ -536,8 +536,7 @@ where
     let mut control_observation = control
         .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
         .map(|stop| stop.observation);
-    let committed_state =
-        source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+    let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if outcome.success() && (!plan_complete || committed_state != predicted_state) {
         let live_outcome = SourceEditOutcome::EffectUnknown {
             message: "source edit effect is unknown and requires reconciliation: the observed committed state did not match the exact preview".to_owned(),
