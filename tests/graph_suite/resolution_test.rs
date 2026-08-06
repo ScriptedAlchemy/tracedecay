@@ -109,7 +109,7 @@ async fn setup_db_with_nodes() -> (TempDir, Database) {
 #[tokio::test]
 async fn test_resolve_exact_name_match() {
     let (_dir, db) = setup_db_with_nodes().await;
-    let resolver = ReferenceResolver::from_nodes(&db, &db.get_all_nodes().await.unwrap());
+    let resolver = ReferenceResolver::from_nodes(&db.get_all_nodes().await.unwrap());
 
     let uref = UnresolvedRef {
         from_node_id: generate_node_id("src/main.rs", &NodeKind::Function, "main", 1),
@@ -137,7 +137,7 @@ async fn test_resolve_exact_name_match() {
 #[tokio::test]
 async fn test_resolve_qualified_name_match() {
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &fixture.nodes);
+    let resolver = ReferenceResolver::from_nodes(&fixture.nodes);
 
     let uref = UnresolvedRef {
         from_node_id: generate_node_id("src/main.rs", &NodeKind::Function, "main", 1),
@@ -162,7 +162,7 @@ async fn test_resolve_qualified_name_match() {
 #[tokio::test]
 async fn test_resolve_all() {
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &fixture.nodes);
+    let resolver = ReferenceResolver::from_nodes(&fixture.nodes);
 
     let refs = vec![UnresolvedRef {
         from_node_id: generate_node_id("src/main.rs", &NodeKind::Function, "main", 1),
@@ -183,7 +183,7 @@ async fn test_resolve_all() {
 #[tokio::test]
 async fn test_unresolvable_reference() {
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &fixture.nodes);
+    let resolver = ReferenceResolver::from_nodes(&fixture.nodes);
 
     let uref = UnresolvedRef {
         from_node_id: "function:caller".to_string(),
@@ -203,7 +203,7 @@ async fn test_unresolvable_reference() {
 #[tokio::test]
 async fn test_unresolvable_in_resolve_all() {
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &fixture.nodes);
+    let resolver = ReferenceResolver::from_nodes(&fixture.nodes);
 
     let refs = vec![
         UnresolvedRef {
@@ -234,7 +234,7 @@ async fn test_unresolvable_in_resolve_all() {
 #[tokio::test]
 async fn test_creates_edges_from_resolved() {
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &fixture.nodes);
+    let resolver = ReferenceResolver::from_nodes(&fixture.nodes);
 
     let resolved = ResolvedRef {
         original: UnresolvedRef {
@@ -296,7 +296,7 @@ async fn test_multiple_candidates_best_match_scoring() {
     );
     let nodes = vec![same_file_node.clone(), other_file_node, caller.clone()];
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+    let resolver = ReferenceResolver::from_nodes(&nodes);
 
     // Reference from src/main.rs should prefer the same-file candidate.
     let uref = UnresolvedRef {
@@ -374,7 +374,7 @@ fn prefilter_nodes() -> Vec<Node> {
 async fn test_prefilter_admits_prefixed_module_calls() {
     let fixture = resolution_fixture().await;
     let nodes = prefilter_nodes();
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+    let resolver = ReferenceResolver::from_nodes(&nodes);
 
     let caller = generate_node_id("src/dispatch.rs", &NodeKind::Function, "dispatch", 1);
     let refs = vec![
@@ -466,7 +466,7 @@ async fn test_prefilter_admits_prefixed_module_calls() {
 async fn test_dispatch_handler_gains_caller_edge() {
     let fixture = resolution_fixture().await;
     let nodes = prefilter_nodes();
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+    let resolver = ReferenceResolver::from_nodes(&nodes);
 
     let handler_id = generate_node_id("src/handlers.rs", &NodeKind::Function, "handle_ping", 10);
     let dispatch_ref = UnresolvedRef {
@@ -518,7 +518,7 @@ async fn test_prefilter_collision_resolves_without_fabricating() {
     );
     let nodes = vec![render_a.clone(), render_b.clone()];
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+    let resolver = ReferenceResolver::from_nodes(&nodes);
 
     // Neutral caller file so neither candidate wins on same-file proximity.
     let uref = UnresolvedRef {
@@ -550,7 +550,7 @@ async fn test_prefilter_collision_resolves_without_fabricating() {
 #[tokio::test]
 async fn test_create_edges_empty_input() {
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &fixture.nodes);
+    let resolver = ReferenceResolver::from_nodes(&fixture.nodes);
 
     let edges = resolver.create_edges(&[]);
     assert!(edges.is_empty());
@@ -559,7 +559,7 @@ async fn test_create_edges_empty_input() {
 #[tokio::test]
 async fn test_resolve_all_empty_input() {
     let fixture = resolution_fixture().await;
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &fixture.nodes);
+    let resolver = ReferenceResolver::from_nodes(&fixture.nodes);
 
     let result = resolver.resolve_all(&[]);
     assert_eq!(result.total, 0);
@@ -585,7 +585,7 @@ async fn test_prefilter_rejects_external_crate_qualified_calls() {
         "fn to_string() -> String",
         Visibility::Pub,
     )];
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+    let resolver = ReferenceResolver::from_nodes(&nodes);
 
     let caller = generate_node_id("src/main.rs", &NodeKind::Function, "main", 1);
     let refs = vec![
@@ -633,7 +633,7 @@ async fn test_prefilter_admits_known_module_qualified_calls() {
         file_path: "src/handlers.rs".to_string(),
         ..nodes[0].clone()
     });
-    let resolver = ReferenceResolver::from_nodes(&fixture.db, &nodes);
+    let resolver = ReferenceResolver::from_nodes(&nodes);
 
     let caller = generate_node_id("src/dispatch.rs", &NodeKind::Function, "dispatch", 1);
     let refs = vec![UnresolvedRef {

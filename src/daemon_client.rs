@@ -16,8 +16,8 @@ use tracedecay_application::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
     ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
     ApplicationResponse, CancellationSignal, CancellationStage, Deadline, InvocationError,
-    InvocationTarget, LegalAction, OpaqueCursor, PageRequest, RequestId, RetryDirective,
-    SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
+    InvocationTarget, OpaqueCursor, PageRequest, RequestId, SafeDiagnostic, StreamEvent,
+    StreamEventKind, StreamTermination,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_lsp::{FramePoll, FrameSend};
@@ -277,13 +277,6 @@ pub fn resolve_dispatch<T>(
     ))
 }
 
-/// The daemon admission lanes used by the live invocation error mapping.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DaemonAdmissionClass {
-    General,
-    ReservedControl,
-}
-
 /// An invocation paired with the request identity used for daemon dispatch.
 pub struct DispatchedInvocation<T> {
     pub request_id: RequestId,
@@ -354,14 +347,6 @@ pub enum DaemonInvocationError {
     TimedOut {
         stage: CancellationStage,
     },
-    #[allow(dead_code)] // reserved backpressure state — staged
-    Saturated {
-        class: DaemonAdmissionClass,
-    },
-    #[allow(dead_code)] // reserved backpressure state — staged
-    Backpressured {
-        stage: CancellationStage,
-    },
     Unavailable,
 }
 
@@ -370,45 +355,11 @@ impl DaemonInvocationError {
         match self {
             Self::Cancelled { .. } => ApplicationProblem::cancelled_before_admission(),
             Self::TimedOut { .. } => ApplicationProblem::timed_out_before_admission(),
-            Self::Saturated { class } => ApplicationProblem::Saturated {
-                diagnostic: SafeDiagnostic {
-                    code: match class {
-                        DaemonAdmissionClass::General => "daemon_general_capacity_saturated",
-                        DaemonAdmissionClass::ReservedControl => {
-                            "daemon_control_capacity_saturated"
-                        }
-                    }
-                    .to_owned(),
-                    message: "The owning TraceDecay daemon has no admission capacity".to_owned(),
-                },
-                retry: RetryDirective::AfterDelay,
-                legal_actions: vec![LegalAction::Retry],
-            },
-            Self::Backpressured { stage } => ApplicationProblem::Saturated {
-                diagnostic: SafeDiagnostic {
-                    code: format!("daemon_backpressured_{}", cancellation_stage_name(stage)),
-                    message: "The owning TraceDecay daemon applied request backpressure".to_owned(),
-                },
-                retry: RetryDirective::AfterDelay,
-                legal_actions: vec![LegalAction::Retry],
-            },
             Self::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "daemon_unavailable".to_owned(),
                 message: "The owning TraceDecay daemon is unavailable".to_owned(),
             }),
         }
-    }
-}
-
-const fn cancellation_stage_name(stage: CancellationStage) -> &'static str {
-    match stage {
-        CancellationStage::BeforeAdmission => "before_admission",
-        CancellationStage::BeforeRead => "before_read",
-        CancellationStage::DuringRead => "during_read",
-        CancellationStage::BeforeEffect => "before_effect",
-        CancellationStage::EffectInFlight => "effect_in_flight",
-        CancellationStage::Reconciling => "reconciling",
-        CancellationStage::AfterCommit => "after_commit",
     }
 }
 
@@ -925,9 +876,6 @@ pub(crate) fn map_invocation_error(error: DaemonInvocationError) -> InvocationEr
     match error {
         DaemonInvocationError::Cancelled { .. } => InvocationError::Cancelled,
         DaemonInvocationError::TimedOut { .. } => InvocationError::DeadlineExceeded,
-        DaemonInvocationError::Saturated { .. } | DaemonInvocationError::Backpressured { .. } => {
-            InvocationError::Unavailable
-        }
         DaemonInvocationError::Unavailable => InvocationError::Unavailable,
     }
 }
@@ -1282,9 +1230,7 @@ mod tests {
     use super::{
         DaemonInvocationError, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
     };
-    use tracedecay_application::{
-        ApplicationProblem, ApplicationProblemKind, CancellationStage, RetryDirective,
-    };
+    use tracedecay_application::{ApplicationProblemKind, CancellationStage};
 
     #[test]
     fn daemon_invocation_errors_keep_canonical_problem_categories() {
@@ -1308,23 +1254,6 @@ mod tests {
         ] {
             assert_eq!(error.into_application_problem().kind(), expected);
         }
-    }
-
-    #[test]
-    fn saturation_mapping_preserves_retry_without_resource_detail() {
-        let problem = DaemonInvocationError::Saturated {
-            class: super::DaemonAdmissionClass::General,
-        }
-        .into_application_problem();
-
-        assert!(matches!(
-            problem,
-            ApplicationProblem::Saturated {
-                retry: RetryDirective::AfterDelay,
-                legal_actions,
-                ..
-            } if legal_actions == vec![tracedecay_application::LegalAction::Retry]
-        ));
     }
 
     #[test]
