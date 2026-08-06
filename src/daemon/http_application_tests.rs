@@ -47,15 +47,27 @@ async fn request_path(
     authorization: Option<&str>,
     origin: Option<&str>,
 ) -> String {
+    request_path_with_body(service, method, path, authorization, origin, &[]).await
+}
+
+async fn request_path_with_body(
+    service: &DaemonHttpApplicationService,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    origin: Option<&str>,
+    body: &[u8],
+) -> String {
     let mut stream = tokio::net::TcpStream::connect(service.endpoint())
         .await
         .expect("connect daemon HTTP application service");
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\n\
          Host: {}\r\n\
-         Content-Length: 0\r\n\
+         Content-Length: {}\r\n\
          Connection: close\r\n",
-        service.endpoint()
+        service.endpoint(),
+        body.len(),
     );
     if let Some(authorization) = authorization {
         request.push_str("Authorization: ");
@@ -72,6 +84,10 @@ async fn request_path(
         .write_all(request.as_bytes())
         .await
         .expect("write HTTP request");
+    stream
+        .write_all(body)
+        .await
+        .expect("write HTTP request body");
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
@@ -244,6 +260,25 @@ async fn daemon_http_requires_bearer_before_application_dispatch() {
 }
 
 #[tokio::test]
+async fn daemon_http_rejects_unauthenticated_malformed_body_before_application_dispatch() {
+    let (service, calls) = service_with_probe().await;
+    let body = b"{not-json";
+    let response = request_path_with_body(
+        &service,
+        "POST",
+        &format!("/projects/{PROJECT_ID}/application/tests/results"),
+        None,
+        Some(service.origin()),
+        body,
+    )
+    .await;
+
+    assert_eq!(status(&response), StatusCode::UNAUTHORIZED);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
 async fn daemon_http_rejects_bearer_tokens_that_differ_by_content_or_length() {
     let (service, calls) = service_with_probe().await;
     let origin = service.origin().to_owned();
@@ -286,6 +321,25 @@ async fn daemon_http_dispatches_authenticated_project_route_to_canonical_router(
 
     assert_eq!(status(&response), StatusCode::NO_CONTENT);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn daemon_http_rejects_non_exact_application_route_without_dispatch() {
+    let (service, calls) = service_with_probe().await;
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    let response = request_path(
+        &service,
+        "POST",
+        &format!("/projects/{PROJECT_ID}/application/tests/results/extra"),
+        Some(&authorization),
+        Some(&origin),
+    )
+    .await;
+
+    assert_eq!(status(&response), StatusCode::NOT_FOUND);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
@@ -450,6 +504,52 @@ async fn daemon_http_cold_entry_resolves_project_before_canonical_dispatch() {
     assert_eq!(status(&second), StatusCode::NO_CONTENT);
     assert_eq!(resolver_calls.load(Ordering::Relaxed), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn daemon_http_cold_resolution_failure_returns_a_safe_typed_problem() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_resolver(|_| async {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "sensitive resolver detail must not cross HTTP".to_owned(),
+            })
+        })
+        .expect("install failing project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+
+    let response = request(&service, Some(&authorization), Some(&origin)).await;
+
+    assert_eq!(status(&response), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(response.contains("\"kind\":\"problem\""));
+    assert!(response.contains("\"kind\":\"unavailable\""));
+    assert!(response.contains("\"code\":\"http.project_router_unavailable\""));
+    assert!(!response.contains("sensitive resolver detail"));
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn daemon_http_unknown_project_returns_a_concealed_typed_problem() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_resolver(|_| async { Ok(None) })
+        .expect("install empty project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+
+    let response = request(&service, Some(&authorization), Some(&origin)).await;
+
+    assert_eq!(status(&response), StatusCode::NOT_FOUND);
+    assert!(response.contains("\"kind\":\"problem\""));
+    assert!(response.contains("\"kind\":\"not_found_or_not_authorized\""));
     service.shutdown().await.expect("shutdown HTTP service");
 }
 

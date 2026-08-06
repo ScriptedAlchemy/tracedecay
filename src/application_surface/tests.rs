@@ -27,9 +27,10 @@ use super::{
     ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
     ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
     HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
-    application_negotiated_features, application_surface_dispatch_input_with_controls,
-    current_micros, execute_application_surface, http_operation_event_router,
-    normalize_application_tool_args, parse_application_surface_request, plan26_sse_stream_event,
+    application_http_context, application_negotiated_features,
+    application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
+    http_operation_event_router, normalize_application_tool_args,
+    parse_application_surface_request, plan26_sse_stream_event,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
     surface_rejection_metadata,
 };
@@ -125,6 +126,41 @@ fn dispatch_controls_retain_the_callers_deadline_and_live_cancellation_identity(
             requested_at: UtcMicros(41)
         }
     ));
+}
+
+#[tokio::test]
+async fn http_context_caps_caller_deadline_at_the_transport_budget() {
+    let before = current_micros().expect("time before request");
+    let app = axum::Router::new()
+        .route(
+            "/deadline",
+            axum::routing::get(
+                |axum::extract::Extension(controls): axum::extract::Extension<
+                    tracedecay_api::HttpApplicationControls,
+                >| async move { controls.deadline.expires_at.0.to_string() },
+            ),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
+            application_http_context,
+        ));
+    let response = app
+        .oneshot(
+            Request::get("/deadline")
+                .header(super::HTTP_DEADLINE_HEADER, i64::MAX.to_string())
+                .body(Body::empty())
+                .expect("deadline request"),
+        )
+        .await
+        .expect("deadline response");
+    let after = current_micros().expect("time after request");
+    let expires_at = response_text(response)
+        .await
+        .parse::<i64>()
+        .expect("numeric effective deadline");
+
+    assert!(expires_at >= before.0.saturating_add(super::DEFAULT_DEADLINE_MICROS));
+    assert!(expires_at <= after.0.saturating_add(super::DEFAULT_DEADLINE_MICROS));
 }
 
 #[test]
@@ -1256,6 +1292,110 @@ async fn sse_disconnect_does_not_cancel_but_explicit_cancel_does() {
         .expect("cancel response");
     assert_eq!(cancelled.status(), StatusCode::ACCEPTED);
     assert!(emitter.is_cancelled());
+}
+
+#[tokio::test]
+async fn sse_last_event_id_resumes_after_the_delivered_event() {
+    let project_id = ProjectId::new("project.http-adapter").expect("project");
+    let authority = OperationEventAuthority::default();
+    let context = operation_context(&project_id);
+    let operation_id = OperationId::from_request(context.request_id().clone());
+    let emitter = authority
+        .begin(
+            &context,
+            OperationKind::GitPreview,
+            current_micros().expect("current time"),
+        )
+        .await
+        .expect("begin operation");
+    let app = http_operation_event_router(authority, project_id, Arc::default(), None);
+    let initial = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/operations/{operation_id}/events"))
+                .body(Body::empty())
+                .expect("initial SSE request"),
+        )
+        .await
+        .expect("initial SSE response");
+
+    emitter
+        .progress(1, Some(1))
+        .await
+        .expect("publish progress");
+    emitter
+        .terminal(completed_receipt(&context))
+        .await
+        .expect("publish terminal");
+    let resume_token = open_resume_token(&response_text(initial).await);
+
+    let resumed = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/operations/{operation_id}/events?resume_token={resume_token}"
+                ))
+                .header("last-event-id", "0")
+                .body(Body::empty())
+                .expect("resumed SSE request"),
+        )
+        .await
+        .expect("resumed SSE response");
+
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let body = response_text(resumed).await;
+    assert!(!body.contains("id: 0"));
+    assert!(body.contains("id: 1"));
+    assert!(body.contains("event: completed"));
+}
+
+#[tokio::test]
+async fn sse_malformed_or_overflowing_last_event_id_is_rejected() {
+    for last_event_id in ["not-a-sequence", "-1", "18446744073709551615"] {
+        let response = http_operation_event_router(
+            OperationEventAuthority::default(),
+            ProjectId::new("project.http-adapter").expect("project"),
+            Arc::default(),
+            None,
+        )
+        .oneshot(
+            Request::builder()
+                .uri("/operations/request.http-adapter/events")
+                .header("last-event-id", last_event_id)
+                .body(Body::empty())
+                .expect("SSE request"),
+        )
+        .await
+        .expect("SSE response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{last_event_id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sse_conflicting_explicit_cursor_and_last_event_id_is_rejected() {
+    let response = http_operation_event_router(
+        OperationEventAuthority::default(),
+        ProjectId::new("project.http-adapter").expect("project"),
+        Arc::default(),
+        None,
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/operations/request.http-adapter/events?next_sequence=43")
+            .header("last-event-id", "41")
+            .body(Body::empty())
+            .expect("SSE request"),
+    )
+    .await
+    .expect("SSE response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use axum::body::Body;
 use axum::extract::{Extension, Path as AxumPath, Query, State};
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -1485,7 +1485,8 @@ async fn application_http_context(
         },
         None => default_expires_at,
     };
-    let Ok(deadline) = Deadline::new(UtcMicros(caller_expires_at)) else {
+    let effective_expires_at = caller_expires_at.min(default_expires_at);
+    let Ok(deadline) = Deadline::new(UtcMicros(effective_expires_at)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     request.extensions_mut().insert(request_id.clone());
@@ -1580,9 +1581,41 @@ impl Drop for SseDisconnectObserver {
 #[serde(deny_unknown_fields)]
 struct HttpOperationEventQuery {
     #[serde(default)]
-    next_sequence: u64,
+    next_sequence: Option<u64>,
     #[serde(default)]
     resume_token: Option<ResumeToken>,
+}
+
+fn operation_event_next_sequence(
+    explicit_next_sequence: Option<u64>,
+    headers: &HeaderMap,
+) -> Result<u64, OperationEventError> {
+    let invalid_cursor = || {
+        OperationEventError::InvalidContext(
+            "operation-event resume cursor is invalid or conflicting".to_owned(),
+        )
+    };
+    let mut last_event_ids = headers.get_all("last-event-id").iter();
+    let from_last_event_id = match last_event_ids.next() {
+        None => None,
+        Some(value) => {
+            if last_event_ids.next().is_some() {
+                return Err(invalid_cursor());
+            }
+            let value = value.to_str().map_err(|_| invalid_cursor())?;
+            if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid_cursor());
+            }
+            let event_id = value.parse::<u64>().map_err(|_| invalid_cursor())?;
+            Some(event_id.checked_add(1).ok_or_else(invalid_cursor)?)
+        }
+    };
+    match (explicit_next_sequence, from_last_event_id) {
+        (Some(explicit), Some(from_header)) if explicit != from_header => Err(invalid_cursor()),
+        (Some(explicit), _) => Ok(explicit),
+        (None, Some(from_header)) => Ok(from_header),
+        (None, None) => Ok(0),
+    }
 }
 
 #[derive(Serialize)]
@@ -1779,6 +1812,7 @@ async fn http_operation_events(
     AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
     Extension(request_id): Extension<RequestId>,
     Extension(controls): Extension<HttpApplicationControls>,
+    headers: HeaderMap,
     Query(query): Query<HttpOperationEventQuery>,
 ) -> Response {
     let observation_subject = sse_observation_subject(&request_id, &operation_id);
@@ -1801,6 +1835,10 @@ async fn http_operation_events(
         .await;
         return operation_event_problem(&request_id, OperationEventError::NotFoundOrNotAuthorized);
     };
+    let next_sequence = match operation_event_next_sequence(query.next_sequence, &headers) {
+        Ok(next_sequence) => next_sequence,
+        Err(error) => return operation_event_problem(&request_id, error),
+    };
     let observed_at = match current_micros() {
         Ok(observed_at) => observed_at,
         Err(error) => {
@@ -1818,7 +1856,7 @@ async fn http_operation_events(
             &operation_id,
             &request_id,
             &controls,
-            query.next_sequence,
+            next_sequence,
         )
         .await;
     }
@@ -1870,7 +1908,7 @@ async fn http_operation_events(
             &operation_id,
             &context,
             observed_at,
-            query.next_sequence,
+            next_sequence,
             query.resume_token.as_ref(),
         )
         .await

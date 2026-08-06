@@ -159,6 +159,8 @@ pub enum StreamValidationError {
     EventAfterTerminal,
     #[error("stream published more than one terminal event")]
     MultipleTerminalEvents,
+    #[error("stream sequence overflowed")]
+    SequenceOverflow,
     #[error("stream gap is invalid: {0}")]
     InvalidGap(String),
     #[error("stream terminal receipt is invalid: {0}")]
@@ -171,11 +173,6 @@ pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidat
     let mut expected = events.first().map(|event| event.sequence);
 
     for event in events {
-        if Some(event.sequence) != expected {
-            return Err(StreamValidationError::NonContiguousSequence);
-        }
-        expected = event.sequence.checked_add(1);
-
         if terminal_seen {
             return Err(if event.kind.is_terminal() {
                 StreamValidationError::MultipleTerminalEvents
@@ -183,15 +180,36 @@ pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidat
                 StreamValidationError::EventAfterTerminal
             });
         }
-        if let StreamEventKind::Gap(gap) = &event.kind {
-            gap.validate()
-                .map_err(|error| StreamValidationError::InvalidGap(error.to_string()))?;
+        if Some(event.sequence) != expected {
+            return Err(StreamValidationError::NonContiguousSequence);
         }
         if let StreamEventKind::Terminal(termination) = &event.kind {
             termination
                 .validate()
                 .map_err(|error| StreamValidationError::InvalidTerminal(error.to_string()))?;
             terminal_seen = true;
+            continue;
+        }
+        if let StreamEventKind::Gap(gap) = &event.kind {
+            if event.sequence != gap.first_missing_sequence {
+                return Err(StreamValidationError::InvalidGap(
+                    "event sequence does not match the first missing sequence".to_owned(),
+                ));
+            }
+            let next_sequence = gap
+                .last_missing_sequence
+                .checked_add(1)
+                .ok_or(StreamValidationError::SequenceOverflow)?;
+            gap.validate()
+                .map_err(|error| StreamValidationError::InvalidGap(error.to_string()))?;
+            expected = Some(next_sequence);
+        } else {
+            expected = Some(
+                event
+                    .sequence
+                    .checked_add(1)
+                    .ok_or(StreamValidationError::SequenceOverflow)?,
+            );
         }
     }
 

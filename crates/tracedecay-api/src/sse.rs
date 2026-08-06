@@ -41,14 +41,22 @@ where
     S: Stream<Item = StreamEvent<T>>,
     T: Serialize,
 {
-    source.scan(false, |terminal_seen, event| {
-        if *terminal_seen {
-            return future::ready(None);
-        }
-        let event = HttpSseEvent::from(event);
-        *terminal_seen = event.is_terminal();
-        future::ready(Some(encode_event(event)))
-    })
+    stream::unfold(
+        (Box::pin(source), false),
+        |(mut source, terminal_seen)| async move {
+            if terminal_seen {
+                return None;
+            }
+            match source.as_mut().next().await {
+                Some(event) => {
+                    let event = HttpSseEvent::from(event);
+                    let terminal_seen = event.is_terminal();
+                    Some((encode_event(event), (source, terminal_seen)))
+                }
+                None => Some((Err(HttpAdapterError::MissingTerminal), (source, true))),
+            }
+        },
+    )
 }
 
 fn encode_event<T>(event: HttpSseEvent<T>) -> Result<Event, HttpAdapterError>
@@ -76,6 +84,7 @@ mod tests {
     use tracedecay_application::{StreamEvent, StreamTermination};
 
     use super::{encode_events, stream};
+    use crate::HttpAdapterError;
 
     #[test]
     fn terminal_event_closes_before_stale_source_callbacks() {
@@ -103,6 +112,26 @@ mod tests {
         assert!(matches!(
             encoded.as_mut().poll_next(&mut context),
             Poll::Ready(Some(Ok(_)))
+        ));
+        assert!(matches!(
+            encoded.as_mut().poll_next(&mut context),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn source_end_without_terminal_is_a_framing_error() {
+        let item = StreamEvent::item(0, "item").expect("item");
+        let mut encoded = Box::pin(encode_events(stream::iter([item])));
+        let mut context = Context::from_waker(noop_waker_ref());
+
+        assert!(matches!(
+            encoded.as_mut().poll_next(&mut context),
+            Poll::Ready(Some(Ok(_)))
+        ));
+        assert!(matches!(
+            encoded.as_mut().poll_next(&mut context),
+            Poll::Ready(Some(Err(HttpAdapterError::MissingTerminal)))
         ));
         assert!(matches!(
             encoded.as_mut().poll_next(&mut context),

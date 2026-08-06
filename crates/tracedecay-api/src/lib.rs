@@ -39,8 +39,8 @@ pub use handoff::{
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
     HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
-    application_problem_response, application_router, configuration_application_router,
-    feedback_application_router, http_route_documents,
+    adapter_problem_response, application_problem_response, application_router,
+    configuration_application_router, feedback_application_router, http_route_documents,
 };
 pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
@@ -242,6 +242,8 @@ impl<T> From<StreamEvent<T>> for HttpSseEvent<T> {
 pub enum HttpAdapterError {
     #[error("canonical SSE event could not be encoded")]
     EventEncoding,
+    #[error("canonical SSE stream ended before its terminal event")]
+    MissingTerminal,
 }
 
 #[cfg(test)]
