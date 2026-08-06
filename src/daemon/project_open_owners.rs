@@ -2825,7 +2825,6 @@ fn project_open_work_grant(
 {
     let capabilities = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
-        .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1.iter())
         .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
         .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
         .chain(std::iter::once(
@@ -2847,7 +2846,6 @@ fn project_open_work_grant(
     }
     let use_cases = tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
-        .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1.iter())
         .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS.iter())
         .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1.iter())
         .chain(std::iter::once(
@@ -3001,7 +2999,6 @@ fn production_owner_capabilities()
     }
     for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .into_iter()
-        .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1)
         .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
         .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
         .chain(std::iter::once(
@@ -3074,8 +3071,7 @@ mod tests {
 
         for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
             .into_iter()
-            .chain(tracedecay_application::WORK_ATTEMPT_OPERATION_IDS_V1)
-            .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
+                .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
             .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
             .chain(std::iter::once(
                 tracedecay_application::HANDOFF_ISSUE_OPERATION_ID_V1,

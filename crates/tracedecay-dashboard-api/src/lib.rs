@@ -1562,7 +1562,7 @@ fn selected_project_application_read(
         "feedback/get" | "feedback/expand" | "feedback/list" => {
             Some(SelectedProjectApplicationRead::Feedback)
         }
-        _ => WorkOperation::CORE
+        _ => WorkOperation::ALL
             .into_iter()
             .filter(|operation| operation.is_read_only())
             .any(|operation| tail.strip_prefix("work/") == Some(operation.route_segment()))
@@ -2034,11 +2034,7 @@ mod authority_tests {
         let application = ActiveProjectApplicationRoutes {
             http_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::NO_CONTENT }))
-                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT }))
-                .route(
-                    "/work/attempt/start",
-                    post(|| async { StatusCode::ACCEPTED }),
-                ),
+                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT })),
             dashboard_configuration_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
             dashboard_feedback_router: Router::new()
@@ -2098,20 +2094,6 @@ mod authority_tests {
             .await
             .expect("dashboard Work response");
         assert_eq!(work.status(), StatusCode::NO_CONTENT);
-
-        let attempt = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/work/attempt/start")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .expect("dashboard Work attempt request"),
-            )
-            .await
-            .expect("dashboard Work attempt response");
-        assert_eq!(attempt.status(), StatusCode::METHOD_NOT_ALLOWED);
 
         let selected = app
             .oneshot(
@@ -2460,8 +2442,8 @@ mod authority_tests {
             assert_eq!(selected_project_application_read(&Method::GET, tail), None);
         }
 
-        // Every Work command, and every attempt operation, stays refused: a
-        // selected project is read-only through this gateway.
+        // Every Work command stays refused: a selected project is read-only
+        // through this gateway.
         for operation in WorkOperation::ALL {
             if operation.is_read_only() {
                 continue;

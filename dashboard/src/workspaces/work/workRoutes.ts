@@ -23,11 +23,8 @@ import type { WorkRoute } from "./workApi.ts";
  * same operation id, same path, same request and response contract. They are
  * written out rather than derived because there is no generated route table on
  * the dashboard side, and a route invented here would be a request the daemon
- * has never mounted.
- *
- * The eight attempt operations are deliberately absent. The dashboard mounts
- * only the descriptor's core family, and `work_api.rs` asserts as much, so a
- * control for an attempt operation could only be a button that always fails.
+ * has never mounted. Execution is owned by the Workflow runtime and has its
+ * own routes; the Work descriptor carries no execution operations.
  */
 
 export const WORK_SNAPSHOT_ROUTE = {
