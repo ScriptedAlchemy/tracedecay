@@ -38,7 +38,7 @@ fn render_registry_result(root: Option<&Path>, args: &Value, payload: &Value) ->
 
 fn registry_missing_payload() -> Value {
     json!({
-        "status": "not_found",
+        "status": "unavailable",
         "message": "project registry is not present for this profile",
         "projects": [],
     })
@@ -120,7 +120,7 @@ pub(crate) async fn handle_project_search(
 }
 
 /// Renders a listing outcome, keeping the missing-registry state a stable
-/// `not_found` payload with the same summary/tree keys as the `ok` shape.
+/// `unavailable` payload with the same summary/tree keys as the `ok` shape.
 fn registry_listing_result(
     args: &Value,
     title: &str,
@@ -213,4 +213,22 @@ pub(crate) async fn handle_project_context(
         }),
     };
     Ok(project_registry_result(cg, &args, &payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registry_missing_payload;
+
+    #[test]
+    fn missing_registry_payload_preserves_unavailable_state() {
+        let payload = registry_missing_payload();
+
+        assert_eq!(payload["status"], "unavailable");
+        assert_eq!(
+            payload["message"],
+            "project registry is not present for this profile"
+        );
+        assert_eq!(payload["projects"].as_array().map(Vec::len), Some(0));
+        assert!(payload.get("registry_path").is_none());
+    }
 }
