@@ -196,15 +196,15 @@ pub struct GraphPublication {
 impl GraphDb {
     pub fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError>;
     pub fn snapshot(&self) -> Result<GraphSnapshot, GraphDbError>;
-    pub(crate) fn apply_unverified(
+    pub fn apply_unverified(
         &self,
         batch: GraphWriteBatch,
     ) -> Result<GraphCommit, GraphDbError>;
-    pub(crate) fn replace_projection_unverified(
+    pub fn replace_projection_unverified(
         &self,
         replacement: ProjectionReplacement,
     ) -> Result<GraphCommit, GraphDbError>;
-    pub(crate) fn publish_unverified(
+    pub fn publish_unverified(
         &self,
         publication: GraphPublication,
     ) -> Result<GraphCommit, GraphDbError>;
