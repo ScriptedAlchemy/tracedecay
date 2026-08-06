@@ -685,6 +685,12 @@ fn capture_and_promotion_gate_share_one_write_transaction() {
     let fixture = fixture();
     let storage = storage(&fixture);
     let capture = admitted();
+    let authority = tracedecay_domain::CurrentRemoteAuthorityStateV1::Available(
+        capture.writer.authority.clone(),
+    );
+    storage
+        .publish_authority(&authority, &capture.writer, UtcMicros(10))
+        .unwrap();
     let fence = &capture.writer.authority.fence;
     let authority_key = canonical_sha256(&(
         "tracedecay.remote-recovery-authority.v1",
