@@ -70,6 +70,7 @@ const SOURCE_EDIT_TOOL_NAMES: &[&str] = &[
     "tracedecay_replace_symbol",
     "tracedecay_insert_at_symbol",
     "tracedecay_move_symbol",
+    "tracedecay_rename_symbol",
 ];
 
 #[cfg(feature = "test-transport")]
@@ -387,7 +388,12 @@ async fn handle_project_open_source_edit_tool_call(
         .await?;
 
     let dry_run = args.get("dry_run").and_then(Value::as_bool);
-    let apply = if tool_name == "tracedecay_move_symbol" {
+    // move_symbol and rename_symbol default to a dry run; the other edits
+    // default to applying.
+    let apply = if matches!(
+        tool_name,
+        "tracedecay_move_symbol" | "tracedecay_rename_symbol"
+    ) {
         dry_run == Some(false)
     } else {
         dry_run != Some(true)

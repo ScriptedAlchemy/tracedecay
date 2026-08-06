@@ -14,6 +14,7 @@ mod lcm_test;
 mod memory_facts_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
+mod rename_symbol_test;
 mod retrieve_truncation_test;
 mod schema_test;
 mod session_search_test;

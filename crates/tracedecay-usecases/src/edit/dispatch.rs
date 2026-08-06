@@ -89,5 +89,11 @@ pub(super) async fn run_source_edit(
                 .move_symbol(&symbol, &dest_file, dry_run, update_references)
                 .await?,
         ),
+        SourceEditRequest::RenameSymbol {
+            binding,
+            new_name,
+            dry_run,
+            ..
+        } => SourceEditOutcome::Rename(graph.rename_symbol(&binding, &new_name, dry_run).await?),
     })
 }

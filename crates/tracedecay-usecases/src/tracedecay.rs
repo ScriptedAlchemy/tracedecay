@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_application::retrieval::HealthDeltaResult;
 use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, RedundancyResultV1};
 use tracedecay_application::source_edit::{
-    AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
+    AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
+    RenameSymbolBindingV1,
 };
 use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -233,6 +234,12 @@ pub trait GraphRuntimePort: Send + Sync {
         dry_run: bool,
         update_references: bool,
     ) -> GraphFuture<'a, MoveResult>;
+    fn rename_symbol<'a>(
+        &'a self,
+        binding: &'a RenameSymbolBindingV1,
+        new_name: &'a str,
+        dry_run: bool,
+    ) -> GraphFuture<'a, RenameResult>;
     fn recover_source_edit_preimages<'a>(
         &'a self,
         files: &'a [PlannedSourceEditFile],
