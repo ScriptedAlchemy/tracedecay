@@ -48,9 +48,9 @@ function successEnvelope(payload: unknown) {
   return {
     kind: "success",
     value: {
-      binding_id: "binding.http.work.snapshot",
+      binding_id: "binding.http.workflow.list_definitions",
       contract: {
-        schema_id: "schema.work.snapshot.result",
+        schema_id: "schema.workflow.list_definitions.result",
         schema_revision: 1,
       },
       request_id: "request.http.1",
@@ -134,7 +134,7 @@ function requestThroughTransport(
   client: ReturnType<typeof createClient>,
   options: OperationRequestOptions = {},
 ): Promise<HttpSuccessEnvelope<unknown>> {
-  return client.operations.work_snapshot({ page_size: 1 }, options);
+  return client.operations.workflow_list_definitions({}, options);
 }
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -258,10 +258,15 @@ describe("canonical JSON Schema decoding", () => {
 });
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("publishes typed Work and Workflow methods from canonical bindings", () => {
+  it("publishes typed Workflow methods from canonical bindings", () => {
     expectTypeOf<
-      Parameters<ReturnType<typeof createClient>["operations"]["work_snapshot"]>[0]
-    >().toEqualTypeOf<{ readonly page_size: number }>();
+      Parameters<
+        ReturnType<typeof createClient>["operations"]["workflow_get_definition"]
+      >[0]
+    >().toEqualTypeOf<{
+      readonly definition_id: string;
+      readonly definition_version: number;
+    }>();
 
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
@@ -300,20 +305,20 @@ describe("TraceDecayClient generated operation bindings", () => {
     });
 
     await expect(
-      client.operations.work_snapshot(
-        { page_size: 25 },
+      client.operations.workflow_list_definitions(
+        {},
         { deadlineMicros: 1_800_000_000_000_003 },
       ),
     ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
 
     expect(requestedUrl).toBe(
-      "https://remote.example/api/v1/projects/project.sdk/application/work/snapshot",
+      "https://remote.example/api/v1/projects/project.sdk/application/workflow/list-definitions",
     );
     expect(requestedOrigin).toBe("https://consumer.example");
     expect(requestedDeadline).toBe("1800000000000003");
   });
 
-  it("fails closed on malformed typed Work requests before transport", async () => {
+  it("fails closed on malformed typed Workflow requests before transport", async () => {
     let fetchCalls = 0;
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
@@ -326,8 +331,10 @@ describe("TraceDecayClient generated operation bindings", () => {
     });
 
     await expect(
-      // @ts-expect-error Deliberately malformed at the package boundary.
-      client.operations.work_snapshot({ page_size: "25" }),
+      client.operations.workflow_get_definition(
+        // @ts-expect-error Deliberately malformed at the package boundary.
+        { definition_id: "workflow.sdk", definition_version: "1" },
+      ),
     ).rejects.toBeInstanceOf(TypeError);
     expect(fetchCalls).toBe(0);
     expect("invoke" in client).toBe(false);
@@ -335,7 +342,7 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(Reflect.get(client, "requestOperation")).toBeUndefined();
   });
 
-  it("publishes all mounted Work and Workflow routes as executable operations", () => {
+  it("publishes all mounted Workflow routes as executable operations", () => {
     const available: string[] = OPERATIONS.map((operation) => operation.operation);
     const unavailable = (
       UNAVAILABLE_OPERATIONS as readonly { readonly operation: string }[]
@@ -351,24 +358,18 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(unavailable.some((operation) => available.includes(operation))).toBe(false);
     expect(available).toEqual(
       expect.arrayContaining([
-        "work_snapshot",
-        "work_delta",
-        "work_create",
-        "work_replan_dependencies",
-        "work_review_proposal",
-        "work_accept_proposal",
-        "work_admit_execution",
-        "work_attach_runtime_evidence",
-        "work_accept_task",
-        "workflow_register_definition",
-        "workflow_activate_definition",
-        "workflow_execute_fan_out",
+        "workflow_definition_history",
+        "workflow_diff_definition",
+        "workflow_get_definition",
         "workflow_handoff_issue",
         "workflow_handoff_redeem",
+        "workflow_list_definitions",
+        "workflow_register_definition",
+        "workflow_validate_definition",
       ]),
     );
     expect(
-      "work_snapshot" in createClient({
+      "workflow_list_definitions" in createClient({
         baseUrl: "http://127.0.0.1:43123",
         projectId: "project.sdk",
         token: "sdk-secret",
@@ -391,30 +392,30 @@ describe("TraceDecayClient generated operation bindings", () => {
     }
   });
 
-  it("publishes work_attempt_finish with the canonical descriptor identity", () => {
+  it("publishes workflow_register_definition with the canonical descriptor identity", () => {
     const client = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
     });
-    expect("work_attempt_finish" in client.operations).toBe(true);
+    expect("workflow_register_definition" in client.operations).toBe(true);
 
     const descriptor = OPERATIONS.find(
-      (operation) => operation.operation === "work_attempt_finish",
+      (operation) => operation.operation === "workflow_register_definition",
     );
     expect(descriptor).toBeDefined();
-    expect(descriptor?.operationId).toBe("operation.work.attempt_finish");
-    expect(descriptor?.route).toBe("/application/work/attempt/finish");
+    expect(descriptor?.operationId).toBe("operation.workflow.register_definition");
+    expect(descriptor?.route).toBe("/application/workflow/register-definition");
     expect(descriptor?.method).toBe("POST");
     expect(descriptor?.effect).toBe("administrative");
     expect(descriptor?.idempotency).toBe("required");
-    expect(descriptor?.bindingId).toBe("binding.http.work.attempt_finish");
+    expect(descriptor?.bindingId).toBe("binding.http.workflow.register_definition");
     expect(descriptor?.requestSchema).toEqual({
-      schemaId: "schema.work.attempt_finish.request",
+      schemaId: "schema.workflow.register_definition.request",
       revision: 1,
     });
     expect(descriptor?.resultSchema).toEqual({
-      schemaId: "schema.work.attempt_finish.result",
+      schemaId: "schema.workflow.register_definition.result",
       revision: 1,
     });
     expect(descriptor?.deadline).toEqual({
@@ -465,7 +466,7 @@ describe("TraceDecayClient transport envelopes", () => {
         (request, response) => {
           expect(request.method).toBe("POST");
           expect(request.url).toBe(
-            "/projects/project.sdk/application/work/snapshot",
+            "/projects/project.sdk/application/workflow/list-definitions",
           );
           json(response, 200, envelope);
         },

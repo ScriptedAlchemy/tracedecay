@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
 };
-use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish, WorkSnapshot};
+use tracedecay_sdk::operations::{TypedOperation, WorkflowGetDefinition, WorkflowListDefinitions};
 
 struct Daemon {
     child: Child,
@@ -38,7 +38,7 @@ impl Drop for Daemon {
 
 #[test]
 #[ignore = "requires a prebuilt production tracedecay daemon"]
-fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability() {
+fn installed_rust_client_requires_workflow_reads_and_exact_lifecycle_capability() {
     let scratch = TempDir::new().unwrap();
     let home = scratch.path().join("home");
     let profile = home.join(".tracedecay");
@@ -106,14 +106,13 @@ fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability()
         )
         .build()
         .unwrap();
-    assert_work_attempt_finish_route_admits_missing_attempt(&client);
-    let request = serde_json::from_value::<<WorkSnapshot as TypedOperation>::Request>(
-        json!({"page_size": 1}),
-    )
-    .unwrap();
+    assert_workflow_get_definition_route_conceals_missing_definition(&client);
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
     let request_id = client
-        .execute::<WorkSnapshot>(&request)
-        .unwrap_or_else(|error| panic!("WorkSnapshot must succeed: {error}"))
+        .execute::<WorkflowListDefinitions>(&request)
+        .unwrap_or_else(|error| panic!("WorkflowListDefinitions must succeed: {error}"))
         .request_id;
     match client.stream_operation(&request_id, StreamOptions::default()) {
         Ok(mut initial) => {
@@ -171,25 +170,18 @@ fn installed_rust_client_requires_work_snapshot_and_exact_lifecycle_capability()
     }
 }
 
-fn assert_work_attempt_finish_route_admits_missing_attempt(client: &Client) {
-    let request = serde_json::from_value::<<WorkAttemptFinish as TypedOperation>::Request>(json!({
-        "identity": {
-            "attempt_id": "attempt.sdk.missing",
-            "run_id": "run.sdk.missing",
-            "task_id": "task.sdk.missing"
-        },
-        "lease": {
-            "epoch": 1,
-            "lease_id": "lease.sdk.missing"
-        },
-        "observed_at": 1
-    }))
-    .expect("canonical missing-attempt finish request");
+fn assert_workflow_get_definition_route_conceals_missing_definition(client: &Client) {
+    let request =
+        serde_json::from_value::<<WorkflowGetDefinition as TypedOperation>::Request>(json!({
+            "definition_id": "workflow.sdk.missing",
+            "definition_version": 1
+        }))
+        .expect("canonical missing-definition get request");
     let error = client
-        .execute::<WorkAttemptFinish>(&request)
-        .expect_err("a nonexistent Work attempt must not finish");
+        .execute::<WorkflowGetDefinition>(&request)
+        .expect_err("a nonexistent workflow definition must not resolve");
     let ClientError::Problem(problem) = error else {
-        panic!("mounted attempt_finish route must return a typed Work problem: {error}");
+        panic!("mounted get-definition route must return a typed Workflow problem: {error}");
     };
 
     assert_eq!(problem.status, 404);
@@ -202,11 +194,11 @@ fn assert_work_attempt_finish_route_admits_missing_attempt(client: &Client) {
     assert_eq!(problem.envelope["binding_id"], serde_json::Value::Null);
     assert_eq!(
         problem.envelope["contract"]["schema_id"],
-        json!(WorkAttemptFinish::RESULT_SCHEMA_ID)
+        json!(WorkflowGetDefinition::RESULT_SCHEMA_ID)
     );
     assert_eq!(
         problem.envelope["contract"]["schema_revision"],
-        json!(WorkAttemptFinish::RESULT_SCHEMA_REVISION)
+        json!(WorkflowGetDefinition::RESULT_SCHEMA_REVISION)
     );
 }
 

@@ -1,5 +1,5 @@
 use tracedecay_sdk::operations::{
-    TypedOperation, UNAVAILABLE_OPERATIONS, WorkAttemptFinish, WorkflowRegisterDefinition,
+    TypedOperation, UNAVAILABLE_OPERATIONS, WorkflowRegisterDefinition,
 };
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
@@ -52,89 +52,12 @@ fn remote_outcomes_are_the_canonical_application_types() {
 }
 
 #[test]
-fn work_inventory_exposes_every_mounted_route() {
+fn rejected_work_family_exposes_no_routes() {
     let registry = work::executable_binding_registry().expect("canonical Work registry");
-    let attempt = registry
-        .get(&operation::OperationId::new("operation.work.attempt_start").unwrap())
-        .expect("attempt availability");
-
-    assert!(matches!(
-        attempt,
-        operation::ExecutableBindingAvailabilityV1::Available { .. }
-    ));
-
-    let entries: Vec<_> = registry.iter().collect();
-    assert!(!entries.is_empty());
-    assert!(
-        entries.iter().all(|availability| matches!(
-            availability,
-            operation::ExecutableBindingAvailabilityV1::Available { .. }
-        )),
-        "every mounted Work route must be an available executable binding"
-    );
-    let unique_ids: std::collections::BTreeSet<_> = entries
-        .iter()
-        .filter_map(|availability| match availability {
-            operation::ExecutableBindingAvailabilityV1::Available { binding } => {
-                Some(binding.operation_id().as_str())
-            }
-            operation::ExecutableBindingAvailabilityV1::Unavailable { .. } => None,
-        })
-        .collect();
-    assert_eq!(unique_ids.len(), entries.len());
-}
-
-#[test]
-fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
-    let registry = work::executable_binding_registry().expect("canonical Work registry");
-    let availability = registry
-        .get(&operation::OperationId::new(WorkAttemptFinish::OPERATION_ID).unwrap())
-        .expect("attempt_finish availability");
-    let binding = match availability {
-        operation::ExecutableBindingAvailabilityV1::Available { binding } => binding,
-        operation::ExecutableBindingAvailabilityV1::Unavailable { .. } => {
-            panic!("attempt_finish must be an available binding")
-        }
-    };
-
     assert_eq!(
-        binding.operation_id().as_str(),
-        WorkAttemptFinish::OPERATION_ID
-    );
-    assert_eq!(WorkAttemptFinish::EFFECT, binding.effect());
-    assert_eq!(WorkAttemptFinish::IDEMPOTENCY, binding.idempotency());
-    assert_eq!(
-        WorkAttemptFinish::MAXIMUM_DEADLINE_MILLIS,
-        binding.deadline().maximum_millis()
-    );
-    assert_eq!(
-        WorkAttemptFinish::DEADLINE_BEHAVIOR,
-        binding.deadline().behavior()
-    );
-
-    match binding.exposure() {
-        operation::RouteExposureV1::Public {
-            binding_id,
-            route_path,
-        } => {
-            assert_eq!(binding_id.as_str(), WorkAttemptFinish::BINDING_ID);
-            assert_eq!(route_path, WorkAttemptFinish::ROUTE);
-        }
-        operation::RouteExposureV1::Internal => panic!("attempt_finish must be publicly exposed"),
-    }
-
-    assert_eq!(
-        binding.request_schema().schema_ref().schema_id().as_str(),
-        "schema.work.attempt_finish.request"
-    );
-    assert_eq!(binding.request_schema().schema_ref().revision(), 1);
-    assert_eq!(
-        binding.result_schema().schema_ref().schema_id().as_str(),
-        WorkAttemptFinish::RESULT_SCHEMA_ID
-    );
-    assert_eq!(
-        binding.result_schema().schema_ref().revision(),
-        WorkAttemptFinish::RESULT_SCHEMA_REVISION
+        registry.iter().count(),
+        0,
+        "the rejected legacy Work execution family must not remount routes"
     );
 }
 
@@ -158,6 +81,22 @@ fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
     assert_eq!(
         WorkflowRegisterDefinition::IDEMPOTENCY,
         binding.idempotency()
+    );
+    assert_eq!(
+        WorkflowRegisterDefinition::MAXIMUM_DEADLINE_MILLIS,
+        binding.deadline().maximum_millis()
+    );
+    assert_eq!(
+        WorkflowRegisterDefinition::DEADLINE_BEHAVIOR,
+        binding.deadline().behavior()
+    );
+    assert_eq!(
+        binding.result_schema().schema_ref().schema_id().as_str(),
+        WorkflowRegisterDefinition::RESULT_SCHEMA_ID
+    );
+    assert_eq!(
+        binding.result_schema().schema_ref().revision(),
+        WorkflowRegisterDefinition::RESULT_SCHEMA_REVISION
     );
 }
 
