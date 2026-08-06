@@ -72,16 +72,20 @@ fn control_outcome(
     termination: EffectTermination,
     cancelled: &str,
     timed_out: &str,
-) -> SourceEditOutcome {
-    match termination {
+) -> Result<SourceEditOutcome> {
+    Ok(match termination {
         EffectTermination::Cancelled => SourceEditOutcome::Cancelled {
             message: cancelled.to_owned(),
         },
         EffectTermination::TimedOut => SourceEditOutcome::TimedOut {
             message: timed_out.to_owned(),
         },
-        _ => unreachable!("source edit control only yields cancellation or timeout"),
-    }
+        _ => {
+            return Err(config_error(
+                "source edit rollback control produced an invalid termination",
+            ));
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -163,7 +167,7 @@ where
             stop.termination,
             "source edit rollback was cancelled before admission",
             "source edit rollback timed out before admission",
-        );
+        )?;
         return persist_pre_effect(
             &durability,
             operation,
@@ -309,7 +313,7 @@ where
             stop.termination,
             "source edit rollback was cancelled before the effect",
             "source edit rollback timed out before the effect",
-        );
+        )?;
         let record = interrupted_record(&journal, &outcome, stop)?;
         durability.persist_receipt(&record)?;
         durability.clear_journal()?;
