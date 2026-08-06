@@ -145,6 +145,7 @@ const UNCONTRACTED: Readonly<Record<string, string>> = {
   '/api/automation/skills': 'automation_skills_api::list answers with a bare Value',
   '/api/automation/fact-proposals':
     'automation_fact_proposals_api::list answers with a bare Value',
+  '/api/automation/runs': 'automation_run_api::run_list answers with a bare Value',
 };
 
 /**

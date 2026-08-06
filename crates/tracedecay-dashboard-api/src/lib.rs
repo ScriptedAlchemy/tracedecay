@@ -1260,6 +1260,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/automation/outcomes",
             get(automation_outcomes_api::outcomes),
         )
+        .route("/api/automation/runs", get(automation_run_api::run_list))
         .route(
             "/api/automation/runs/{run_id}/artifacts",
             get(automation_run_api::artifact_list),

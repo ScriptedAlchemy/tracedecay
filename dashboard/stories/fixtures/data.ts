@@ -1341,6 +1341,47 @@ function jobsPayload(): Record<string, unknown> {
   return { jobs, count: jobs.length };
 }
 
+/** `automation_run_api::run_list` — the run-history ledger tail, projected by
+ * `run_history_row`. Two terminal states so the audit shoots both the applied
+ * row and the failed row with its error sentence. */
+function automationRunsPayload(): Record<string, unknown> {
+  const runs = [
+    {
+      run_id: 'run-20260805-193042-memory-curator',
+      task: 'memory_curator',
+      trigger: 'scheduled',
+      backend: 'claude',
+      model: 'claude-sonnet-5',
+      status: 'applied',
+      reviewed_count: 6,
+      accepted_count: 4,
+      rejected_count: 2,
+      skipped_count: 0,
+      error: null,
+      started_at: String(nowSecs - 2 * DAY),
+      completed_at: String(nowSecs - 2 * DAY + 240),
+      artifact_kinds: ['traces', 'feedback', 'validation_gate'],
+    },
+    {
+      run_id: 'run-20260804-071133-skill-writing',
+      task: 'skill_writing',
+      trigger: 'manual',
+      backend: 'codex',
+      model: null,
+      status: 'failed',
+      reviewed_count: 0,
+      accepted_count: 0,
+      rejected_count: 0,
+      skipped_count: 0,
+      error: 'the backend refused the run: model quota exhausted',
+      started_at: String(nowSecs - 3 * DAY),
+      completed_at: String(nowSecs - 3 * DAY + 31),
+      artifact_kinds: [],
+    },
+  ];
+  return { runs, count: runs.length, limit: 50, error: '' };
+}
+
 const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
   ['agent-hook-hint-quality-review', 'Agent Hook Hint Quality Review', 'active', 'automation'],
   ['cargo-build-cache-coordination', 'Cargo Build Cache Coordination', 'active', 'build'],
@@ -2307,6 +2348,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/automation/jobs': jobsPayload(),
   '/api/automation/skills': skillsPayload(),
   '/api/automation/fact-proposals': factProposalsPayload(),
+  '/api/automation/runs': automationRunsPayload(),
   // Plan 26 canonical read models. These are the projections the CLI and MCP
   // also serve, so their fixtures carry the mixed available/unavailable metric
   // set the real projector emits rather than a fully-populated one.

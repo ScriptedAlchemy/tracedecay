@@ -186,6 +186,110 @@ where
     enqueue_dashboard_run(state, task, run_job).await
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct RunListParams {
+    limit: Option<i64>,
+}
+
+/// The newest automation runs from the ledger, projected to the fields the
+/// run-history surface reads. Heavy per-run payloads (proposed/applied ops,
+/// validation reports) stay behind the per-run artifact routes.
+pub async fn run_list(
+    State(state): State<DashboardState>,
+    axum::extract::Query(params): axum::extract::Query<RunListParams>,
+) -> (StatusCode, Json<Value>) {
+    let limit = super::util::coerce_limit(params.limit, 50, 200) as usize;
+    match tracedecay_agent_hosts::automation::run_ledger::load_run_records(
+        &state.dashboard_root,
+        limit,
+    )
+    .await
+    {
+        Ok(records) => {
+            let runs: Vec<Value> = records.iter().map(run_history_row).collect();
+            let count = runs.len();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "runs": runs,
+                    "count": count,
+                    "limit": limit,
+                    "error": "",
+                })),
+            )
+        }
+        Err(err) => internal_error(&format!("Failed to read automation run ledger: {err}")),
+    }
+}
+
+/// One ledger record as the run-history row: identity, outcome, review tallies,
+/// and which artifacts exist — every field measured from the record itself.
+fn run_history_row(record: &AutomationRunLedgerRecord) -> Value {
+    json!({
+        "run_id": record.run_id,
+        "task": record.task,
+        "trigger": record.trigger,
+        "backend": record.backend,
+        "model": record.model,
+        "status": record.status,
+        "reviewed_count": record.reviewed_count,
+        "accepted_count": record.accepted_count,
+        "rejected_count": record.rejected_count,
+        "skipped_count": record.skipped_count,
+        "error": record.error,
+        "started_at": record.started_at,
+        "completed_at": record.completed_at,
+        "artifact_kinds": record
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.kind.clone())
+            .collect::<Vec<_>>(),
+    })
+}
+
+#[cfg(test)]
+mod run_list_tests {
+    use super::*;
+
+    #[test]
+    fn run_history_row_projects_identity_outcome_and_artifact_kinds() {
+        let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
+            "schema_version": 1,
+            "run_id": "run-1",
+            "trigger": "manual",
+            "task": "memory_curator",
+            "backend": "claude",
+            "status": "applied",
+            "reviewed_count": 4,
+            "accepted_count": 3,
+            "rejected_count": 1,
+            "error": "quota exhausted",
+            "artifacts": [{
+                "schema_version": 1,
+                "kind": "traces",
+                "path": "runs/run-1/traces.json",
+                "sha256": "ab",
+                "created_at": "1754000060"
+            }],
+            "started_at": "1754000000",
+            "completed_at": "1754000060"
+        }))
+        .expect("ledger record fixture parses");
+
+        let row = run_history_row(&record);
+        assert_eq!(row["run_id"], json!("run-1"));
+        assert_eq!(row["task"], json!("memory_curator"));
+        assert_eq!(row["status"], json!("applied"));
+        assert_eq!(row["accepted_count"], json!(3));
+        assert_eq!(row["error"], json!("quota exhausted"));
+        assert_eq!(row["artifact_kinds"], json!(["traces"]));
+        // The heavy per-run payloads stay behind the artifact routes: a list
+        // row must never carry proposed or applied operation bodies.
+        assert!(row.get("proposed_ops").is_none());
+        assert!(row.get("applied_ops").is_none());
+    }
+}
+
 pub async fn artifact_list(
     State(state): State<DashboardState>,
     AxumPath(run_id): AxumPath<String>,
