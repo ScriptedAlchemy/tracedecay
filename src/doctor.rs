@@ -11,7 +11,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_tool_catalog::BindingSurface;
 
-use crate::agents::{self, DoctorCounters};
+use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::application_surface::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, ConfigurationKeySurfaceRequest,
     ConfigurationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
@@ -130,6 +130,18 @@ pub async fn run_doctor() -> crate::errors::Result<()> {
     check_external_tools(&mut dc);
 
     if let Some(ref home) = agents::home_dir() {
+        // Host integration health is read-only: every `healthcheck` only reads
+        // the host's own on-disk registration and reports findings. Doctor
+        // never repairs them — remediation stays with `tracedecay install`.
+        let hctx = HealthcheckContext {
+            home: home.clone(),
+            project_path: project_path.clone(),
+        };
+        for agent in agents::all_integrations() {
+            if agent.has_tracedecay(home) {
+                agent.healthcheck_with_daemon_status(&mut dc, &hctx, daemon_status.as_ref().ok());
+            }
+        }
         let materialization_root =
             crate::automation::skill_materialization::resolve_project_root(&project_path);
         check_managed_skill_materialization(&mut dc, home, &materialization_root);
