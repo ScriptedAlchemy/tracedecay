@@ -247,6 +247,7 @@ pub(crate) const fn semantic_abstention_reason(abstention: &SemanticAbstentionV1
         SemanticAbstentionV1::PartialCoverage => "semantic_partial",
         SemanticAbstentionV1::SemanticUnavailable => "semantic_unavailable",
         SemanticAbstentionV1::Cancelled => "semantic_cancelled",
+        SemanticAbstentionV1::TimedOut => "semantic_timed_out",
         SemanticAbstentionV1::BudgetExceeded => "semantic_budget_exceeded",
         SemanticAbstentionV1::Denied => "semantic_denied",
         SemanticAbstentionV1::Stale => "semantic_stale",

@@ -164,6 +164,12 @@ impl CodeIndexWorktreeSchedulerV1 {
         let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
         let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         Ok(CapturedSnapshotV1 {
+            // An exact sealed Git tree is immutable committed state: the parse
+            // identity is the tree itself and can never be dirty.
+            repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+                tree: Some(source.tree.clone()),
+                dirty: tracedecay_domain::RepositoryDirtyStateV1::Clean,
+            },
             snapshot: SanitizedCodeSnapshotV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),
@@ -197,6 +203,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     captured_files: captured.captured_files,
                     changed_files: captured.changed_paths,
                     invalidations: BTreeSet::new(),
+                    repository_parse_identity: captured.repository_parse_identity,
                     sealed_at: now_micros(),
                     target_projection_key: projection_key()
                         .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,

@@ -11,25 +11,10 @@ pub use admin::{
     BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
     prepare_branch_admin_mutation, remove_tracked_branch_store_checked,
 };
-pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_admin_recovery};
 pub use snapshots::{
     BranchSnapshot, LocalBranchReadControlV1, LocalBranchRevisionV1, LocalBranchSnapshotErrorV1,
     LocalBranchSnapshotsV1, local_branch_revision_controlled, local_branch_snapshots_controlled,
 };
-
-/// Installs the root-owned pending branch-admin recovery gate into the kernel
-/// lock primitives.
-///
-/// The gate reads `branch::admin::transaction`'s journal, which stayed in this
-/// crate, so the kernel calls back through
-/// `tracedecay_runtime_core::ports::branch_admin_recovery`. Idempotent; every
-/// process entry point that can take a branch lock must call it before doing
-/// so.
-pub fn register_branch_admin_recovery_gate() {
-    tracedecay_runtime_core::ports::branch_admin_recovery::register(
-        admin::ensure_no_pending_branch_admin_recovery,
-    );
-}
 
 /// The shared branch-add lock, its retry policy, and the current-branch read
 /// moved into `tracedecay_runtime_core::branch`: `branch_meta` and `worktree`
