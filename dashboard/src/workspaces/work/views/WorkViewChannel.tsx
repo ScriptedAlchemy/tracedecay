@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { cn } from '../../../ui/cn.ts';
-import type { WorkChannel } from '../workViewsModel.ts';
+import type { WorkChannel } from '../workChannel.ts';
 
 /**
  * The shared vocabulary of the four plan 11c Work projections.

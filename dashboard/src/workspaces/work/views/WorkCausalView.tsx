@@ -3,6 +3,7 @@ import { type DomainStateKind, StateChip } from '../../../ui/StateChip.tsx';
 import { MeterRow, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
 import { coverageReading } from '../workModel.ts';
+import type { WorkGraphReading } from '../workGraphModel.ts';
 import {
   type WorkCausalEdge,
   type WorkCausalReading,
@@ -28,6 +29,14 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * declared — cannot be found at all without an order to find it against. Both
  * are drawn as the absences they are, because a page that quietly omitted them
  * would read as a survey for undeclared coupling that came back clean.
+ *
+ * The work-product graph's causal candidates do NOT fill that half, and the
+ * temptation to let them is the reason they are drawn in a panel of their own.
+ * A candidate is what the plan NOMINATED as a possible cause: declared data,
+ * from the same plan the disagreement field is testing. An empty candidate set
+ * means nobody nominated anything, which is a reading; it is not a search for
+ * hidden coupling that came back empty, and the two are set apart on the page
+ * so a reader can never take one for the other.
  *
  * Nothing here is scored. Three of the five readings order nothing: both ends
  * finished with no clock between them, neither end has finished, or the far
@@ -79,14 +88,16 @@ const READING_BANDS: readonly {
 
 export function WorkCausalView({
   snapshot,
+  graph,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
+  graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workCausalReading(snapshot.projections);
+  const reading = workCausalReading(snapshot.projections, graph);
   const coverage = coverageReading(snapshot.coverage);
   // Titles come off the snapshot rather than the reading: the causal reading
   // carries identities only, and a task with no title here is a task the page
@@ -140,6 +151,8 @@ export function WorkCausalView({
         onSelect={onSelect}
       />
 
+      <DeclaredCandidates reading={reading} />
+
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
         <UndeclaredCoupling />
         <ChannelLedger
@@ -150,6 +163,7 @@ export function WorkCausalView({
               measure: 'executed-before-but-undeclared edges',
               channel: reading.undeclared,
             },
+            { measure: 'declared causal candidates', channel: reading.candidates },
           ]}
         />
       </div>
@@ -334,6 +348,67 @@ function Disagreements({
 }
 
 /**
+ * What the plan nominated as a possible cause.
+ *
+ * The work-product graph's `candidate_edges`, drawn exactly as what they are:
+ * DECLARED data. An empty set is available and empty rather than absent,
+ * because the authority answered — nobody nominated a candidate — and that is a
+ * different statement from the panel below it, where the search could not be
+ * run at all. The two sit apart deliberately; collapsing them would let "the
+ * plan declares no candidate" be read as "no hidden coupling was found".
+ *
+ * Task ids are printed rather than offered as buttons: these edges come off the
+ * graph read and the board comes off the snapshot page, so an endpoint here
+ * need not be a task this page holds.
+ */
+function DeclaredCandidates({ reading }: { reading: WorkCausalReading }) {
+  const candidates = reading.candidates;
+  return (
+    <Panel
+      legend="Causal candidates the plan declares"
+      actions={
+        candidates.available ? (
+          <StateChip
+            kind={candidates.value.length === 0 ? 'complete_zero_findings' : 'ready'}
+            detail={`${candidates.value.length}`}
+          />
+        ) : (
+          <StateChip kind={candidates.state} detail="not read" />
+        )
+      }
+    >
+      {!candidates.available ? (
+        <p className="text-3xs leading-snug text-text-muted">{candidates.detail}</p>
+      ) : candidates.value.length === 0 ? (
+        <EmptyReading>
+          The work-product graph declares no causal candidate at all. Nobody nominated one — this
+          is the authority answering, and it says nothing whatever about coupling the plan failed
+          to write down, which is the panel below and is a question this build cannot ask.
+        </EmptyReading>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-2">
+          <p className="text-3xs leading-snug text-text-muted">
+            Each pair is a cause the plan nominated. These are declarations rather than
+            observations: nothing here says the nominated cause ran first, or ran at all, because
+            no order of execution is readable in this build.
+          </p>
+          <ul
+            className="flex min-w-0 flex-col gap-1 font-mono text-3xs text-text-secondary"
+            data-work-candidates={candidates.value.length}
+          >
+            {candidates.value.map((edge, index) => (
+              <li key={`${edge.dependency}->${edge.dependent}#${index}`} className="truncate">
+                {edge.dependent} may follow {edge.dependency}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/**
  * The half of the field that is not drawn.
  *
  * An undeclared edge is one the plan never wrote down, and it can only be
@@ -354,8 +429,10 @@ function UndeclaredCoupling() {
         <p>
           The other half of a disagreement field is the edge that executed but was never
           declared: one task in fact waited on another and the plan says nothing about it.
-          Finding one needs an observed execution order to hold the plan against, and this read
-          carries no timestamp anywhere.
+          Finding one needs an observed order of execution to hold the plan against. The
+          snapshot carries no timestamp at all, and the work-product graph carries when a task
+          was created, changed, scheduled and is due — a calendar, not a record of what ran
+          before what.
         </p>
         <p>
           So this page has not searched for undeclared coupling and come back empty. It could

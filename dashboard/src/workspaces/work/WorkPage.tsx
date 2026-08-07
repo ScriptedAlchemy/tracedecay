@@ -6,8 +6,9 @@ import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
 import { WorkTaskActivity } from './WorkTaskActivity.tsx';
 import { resumeCursor, useWorkDelta, useWorkSnapshot } from './workQueries.ts';
-import { useWorkAttempts } from './workViewsQueries.ts';
+import { useWorkAttempts, useWorkGraphViews } from './workViewsQueries.ts';
 import { workAttemptReading, type WorkAttemptReading } from './workAttemptModel.ts';
+import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
 import { WorkCausalView } from './views/WorkCausalView.tsx';
 import { WorkDagView } from './views/WorkDagView.tsx';
 import {
@@ -31,16 +32,18 @@ import { WorkWorkloadView } from './views/WorkWorkloadView.tsx';
  * refuses is reported as the refusal it was. Execution belongs to the Workflow
  * runtime, which has its own workspace — this channel is the task graph.
  *
- * Five projections over ONE read. The switcher moves the camera and the
+ * Five projections over ONE snapshot. The switcher moves the camera and the
  * snapshot does not change underneath it, which is what makes the plan 11
  * mandate hold: a task selected in any projection stays selected in all of
  * them, because the selection lives in the address and no projection owns it.
  *
- * The four projections beside the board each encode at least one measurement
- * this build cannot take — effort, wall clock, observed order, executor
- * identity, concurrency. Those gaps are drawn inside each projection rather
- * than hidden behind an empty axis; `workViewsModel.ts` explains which belongs
- * to which and why.
+ * Three reads feed the page, and each is issued where it is drawn rather than
+ * on every visit: the snapshot always, the attempt list under the timeline, and
+ * the work-product graph under any of the four projections beside the board.
+ * The graph read is what made effort, concurrency and churn measurable; wall
+ * clock and observed execution order survive it as stated absences.
+ * `workViewsModel.ts` explains which channel comes from which read and why the
+ * two that are still absent cannot be filled from the ones that are not.
  */
 
 export function workScopeProvenance(scope: DashboardScope): string {
@@ -77,12 +80,14 @@ function WorkProjectionView({
   kind,
   snapshot,
   attempts,
+  graph,
   selected,
   onSelect,
 }: {
   kind: WorkProjectionKind;
   snapshot: WorkProjectionSnapshotV1;
   attempts: WorkAttemptReading;
+  graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
@@ -90,20 +95,32 @@ function WorkProjectionView({
     case 'board':
       return <WorkBoard snapshot={snapshot} selected={selected} onSelect={onSelect} />;
     case 'dag':
-      return <WorkDagView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+      return (
+        <WorkDagView snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} />
+      );
     case 'timeline':
       return (
         <WorkTimelineView
           snapshot={snapshot}
           attempts={attempts}
+          graph={graph}
           selected={selected}
           onSelect={onSelect}
         />
       );
     case 'causal':
-      return <WorkCausalView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+      return (
+        <WorkCausalView snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} />
+      );
     case 'workload':
-      return <WorkWorkloadView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+      return (
+        <WorkWorkloadView
+          snapshot={snapshot}
+          graph={graph}
+          selected={selected}
+          onSelect={onSelect}
+        />
+      );
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -120,6 +137,13 @@ export function WorkPage() {
   // when that projection is the camera and not on every visit to the page.
   const attempts = useWorkAttempts(projection === 'timeline');
   const attemptReading = workAttemptReading(attempts.data);
+  // The work-product graph feeds all four projections beside the board and
+  // nothing on the board itself, so it is read when the camera is on one of
+  // them. One query key for all four: they draw different channels off the same
+  // graph version, and four reads of one version would be four chances for them
+  // to disagree.
+  const graph = useWorkGraphViews(projection !== 'board');
+  const graphReading = workGraphReading(graph.data);
   const result = snapshot.data;
   const value = result?.outcome === 'value' ? result.value : undefined;
   // Only asked for when the snapshot says it was capped or partial, so a
@@ -208,6 +232,7 @@ export function WorkPage() {
                 kind={projection}
                 snapshot={value}
                 attempts={attemptReading}
+                graph={graphReading}
                 selected={selected}
                 onSelect={setSelected}
               />

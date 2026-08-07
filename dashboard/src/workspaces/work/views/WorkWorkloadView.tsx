@@ -2,29 +2,40 @@ import type { WorkProjection, WorkProjectionSnapshotV1 } from '../../../contract
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { MeterRow, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
+import { relativeAge } from '../../../ui/time.ts';
 import { kindColorVars } from '../../../viz/graph/kindColor.ts';
 import { coverageReading } from '../workModel.ts';
+import type { WorkGraphReading } from '../workGraphModel.ts';
 import {
   type WorkloadReading,
   type WorkloadRegion,
   workloadReading,
 } from '../workViewsModel.ts';
-import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
+import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
  * Workload / executor / model — the cortex aggregation over runs.
  *
- * A cortex draws regions whose area is mass, whose contours are concurrency
- * and whose heat is recent churn. This build has none of those three. What
- * `WorkProjection` carries is the run/task incidence, so a region is a run and
- * its length is TASK COUNT — captioned as that, printed as that beside every
- * bar, and never called mass, cost or load. The three measurements plan 11c
- * asks the cortex to encode are drawn as the absences they are.
+ * A cortex draws regions whose area is mass, whose contours are concurrency and
+ * whose heat is recent churn. This build now has all three — the work-product
+ * graph read carries declared effort, both concurrency figures and the per-task
+ * change instants — and it still does not draw them ONTO the regions, which is
+ * the decision worth stating.
+ *
+ * The regions are the snapshot's run/task incidence, so a region's length stays
+ * TASK COUNT: captioned as that, printed as that beside every bar, never called
+ * mass, cost or load. Effort, concurrency and churn are properties of the whole
+ * work-product graph read at one version, over a task set that need not be the
+ * task set this snapshot page returned. Rescaling a run's bar by the graph's
+ * effort would draw a figure across that seam that neither read holds, so the
+ * measurements are printed as figures of their own, beside the aggregation and
+ * captioned with the read they came from.
  *
  * No contour is drawn and no heat ramp appears anywhere on this page. The hue
  * that separates one region from its neighbour is the console's categorical
- * kind arc; a warm-to-cool ramp standing in for something that is not churn
- * would be read as churn by anyone who knows the grammar.
+ * kind arc; a warm-to-cool ramp standing in for churn would be read as a
+ * measurement of the regions it was painted on, which is precisely the seam
+ * above.
  *
  * A run is not an executor. `WorkProjection` names no provider, model or
  * agent, so a region is labelled by its run id and says the executor behind it
@@ -89,14 +100,16 @@ function regionMembers(
 
 export function WorkWorkloadView({
   snapshot,
+  graph,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
+  graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workloadReading(snapshot.projections);
+  const reading = workloadReading(snapshot.projections, graph);
   const coverage = coverageReading(snapshot.coverage);
   const members = regionMembers(snapshot.projections);
   const attributed = reading.taskCount - reading.unattributed.length;
@@ -131,6 +144,16 @@ export function WorkWorkloadView({
       </Panel>
 
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
+        <EffortMass reading={reading} />
+        <Concurrency reading={reading} />
+      </div>
+
+      <div className="grid min-w-0 gap-3 lg:grid-cols-2">
+        <Churn reading={reading} />
+        <RuntimeAttempts reading={reading} />
+      </div>
+
+      <div className="grid min-w-0 gap-3 lg:grid-cols-2">
         <Unattributed reading={reading} selected={selected} onSelect={onSelect} />
         <ChannelLedger
           legend="Measurements this projection could not take"
@@ -138,10 +161,281 @@ export function WorkWorkloadView({
             { measure: 'task mass by effort', channel: reading.effortMass },
             { measure: 'concurrency contours', channel: reading.concurrency },
             { measure: 'recent churn', channel: reading.churn },
+            { measure: 'live attempt state', channel: reading.runtime },
           ]}
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * Declared effort mass, and the runtime split of it.
+ *
+ * Two readings in one panel because they fail apart: the total is declared by
+ * the graph and always arrives with it, while ready/running/blocked are counted
+ * against live attempt state and the authority withholds all three unless the
+ * runtime projection covered every attempt. A page that printed zeros for the
+ * split under incomplete coverage would report an idle graph; the split is
+ * drawn as its own absence instead.
+ */
+function EffortMass({ reading }: { reading: WorkloadReading }) {
+  const mass = reading.effortMass;
+  return (
+    <Panel
+      legend="Declared effort mass"
+      actions={
+        mass.available ? (
+          <StateChip kind="ready" detail={`${mass.value.total} total`} />
+        ) : (
+          <StateChip kind={mass.state} detail="not read" />
+        )
+      }
+    >
+      {!mass.available ? (
+        <p className="text-3xs leading-snug text-text-muted">{mass.detail}</p>
+      ) : (
+        <div className="flex min-w-0 flex-col gap-2" data-work-effort={mass.value.total}>
+          <p className="text-3xs leading-snug text-text-muted">
+            {mass.value.total} declared effort across the whole work-product graph version. This
+            is not the mass of the regions above — those are the tasks this snapshot page
+            returned, and the two reads need not cover the same set.
+          </p>
+          {mass.value.split.available ? (
+            <ul
+              className="flex min-w-0 flex-col gap-1"
+              data-work-effort-split={`${mass.value.split.value.ready}/${mass.value.split.value.running}/${mass.value.split.value.blocked}`}
+            >
+              {(
+                [
+                  ['Ready', mass.value.split.value.ready],
+                  ['Running', mass.value.split.value.running],
+                  ['Blocked', mass.value.split.value.blocked],
+                ] as const
+              ).map(([label, value]) => (
+                <li key={label} className="min-w-0">
+                  <MeterRow
+                    label={label}
+                    title={label}
+                    value={value}
+                    fraction={mass.value.total === 0 ? null : value / mass.value.total}
+                  />
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <ChannelAbsence
+              measure="ready, running and blocked effort"
+              channel={mass.value.split}
+            />
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/** What was asked for against what is running. Both figures or neither: the
+ * authority counts them against the same runtime coverage. */
+function Concurrency({ reading }: { reading: WorkloadReading }) {
+  const concurrency = reading.concurrency;
+  return (
+    <Panel
+      legend="Concurrency"
+      actions={
+        concurrency.available ? (
+          <StateChip
+            kind={
+              concurrency.value.actual > concurrency.value.requested ? 'conflicting' : 'ready'
+            }
+            detail={`${concurrency.value.actual} of ${concurrency.value.requested}`}
+          />
+        ) : (
+          <StateChip kind={concurrency.state} detail="not counted" />
+        )
+      }
+    >
+      {!concurrency.available ? (
+        <p className="text-3xs leading-snug text-text-muted">{concurrency.detail}</p>
+      ) : (
+        <div
+          className="flex min-w-0 flex-col gap-2"
+          data-work-concurrency={`${concurrency.value.actual}/${concurrency.value.requested}`}
+        >
+          <MeterRow
+            label="Requested"
+            title="Requested concurrency"
+            value={concurrency.value.requested}
+            fraction={null}
+          />
+          <MeterRow
+            label="Actual"
+            title="Actual concurrency"
+            value={concurrency.value.actual}
+            fraction={
+              concurrency.value.requested === 0
+                ? null
+                : concurrency.value.actual / concurrency.value.requested
+            }
+          />
+          {concurrency.value.actual > concurrency.value.requested ? (
+            <p className="text-3xs leading-snug text-text-muted">
+              More is running than was asked for. Both figures come off one graph version and
+              disagreeing is the reading — neither is corrected against the other.
+            </p>
+          ) : null}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * Recent change, against the instant the graph version was observed at.
+ *
+ * The window is a rendering parameter and is printed as one; the measurement is
+ * each task's real distance from the observation instant. An update recorded
+ * LATER than that instant is counted apart rather than clamped into the window:
+ * the two clocks disagree, and that is a reading about the read.
+ */
+function Churn({ reading }: { reading: WorkloadReading }) {
+  const churn = reading.churn;
+  return (
+    <Panel
+      legend="Recent change"
+      actions={
+        churn.available ? (
+          <StateChip
+            kind={churn.value.recent.length === 0 ? 'complete_zero_findings' : 'ready'}
+            detail={`${churn.value.recent.length} of ${churn.value.counted}`}
+          />
+        ) : (
+          <StateChip kind={churn.state} detail="not measured" />
+        )
+      }
+    >
+      {!churn.available ? (
+        <p className="text-3xs leading-snug text-text-muted">{churn.detail}</p>
+      ) : (
+        <div
+          className="flex min-w-0 flex-col gap-2"
+          data-work-churn={churn.value.recent.length}
+          data-work-churn-counted={churn.value.counted}
+        >
+          <p className="text-3xs leading-snug text-text-muted">
+            {churn.value.recent.length} of {churn.value.counted}{' '}
+            {churn.value.counted === 1 ? 'task' : 'tasks'} changed within{' '}
+            {Math.round(churn.value.window / 3_600_000_000)} hours of the instant this graph
+            version was observed at. The window is a choice about what to list; the age beside
+            each task is the measurement.
+            {churn.value.ahead > 0
+              ? ` ${churn.value.ahead} ${churn.value.ahead === 1 ? 'task records a change' : 'tasks record a change'} later than that instant, counted here and listed nowhere: the two clocks disagree and neither is corrected.`
+              : ''}
+          </p>
+          {churn.value.recent.length === 0 ? (
+            <EmptyReading>
+              No task changed inside the window. The graph was read and its tasks were compared
+              against the instant of the read — this is a measured quiet, not an unmeasured one.
+            </EmptyReading>
+          ) : (
+            <ul className="flex min-w-0 flex-col gap-1">
+              {churn.value.recent.map((entry) => (
+                <li
+                  key={entry.taskId}
+                  className="flex min-w-0 items-center gap-2 text-2xs"
+                  data-work-churn-task={entry.taskId}
+                >
+                  <span aria-hidden className="size-1.5 shrink-0 bg-state-ready" />
+                  <span className="min-w-0 flex-1 truncate font-mono text-3xs text-text-secondary">
+                    {entry.taskId}
+                  </span>
+                  <span className="td-value shrink-0 text-3xs text-text-muted" data-cell="numeric">
+                    {relativeAge(entry.updatedAt / 1_000_000, churn.value.observedAt / 1_000_000) ??
+                      'age unread'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * The live attempt projection under this graph version.
+ *
+ * The distinction this panel exists to hold: `unavailable` coverage means the
+ * attempts could not be measured, and an empty list under `complete` coverage
+ * means nothing is running. The first is an absence with the read's reason on
+ * it; the second is a reading a person can act on. They are never drawn alike.
+ */
+function RuntimeAttempts({ reading }: { reading: WorkloadReading }) {
+  const runtime = reading.runtime;
+  return (
+    <Panel
+      legend="Live attempts"
+      actions={
+        runtime.available ? (
+          <StateChip
+            kind={
+              !runtime.value.complete
+                ? 'partial'
+                : runtime.value.attempts.length === 0
+                  ? 'complete_zero_findings'
+                  : 'ready'
+            }
+            detail={`${runtime.value.attempts.length}`}
+          />
+        ) : (
+          <StateChip kind={runtime.state} detail="unmeasured" />
+        )
+      }
+    >
+      {!runtime.available ? (
+        <p className="text-3xs leading-snug text-text-muted" data-work-runtime="unavailable">
+          {runtime.detail}
+        </p>
+      ) : (
+        <div
+          className="flex min-w-0 flex-col gap-2"
+          data-work-runtime={runtime.value.complete ? 'complete' : 'partial'}
+          data-work-runtime-attempts={runtime.value.attempts.length}
+        >
+          {runtime.value.complete ? null : (
+            <p className="text-3xs leading-snug text-text-muted">
+              The projection reached {runtime.value.unavailable}{' '}
+              {runtime.value.unavailable === 1 ? 'attempt' : 'attempts'} it could not read, so
+              every count here is a floor.
+            </p>
+          )}
+          {runtime.value.attempts.length === 0 ? (
+            <EmptyReading>
+              {runtime.value.complete
+                ? 'The runtime projection covered every attempt under this graph version and found none in flight. Nothing is running, and that is a reading rather than a gap.'
+                : 'No attempt this projection could read is in flight, and it could not read all of them, so this is a floor of zero rather than a measurement of none.'}
+            </EmptyReading>
+          ) : (
+            <ul className="flex min-w-0 flex-col gap-1">
+              {runtime.value.attempts.map((attempt) => (
+                <li
+                  key={attempt.attemptId}
+                  className="flex min-w-0 items-center gap-2 text-2xs"
+                  data-work-runtime-attempt={attempt.attemptId}
+                  data-work-runtime-state={attempt.state}
+                >
+                  <span className="min-w-0 flex-1 truncate font-mono text-3xs text-text-secondary">
+                    {attempt.taskId} · {attempt.runId}
+                  </span>
+                  <span className="shrink-0 text-3xs text-text-muted">{attempt.state}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </Panel>
   );
 }
 

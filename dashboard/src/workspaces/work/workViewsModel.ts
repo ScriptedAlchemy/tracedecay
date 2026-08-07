@@ -1,4 +1,4 @@
-import type { WorkProjection } from '../../contracts/index.ts';
+import type { WorkDagEdgeV1, WorkProjection } from '../../contracts/index.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import {
   attemptPageOf,
@@ -8,15 +8,35 @@ import {
   type WorkExecutorReading,
   type WorkTerminalObservation,
 } from './workAttemptModel.ts';
+import { absentChannel, type WorkChannel } from './workChannel.ts';
+import {
+  WORK_CHURN_WINDOW_MICROS,
+  churnReading,
+  concurrencyReading,
+  criticalPathReading,
+  effortSplit,
+  graphChannel,
+  graphChannelGap,
+  graphEntryOf,
+  runtimeReading,
+  timelineInstants,
+  type WorkChurnReading,
+  type WorkConcurrencyReading,
+  type WorkCriticalPathReading,
+  type WorkEffortMassReading,
+  type WorkGraphReading,
+  type WorkRuntimeReading,
+  type WorkTimelineInstantReading,
+} from './workGraphModel.ts';
 
 /**
- * The four Work projections of plan 11c, derived from the snapshot this build
- * can actually read.
+ * The four Work projections of plan 11c, derived from the reads this build can
+ * actually make.
  *
  * Plan 11c maps each projection onto a grammar the app has already proved:
  * the DAG onto transit strata, the timeline onto the loom weave, the causal
  * view onto the disagreement field, and the workload onto cortex aggregation.
- * The data arrives from two reads, and which read a channel comes from is the
+ * The data arrives from three reads, and which read a channel comes from is the
  * thing to keep straight:
  *
  *   the snapshot        `WorkProjection` — the declared dependency graph, its
@@ -26,102 +46,49 @@ import {
  *                       (`requested_route`/`actual_route`), the retry chains,
  *                       the typed cancellation ladder, and the instant each
  *                       terminated attempt was observed to finish
+ *   the graph read      `WorkGraphReadV1` — one immutable work-product graph
+ *                       version and the whole `WorkProductProjectionBundleV1`
+ *                       derived from that same version: declared effort and the
+ *                       effort-weighted critical path, the gating edge set, the
+ *                       declared causal candidates, the per-task timeline
+ *                       instants, the workload figures, and the live runtime
+ *                       attempt projection with its own coverage
  *
- * The attempt list is mounted (`operation.work.list_attempts`) and its channels
- * are live, derived in `workAttemptModel.ts` and bound onto the weave below.
- * What is still not mounted is the product projection: 11c's effort mass,
- * concurrency, churn, gating edges and the effort-weighted critical path all
- * need `WorkProductProjectionBundleV1` (`work_product_projection.rs`), a domain
- * type with no route and no generated dashboard contract in this build. Those
- * stay named absences.
+ * All three are mounted. The graph read is `operation.work.views`, and it is
+ * what closed 11c's effort, concurrency and churn gaps: they were absent
+ * because no route carried `WorkProductProjectionBundleV1`, and one does now.
  *
- * Wall clock stays absent too, and for a reason worth stating precisely rather
- * than filing under "no data": the attempt record has an end and no start.
- * `WorkLeaseFenceV1` is `{epoch, lease_id}` and `WorkAttemptProgressV1` is
- * `{completed, total}` — neither is a clock — so a terminated attempt yields an
- * instant and never a width. The weave gained an order it can prove and did not
- * gain a duration, and it says both.
+ * TWO ABSENCES SURVIVE THE MOUNT, and they are the interesting ones, because a
+ * new read is exactly the moment a gap is most likely to be quietly filled with
+ * something adjacent.
  *
- * A channel is never estimated to fill a gap. 11c is explicit: attempt counts,
- * queue ages and wall-times are real or absent, and a degenerate distribution
- * is said rather than drawn.
+ *   wall clock       the attempt record has an end and no start.
+ *                    `WorkLeaseFenceV1` is `{epoch, lease_id}` and
+ *                    `WorkAttemptProgressV1` is `{completed, total}` — neither
+ *                    is a clock — so a terminated attempt yields an instant and
+ *                    never a width. The bundle does not change that: its
+ *                    runtime projection carries an attempt's identity and its
+ *                    STATE, and no instant at all.
+ *   observed order   the causal projection's `candidate_edges` are DECLARED
+ *                    data — what the plan nominated as a possible cause — and
+ *                    the graph read carries no execution order to hold them
+ *                    against. An empty candidate set means nobody declared one.
+ *                    It must never be filled in from the order things were
+ *                    observed to finish, which is a different question with its
+ *                    own honest ceiling in the weave's `observedOrder`.
+ *
+ * A channel is never estimated to fill a gap, and a channel that goes live is
+ * live because a read proved it rather than because a read arrived. 11c is
+ * explicit: attempt counts, queue ages and wall-times are real or absent, and a
+ * degenerate distribution is said rather than drawn.
  */
 
-/**
- * One measurement channel, either proved or explained.
- *
- * There is no third case and no default value. A view that renders
- * `available: false` renders the state and the sentence, so an absence can
- * never be mistaken for a zero.
+/*
+ * The channel vocabulary — `WorkChannel`, the two surviving `WorkChannelGap`
+ * absences and their sentences — lives in `workChannel.ts`, and the
+ * work-product graph read that feeds the graph-fed channels below lives in
+ * `workGraphModel.ts`. This module owns the four projections themselves.
  */
-export type WorkChannel<T> =
-  | { readonly available: true; readonly value: T }
-  | { readonly available: false; readonly state: DomainStateKind; readonly detail: string };
-
-/**
- * The measurements plan 11c asks each projection to encode that no mounted read
- * in this build can supply.
- *
- * Each is named for the measurement rather than for the route that would
- * supply it, because the gap is in the read model rather than in the transport.
- * Executor identity is deliberately not among them any more: the attempt list
- * carries `requested_route` and `actual_route`, so a thread that cannot name
- * its executor now says which attempt read failed it, in
- * `attemptChannelGap` — a transient reason, not a schema one.
- */
-export type WorkChannelGap =
-  | 'effort'
-  | 'wall_clock'
-  | 'observed_order'
-  | 'concurrency'
-  | 'churn';
-
-const CONTRACT_GAP =
-  'no generated contract in this build carries it — the product-graph read is not mounted';
-
-export function channelGap(gap: WorkChannelGap): {
-  state: DomainStateKind;
-  detail: string;
-} {
-  switch (gap) {
-    case 'effort':
-      return {
-        state: 'unsupported_schema',
-        detail: `task effort is not a field of WorkProjection, so mass and the effort-weighted critical path cannot be measured — ${CONTRACT_GAP}`,
-      };
-    case 'wall_clock':
-      return {
-        state: 'unsupported_schema',
-        detail:
-          'no span can be drawn: an attempt records the instant it was observed to finish, and nothing anywhere records when it started — WorkLeaseFenceV1 is {epoch, lease_id} and WorkAttemptProgressV1 is {completed, total}, so every mark has an end and never a width',
-      };
-    case 'observed_order':
-      return {
-        state: 'unsupported_schema',
-        detail: `this projection is derived from WorkProjection alone, which carries no timestamp, so the order its tasks ran in cannot be read here — the attempt list carries terminal instants and the weave draws them, but nothing binds a task's completion to an attempt's — ${CONTRACT_GAP}`,
-      };
-    case 'concurrency':
-      return {
-        state: 'unsupported_schema',
-        detail: `concurrency needs overlapping attempt spans, and this read has neither spans nor live attempt state — ${CONTRACT_GAP}`,
-      };
-    case 'churn':
-      return {
-        state: 'unsupported_schema',
-        detail: `recent churn needs a clock to be recent against, and this read carries no timestamp — ${CONTRACT_GAP}`,
-      };
-    default: {
-      const unhandled: never = gap;
-      return unhandled;
-    }
-  }
-}
-
-export function absentChannel(gap: WorkChannelGap): WorkChannel<never> {
-  const { state, detail } = channelGap(gap);
-  return { available: false, state, detail };
-}
-
 // --- DAG / critical path: transit strata ------------------------------------
 
 /**
@@ -178,10 +145,21 @@ export interface WorkDagReading {
   readonly unresolved: readonly WorkDagUnresolvedEdge[];
   readonly cycles: readonly WorkDagComponent[];
   /** The deepest chain of components, which is the widest channel on the
-   * transit map. Unweighted: see `effort`. */
+   * transit map. UNWEIGHTED, and kept beside `effort` rather than replaced by
+   * it: this chain is the longest path over the edges the snapshot returned,
+   * and the effort-weighted path is the authority's own chain over the whole
+   * work-product graph. They answer different questions over different
+   * populations and disagreeing is informative. */
   readonly longestChain: readonly WorkDagComponent[];
   readonly widestStratum: number;
-  readonly effort: WorkChannel<never>;
+  /** The authority's effort-weighted critical path, from the graph read. */
+  readonly effort: WorkChannel<WorkCriticalPathReading>;
+  /** The gating edge set the work-product graph declares. Declared data: an
+   * empty set is the plan gating nothing, not a measurement that failed. */
+  readonly gating: WorkChannel<readonly WorkDagEdgeV1[]>;
+  /** What the graph read itself answered, so the view states its state rather
+   * than inferring it from an empty channel. */
+  readonly graph: WorkGraphReading;
 }
 
 /**
@@ -270,8 +248,15 @@ function stronglyConnected(
  * Depth is the longest path over the condensation, so a task sits one stratum
  * below the deepest thing it depends on. Every member of a cycle shares its
  * component's depth, because a cycle has no internal order to layer by.
+ *
+ * The graph argument defaults to `pending` so a caller that has not issued the
+ * read draws its two channels as not-yet-answered rather than as absent.
  */
-export function workDagReading(projections: readonly WorkProjection[]): WorkDagReading {
+export function workDagReading(
+  projections: readonly WorkProjection[],
+  graph: WorkGraphReading = { state: 'pending' },
+): WorkDagReading {
+  const entry = graphEntryOf(graph);
   const titles = new Map(projections.map((p) => [p.task_id, p.title]));
   const taskIds = projections.map((p) => p.task_id);
 
@@ -395,7 +380,17 @@ export function workDagReading(projections: readonly WorkProjection[]): WorkDagR
     cycles: components.filter((component) => component.taskIds.length > 1),
     longestChain,
     widestStratum: strata.reduce((widest, s) => Math.max(widest, s.components.length), 0),
-    effort: absentChannel('effort'),
+    effort: graphChannel(
+      graph,
+      'the effort-weighted critical path',
+      entry === null ? null : criticalPathReading(entry),
+    ),
+    gating: graphChannel(
+      graph,
+      'the declared gating edge set',
+      entry === null ? null : entry.projections.dag.gating_edges,
+    ),
+    graph,
   };
 }
 
@@ -429,9 +424,20 @@ export interface WorkWeaveReading {
   readonly observedOrder: WorkChannel<readonly WorkTerminalObservation[]>;
   readonly retryWeave: WorkChannel<readonly WorkAttemptLineage[]>;
   readonly cancellationLadder: WorkChannel<WorkCancellationLadder>;
+  /**
+   * The instants the work-product graph records per task: when it was created,
+   * when it last changed, when it is scheduled for, and what it is due by.
+   *
+   * Four instants, and still no span. These place a task on a calendar; they do
+   * not say how long any attempt at it took, which is why `wallClock` sits
+   * beside them and stays absent.
+   */
+  readonly instants: WorkChannel<readonly WorkTimelineInstantReading[]>;
   /** What the attempt read itself answered, so the view states the page's
    * coverage and its refusals rather than inferring them from empty channels. */
   readonly attempts: WorkAttemptReading;
+  /** What the graph read answered, for the same reason. */
+  readonly graph: WorkGraphReading;
 }
 
 /**
@@ -503,14 +509,17 @@ function attemptChannel<T>(
  *
  * Every mark stays hollow. The page brought an end instant and no start, so the
  * weave gained `observedOrder` and did not gain a width; `wallClock` still says
- * so.
+ * so. The graph read does not change that either — it brought four calendar
+ * instants per task and no duration anywhere — which is exactly why `instants`
+ * and `wallClock` are two channels and not one.
  *
- * The attempt argument defaults to `pending` so a caller that has not issued
- * the read draws the channels as not-yet-answered rather than as absent.
+ * Both read arguments default to `pending` so a caller that has not issued a
+ * read draws its channels as not-yet-answered rather than as absent.
  */
 export function workWeaveReading(
   projections: readonly WorkProjection[],
   attempts: WorkAttemptReading = { state: 'pending' },
+  graph: WorkGraphReading = { state: 'pending' },
 ): WorkWeaveReading {
   const threads = new Map<string, Map<string, { crossings: number; terminal: boolean }>>();
   const unwoven: { taskId: string; title: string }[] = [];
@@ -552,6 +561,7 @@ export function workWeaveReading(
     .sort((a, b) => b.crossings - a.crossings || a.runId.localeCompare(b.runId));
 
   const page = attemptPageOf(attempts);
+  const entry = graphEntryOf(graph);
   return {
     threads: woven,
     unwoven: unwoven.sort((a, b) => a.taskId.localeCompare(b.taskId)),
@@ -568,7 +578,15 @@ export function workWeaveReading(
       page === null
         ? attemptChannelGap(attempts, 'the cancellation ladder')
         : { available: true, value: page.ladder },
+    // Declared calendar data, so an empty set is a graph with no tasks in it
+    // rather than a measurement that failed.
+    instants: graphChannel(
+      graph,
+      'the recorded task instants',
+      entry === null ? null : timelineInstants(entry),
+    ),
     attempts,
+    graph,
   };
 }
 
@@ -609,6 +627,21 @@ export interface WorkCausalReading {
   /** Executed-before-but-undeclared, the field's other half. It needs an
    * observed order to find an edge the plan never declared. */
   readonly undeclared: WorkChannel<never>;
+  /**
+   * The causal candidates the work-product graph DECLARES — what the plan
+   * nominated as a possible cause, edge by edge.
+   *
+   * The one channel on this page whose empty value is a reading. An empty
+   * candidate set means nobody declared a candidate, and it is available and
+   * empty rather than absent, because the authority answered the question. It
+   * is emphatically not the undeclared half of the field: filling it from the
+   * order things were observed to finish would manufacture exactly the
+   * measurement `observedOrder` says this build cannot take.
+   */
+  readonly candidates: WorkChannel<readonly WorkDagEdgeV1[]>;
+  /** What the graph read answered, so the view states its state rather than
+   * inferring it from an empty channel. */
+  readonly graph: WorkGraphReading;
 }
 
 export function causalReadingLabel(kind: WorkCausalReadingKind): string {
@@ -649,7 +682,11 @@ export function causalReadingState(kind: WorkCausalReadingKind): DomainStateKind
   }
 }
 
-export function workCausalReading(projections: readonly WorkProjection[]): WorkCausalReading {
+export function workCausalReading(
+  projections: readonly WorkProjection[],
+  graph: WorkGraphReading = { state: 'pending' },
+): WorkCausalReading {
+  const entry = graphEntryOf(graph);
   const terminal = new Map(
     projections.map((p) => [p.task_id, p.runtime_evidence.some((e) => e.terminal)]),
   );
@@ -691,6 +728,12 @@ export function workCausalReading(projections: readonly WorkProjection[]): WorkC
     declared: edges.length,
     observedOrder: absentChannel('observed_order'),
     undeclared: absentChannel('observed_order'),
+    candidates: graphChannel(
+      graph,
+      'the declared causal candidates',
+      entry === null ? null : entry.projections.causal.candidate_edges,
+    ),
+    graph,
   };
 }
 
@@ -710,19 +753,43 @@ export interface WorkloadReading {
   readonly unattributed: readonly { readonly taskId: string; readonly title: string }[];
   readonly taskCount: number;
   readonly evidenceCount: number;
-  readonly effortMass: WorkChannel<never>;
-  readonly concurrency: WorkChannel<never>;
-  readonly churn: WorkChannel<never>;
+  /** Declared effort mass over the whole work-product graph, with its runtime
+   * split nested inside as its own channel. */
+  readonly effortMass: WorkChannel<WorkEffortMassReading>;
+  readonly concurrency: WorkChannel<WorkConcurrencyReading>;
+  /** Recent change, measured against the instant the graph version was observed
+   * at — which is the clock this projection did not have until the graph read
+   * was mounted. */
+  readonly churn: WorkChannel<WorkChurnReading>;
+  /** The live attempt projection under this graph version, and the one coverage
+   * state that is an absence rather than a value. */
+  readonly runtime: WorkChannel<WorkRuntimeReading>;
+  /** What the graph read answered, so the view states its state rather than
+   * inferring it from an empty channel. */
+  readonly graph: WorkGraphReading;
 }
 
 /**
  * Runs as regions, task mass as area.
  *
  * The aggregation ratio a cortex view must print is `taskCount` against
- * `regions.length`. Area is task count rather than effort, and says so:
- * `effortMass` is the measurement 11c actually asks for and it is absent.
+ * `regions.length`. Area stays TASK COUNT and says so: the regions are the
+ * snapshot's run/task incidence, and `effortMass` — the measurement 11c
+ * actually asks for — is a property of the whole work-product graph rather than
+ * of any run. The two are kept as separate readings instead of one being
+ * rescaled by the other, because the graph read and the snapshot page need not
+ * cover the same tasks and a bar weighted across that seam would be a number
+ * neither read holds.
+ *
+ * The graph argument defaults to `pending` so a caller that has not issued the
+ * read draws its four channels as not-yet-answered rather than as absent.
  */
-export function workloadReading(projections: readonly WorkProjection[]): WorkloadReading {
+export function workloadReading(
+  projections: readonly WorkProjection[],
+  graph: WorkGraphReading = { state: 'pending' },
+  churnWindow: number = WORK_CHURN_WINDOW_MICROS,
+): WorkloadReading {
+  const entry = graphEntryOf(graph);
   const regions = new Map<string, { tasks: Set<string>; evidence: number; terminal: number }>();
   const unattributed: { taskId: string; title: string }[] = [];
   let evidenceCount = 0;
@@ -758,8 +825,36 @@ export function workloadReading(projections: readonly WorkProjection[]): Workloa
     unattributed: unattributed.sort((a, b) => a.taskId.localeCompare(b.taskId)),
     taskCount: projections.length,
     evidenceCount,
-    effortMass: absentChannel('effort'),
-    concurrency: absentChannel('concurrency'),
-    churn: absentChannel('churn'),
+    effortMass: graphChannel(
+      graph,
+      'declared effort mass',
+      entry === null
+        ? null
+        : {
+            total: entry.projections.workload.total_effort,
+            split: effortSplit(entry),
+          },
+    ),
+    // Not routed through `graphChannel`: this one has two ways to be absent —
+    // the read did not answer, and the read answered without the figures — and
+    // they carry different states and different sentences.
+    concurrency:
+      entry === null
+        ? graphChannelGap(graph, 'requested and actual concurrency')
+        : concurrencyReading(entry),
+    churn: graphChannel(
+      graph,
+      'recent churn',
+      entry === null ? null : churnReading(entry, churnWindow),
+    ),
+    // `entry.runtime` rather than `entry.projections.runtime`: the version entry
+    // carries the runtime projection the whole bundle was derived against, and
+    // reading it from the entry keeps this channel bound to the same version as
+    // the effort split and the concurrency figures that are gated on it.
+    runtime:
+      entry === null
+        ? graphChannelGap(graph, 'the live attempt projection')
+        : runtimeReading(entry.runtime),
+    graph,
   };
 }

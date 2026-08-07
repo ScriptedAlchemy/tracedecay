@@ -2,9 +2,11 @@ import type { WorkProjectionSnapshotV1 } from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
+import { formatMicrosUtc } from '../../../ui/format.ts';
 import { kindColorVars } from '../../../viz/graph/kindColor.ts';
 import { coverageReading } from '../workModel.ts';
 import type { WorkAttemptReading } from '../workAttemptModel.ts';
+import type { WorkGraphReading } from '../workGraphModel.ts';
 import {
   type WorkWeaveLanding,
   type WorkWeaveReading,
@@ -60,15 +62,17 @@ const TALLY_CAP = 6;
 export function WorkTimelineView({
   snapshot,
   attempts,
+  graph,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
   attempts: WorkAttemptReading;
+  graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workWeaveReading(snapshot.projections, attempts);
+  const reading = workWeaveReading(snapshot.projections, attempts, graph);
   const coverage = coverageReading(snapshot.coverage);
 
   const landings = reading.threads.reduce((total, thread) => total + thread.landings.length, 0);
@@ -121,13 +125,16 @@ export function WorkTimelineView({
 
       <WorkExecutionRecord reading={reading} selected={selected} onSelect={onSelect} />
 
+      <RecordedInstants reading={reading} />
+
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
         <UnwovenBand reading={reading} selected={selected} onSelect={onSelect} />
         {/* Wall clock alone. The attempt-derived channels are drawn in the
           * execution record, each where its measurement would have been: a
           * refused attempt read makes all four absent for one reason, and
           * repeating that one sentence in a ledger as well would print it four
-          * times on a page that has one thing to say. */}
+          * times on a page that has one thing to say. The recorded instants get
+          * the same treatment, in their own panel above. */}
         <ChannelLedger
           legend="Measurements this projection could not take"
           channels={[
@@ -358,6 +365,110 @@ function Tally({ count, runId }: { count: number; runId: string }) {
         />
       ))}
     </span>
+  );
+}
+
+/**
+ * The four instants the work-product graph records per task.
+ *
+ * A calendar, and deliberately not an axis. Created, last changed, scheduled
+ * for, due by — four points, none of which is the start of an attempt, so
+ * nothing here closes the wall-clock absence stated at the top of the weave.
+ * They are drawn as a table of instants rather than laid on a time line for
+ * exactly that reason: a line would invite reading the distance between two
+ * marks as a duration something took.
+ *
+ * `scheduled_at` and `deadline` are nullable in the contract and their absence
+ * is printed as an absence rather than as an epoch: a task with no deadline is
+ * not a task due at the beginning of time.
+ */
+function RecordedInstants({ reading }: { reading: WorkWeaveReading }) {
+  const instants = reading.instants;
+  return (
+    <Panel
+      legend="Instants the graph records"
+      actions={
+        instants.available ? (
+          <StateChip
+            kind={instants.value.length === 0 ? 'complete_zero_findings' : 'ready'}
+            detail={`${instants.value.length}`}
+          />
+        ) : (
+          <StateChip kind={instants.state} detail="not read" />
+        )
+      }
+      bodyClassName={instants.available && instants.value.length > 0 ? 'p-0' : undefined}
+    >
+      {!instants.available ? (
+        <p className="text-3xs leading-snug text-text-muted">{instants.detail}</p>
+      ) : instants.value.length === 0 ? (
+        <EmptyReading>
+          The work-product graph version this read returned holds no task at all, so there is no
+          instant to record. This is the authority reporting an empty graph, not a read that
+          failed.
+        </EmptyReading>
+      ) : (
+        <div
+          role="region"
+          aria-label="Recorded task instants"
+          tabIndex={0}
+          className="min-w-0 overflow-x-auto"
+          data-work-instants={instants.value.length}
+        >
+          <table className="w-full min-w-0 border-collapse text-2xs">
+            <caption className="sr-only">
+              Every task the work-product graph returned, with the instant it was created, the
+              instant it last changed, the instant it is scheduled for and the instant it is due
+              by. None of these is the start of an attempt, so no duration is derivable from
+              them.
+            </caption>
+            <thead>
+              <tr className="border-b border-edge text-text-muted">
+                <th scope="col" className="px-2 py-1 text-left font-medium">
+                  Task
+                </th>
+                <th scope="col" className="px-2 py-1 text-left font-medium">
+                  Created
+                </th>
+                <th scope="col" className="px-2 py-1 text-left font-medium">
+                  Last changed
+                </th>
+                <th scope="col" className="px-2 py-1 text-left font-medium">
+                  Scheduled
+                </th>
+                <th scope="col" className="px-2 py-1 text-left font-medium">
+                  Due
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {instants.value.map((row) => (
+                <tr key={row.taskId} data-work-instant={row.taskId}>
+                  <th
+                    scope="row"
+                    className="min-w-0 px-2 py-1 text-left align-top font-normal font-mono text-3xs text-text-secondary"
+                  >
+                    {row.taskId}
+                  </th>
+                  <td className="px-2 py-1 align-top font-mono text-3xs text-text-muted">
+                    {formatMicrosUtc(row.createdAt)}
+                  </td>
+                  <td className="px-2 py-1 align-top font-mono text-3xs text-text-secondary">
+                    {formatMicrosUtc(row.updatedAt)}
+                  </td>
+                  <td className="px-2 py-1 align-top font-mono text-3xs text-text-muted">
+                    {row.scheduledAt === null ? 'not scheduled' : formatMicrosUtc(row.scheduledAt)}
+                  </td>
+                  <td className="px-2 py-1 align-top font-mono text-3xs text-text-muted">
+                    {row.deadline === null ? 'no deadline' : formatMicrosUtc(row.deadline)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Panel>
   );
 }
 

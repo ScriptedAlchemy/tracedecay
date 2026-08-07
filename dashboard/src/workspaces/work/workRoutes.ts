@@ -8,6 +8,8 @@ import {
   ReviewProposalRequestV1Schema,
   WorkAttemptListRequestV1Schema,
   WorkAttemptListV1Schema,
+  WorkGraphReadRequestV1Schema,
+  WorkGraphReadV1Schema,
   WorkProjectionDeltaRequestV1Schema,
   WorkProjectionDeltaV1Schema,
   WorkProjectionSchema,
@@ -17,7 +19,7 @@ import {
 import type { WorkRoute } from "./workApi.ts";
 
 /**
- * The ten Work routes this build can reach, and no others.
+ * The eleven Work routes this build can reach, and no others.
  *
  * Each one names a core operation of the canonical `WorkOperation` descriptor
  * (`crates/tracedecay-api/src/work.rs`), which is what the daemon mounts and
@@ -27,10 +29,19 @@ import type { WorkRoute } from "./workApi.ts";
  * the dashboard side, and a route invented here would be a request the daemon
  * has never mounted.
  *
- * The descriptor mounts fifteen; these are the ten the dashboard has a caller
- * for. The five it leaves alone are the attempt commands — start, cancel,
- * resume, and the single-attempt status read — which drive execution rather
- * than read it, and belong to whichever surface takes on running Work.
+ * The descriptor mounts sixteen; these eleven are the ones the dashboard
+ * declares. The five it leaves alone are `generate_proposal` and the four
+ * attempt operations — start, the single-attempt status read, cancel, and
+ * resume — which drive execution rather than read it, and belong to whichever
+ * surface takes on running Work.
+ *
+ * Declared is not the same as called, and the difference is deliberate. Eight
+ * of the eleven have a caller in this build; `review_proposal`,
+ * `accept_proposal` and `attach_runtime_evidence` are declared and unbound.
+ * They stay because this table is the dashboard's record of what the daemon
+ * mounts and what contracts sit on either side of it — deleting a row would
+ * not un-mount the route, it would only mean the next caller has to rediscover
+ * its contract by hand.
  */
 
 export const WORK_SNAPSHOT_ROUTE = {
@@ -61,6 +72,30 @@ export const WORK_LIST_ATTEMPTS_ROUTE = {
   path: "/api/work/list-attempts",
   request: WorkAttemptListRequestV1Schema,
   response: WorkAttemptListV1Schema,
+} as const satisfies WorkRoute<unknown, unknown>;
+
+/**
+ * The work-product graph, and every projection derived from one version of it.
+ *
+ * This is the read the four projections beside the board were waiting for. It
+ * answers `WorkGraphReadV1`, tagged by the mode it was asked in: `current` and
+ * `as_of` carry one `snapshot` entry, `evolution` and `forensic` carry a
+ * `timeline` of entries plus the coverage that timeline was read under. Every
+ * entry holds one immutable graph version AND the whole
+ * `WorkProductProjectionBundleV1` derived from that same version at the
+ * caller's own observation instant, so effort, gating edges, declared causal
+ * candidates, timeline instants, workload and live runtime state are all read
+ * off one consistent version rather than stitched from separate reads.
+ *
+ * `continuation` is a timeline cursor and is legal only on the two timeline
+ * modes; `selection` names the relation scope, and a `relations` selection with
+ * an empty scope set is an invalid request rather than an empty answer.
+ */
+export const WORK_VIEWS_ROUTE = {
+  operation: "operation.work.views",
+  path: "/api/work/views",
+  request: WorkGraphReadRequestV1Schema,
+  response: WorkGraphReadV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 /**

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { WorkProjection } from '../../contracts/index.ts';
+import { WorkGraphReadV1Schema, type WorkProjection } from '../../contracts/index.ts';
+import { workGraphRead } from '../../test/workGraphFixture.ts';
+import { absentChannel, channelGap, type WorkChannelGap } from './workChannel.ts';
+import { workGraphReading } from './workGraphModel.ts';
 import {
-  absentChannel,
-  channelGap,
-  type WorkChannelGap,
   workCausalReading,
   workDagReading,
   workWeaveReading,
@@ -330,13 +330,11 @@ describe('the workload aggregation', () => {
 });
 
 describe('the absent channels', () => {
-  const gaps: readonly WorkChannelGap[] = [
-    'effort',
-    'wall_clock',
-    'observed_order',
-    'concurrency',
-    'churn',
-  ];
+  /** The two absences no mounted read closes. Effort, concurrency and churn
+   * left this list when `operation.work.views` put
+   * `WorkProductProjectionBundleV1` on the wire — their gaps are now the graph
+   * READ's state, proved in `workGraphModel.test.ts`, not a schema absence. */
+  const gaps: readonly WorkChannelGap[] = ['wall_clock', 'observed_order'];
 
   /** A channel that says only "unavailable" is not much better than a blank.
    * Each one has to name the measurement it could not take. */
@@ -452,5 +450,154 @@ describe('the attempt channels bound onto the weave', () => {
     expect(reading.wallClock.available === false && reading.wallClock.detail).toContain(
       'never a width',
     );
+  });
+});
+
+/**
+ * The graph channels bound onto the four projections.
+ *
+ * Every graph read here is built by the shared wire fixture and parsed through
+ * `WorkGraphReadV1Schema` — the same schema `callWork` parses the wire with —
+ * so these bindings and the DOM tests cannot drift into two ideas of the
+ * contract. The separations under proof: declared-and-empty from absent,
+ * withheld from zero, and the one fill-in the mount must never cause — causal
+ * candidates acquiring an observed order.
+ */
+describe('the graph channels bound onto the projections', () => {
+  function graphOf(spec: Parameters<typeof workGraphRead>[0]) {
+    return workGraphReading({
+      outcome: 'value',
+      value: WorkGraphReadV1Schema.parse(workGraphRead(spec)),
+    });
+  }
+
+  it('weights the critical path with the authority’s own chain and effort', () => {
+    const reading = workDagReading(
+      [projection({ task_id: 'a' })],
+      graphOf({
+        tasks: [{ taskId: 'a', effort: 3 }, { taskId: 'b', effort: 5 }],
+        criticalPath: ['a', 'b'],
+      }),
+    );
+
+    expect(reading.effort.available).toBe(true);
+    expect(reading.effort.available && reading.effort.value).toEqual({
+      taskIds: ['a', 'b'],
+      totalEffort: 8,
+    });
+    // The unweighted chain over THIS page's edges survives beside it.
+    expect(reading.longestChain.map((component) => component.taskIds)).toEqual([['a']]);
+  });
+
+  it('reads an empty gating set as the plan gating nothing, not as an absence', () => {
+    const reading = workDagReading([projection({ task_id: 'a' })], graphOf({
+      tasks: [{ taskId: 'a' }],
+    }));
+
+    expect(reading.gating.available).toBe(true);
+    expect(reading.gating.available && reading.gating.value).toEqual([]);
+  });
+
+  /** The 09:34 causal-binding constraint, as a test. Candidates are DECLARED
+   * data: an empty set is somebody answering "none", and the observed order —
+   * the different question — must stay the stated absence it always was. */
+  it('keeps declared causal candidates apart from any observed order', () => {
+    const declared = workCausalReading(
+      [projection({ task_id: 'b', dependencies: ['a'] })],
+      graphOf({ tasks: [{ taskId: 'a' }, { taskId: 'b', causalCandidates: ['a'] }] }),
+    );
+    expect(declared.candidates.available).toBe(true);
+    expect(declared.candidates.available && declared.candidates.value).toEqual([
+      { dependency: 'a', dependent: 'b' },
+    ]);
+
+    const none = workCausalReading(
+      [projection({ task_id: 'a' })],
+      graphOf({ tasks: [{ taskId: 'a' }] }),
+    );
+    expect(none.candidates.available).toBe(true);
+    expect(none.candidates.available && none.candidates.value).toEqual([]);
+    // The mount changes neither of these: order stays an absence with its
+    // schema-gap sentence, never filled from the candidates beside it.
+    expect(none.observedOrder.available).toBe(false);
+    expect(none.observedOrder.available === false && none.observedOrder.state).toBe(
+      'unsupported_schema',
+    );
+  });
+
+  it('reports a withheld effort split and concurrency as partial, never as zero', () => {
+    const reading = workloadReading(
+      [projection({ task_id: 'a' })],
+      graphOf({
+        tasks: [{ taskId: 'a', effort: 7 }],
+        readyEffort: null,
+        runningEffort: null,
+        blockedEffort: null,
+        requestedConcurrency: null,
+        actualConcurrency: null,
+      }),
+    );
+
+    expect(reading.effortMass.available).toBe(true);
+    if (!reading.effortMass.available) return;
+    expect(reading.effortMass.value.total).toBe(7);
+    expect(reading.effortMass.value.split.available).toBe(false);
+    expect(
+      reading.effortMass.value.split.available === false && reading.effortMass.value.split.state,
+    ).toBe('partial');
+    expect(reading.concurrency.available).toBe(false);
+    expect(reading.concurrency.available === false && reading.concurrency.state).toBe('partial');
+  });
+
+  it('answers the runtime-gated figures when the authority answered them', () => {
+    const reading = workloadReading(
+      [projection({ task_id: 'a' })],
+      graphOf({
+        tasks: [{ taskId: 'a', effort: 4 }],
+        readyEffort: 1,
+        runningEffort: 2,
+        blockedEffort: 1,
+        requestedConcurrency: 3,
+        actualConcurrency: 2,
+      }),
+    );
+
+    expect(reading.effortMass.available && reading.effortMass.value.split.available).toBe(true);
+    if (!reading.effortMass.available || !reading.effortMass.value.split.available) return;
+    expect(reading.effortMass.value.split.value).toEqual({ ready: 1, running: 2, blocked: 1 });
+    expect(reading.concurrency.available && reading.concurrency.value).toEqual({
+      requested: 3,
+      actual: 2,
+    });
+  });
+
+  it('places the recorded task instants on the weave, freshest first', () => {
+    const OBSERVED = 1_800_000_000_000_000;
+    const reading = workWeaveReading(
+      [projection({ task_id: 'a' })],
+      { state: 'pending' },
+      graphOf({
+        tasks: [
+          { taskId: 'older', updatedAt: OBSERVED - 2_000 },
+          { taskId: 'newer', updatedAt: OBSERVED - 1_000 },
+        ],
+        observedAt: OBSERVED,
+      }),
+    );
+
+    expect(reading.instants.available).toBe(true);
+    if (!reading.instants.available) return;
+    expect(reading.instants.value.map((instant) => instant.taskId)).toEqual(['newer', 'older']);
+    // The graph brought four calendar instants and still no duration.
+    expect(reading.wallClock.available).toBe(false);
+  });
+
+  it('draws every graph channel as pending until the read is issued', () => {
+    const reading = workloadReading([projection({ task_id: 'a' })]);
+
+    for (const channel of [reading.effortMass, reading.concurrency, reading.churn, reading.runtime]) {
+      expect(channel.available).toBe(false);
+      expect(channel.available === false && channel.state).toBe('loading');
+    }
   });
 });

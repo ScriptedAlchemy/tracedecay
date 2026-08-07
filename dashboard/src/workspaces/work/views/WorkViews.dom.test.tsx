@@ -28,6 +28,7 @@ import {
   workRoute,
   workTerminal,
 } from '../../../test/workAttemptFixture.ts';
+import { workGraphRead, type WorkGraphVersionSpec } from '../../../test/workGraphFixture.ts';
 import { WorkPage } from '../WorkPage.tsx';
 
 function projection(overrides: Record<string, unknown> = {}) {
@@ -144,19 +145,49 @@ const ATTEMPTS = [
   }),
 ];
 
-/** Serve both Work reads the page issues. Routed by path rather than answered
- * with one body, so a projection cannot pass by reading the wrong contract. */
+/**
+ * The work-product graph behind the projections, coherent with GRAPH above: the
+ * same chain carries declared effort, its dependencies are the gating edges,
+ * one causal candidate is nominated, and one attempt is live under complete
+ * runtime coverage.
+ */
+const VIEWS_GRAPH: WorkGraphVersionSpec = {
+  tasks: [
+    { taskId: 'root', effort: 2 },
+    { taskId: 'middle', effort: 3, dependencies: ['root'] },
+    { taskId: 'leaf', effort: 5, dependencies: ['middle'], causalCandidates: ['middle'] },
+    { taskId: 'loop-a', dependencies: ['loop-b'] },
+    { taskId: 'loop-b', dependencies: ['loop-a'] },
+    { taskId: 'lonely' },
+  ],
+  criticalPath: ['root', 'middle', 'leaf'],
+  runtimeAttempts: [{ attemptId: 'attempt-2', taskId: 'middle', runId: 'run-1' }],
+};
+
+function viewsBody(spec: WorkGraphVersionSpec = VIEWS_GRAPH) {
+  return {
+    status: 200,
+    body: workEnvelope(workGraphRead(spec), 'binding.http.work.views'),
+  };
+}
+
+/** Serve all three Work reads the page issues. Routed by path rather than
+ * answered with one body, so a projection cannot pass by reading the wrong
+ * contract. */
 function serveWork(
   attempts: { status: number; body: unknown } = {
     status: 200,
     body: workEnvelope(workAttemptList(ATTEMPTS), 'binding.http.work.list_attempts'),
   },
   projections: readonly unknown[] = GRAPH,
+  views: { status: number; body: unknown } = viewsBody(),
 ) {
   serve((url) =>
     url.includes('/work/list-attempts')
       ? attempts
-      : { status: 200, body: snapshotBody(projections) },
+      : url.includes('/work/views')
+        ? views
+        : { status: 200, body: snapshotBody(projections) },
   );
 }
 
@@ -362,32 +393,64 @@ describe('the DAG projection', () => {
     expect(screen.getByText('leaf needs offpage')).toBeTruthy();
   });
 
-  /** The effort-weighted critical path is the measurement 11c asks for and no
-   * contract in this build carries it. */
-  it('states that it could not weight the critical path', async () => {
+  /** The effort-weighted critical path is the measurement 11c asks for, and
+   * `operation.work.views` now carries it: the authority's chain and its
+   * weight render from the wire, beside — never in place of — the unweighted
+   * chain over this page's own edges. */
+  it('weights the critical path with the authority chain from the graph read', async () => {
     const { container } = renderPage('/work?view=dag');
-    await waitFor(() => expect(container.querySelector('[data-work-view="dag"]')).not.toBeNull());
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-critical-path="3"]')).not.toBeNull(),
+    );
 
     expect(
-      container.querySelector('[data-work-measure="effort-weighted critical path"]'),
-    ).not.toBeNull();
+      container
+        .querySelector('[data-work-critical-path="3"]')
+        ?.getAttribute('data-work-critical-effort'),
+    ).toBe('10');
+    // The unweighted chain over this page's edges survives beside it.
+    expect(container.querySelectorAll('[data-work-widest="true"]').length).toBeGreaterThan(0);
+  });
+
+  it('lists the gating edges the graph declares', async () => {
+    const { container } = renderPage('/work?view=dag');
+    await waitFor(() => expect(container.querySelector('[data-work-gating]')).not.toBeNull());
+
+    expect(container.querySelector('[data-work-gating]')?.getAttribute('data-work-gating')).toBe(
+      '4',
+    );
+    expect(screen.getByText('middle needs root')).toBeTruthy();
+  });
+
+  /** When the graph read is refused, the two graph-fed panels state the
+   * refusal in the read's own words rather than drawing an empty chain. */
+  it('states a refused graph read on the channels it would have fed', async () => {
+    serveWork(undefined, GRAPH, {
+      status: 503,
+      body: { kind: 'problem' },
+    });
+    const { container } = renderPage('/work?view=dag');
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-critical-path="absent"]')).not.toBeNull(),
+    );
+
+    expect(
+      container.querySelector('[data-work-critical-path="absent"]')?.textContent ?? '',
+    ).toContain('refused');
   });
 });
 
 describe('every attempt-shaped projection', () => {
   /**
-   * The assertion this file exists for. Every projection is still missing at
-   * least one measurement 11c asks it to encode — effort, wall clock,
-   * concurrency and churn have no mounted read at all, and the projections
-   * derived from the snapshot alone cannot order their tasks in time — and a
-   * projection that drew one of them would be drawing a number nobody could
-   * check.
+   * The assertion this file exists for. Wall clock and observed execution
+   * order survived the graph-read mount as the two measurements no contract
+   * carries — an attempt still records an end and no start, and nothing binds
+   * a task's completion to the instant another task finished — and a
+   * projection that drew either would be drawing a number nobody could check.
    */
   it.each([
-    ['DAG', 'dag'],
     ['Timeline', 'timeline'],
     ['Causal', 'causal'],
-    ['Workload', 'workload'],
   ])('%s states the measurements it could not take', async (name, view) => {
     const { container } = renderPage(`/work?view=${view}`);
     await waitFor(() =>
@@ -460,6 +523,105 @@ describe('every attempt-shaped projection', () => {
       expect(control.className).toContain('min-h-[44px]');
     }
     expect(name.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The graph-fed channels, over the mounted views route.
+ *
+ * Effort, concurrency, churn, gating edges, causal candidates, task instants
+ * and the live runtime projection were this page's absences until
+ * `operation.work.views` landed. Each test asserts a measurement is now drawn
+ * from `WorkGraphReadV1` on the wire — parsed by the same schema the model
+ * tests prove the fixture against — and that the read's own limits are still
+ * said out loud: declared-and-empty is an answer, withheld is not zero, and
+ * unmeasured attempts are never a quiet empty list.
+ */
+describe('the graph-fed channels', () => {
+  it('draws the workload figures the graph version answered', async () => {
+    const { container } = renderPage('/work?view=workload');
+    await waitFor(() => expect(container.querySelector('[data-work-effort]')).not.toBeNull());
+
+    // Total declared effort: 2+3+5 on the chain, 1 each for the three others.
+    expect(container.querySelector('[data-work-effort]')?.getAttribute('data-work-effort')).toBe(
+      '13',
+    );
+    expect(
+      container.querySelector('[data-work-effort-split]')?.getAttribute('data-work-effort-split'),
+    ).toBe('13/0/0');
+    expect(
+      container.querySelector('[data-work-concurrency]')?.getAttribute('data-work-concurrency'),
+    ).toBe('1/2');
+    // Every fixture task was last updated two days before the read instant, so
+    // a one-day churn window truthfully lists nothing over six counted tasks.
+    expect(container.querySelector('[data-work-churn]')?.getAttribute('data-work-churn')).toBe('0');
+    expect(
+      container.querySelector('[data-work-churn-counted]')?.getAttribute('data-work-churn-counted'),
+    ).toBe('6');
+    expect(
+      container.querySelector('[data-work-runtime="complete"]')?.getAttribute(
+        'data-work-runtime-attempts',
+      ),
+    ).toBe('1');
+  });
+
+  /** Unavailable runtime coverage is unmeasured attempts. It must never render
+   * like the complete-and-empty reading, which is the authority stating that
+   * nothing is running. */
+  it('renders unmeasured attempts as unmeasured, never as zero attempts', async () => {
+    serveWork(undefined, GRAPH, viewsBody({
+      ...VIEWS_GRAPH,
+      runtimeAttempts: [],
+      runtimeCoverage: { coverage: 'unavailable' },
+    }));
+    const { container } = renderPage('/work?view=workload');
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-runtime="unavailable"]')).not.toBeNull(),
+    );
+
+    expect(
+      container.querySelector('[data-work-runtime="unavailable"]')?.textContent ?? '',
+    ).toContain('not a reading of zero attempts');
+    expect(container.querySelector('[data-work-runtime-attempts]')).toBeNull();
+  });
+
+  it('draws the declared causal candidates from the wire', async () => {
+    const { container } = renderPage('/work?view=causal');
+    await waitFor(() => expect(container.querySelector('[data-work-candidates]')).not.toBeNull());
+
+    expect(
+      container.querySelector('[data-work-candidates]')?.getAttribute('data-work-candidates'),
+    ).toBe('1');
+  });
+
+  /** The one channel whose empty value is a reading, and the one fill-in the
+   * mount must never cause: a graph that declares no candidate renders the
+   * declaration, and the observed order stays a stated absence beside it. */
+  it('renders declared-none candidates as an answer while order stays absent', async () => {
+    serveWork(undefined, GRAPH, viewsBody({
+      ...VIEWS_GRAPH,
+      tasks: VIEWS_GRAPH.tasks.map((task) => ({ ...task, causalCandidates: [] })),
+    }));
+    const { container } = renderPage('/work?view=causal');
+    await waitFor(() =>
+      expect(screen.getByText(/declares no causal candidate at all/)).toBeTruthy(),
+    );
+
+    const absences = [...container.querySelectorAll('[data-work-channel="absent"]')].map(
+      (absence) => absence.getAttribute('data-work-measure') ?? '',
+    );
+    expect(absences.some((measure) => measure.includes('order'))).toBe(true);
+  });
+
+  it('places the recorded task instants on the timeline', async () => {
+    const { container } = renderPage('/work?view=timeline');
+    await waitFor(() => expect(container.querySelector('[data-work-instants]')).not.toBeNull());
+
+    expect(
+      container.querySelector('[data-work-instants]')?.getAttribute('data-work-instants'),
+    ).toBe('6');
+    // Six calendar rows and still no span anywhere.
+    expect(container.querySelector('[data-work-span="hollow"]')).not.toBeNull();
   });
 });
 

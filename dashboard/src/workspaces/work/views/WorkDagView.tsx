@@ -3,6 +3,7 @@ import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
 import { coverageReading } from '../workModel.ts';
+import type { WorkGraphReading } from '../workGraphModel.ts';
 import {
   type WorkDagComponent,
   type WorkDagReading,
@@ -20,10 +21,14 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
  * the climb hue and requires the caption to state it is an observation; a
  * declared cycle is a real reading of the plan, not a rendering fault.
  *
- * The widest channel is the deepest chain of components. It is UNWEIGHTED —
- * 11c's critical path is weighted by effort, `WorkProjection` has no effort
- * field, and a chain weighted by a number this build invented would be the one
- * thing on the page nobody could check. The absence is drawn instead.
+ * The widest channel is the deepest chain of components, and it is UNWEIGHTED.
+ * 11c's critical path is weighted by effort, and the effort lives in the
+ * work-product graph rather than in `WorkProjection`, so the two chains are
+ * drawn side by side and neither is rescaled by the other: this one is the
+ * longest path over the edges THIS PAGE returned, and the authority's is the
+ * effort-weighted path over the whole graph. Where they disagree, the
+ * disagreement is the reading. When the graph read has not answered, the
+ * weighted chain is an absence carrying that read's own state.
  *
  * Accessibility. The strata are an ordered list of ordered lists of buttons,
  * so the visualization IS the accessible structure: it takes Tab in reading
@@ -34,14 +39,16 @@ import { ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx'
 
 export function WorkDagView({
   snapshot,
+  graph,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
+  graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workDagReading(snapshot.projections);
+  const reading = workDagReading(snapshot.projections, graph);
   const coverage = coverageReading(snapshot.coverage);
   const onLongestChain = new Set(reading.longestChain.map((component) => component.index));
 
@@ -78,19 +85,137 @@ export function WorkDagView({
         </div>
       </Panel>
 
+      <CriticalPath reading={reading} />
+
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
         <ClimbAndCycles reading={reading} onSelect={onSelect} />
         <div className="flex min-w-0 flex-col gap-3">
           <UnresolvedEdges reading={reading} />
+          <GatingEdges reading={reading} />
           <ChannelLedger
             legend="Measurements this projection could not take"
             channels={[
               { measure: 'effort-weighted critical path', channel: reading.effort },
+              { measure: 'declared gating edges', channel: reading.gating },
             ]}
           />
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The authority's effort-weighted critical path.
+ *
+ * Task ids are printed rather than offered as buttons, and that is the reading
+ * rather than an omission: this chain comes off the work-product graph and the
+ * strata above come off the snapshot page, so a task on it need not be a task
+ * this page returned. A button that moved the selection to a task the board
+ * does not hold would move it to nothing.
+ */
+function CriticalPath({ reading }: { reading: WorkDagReading }) {
+  const chain = reading.effort;
+  return (
+    <Panel
+      legend="Effort-weighted critical path"
+      actions={
+        chain.available ? (
+          <StateChip
+            kind={chain.value.taskIds.length === 0 ? 'complete_zero_findings' : 'ready'}
+            detail={`${chain.value.totalEffort} effort`}
+          />
+        ) : (
+          <StateChip kind={chain.state} detail="not weighted" />
+        )
+      }
+    >
+      {!chain.available ? (
+        <p className="text-3xs leading-snug text-text-muted" data-work-critical-path="absent">
+          {chain.detail}
+        </p>
+      ) : chain.value.taskIds.length === 0 ? (
+        <EmptyReading>
+          The work-product graph weighted its critical path and the path is empty: this graph
+          version declares no chain of work to weigh. That is the authority answering, not a
+          measurement that failed.
+        </EmptyReading>
+      ) : (
+        <div
+          className="flex min-w-0 flex-col gap-2"
+          data-work-critical-path={chain.value.taskIds.length}
+          data-work-critical-effort={chain.value.totalEffort}
+        >
+          <p className="text-3xs leading-snug text-text-muted">
+            {chain.value.taskIds.length}{' '}
+            {chain.value.taskIds.length === 1 ? 'task' : 'tasks'} carrying{' '}
+            {chain.value.totalEffort} declared effort, weighted by the work-product graph over
+            its whole graph version. The strata above are the longest path over the edges THIS
+            page returned and are unweighted, so the two chains answer different questions and
+            need not agree.
+          </p>
+          <ol className="flex min-w-0 flex-wrap items-center gap-1 font-mono text-3xs text-text-secondary">
+            {chain.value.taskIds.map((taskId, index) => (
+              <li key={`${taskId}#${index}`} className="flex min-w-0 items-center gap-1">
+                {index === 0 ? null : (
+                  <span aria-hidden className="shrink-0 text-text-muted">
+                    ›
+                  </span>
+                )}
+                <span className="min-w-0 truncate">{taskId}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/**
+ * The gating edge set the work-product graph declares.
+ *
+ * Declared data, so an empty set is an answer: this graph version gates
+ * nothing. It is listed apart from the snapshot's declared edges rather than
+ * merged with them, because the two reads cover different populations and a
+ * merged count would be a total over a set neither read returned.
+ */
+function GatingEdges({ reading }: { reading: WorkDagReading }) {
+  const gating = reading.gating;
+  return (
+    <Panel
+      legend="Gating edges the graph declares"
+      actions={
+        gating.available ? (
+          <StateChip
+            kind={gating.value.length === 0 ? 'complete_zero_findings' : 'ready'}
+            detail={`${gating.value.length}`}
+          />
+        ) : (
+          <StateChip kind={gating.state} detail="not read" />
+        )
+      }
+    >
+      {!gating.available ? (
+        <p className="text-3xs leading-snug text-text-muted">{gating.detail}</p>
+      ) : gating.value.length === 0 ? (
+        <EmptyReading>
+          The work-product graph declares no gating edge at all. Nobody wrote one down — this is
+          the authority answering the question, not the question going unasked.
+        </EmptyReading>
+      ) : (
+        <ul
+          className="flex min-w-0 flex-col gap-1 font-mono text-3xs text-text-secondary"
+          data-work-gating={gating.value.length}
+        >
+          {gating.value.map((edge, index) => (
+            <li key={`${edge.dependency}->${edge.dependent}#${index}`} className="truncate">
+              {edge.dependent} needs {edge.dependency}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
   );
 }
 

@@ -84,9 +84,11 @@ describe("SSE query invalidation", () => {
       ["work", "snapshot", "project:project.alpha"],
       ["work", "delta", "project:project.alpha"],
       ["work", "list-attempts", "project:project.alpha"],
+      ["work", "views", "project:project.alpha"],
       ["work", "snapshot", "all"],
       ["work", "delta", "all"],
       ["work", "list-attempts", "all"],
+      ["work", "views", "all"],
     ]);
   });
 
@@ -104,6 +106,7 @@ describe("SSE query invalidation", () => {
       ["work", "snapshot", "project:project.beta"],
       ["work", "delta", "project:project.beta"],
       ["work", "list-attempts", "project:project.beta"],
+      ["work", "views", "project:project.beta"],
     ]);
   });
 
@@ -126,9 +129,11 @@ describe("SSE query invalidation", () => {
       ["work", "snapshot", "project:project.alpha"],
       ["work", "delta", "project:project.alpha"],
       ["work", "list-attempts", "project:project.alpha"],
+      ["work", "views", "project:project.alpha"],
       ["work", "snapshot", "project:project.beta"],
       ["work", "delta", "project:project.beta"],
       ["work", "list-attempts", "project:project.beta"],
+      ["work", "views", "project:project.beta"],
     ]);
   });
 
