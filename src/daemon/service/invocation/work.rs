@@ -553,7 +553,6 @@ fn work_product_read_problem(
     }
 }
 
-
 /// Mints the daemon-owned request context under which background attempt
 /// execution persists transitions. The authority and scope are exactly the
 /// registered runtime's; only the deadline is the runtime's own, because the
@@ -650,6 +649,81 @@ pub(super) async fn execute_workflow_application(
                         workflow_effect_problem(workflow_coordination_problem(error)),
                     ),
                 };
+            execute_journaled_workflow_effect(
+                &registered,
+                services.effects(),
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+        }
+        WorkflowApplicationInvocation::ActivateDefinition(request) => {
+            let prepared = WorkflowEffectPreparedV1::activate_definition(
+                input_digest.clone(),
+                WorkflowDefinitionLifecycleCommand {
+                    definition_id: request.definition_id,
+                    definition_version: request.definition_version,
+                    operation: WorkflowLifecycleOperation::Activate,
+                    expected_revision: request.expected_revision,
+                    transitioned_at: observed_at,
+                },
+            );
+            execute_journaled_workflow_effect(
+                &registered,
+                services.effects(),
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+        }
+        WorkflowApplicationInvocation::RetireDefinition(request) => {
+            let prepared = WorkflowEffectPreparedV1::retire_definition(
+                input_digest.clone(),
+                WorkflowDefinitionLifecycleCommand {
+                    definition_id: request.definition_id,
+                    definition_version: request.definition_version,
+                    operation: WorkflowLifecycleOperation::Retire,
+                    expected_revision: request.expected_revision,
+                    transitioned_at: observed_at,
+                },
+            );
+            execute_journaled_workflow_effect(
+                &registered,
+                services.effects(),
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                prepared,
+                observed_at,
+                deadline,
+            )
+        }
+        WorkflowApplicationInvocation::RejectDefinition(request) => {
+            let prepared = WorkflowEffectPreparedV1::reject_definition(
+                input_digest.clone(),
+                WorkflowDefinitionLifecycleCommand {
+                    definition_id: request.definition_id,
+                    definition_version: request.definition_version,
+                    operation: WorkflowLifecycleOperation::Reject,
+                    expected_revision: request.expected_revision,
+                    transitioned_at: observed_at,
+                },
+            );
             execute_journaled_workflow_effect(
                 &registered,
                 services.effects(),
@@ -1055,6 +1129,9 @@ fn workflow_effect_receipt_context(
 fn workflow_effect_operation(operation_key: &str) -> Option<WorkflowEffectOperationV1> {
     match operation_key {
         "register_definition" => Some(WorkflowEffectOperationV1::RegisterDefinition),
+        "activate_definition" => Some(WorkflowEffectOperationV1::ActivateDefinition),
+        "retire_definition" => Some(WorkflowEffectOperationV1::RetireDefinition),
+        "reject_definition" => Some(WorkflowEffectOperationV1::RejectDefinition),
         "handoff_issue" => Some(WorkflowEffectOperationV1::HandoffIssue),
         "handoff_redeem" => Some(WorkflowEffectOperationV1::HandoffRedeem),
         _ => None,
@@ -1109,6 +1186,21 @@ fn workflow_effect_outcome(
                 )
                 .map(WorkflowApplicationOutcome::RegisterDefinition)
                 .map_err(|_| DaemonInvocationProblem::Unavailable),
+                WorkflowEffectOperationV1::ActivateDefinition => {
+                    work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
+                        .map(WorkflowApplicationOutcome::ActivateDefinition)
+                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                }
+                WorkflowEffectOperationV1::RetireDefinition => {
+                    work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
+                        .map(WorkflowApplicationOutcome::RetireDefinition)
+                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                }
+                WorkflowEffectOperationV1::RejectDefinition => {
+                    work_effect::<WorkflowDefinitionDisposition>(terminal, None, termination)
+                        .map(WorkflowApplicationOutcome::RejectDefinition)
+                        .map_err(|_| DaemonInvocationProblem::Unavailable)
+                }
                 WorkflowEffectOperationV1::HandoffIssue => {
                     work_effect::<TaskHandoffGrant>(terminal, None, termination)
                         .map(WorkflowApplicationOutcome::HandoffIssue)
@@ -1129,6 +1221,33 @@ fn workflow_effect_outcome(
                 EffectTermination::Completed,
             )
             .map(WorkflowApplicationOutcome::RegisterDefinition)
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
+        }
+        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionActivated(result)) => {
+            work_effect(
+                terminal,
+                Some((**result).clone()),
+                EffectTermination::Completed,
+            )
+            .map(WorkflowApplicationOutcome::ActivateDefinition)
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
+        }
+        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRetired(result)) => {
+            work_effect(
+                terminal,
+                Some((**result).clone()),
+                EffectTermination::Completed,
+            )
+            .map(WorkflowApplicationOutcome::RetireDefinition)
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
+        }
+        WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRejected(result)) => {
+            work_effect(
+                terminal,
+                Some((**result).clone()),
+                EffectTermination::Completed,
+            )
+            .map(WorkflowApplicationOutcome::RejectDefinition)
             .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(result)) => {
@@ -1162,7 +1281,9 @@ fn workflow_coordination_problem(error: WorkflowCoordinationError) -> DaemonInvo
             DaemonInvocationProblem::NotFoundOrNotAuthorized
         }
         WorkflowCoordinationError::InvalidDefinition
-        | WorkflowCoordinationError::ImmutableDefinitionConflict => {
+        | WorkflowCoordinationError::ImmutableDefinitionConflict
+        | WorkflowCoordinationError::IllegalLifecycleTransition
+        | WorkflowCoordinationError::LifecycleRevisionConflict => {
             DaemonInvocationProblem::InvalidRequest
         }
     }
