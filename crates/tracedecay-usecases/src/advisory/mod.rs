@@ -88,7 +88,7 @@ pub use host_delivery::{
 };
 pub use host_delivery::{
     acknowledge_advisory_hook_notice, peek_advisory_hook_notice,
-    register_advisory_hook_notice_queue,
+    register_advisory_hook_notice_queue, unregister_advisory_hook_notice_queue,
 };
 pub use production::{
     AdvisoryProductionAuthoritiesV1, AdvisoryProductionHookDeliveryPortV1,

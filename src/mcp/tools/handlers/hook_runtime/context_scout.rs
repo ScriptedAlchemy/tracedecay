@@ -277,6 +277,11 @@ fn orchestration_response(
     use crate::daemon::HookOrchestrationAdmissionV1 as Admission;
     match outcome {
         Admission::Enqueued => json!({ "action": action, "status": "accepted" }),
+        Admission::Warming => json!({
+            "action": action,
+            "status": "warming",
+            "reason": "orchestration_warming",
+        }),
         Admission::Backpressured => json!({ "action": action, "status": "deferred" }),
         Admission::UnsupportedTrigger => json!({ "action": action, "status": "unsupported" }),
         Admission::Unavailable => json!({

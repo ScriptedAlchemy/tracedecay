@@ -65,7 +65,6 @@ impl AdvisoryProductionAuthoritiesV1 {
 
 #[derive(Clone)]
 pub struct AdvisoryProductionOpenV1 {
-    pub database: Database,
     pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub graph: Arc<TraceDecay>,
     pub code_index_identity:
@@ -96,7 +95,6 @@ pub fn open_advisory_production_authorities(
     input: AdvisoryProductionOpenV1,
 ) -> Result<AdvisoryProductionAuthoritiesV1, AdvisoryProductionOpenErrorV1> {
     let AdvisoryProductionOpenV1 {
-        database,
         project_runtime_db,
         graph,
         code_index_identity,
@@ -109,6 +107,7 @@ pub fn open_advisory_production_authorities(
         hook_v2,
         legacy_hook,
     } = input;
+    let database: Database = graph.db().clone();
     let github = github_anchor_authorities_arc_v1(
         database,
         project_root.clone(),
@@ -132,7 +131,8 @@ pub fn open_advisory_production_authorities(
             open_production_ci_provider_authorities_v1(config, ci_retained, ci_code_anchors)
                 .map_err(|_| AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?
         }
-        None => unavailable_production_ci_provider_authorities_v1(),
+        None => unavailable_production_ci_provider_authorities_v1()
+            .map_err(|_| AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?,
     };
     let (ci_source, ci_exact_evidence) = ci.into_registrar_parts();
     let hook_delivery_port = new_advisory_hook_delivery_port(feedback_scope, hook_v2, legacy_hook);

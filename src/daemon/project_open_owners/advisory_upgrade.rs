@@ -159,6 +159,10 @@ async fn try_deferred_feedback_registration(
     }
 }
 
+/// Publishes the retained warming gateway for this project, then runs the
+/// advisory owner registration as a bounded, cancellable post-open setup.
+/// Hook admission answers `warming` until the setup reaches a terminal;
+/// project-runtime retirement cancels and joins it.
 async fn register_advisory_owner_from_state(
     invocation: &DaemonInvocationState,
     project_root: &Path,
@@ -167,36 +171,76 @@ async fn register_advisory_owner_from_state(
     feedback_scope: FeedbackScopeV1,
     feedback_lsp_input: crate::application::feedback::FeedbackCycleLspInput,
 ) {
-    let outcome = register_production_advisory_owner(
-        invocation,
-        project_root,
-        state.database.clone(),
-        Arc::clone(&state.session_db),
-        Arc::clone(&state.graph),
-        state.scope.clone(),
-        state.access.clone(),
-        feedback_scope,
-        feedback_cycle,
-        feedback_lsp_input,
-        Arc::clone(&state.lsp_session_factory),
-        Arc::clone(&state.scout_registry),
-        state.scout_configuration.clone(),
-        state.admitted_root_uri.clone(),
-        state.indexed_files.clone(),
+    let (hook_project_id, hook_worktree_id) = crate::hooks::hook_scope_locators(&state.scope);
+    let deferred = match invocation
+        .advisory_runtime_registrar()
+        .register_deferred_hook_orchestrator(
+            project_root.to_path_buf(),
+            hook_project_id,
+            hook_worktree_id,
+        )
+        .await
+    {
+        Ok(deferred) => deferred,
+        Err(error) => {
+            tracing::warn!(
+                event = "advisory_runtime_setup",
+                state = "unavailable",
+                reason = "gateway_registration_failed",
+                project = %project_root.display(),
+                error = %error,
+            );
+            return;
+        }
+    };
+    let setup_invocation = invocation.clone();
+    let setup_project_root = project_root.to_path_buf();
+    let database = state.database.clone();
+    let session_db = Arc::clone(&state.session_db);
+    let graph = Arc::clone(&state.graph);
+    let scope = state.scope.clone();
+    let access = state.access.clone();
+    let lsp_session_factory = Arc::clone(&state.lsp_session_factory);
+    let scout_registry = Arc::clone(&state.scout_registry);
+    let scout_configuration = state.scout_configuration.clone();
+    let admitted_root_uri = state.admitted_root_uri.clone();
+    let indexed_files = state.indexed_files.clone();
+    let setup = move |setup_cancellation| async move {
+        register_production_advisory_owner(
+            &setup_invocation,
+            &setup_project_root,
+            database,
+            session_db,
+            graph,
+            scope,
+            access,
+            feedback_scope,
+            feedback_cycle,
+            feedback_lsp_input,
+            lsp_session_factory,
+            scout_registry,
+            scout_configuration,
+            admitted_root_uri,
+            indexed_files,
+            setup_cancellation,
+        )
+        .await
+    };
+    if !crate::daemon::project_open_advisory::schedule_bounded_post_open_advisory_setup(
+        deferred, setup,
     )
-    .await;
-    match outcome {
-        Ok(_) => tracing::info!(
-            event = "project_open_owner_phase",
+    .await
+    {
+        tracing::info!(
+            event = "advisory_runtime_setup",
+            state = "joined",
             project = %project_root.display(),
-            phase = "advisory_owner_registered",
-            deferred = true,
-        ),
-        Err(error) => tracing::warn!(
-            event = "project_open_owner_phase",
-            project = %project_root.display(),
-            phase = "advisory_owner_deferred_failed",
-            error = %error,
-        ),
+        );
+        return;
     }
+    tracing::info!(
+        event = "advisory_runtime_setup",
+        state = "scheduled",
+        project = %project_root.display(),
+    );
 }

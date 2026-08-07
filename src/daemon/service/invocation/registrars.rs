@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod advisory_background;
 mod lsp;
 pub(crate) use lsp::DaemonLspOwnerRegistrar;
 
@@ -530,29 +531,6 @@ impl DaemonFeedbackRuntimeRegistrar {
         Ok(runtime)
     }
 
-    pub(crate) async fn install_advisory_cycle_input(
-        &self,
-        project_root: &Path,
-        input: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
-        self.service
-            .project_runtimes
-            .replace_feedback_cycle_input_atomically(project_root, input)
-            .await
-            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
-    }
-
-    pub(crate) async fn install_advisory_cycle_invocation(
-        &self,
-        project_root: &Path,
-        owner: DaemonAdvisoryCycleInvocationOwner,
-    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
-        self.service
-            .project_runtimes
-            .register(project_root.to_path_buf(), owner)
-            .await
-            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
-    }
 }
 
 impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
@@ -867,7 +845,11 @@ impl DaemonAdvisoryRuntimeRegistrar {
             .map_err(DaemonAdvisoryRuntimeRegistrationError::from)
     }
 
-    pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(
+    /// Constructs the advisory startup registration without publishing it.
+    /// Publication happens separately through [`Self::publish`] so a bounded
+    /// post-open setup can stage the complete runtime and commit or roll back
+    /// atomically.
+    pub(crate) async fn build<GR, GA, CS, CE, PE, PC>(
         &self,
         project_root: PathBuf,
         input: AdvisoryRuntimeOpenV1,
@@ -900,38 +882,16 @@ impl DaemonAdvisoryRuntimeRegistrar {
         if !feedback_registered {
             return Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable);
         }
-        if self
-            .service
-            .project_runtimes
-            .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
-            .await
-        {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
-        }
         let registration = Arc::new(register_advisory_daemon_startup(
             input,
             providers,
-            lsp_session_factory.clone(),
+            lsp_session_factory,
             hook_delivery_port,
         )?);
-        let registered_root = project_root.clone();
-        let published: Arc<dyn Any + Send + Sync> = registration.clone();
-        self.service
-            .project_runtimes
-            .register(project_root, published)
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        self.service
-            .install_lsp_owner(
-                registered_root,
-                DaemonLspInvocationOwner::new(lsp_session_factory),
-            )
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
         Ok(registration)
     }
 
-    pub(crate) async fn register_production(
+    pub(crate) async fn build_production(
         &self,
         project_root: PathBuf,
         input: AdvisoryRuntimeOpenV1,
@@ -941,7 +901,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
     {
         let authorities = open_advisory_production_authorities(production)?;
         let (providers, hook_delivery_port) = authorities.into_registrar_parts();
-        self.register(
+        self.build(
             project_root,
             input,
             providers,
@@ -951,54 +911,32 @@ impl DaemonAdvisoryRuntimeRegistrar {
         .await
     }
 
-    pub(crate) async fn register_hook_orchestrator(
+    pub(crate) async fn publish(
         &self,
-        project_root: PathBuf,
-        project_id: [u8; 16],
-        worktree_id: [u8; 16],
-        runtime: Arc<dyn HookOrchestrationPortV1>,
-    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
-        if project_id == [0; 16]
-            || worktree_id == [0; 16]
-            || !self
-                .service
-                .project_runtimes
-                .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
-                .await
-        {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
-        }
+        project_root: &Path,
+        registration: Arc<dyn Any + Send + Sync>,
+        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
+        feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
+        cancellation: &crate::application::context::CancellationToken,
+    ) -> Result<
+        super::super::project_runtime::AdvisoryRuntimePublicationV1,
+        DaemonAdvisoryRuntimeRegistrationError,
+    > {
         self.service
             .project_runtimes
-            .register(project_root.clone(), Arc::clone(&runtime))
+            .publish_advisory_atomically(
+                project_root,
+                registration,
+                advisory_cycle,
+                feedback_input,
+                cancellation,
+            )
             .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        let runtime_weak: Weak<dyn HookOrchestrationPortV1> = Arc::downgrade(&runtime);
-        let registered = match hook_orchestration_registry().lock() {
-            Ok(mut registry) => {
-                registry.retain(|_, runtime| runtime.strong_count() > 0);
-                let key = (project_id, worktree_id);
-                if registry
-                    .get(&key)
-                    .and_then(Weak::upgrade)
-                    .is_some_and(|existing| !Arc::ptr_eq(&existing, &runtime))
-                {
-                    false
-                } else {
-                    registry.insert(key, runtime_weak);
-                    true
+            .map_err(|error| match error {
+                FeedbackCyclePublicationError::Registry(error) => error.into(),
+                FeedbackCyclePublicationError::RouterUnavailable => {
+                    DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime
                 }
-            }
-            Err(_) => false,
-        };
-        if registered {
-            Ok(())
-        } else {
-            self.service
-                .project_runtimes
-                .withdraw::<Arc<dyn HookOrchestrationPortV1>>(&project_root)
-                .await;
-            Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
-        }
+            })
     }
 }

@@ -148,6 +148,18 @@ pub(crate) fn register_context_scout_lifecycle_authority(
     AuthorityRegistrationV1::Registered
 }
 
+/// Removes exactly the given session store's registration; a different live
+/// authority under the same locator pair is left untouched so a rolled-back
+/// advisory setup can never unregister its successor.
+pub(crate) fn unregister_context_scout_lifecycle_authority(
+    hook_project_id: [u8; 16],
+    hook_worktree_id: [u8; 16],
+    sessions: &Arc<RegisteredGlobalDb>,
+) -> bool {
+    registered_context_scout_lifecycle_authorities()
+        .remove_if_same(&(hook_project_id, hook_worktree_id), sessions)
+}
+
 /// Test-only view of raw registry membership.
 ///
 /// Deliberately distinct from [`resolve_authority`]: this reports whether the

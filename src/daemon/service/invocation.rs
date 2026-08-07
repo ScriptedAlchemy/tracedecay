@@ -231,7 +231,8 @@ pub(crate) use primitive::{
 };
 pub(in crate::daemon) use types::observe_accepted_feedback_cycle_terminal;
 pub(crate) use types::{
-    BoundedHookOrchestratorV1, DaemonLspInvocationOwner, HookOrchestrationAdmissionV1,
+    AdvisoryRuntimeReadinessV1, AdvisoryRuntimeUnavailableReasonV1, BoundedHookOrchestratorV1,
+    DaemonLspInvocationOwner, DeferredHookOrchestratorV1, HookOrchestrationAdmissionV1,
     HookOrchestrationPortV1, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
     admit_registered_hook_orchestration,
 };
@@ -248,7 +249,8 @@ pub(crate) use registrars::{
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    RegisteredHookOrchestrationRuntimeV1, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
 #[derive(Clone)]

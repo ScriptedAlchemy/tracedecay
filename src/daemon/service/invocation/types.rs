@@ -6,6 +6,9 @@ use super::*;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HookOrchestrationAdmissionV1 {
     Enqueued,
+    /// The retained post-open gateway is published but its bounded setup has
+    /// not reached a terminal yet; the caller may retry after warmup.
+    Warming,
     Backpressured,
     UnsupportedTrigger,
     Unavailable,
@@ -65,15 +68,33 @@ pub(crate) trait HookOrchestrationPortV1: Send + Sync {
 }
 
 type HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type HookOrchestrationWorkV1 =
-    dyn Fn(HookOrchestrationRequestV1) -> HookOrchestrationFutureV1 + Send + Sync;
+type HookOrchestrationWorkV1 = dyn Fn(
+        HookOrchestrationRequestV1,
+        crate::application::context::CancellationToken,
+    ) -> HookOrchestrationFutureV1
+    + Send
+    + Sync;
 /// Exact hook identity: one project, one worktree, one hook event. Two
 /// admissions that agree on all three describe the same boundary, so they must
 /// share one cycle rather than start a second.
-type HookOrchestrationInFlightKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+/// Stable per-session work address. A newer boundary at the same address
+/// supersedes the running one instead of queueing behind it.
+type HookOrchestrationAddressV1 = String;
 type HookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
-type HookOrchestrationInFlightV1 =
-    StdMutex<BTreeMap<HookOrchestrationInFlightKeyV1, Vec<HookOrchestrationCompletionV1>>>;
+
+struct HookOrchestrationInFlightEntryV1 {
+    event: HookOrchestrationEventKeyV1,
+    cancellation: crate::application::context::CancellationToken,
+    superseded: std::sync::atomic::AtomicBool,
+    completions: StdMutex<Vec<HookOrchestrationCompletionV1>>,
+}
+
+#[derive(Default)]
+struct HookOrchestrationInFlightV1 {
+    addresses: BTreeMap<HookOrchestrationAddressV1, Arc<HookOrchestrationInFlightEntryV1>>,
+    events: BTreeMap<HookOrchestrationEventKeyV1, Arc<HookOrchestrationInFlightEntryV1>>,
+}
 
 /// Upper bound on admissions that may join one in-flight cycle. Beyond it the
 /// caller is backpressured instead of queued, so a hook storm can never grow
@@ -83,25 +104,86 @@ pub(in crate::daemon::service) const MAX_COALESCED_HOOK_COMPLETIONS: usize = 32;
 pub(crate) struct BoundedHookOrchestratorV1 {
     permits: Arc<Semaphore>,
     work: Arc<HookOrchestrationWorkV1>,
-    in_flight: Arc<HookOrchestrationInFlightV1>,
+    in_flight: Arc<StdMutex<HookOrchestrationInFlightV1>>,
     cancellation: crate::application::context::CancellationToken,
 }
 
 impl BoundedHookOrchestratorV1 {
     pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
-        F: Fn(HookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
+        F: Fn(
+                HookOrchestrationRequestV1,
+                crate::application::context::CancellationToken,
+            ) -> Fut
+            + Send
+            + Sync
+            + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let work: Arc<HookOrchestrationWorkV1> = Arc::new(move |request| Box::pin(work(request)));
+        let work: Arc<HookOrchestrationWorkV1> =
+            Arc::new(move |request, cancellation| Box::pin(work(request, cancellation)));
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
-                in_flight: Arc::new(StdMutex::new(BTreeMap::new())),
+                in_flight: Arc::new(StdMutex::new(HookOrchestrationInFlightV1::default())),
                 cancellation: crate::application::context::CancellationToken::new(),
             })
         })
+    }
+
+    fn stable_address(request: &HookOrchestrationRequestV1) -> Option<HookOrchestrationAddressV1> {
+        let envelope = request.hook.envelope();
+        canonical_sha256(&(
+            "tracedecay.advisory-hook-address.v1",
+            envelope.project_id,
+            envelope.repository_id,
+            envelope.worktree_id,
+            envelope.protected_session_id,
+            request.lifecycle.as_ref(),
+        ))
+        .ok()
+        .map(|digest| digest.as_str().to_owned())
+    }
+
+    fn settle_operation(
+        in_flight: &StdMutex<HookOrchestrationInFlightV1>,
+        address: &HookOrchestrationAddressV1,
+        operation: &Arc<HookOrchestrationInFlightEntryV1>,
+        emit_terminal: bool,
+    ) {
+        let completions = {
+            let mut in_flight = in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let completions = {
+                let mut completions = operation
+                    .completions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                std::mem::take(&mut *completions)
+            };
+            if in_flight
+                .addresses
+                .get(address)
+                .is_some_and(|current| Arc::ptr_eq(current, operation))
+            {
+                in_flight.addresses.remove(address);
+            }
+            if in_flight
+                .events
+                .get(&operation.event)
+                .is_some_and(|current| Arc::ptr_eq(current, operation))
+            {
+                in_flight.events.remove(&operation.event);
+            }
+            completions
+        };
+        if emit_terminal {
+            for completion in completions {
+                completion();
+            }
+        }
     }
 }
 
@@ -111,17 +193,23 @@ impl HookOrchestrationPortV1 for BoundedHookOrchestratorV1 {
             return HookOrchestrationAdmissionV1::Unavailable;
         };
         let envelope = request.hook.envelope();
-        let key = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let event = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let Some(address) = Self::stable_address(&request) else {
+            return HookOrchestrationAdmissionV1::Unavailable;
+        };
         let completion = request.completion.take();
-        let permit = {
+        let (permit, operation) = {
             let Ok(mut in_flight) = self.in_flight.lock() else {
                 return HookOrchestrationAdmissionV1::Unavailable;
             };
-            if let Some(completions) = in_flight.get_mut(&key) {
+            if let Some(incumbent) = in_flight.events.get(&event).cloned() {
                 // The exact boundary is already running. Join it: one cycle
                 // terminates once and every joined admission observes that one
                 // terminal, so a duplicate never consumes a second permit.
                 if let Some(completion) = completion {
+                    let Ok(mut completions) = incumbent.completions.lock() else {
+                        return HookOrchestrationAdmissionV1::Unavailable;
+                    };
                     if completions.len() >= MAX_COALESCED_HOOK_COMPLETIONS {
                         return HookOrchestrationAdmissionV1::Backpressured;
                     }
@@ -129,39 +217,84 @@ impl HookOrchestrationPortV1 for BoundedHookOrchestratorV1 {
                 }
                 return HookOrchestrationAdmissionV1::Enqueued;
             }
-            let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                return HookOrchestrationAdmissionV1::Backpressured;
+            let permit = if let Some(incumbent) = in_flight.addresses.remove(&address) {
+                // A newer boundary at the same stable address supersedes the
+                // incumbent: cancel it and inherit its permit once it settles.
+                incumbent
+                    .superseded
+                    .store(true, std::sync::atomic::Ordering::Release);
+                incumbent.cancellation.cancel();
+                None
+            } else {
+                let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                    return HookOrchestrationAdmissionV1::Backpressured;
+                };
+                Some(permit)
             };
-            in_flight.insert(key, completion.into_iter().collect());
-            permit
+            let work_cancellation = crate::application::context::CancellationToken::new();
+            let operation = Arc::new(HookOrchestrationInFlightEntryV1 {
+                event,
+                cancellation: work_cancellation,
+                superseded: std::sync::atomic::AtomicBool::new(false),
+                completions: StdMutex::new(completion.into_iter().collect()),
+            });
+            in_flight
+                .addresses
+                .insert(address.clone(), Arc::clone(&operation));
+            in_flight.events.insert(event, Arc::clone(&operation));
+            (permit, operation)
         };
         let work = Arc::clone(&self.work);
         let in_flight = Arc::clone(&self.in_flight);
         let cancellation = self.cancellation.clone();
+        let permits = Arc::clone(&self.permits);
         handle.spawn(async move {
-            let completed = tokio::select! {
-                () = cancellation.cancelled() => false,
-                () = (work)(request) => true,
+            let work_cancellation = operation.cancellation.clone();
+            let permit = match permit {
+                Some(permit) => Some(permit),
+                None => tokio::select! {
+                    biased;
+                    () = work_cancellation.cancelled() => None,
+                    () = cancellation.cancelled() => None,
+                    permit = permits.acquire_owned() => permit.ok(),
+                },
             };
-            let completions = in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&key);
-            match completions {
-                // Only completed work clears the joined admissions. Cancelled
-                // work reports nothing: silence is a normal result, and an
-                // adapter must never invent a termination reason.
-                Some(completions) if completed => {
-                    for completion in completions {
-                        completion();
-                    }
-                }
-                Some(_) => {}
-                None => tracing::error!(
-                    event = "hook_orchestration_completion_missing",
-                    "daemon-owned advisory work finished without its in-flight admission"
-                ),
+            let Some(permit) = permit else {
+                let superseded = operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire);
+                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                return;
+            };
+            if cancellation.is_cancelled() || work_cancellation.is_cancelled() {
+                let superseded = operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire);
+                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                return;
             }
+            let mut work_future = (work)(request, work_cancellation.clone());
+            // Only completed or superseded work emits terminals. Owner-level
+            // cancellation reports nothing: silence is a normal result, and an
+            // adapter must never invent a termination reason.
+            let emit_terminal = tokio::select! {
+                biased;
+                () = work_cancellation.cancelled() => {
+                    (&mut work_future).await;
+                    operation
+                        .superseded
+                        .load(std::sync::atomic::Ordering::Acquire)
+                },
+                () = cancellation.cancelled() => {
+                    work_cancellation.cancel();
+                    (&mut work_future).await;
+                    operation
+                        .superseded
+                        .load(std::sync::atomic::Ordering::Acquire)
+                },
+                () = &mut work_future => true,
+            };
+            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
             drop(permit);
         });
         HookOrchestrationAdmissionV1::Enqueued
@@ -173,6 +306,328 @@ impl Drop for BoundedHookOrchestratorV1 {
         // Retiring the owner cancels every worker it still holds. The workers
         // drop their in-flight entry without firing completions.
         self.cancellation.cancel();
+        if let Ok(in_flight) = self.in_flight.lock() {
+            for entry in in_flight.events.values() {
+                entry.cancellation.cancel();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AdvisoryRuntimeUnavailableReasonV1 {
+    Cancelled,
+    DeadlineExceeded,
+    RegistrationFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum AdvisoryRuntimeReadinessV1 {
+    Warming {
+        started_at: UtcMicros,
+    },
+    Ready {
+        started_at: UtcMicros,
+        finished_at: UtcMicros,
+    },
+    Unavailable {
+        started_at: UtcMicros,
+        finished_at: UtcMicros,
+        reason: AdvisoryRuntimeUnavailableReasonV1,
+    },
+}
+
+enum DeferredHookOrchestratorStateV1 {
+    Warming {
+        started_at: UtcMicros,
+        claimed: bool,
+    },
+    Ready {
+        started_at: UtcMicros,
+        runtime: Arc<dyn HookOrchestrationPortV1>,
+        finished_at: UtcMicros,
+    },
+    Unavailable {
+        started_at: UtcMicros,
+        reason: AdvisoryRuntimeUnavailableReasonV1,
+        finished_at: UtcMicros,
+    },
+}
+
+/// Retained post-open gateway for one project's advisory and Scout work.
+///
+/// The gateway is published before provider/model setup begins, so hook
+/// admission distinguishes a live warming owner from a terminally unavailable
+/// one. Setup has one claim and project-runtime retirement cancels that claim.
+pub(crate) struct DeferredHookOrchestratorV1 {
+    state: StdMutex<DeferredHookOrchestratorStateV1>,
+    setup_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    cancellation: crate::application::context::CancellationToken,
+}
+
+impl DeferredHookOrchestratorV1 {
+    pub(crate) fn new(started_at: UtcMicros) -> Arc<Self> {
+        Arc::new(Self {
+            state: StdMutex::new(DeferredHookOrchestratorStateV1::Warming {
+                started_at,
+                claimed: false,
+            }),
+            setup_task: Mutex::new(None),
+            cancellation: crate::application::context::CancellationToken::new(),
+        })
+    }
+
+    pub(crate) fn claim_setup(&self) -> bool {
+        if self.cancellation.is_cancelled() {
+            return false;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        match &mut *state {
+            DeferredHookOrchestratorStateV1::Warming { claimed, .. } if !*claimed => {
+                *claimed = true;
+                true
+            }
+            // A deadline or registration terminal may be retried by a new
+            // claim; an explicit cancellation is final.
+            DeferredHookOrchestratorStateV1::Unavailable {
+                reason:
+                    AdvisoryRuntimeUnavailableReasonV1::DeadlineExceeded
+                    | AdvisoryRuntimeUnavailableReasonV1::RegistrationFailed,
+                ..
+            } => {
+                *state = DeferredHookOrchestratorStateV1::Warming {
+                    started_at: now_micros(),
+                    claimed: true,
+                };
+                true
+            }
+            DeferredHookOrchestratorStateV1::Warming { .. }
+            | DeferredHookOrchestratorStateV1::Ready { .. }
+            | DeferredHookOrchestratorStateV1::Unavailable {
+                reason: AdvisoryRuntimeUnavailableReasonV1::Cancelled,
+                ..
+            } => false,
+        }
+    }
+
+    pub(crate) fn cancellation(&self) -> crate::application::context::CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub(crate) fn readiness(&self) -> AdvisoryRuntimeReadinessV1 {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            DeferredHookOrchestratorStateV1::Warming { started_at, .. } => {
+                AdvisoryRuntimeReadinessV1::Warming {
+                    started_at: *started_at,
+                }
+            }
+            DeferredHookOrchestratorStateV1::Ready {
+                started_at,
+                finished_at,
+                ..
+            } => AdvisoryRuntimeReadinessV1::Ready {
+                started_at: *started_at,
+                finished_at: *finished_at,
+            },
+            DeferredHookOrchestratorStateV1::Unavailable {
+                started_at,
+                reason,
+                finished_at,
+            } => AdvisoryRuntimeReadinessV1::Unavailable {
+                started_at: *started_at,
+                finished_at: *finished_at,
+                reason: *reason,
+            },
+        }
+    }
+
+    pub(crate) fn mark_ready(
+        &self,
+        runtime: Arc<dyn HookOrchestrationPortV1>,
+        finished_at: UtcMicros,
+    ) -> bool {
+        if self.cancellation.is_cancelled() {
+            self.mark_unavailable(AdvisoryRuntimeUnavailableReasonV1::Cancelled, finished_at);
+            return false;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let DeferredHookOrchestratorStateV1::Warming {
+            started_at,
+            claimed: true,
+        } = *state
+        else {
+            return false;
+        };
+        *state = DeferredHookOrchestratorStateV1::Ready {
+            started_at,
+            runtime,
+            finished_at,
+        };
+        true
+    }
+
+    pub(crate) fn mark_unavailable(
+        &self,
+        reason: AdvisoryRuntimeUnavailableReasonV1,
+        finished_at: UtcMicros,
+    ) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let DeferredHookOrchestratorStateV1::Warming {
+            started_at,
+            claimed: true,
+        } = *state
+        else {
+            return false;
+        };
+        *state = DeferredHookOrchestratorStateV1::Unavailable {
+            started_at,
+            reason,
+            finished_at,
+        };
+        true
+    }
+
+    /// Retains the owning setup task, waiting for a finished predecessor to
+    /// settle first. Fails after cancellation so retirement never races a new
+    /// setup into a cancelled gateway.
+    pub(crate) async fn retain_setup_task(
+        &self,
+        task: tokio::task::JoinHandle<()>,
+    ) -> Result<(), tokio::task::JoinHandle<()>> {
+        let task = task;
+        loop {
+            let incumbent = {
+                let mut setup_task = self.setup_task.lock().await;
+                if self.cancellation.is_cancelled() {
+                    return Err(task);
+                }
+                match setup_task.take() {
+                    Some(incumbent) => Some(incumbent),
+                    None => {
+                        *setup_task = Some(task);
+                        return Ok(());
+                    }
+                }
+            };
+            if let Some(incumbent) = incumbent {
+                let _ = incumbent.await;
+            }
+        }
+    }
+
+    pub(crate) async fn setup_task_finished(&self) {
+        self.setup_task.lock().await.take();
+    }
+
+    pub(crate) async fn cancel_and_join(&self) {
+        self.cancellation.cancel();
+        let finished_at = now_micros();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let started_at = match &*state {
+                DeferredHookOrchestratorStateV1::Warming { started_at, .. }
+                | DeferredHookOrchestratorStateV1::Ready { started_at, .. } => Some(*started_at),
+                DeferredHookOrchestratorStateV1::Unavailable { .. } => None,
+            };
+            if let Some(started_at) = started_at {
+                *state = DeferredHookOrchestratorStateV1::Unavailable {
+                    started_at,
+                    reason: AdvisoryRuntimeUnavailableReasonV1::Cancelled,
+                    finished_at,
+                };
+            }
+        }
+        let setup_task = { self.setup_task.lock().await.take() };
+        if let Some(task) = setup_task {
+            let _ = task.await;
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+}
+
+impl HookOrchestrationPortV1 for DeferredHookOrchestratorV1 {
+    fn admit(&self, request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
+        match self.readiness() {
+            AdvisoryRuntimeReadinessV1::Warming { .. } => {
+                return HookOrchestrationAdmissionV1::Warming;
+            }
+            AdvisoryRuntimeReadinessV1::Unavailable { .. } => {
+                return HookOrchestrationAdmissionV1::Unavailable;
+            }
+            AdvisoryRuntimeReadinessV1::Ready { .. } => {}
+        }
+        let runtime = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &*state {
+                DeferredHookOrchestratorStateV1::Ready { runtime, .. } => Arc::clone(runtime),
+                DeferredHookOrchestratorStateV1::Warming { .. }
+                | DeferredHookOrchestratorStateV1::Unavailable { .. } => {
+                    return HookOrchestrationAdmissionV1::Unavailable;
+                }
+            }
+        };
+        runtime.admit(request)
+    }
+}
+
+pub(in crate::daemon::service) struct RegisteredHookOrchestrationRuntimeV1 {
+    project_id: [u8; 16],
+    worktree_id: [u8; 16],
+    runtime: Arc<DeferredHookOrchestratorV1>,
+}
+
+impl RegisteredHookOrchestrationRuntimeV1 {
+    pub(in crate::daemon::service) fn new(
+        project_id: [u8; 16],
+        worktree_id: [u8; 16],
+        runtime: Arc<DeferredHookOrchestratorV1>,
+    ) -> Self {
+        Self {
+            project_id,
+            worktree_id,
+            runtime,
+        }
+    }
+
+    pub(in crate::daemon::service) fn matches(
+        &self,
+        project_id: [u8; 16],
+        worktree_id: [u8; 16],
+    ) -> bool {
+        self.project_id == project_id && self.worktree_id == worktree_id
+    }
+
+    pub(in crate::daemon::service) fn runtime(&self) -> Arc<DeferredHookOrchestratorV1> {
+        Arc::clone(&self.runtime)
+    }
+}
+
+impl Drop for RegisteredHookOrchestrationRuntimeV1 {
+    fn drop(&mut self) {
+        self.runtime.cancel();
     }
 }
 
@@ -303,12 +758,30 @@ impl SwitchableFeedbackCycleRuntimeV1 {
     pub(in crate::daemon::service) fn replace(
         &self,
         current: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), LspRuntimeFailure> {
-        *self
+    ) -> Result<Arc<dyn FeedbackCycleRuntimePort>, LspRuntimeFailure> {
+        let mut guard = self
             .current
             .write()
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-router"))? = current;
-        Ok(())
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-router"))?;
+        Ok(std::mem::replace(&mut *guard, current))
+    }
+
+    /// Restores `replacement` only while `expected` is still routed, so a
+    /// rollback can never clobber a successor publication.
+    pub(in crate::daemon::service) fn replace_if_same(
+        &self,
+        expected: &Arc<dyn FeedbackCycleRuntimePort>,
+        replacement: Arc<dyn FeedbackCycleRuntimePort>,
+    ) -> Result<bool, LspRuntimeFailure> {
+        let mut current = self
+            .current
+            .write()
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-router"))?;
+        if !Arc::ptr_eq(&current, expected) {
+            return Ok(false);
+        }
+        *current = replacement;
+        Ok(true)
     }
 }
 

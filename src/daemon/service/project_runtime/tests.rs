@@ -956,12 +956,23 @@ impl FeedbackCycleRuntimePort for CountingFeedbackCycle {
     }
 }
 
+struct PendingAdvisoryCycle;
+
+impl crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationPort for PendingAdvisoryCycle {
+    fn invoke(
+        &self,
+        _request: crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationRequest,
+    ) -> crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationFuture<'_> {
+        Box::pin(std::future::pending())
+    }
+}
+
 #[tokio::test]
-async fn advisory_input_cannot_repoint_a_router_after_shutdown() {
+async fn advisory_publication_cancellation_and_rollback_leave_no_partial_runtime() {
     let registry = ProjectRuntimeRegistryV1::default();
-    let project = root("closed-router");
+    let project = root("advisory-atomic-publication");
     let incumbent_calls = Arc::new(AtomicUsize::new(0));
-    let rejected_calls = Arc::new(AtomicUsize::new(0));
+    let advisory_calls = Arc::new(AtomicUsize::new(0));
     let router = Arc::new(SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
         CountingFeedbackCycle(Arc::clone(&incumbent_calls)),
     )));
@@ -969,20 +980,53 @@ async fn advisory_input_cannot_repoint_a_router_after_shutdown() {
         .publish(project.clone(), Arc::clone(&router))
         .await
         .unwrap();
+    let owner = || {
+        DaemonAdvisoryCycleInvocationOwner::new(
+            tracedecay_domain::ProjectId::new("project.advisory-atomic-publication").unwrap(),
+            Arc::new(PendingAdvisoryCycle),
+        )
+    };
 
-    registry.shut_down_all().await;
+    let cancellation = crate::application::context::CancellationToken::new();
+    cancellation.cancel();
     assert!(matches!(
         registry
-            .replace_feedback_cycle_input_atomically(
+            .publish_advisory_atomically(
                 &project,
-                Arc::new(CountingFeedbackCycle(Arc::clone(&rejected_calls))),
+                component(1),
+                owner(),
+                Arc::new(CountingFeedbackCycle(Arc::clone(&advisory_calls))),
+                &cancellation,
             )
             .await,
-        Err(FeedbackCyclePublicationError::Registry(
-            ProjectRuntimeRegistryError::Closed
-        ))
+        Err(FeedbackCyclePublicationError::RouterUnavailable)
     ));
+    assert!(registry.get::<Component>(&project).await.is_none());
+    assert!(
+        registry
+            .get::<DaemonAdvisoryCycleInvocationOwner>(&project)
+            .await
+            .is_none()
+    );
 
+    let publication = registry
+        .publish_advisory_atomically(
+            &project,
+            component(2),
+            owner(),
+            Arc::new(CountingFeedbackCycle(Arc::clone(&advisory_calls))),
+            &crate::application::context::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    drop(publication);
+    assert!(registry.get::<Component>(&project).await.is_none());
+    assert!(
+        registry
+            .get::<DaemonAdvisoryCycleInvocationOwner>(&project)
+            .await
+            .is_none()
+    );
     router
         .execute(FeedbackCycleRequest {
             root_uri: "file:///project".to_owned(),
@@ -992,5 +1036,5 @@ async fn advisory_input_cannot_repoint_a_router_after_shutdown() {
         .await
         .unwrap();
     assert_eq!(incumbent_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(rejected_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(advisory_calls.load(Ordering::SeqCst), 0);
 }

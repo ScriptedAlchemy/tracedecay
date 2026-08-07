@@ -185,6 +185,28 @@ pub fn register_advisory_hook_notice_queue(
     true
 }
 
+/// Removes exactly the given queue's registration; a different live queue
+/// under the same locator pair is left untouched so a failed or rolled-back
+/// setup can never unregister its successor.
+pub fn unregister_advisory_hook_notice_queue(
+    project_id: [u8; 16],
+    worktree_id: [u8; 16],
+    queue: &Arc<AdvisoryHookNoticeQueueV1>,
+) -> bool {
+    let Ok(mut queues) = registered_hook_notice_queues().lock() else {
+        return false;
+    };
+    let key = (project_id, worktree_id);
+    if !queues
+        .get(&key)
+        .and_then(Weak::upgrade)
+        .is_some_and(|registered| Arc::ptr_eq(&registered, queue))
+    {
+        return false;
+    }
+    queues.remove(&key).is_some()
+}
+
 pub fn peek_advisory_hook_notice(
     project_id: [u8; 16],
     worktree_id: [u8; 16],

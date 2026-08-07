@@ -779,14 +779,19 @@ pub fn open_production_ci_provider_authorities_v1(
     })
 }
 
-pub fn unavailable_production_ci_provider_authorities_v1() -> ProductionCiProviderAuthoritiesV1 {
-    ProductionCiProviderAuthoritiesV1 {
-        archive: Arc::new(UnavailableProductionCiArchiveV1),
+pub fn unavailable_production_ci_provider_authorities_v1()
+-> Result<ProductionCiProviderAuthoritiesV1, ProductionCiProviderOpenErrorV1> {
+    let provider = ProviderId::new("provider.unavailable")
+        .map_err(|_| ProductionCiProviderOpenErrorV1::InvalidProvider)?;
+    Ok(ProductionCiProviderAuthoritiesV1 {
+        archive: Arc::new(UnavailableProductionCiArchiveV1 { provider }),
         exact_evidence: Arc::new(UnavailableProductionCiExactEvidenceV1),
-    }
+    })
 }
 
-struct UnavailableProductionCiArchiveV1;
+struct UnavailableProductionCiArchiveV1 {
+    provider: ProviderId,
+}
 
 impl CiReadOnlyProviderArchiveV1 for UnavailableProductionCiArchiveV1 {
     type Record = CiRetainedProviderRecordV1;
@@ -797,17 +802,8 @@ impl CiReadOnlyProviderArchiveV1 for UnavailableProductionCiArchiveV1 {
         request: &'a CiFailureLocalizationRequestV1,
     ) -> FeedbackPortFuture<'a, CiProviderReadResultV1<Self::Record>> {
         Box::pin(async move {
-            let provider = match ProviderId::new("provider.unavailable") {
-                Ok(provider) => provider,
-                Err(_) => match ProviderId::new(GITHUB_ACTIONS_PROVIDER_ID_V1) {
-                    Ok(provider) => provider,
-                    Err(error) => {
-                        panic!("static CI provider id must remain constructible: {error}")
-                    }
-                },
-            };
             CiProviderReadResultV1 {
-                provider,
+                provider: self.provider.clone(),
                 run: request.run.clone(),
                 state: CiFailureLocalizationStateV1::Unavailable,
                 coverage: CiFailureCoverageV1::Unavailable,
