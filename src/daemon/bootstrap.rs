@@ -156,6 +156,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         );
     }
     maintenance.shutdown().await;
+    cancel_retained_session_history(&store_administration).await;
     if let Err(error) = http_application_service.shutdown().await {
         log_daemon_event(
             "daemon_http_application",
@@ -166,6 +167,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         );
     }
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
+    cancel_retained_session_history(&store_administration).await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
         .is_ok();
@@ -384,6 +386,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             &[("outcome", "shutdown_failed".to_owned()), ("error", error)],
         );
     }
+    cancel_retained_session_history(&engine.store_administration).await;
     if let Err(error) = http_application_service.shutdown().await {
         log_daemon_event(
             "daemon_http_application",
@@ -394,6 +397,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         );
     }
     engine.shutdown_project_open_tasks().await;
+    cancel_retained_session_history(&engine.store_administration).await;
     // Keep auxiliary process creation blocked until every scheduler and client
     // task is drained or abandoned. A killed app-server call may retry before
     // unwinding, so a shorter guard leaves a shutdown-time respawn race.

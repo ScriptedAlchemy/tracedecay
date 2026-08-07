@@ -589,7 +589,6 @@ pub(super) async fn production_project_server(
         handshake.scope_prefix.clone(),
         crate::mcp::server::McpServerDaemonCoreAuthority {
             profile_identity: profile_identity.clone(),
-            transcript_source_home: transcript_source_home.clone(),
             accounting: accounting_db.clone(),
             registry: Arc::clone(&registry_db),
             database_owner_reconciler: Arc::clone(&database_owner_reconciler),
@@ -803,13 +802,33 @@ pub(super) async fn production_project_server(
                 .cloned();
             let project_session_refresh_wake = store_administration
                 .session_temporal_refresh_schedulers()
-                .ensure_project(key.owner.clone(), Arc::clone(&session_db))
+                .ensure_project_with_history(
+                    key.owner.clone(),
+                    Arc::clone(&session_db),
+                    Arc::new(
+                        session_temporal_refresh_scheduler::ProjectSessionHistoricalIngestor::new(
+                            Arc::clone(&session_db),
+                            profile_identity.clone(),
+                            canonical_project_path.to_path_buf(),
+                            code_search_project_id.clone(),
+                            transcript_source_home.clone(),
+                        ),
+                    ),
+                )
                 .await;
             let user_session_refresh_wake = store_administration
                 .session_temporal_refresh_schedulers()
-                .ensure_profile(
+                .ensure_profile_with_history(
                     user_session_db.db_path().to_path_buf(),
                     Arc::clone(&user_session_db),
+                    Arc::new(
+                        session_temporal_refresh_scheduler::ProfileSessionHistoricalIngestor::new(
+                            Arc::clone(&user_session_db),
+                            Arc::clone(&registry_db),
+                            profile_identity.clone(),
+                            transcript_source_home.clone(),
+                        ),
+                    ),
                 )
                 .await;
             let session_sync_owner = store_administration.session_sync_service();
@@ -890,7 +909,6 @@ pub(super) async fn production_project_server(
                 handshake.scope_prefix.clone(),
                 crate::mcp::server::McpServerDaemonAuthority {
                     profile_identity: profile_identity.clone(),
-                    transcript_source_home,
                     databases: crate::mcp::server::McpServerDaemonDatabases {
                         accounting: accounting_db,
                         registry: registry_db,

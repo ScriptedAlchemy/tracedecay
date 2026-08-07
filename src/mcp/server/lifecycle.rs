@@ -108,10 +108,8 @@ pub(crate) struct StartupCatchUpTasksV1 {
 
 /// The startup catch-up lifecycle as one linear machine.
 ///
-/// This replaces six independently mutable fields (two completion
-/// `AtomicBool`s, a dispatch `AtomicBool`, two task-handle mutexes, and the
-/// ingest cancellation) whose only valid combinations were these phases.
-/// The hazard that motivated the change: the completion flags defaulted to
+/// Dispatch and readiness live in the same state machine. The hazard that
+/// motivated it: the old completion flag defaulted to
 /// `true` so a server with no catch-up reported "settled", which forced the
 /// dispatch site to pre-clear them in a separate store *before* spawning —
 /// an ordering that was documented rather than enforced. Here, dispatch

@@ -281,7 +281,6 @@ pub struct McpServer {
     global_db: Option<Arc<RegisteredGlobalDb>>,
     profile_root: Option<PathBuf>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    transcript_source_home: Option<PathBuf>,
     accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
@@ -388,12 +387,9 @@ pub struct McpServer {
     /// spawn at most one pair of `git rev-parse` per session no matter how
     /// many tool calls fire. See [`crate::worktree`] and #312.
     worktree_mismatch: Option<crate::worktree::WorktreeIndexMismatch>,
-    /// The whole startup catch-up lifecycle (D1): dispatch claim, index-sync
-    /// and transcript-ingest phases, both retained task handles, and the
-    /// ingest cancellation — one typed state behind one lock. See
-    /// [`StartupCatchUpStateV1`] for the phases and the ordering hazard the
-    /// previous flag soup carried. `Arc` so the detached ingest task can
-    /// settle the same machine that waiters and shutdown read.
+    /// Startup code-index catch-up lifecycle (D1): dispatch claim, retained
+    /// task handle, and readiness state behind one lock. Historical session
+    /// convergence is owned by the daemon scheduler, not this server.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
     /// `true` while a retained sync-on-read refresh (D4) is in flight.
     /// Single-flights the background refresh: `compare_exchange`d to `true`
@@ -699,7 +695,6 @@ impl McpServer {
             scope_prefix,
             profile_root,
             profile_identity,
-            transcript_source_home,
             global_db,
             accounting_db,
             registry_db,
@@ -734,14 +729,6 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
-        #[cfg(test)]
-        assert!(
-            !startup_catch_up_enabled
-                || registered_session_db.is_none()
-                || profile_identity.is_none()
-                || transcript_source_home.is_some(),
-            "test MCP servers with startup transcript authority require an isolated transcript-source home"
-        );
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -923,7 +910,6 @@ impl McpServer {
             accounting_db,
             profile_root,
             profile_identity,
-            transcript_source_home,
             session_db,
             registry_db,
             project_registry_reads,

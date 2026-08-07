@@ -16,7 +16,7 @@ pub use project::{
     home_dir, ingest_project_sources_for_provider,
     ingest_project_sources_for_provider_with_cancellation, with_transcript_source_home,
 };
-pub use startup::ingest_user_global_sources_for_startup_with_db;
+pub use startup::{TranscriptIngestOutcome, ingest_user_global_sources_for_startup_with_db};
 pub use user::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 pub use user::{
     ingest_user_global_sources_for_provider_with_authorities,

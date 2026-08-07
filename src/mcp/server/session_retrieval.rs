@@ -29,16 +29,12 @@ use crate::application::context::{
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalExecutionError, SessionTemporalQuery,
+    SessionDataFreshness, SessionFreshnessPolicy, SessionProjectionServingStatusPort,
+    SessionRequestBinding, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalQuery,
 };
-use crate::daemon::session_temporal_refresh_scheduler::{
-    SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
-    SessionTemporalRefreshUnavailableReason, SessionTemporalRefreshWake,
-    SessionTemporalRefreshWorkerStatus,
-};
+use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 use crate::mcp::tools::{
@@ -47,9 +43,7 @@ use crate::mcp::tools::{
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalOmissionView,
     SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
     SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
-    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
-    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
-    SessionTemporalMetadataView, SessionTemporalWatermarksView,
+    SessionRetrievalUnavailableReason, SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::sessions::lcm::{
@@ -68,6 +62,8 @@ pub(crate) const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.
 const MESSAGE_SEARCH_PROFILE_ID: &str = "profile.primary";
 const MESSAGE_SEARCH_SCHEMA_VERSION: u32 = 1;
 const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;
+
+mod serving_status;
 const MESSAGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MESSAGE_SEARCH_MAX_RESULTS: u64 = 1_024;
 const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
@@ -348,38 +344,6 @@ impl SessionScopeAuthorizer for DaemonSessionRetrievalAuthorizer {
     }
 }
 
-fn session_retrieval_worker_status(
-    status: SessionTemporalRefreshWorkerStatus,
-) -> SessionRetrievalWorkerStatusView {
-    SessionRetrievalWorkerStatusView {
-        last_progress_at_unix_micros: status.last_progress_at_unix_micros,
-        backlog: status.backlog,
-        blocker: status.blocker.map(|blocker| match blocker {
-            SessionTemporalRefreshBlocker::WorkerMissing => {
-                SessionRetrievalWorkerBlocker::WorkerMissing
-            }
-            SessionTemporalRefreshBlocker::WorkerPanicked => {
-                SessionRetrievalWorkerBlocker::WorkerPanicked
-            }
-            SessionTemporalRefreshBlocker::WorkerStopped => {
-                SessionRetrievalWorkerBlocker::WorkerStopped
-            }
-            SessionTemporalRefreshBlocker::Storage => SessionRetrievalWorkerBlocker::Storage,
-            SessionTemporalRefreshBlocker::Projector => SessionRetrievalWorkerBlocker::Projector,
-            SessionTemporalRefreshBlocker::Deadline => SessionRetrievalWorkerBlocker::Deadline,
-        }),
-        retry_class: status.retry_class.map(|retry_class| match retry_class {
-            SessionTemporalRefreshRetryClass::Storage => SessionRetrievalWorkerRetryClass::Storage,
-            SessionTemporalRefreshRetryClass::Projector => {
-                SessionRetrievalWorkerRetryClass::Projector
-            }
-            SessionTemporalRefreshRetryClass::Deadline => {
-                SessionRetrievalWorkerRetryClass::Deadline
-            }
-        }),
-    }
-}
-
 const fn requires_refresh_worker(freshness_policy: SessionFreshnessPolicy) -> bool {
     matches!(freshness_policy, SessionFreshnessPolicy::RequireFresh)
 }
@@ -388,7 +352,7 @@ pub(crate) struct DaemonSessionRetrievalService {
     database: Arc<RegisteredGlobalDb>,
     root: DaemonSessionRetrievalRoot,
     configuration: SessionRetrievalConfiguration,
-    refresh_status: Option<SessionTemporalRefreshWake>,
+    refresh_status: Option<Arc<dyn SessionProjectionServingStatusPort>>,
 }
 
 impl DaemonSessionRetrievalService {
@@ -405,7 +369,8 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            refresh_status,
+            refresh_status: refresh_status
+                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
         })
     }
 
@@ -430,30 +395,13 @@ impl DaemonSessionRetrievalService {
                 MESSAGE_SEARCH_RANKING_VERSION,
             )
             .ok()?,
-            refresh_status,
+            refresh_status: refresh_status
+                .map(|status| Arc::new(status) as Arc<dyn SessionProjectionServingStatusPort>),
         })
     }
 
-    fn refresh_unavailable(&self) -> Option<SessionRetrievalUnavailable> {
-        let status = self.refresh_status.as_ref()?.status();
-        let unavailable = status.unavailable_reason?;
-        Some(SessionRetrievalUnavailable {
-            reason: match unavailable {
-                SessionTemporalRefreshUnavailableReason::Missing => {
-                    SessionRetrievalUnavailableReason::RefreshWorkerMissing
-                }
-                SessionTemporalRefreshUnavailableReason::Recovering => {
-                    SessionRetrievalUnavailableReason::RefreshWorkerRecovering
-                }
-                SessionTemporalRefreshUnavailableReason::Stalled => {
-                    SessionRetrievalUnavailableReason::RefreshWorkerStalled
-                }
-                SessionTemporalRefreshUnavailableReason::Stopped => {
-                    SessionRetrievalUnavailableReason::RefreshWorkerStopped
-                }
-            },
-            worker: Some(session_retrieval_worker_status(status)),
-        })
+    fn refresh_not_current(&self) -> Option<SessionRetrievalUnavailable> {
+        serving_status::not_current_unavailable(self.refresh_status.as_deref()?)
     }
 
     fn registered_execution(
@@ -574,7 +522,7 @@ impl DaemonSessionRetrievalService {
         command: SessionRetrievalCommand,
     ) -> SessionRetrievalServiceOutcome {
         if requires_refresh_worker(command.query().freshness_policy())
-            && let Some(unavailable) = self.refresh_unavailable()
+            && let Some(unavailable) = self.refresh_not_current()
         {
             return SessionRetrievalServiceOutcome::Unavailable(unavailable);
         }

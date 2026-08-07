@@ -320,8 +320,9 @@ use project_routing::{
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
 use project_server_lifecycle::{
-    await_user_profile_host_admission_replay_for_identity, schedule_project_server_retirement,
-    schedule_user_profile_host_admission_replay_for_identity, shutdown_project_servers,
+    await_user_profile_host_admission_replay_for_identity, cancel_retained_session_history,
+    schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
+    shutdown_project_servers,
 };
 pub(crate) mod lcm_effects;
 mod lcm_summarization;
@@ -362,8 +363,7 @@ pub(crate) use service::invocation::{
     DaemonInvocationService, DaemonLspOwnerRegistrar, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
-    HookOrchestrationAdmissionV1, HookOrchestrationPortV1, HookOrchestrationRequestV1,
-    HookOrchestrationTriggerV1,
+    HookOrchestrationAdmissionV1, HookOrchestrationRequestV1, HookOrchestrationTriggerV1,
     admit_registered_hook_orchestration, advisory_cycle_invocation_result,
     daemon_operation_event_authority,
 };

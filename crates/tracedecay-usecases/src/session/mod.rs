@@ -3,13 +3,15 @@ pub mod lcm;
 mod ports;
 mod refresh;
 mod retrieval;
+mod serving;
 #[cfg(test)]
 mod tests;
 mod types;
 
 pub use ports::{
-    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
-    SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
+    AuthorizedTemporalExecutionRequest, SessionProjectionServingStatusPort,
+    SessionTemporalExecutionError, SessionTemporalExecutionPort, SessionTemporalExecutionReport,
+    TemporalExecutionFuture,
 };
 pub use refresh::{
     SessionRefreshConfiguration, SessionRefreshDigest, SessionRefreshHandle, SessionRefreshOutcome,
@@ -19,6 +21,11 @@ pub use refresh::{
 pub use retrieval::{
     SessionRetrievalConfiguration, SessionRetrievalService, SessionTemporalQuery,
     SessionTemporalQueryError,
+};
+pub use serving::{
+    SessionProjectionServingState, SessionProjectionServingStatus, SessionProjectionStaleReason,
+    SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
+    SessionProjectionWorkerRetryClass,
 };
 pub use types::{
     AuthorizationGrantId, AuthorizedSessionScope, SessionAccess, SessionAuthorizationError,

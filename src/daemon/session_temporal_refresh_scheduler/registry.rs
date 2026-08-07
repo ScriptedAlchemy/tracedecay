@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use super::super::StoreOwnerKey;
+use super::history::SharedSessionHistoricalIngestor;
 use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshPolicy,
     SessionTemporalRefreshProjector,
@@ -55,11 +56,20 @@ impl SessionTemporalRefreshPassReport {
 struct SessionTemporalRefreshSchedulerEntry {
     state: Arc<SessionTemporalRefreshWakeState>,
     wake: SessionTemporalRefreshWake,
+    history: Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl SessionTemporalRefreshSchedulerEntry {
     async fn shutdown(self) {
+        if let Some(history) = self
+            .history
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            history.cancel();
+        }
         self.state.cancel();
         let mut task = self.task;
         if tokio::time::timeout(super::super::DAEMON_CLIENT_DRAIN_DEADLINE, &mut task)
@@ -104,11 +114,27 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
         self.shutting_down.store(true, Ordering::Release);
         if let Ok(project) = self.project.try_lock() {
             for entry in project.values() {
+                if let Some(history) = entry
+                    .history
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                {
+                    history.cancel();
+                }
                 entry.state.cancel();
             }
         }
         if let Ok(profile) = self.profile.try_lock() {
             for entry in profile.values() {
+                if let Some(history) = entry
+                    .history
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                {
+                    history.cancel();
+                }
                 entry.state.cancel();
             }
         }
@@ -120,13 +146,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
         &self,
         database: Arc<RegisteredGlobalDb>,
         route: Option<SessionTemporalRefreshWake>,
+        history: Option<SharedSessionHistoricalIngestor>,
     ) -> SessionTemporalRefreshSchedulerEntry {
         let state = Arc::new(SessionTemporalRefreshWakeState::default());
+        let history = Arc::new(std::sync::RwLock::new(history));
         let wake = route.unwrap_or_else(|| state.handle());
         wake.bind(&state);
         state.mark_running();
         let worker_state = Arc::clone(&state);
         let projector = Arc::clone(&self.projector);
+        let worker_history = Arc::clone(&history);
         let policy = self.policy;
         state.wake();
         let task = tokio::spawn(async move {
@@ -137,6 +166,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     Arc::clone(&database),
                     Arc::clone(&worker_state),
                     Arc::clone(&projector),
+                    Arc::clone(&worker_history),
                     policy,
                 ));
                 let Some(result) = workers.join_next().await else {
@@ -154,6 +184,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             SessionTemporalRefreshRetryClass::Projector,
                         );
                         worker_state.dirty.store(true, Ordering::Release);
+                        worker_state.recover_history_after_worker_panic();
                         tokio::select! {
                             () = worker_state.wait_for_cancellation() => return,
                             () = tokio::time::sleep(session_refresh_retry_delay(
@@ -169,7 +200,12 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 }
             }
         });
-        SessionTemporalRefreshSchedulerEntry { state, wake, task }
+        SessionTemporalRefreshSchedulerEntry {
+            state,
+            wake,
+            history,
+            task,
+        }
     }
 
     pub(in crate::daemon) async fn ensure_project(
@@ -201,11 +237,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
             #[allow(clippy::expect_used)]
             let finished = project.remove(&owner).expect("finished entry disappeared");
             let route = finished.wake.clone();
+            let history = finished
+                .history
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             finished.shutdown().await;
             if self.shutting_down.load(Ordering::Acquire) {
                 return inert_session_temporal_refresh_wake();
             }
-            let entry = self.spawn_entry(database, Some(route));
+            let entry = self.spawn_entry(database, Some(route), history);
             let wake = entry.wake.clone();
             project.insert(owner, entry);
             return wake;
@@ -214,7 +255,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             entry.wake.wake();
             return entry.wake.clone();
         }
-        let entry = self.spawn_entry(database, None);
+        let entry = self.spawn_entry(database, None, None);
         let wake = entry.wake.clone();
         project.insert(owner, entry);
         wake
@@ -242,11 +283,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .remove(&database_path)
                 .expect("finished entry disappeared");
             let route = finished.wake.clone();
+            let history = finished
+                .history
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             finished.shutdown().await;
             if self.shutting_down.load(Ordering::Acquire) {
                 return inert_session_temporal_refresh_wake();
             }
-            let entry = self.spawn_entry(database, Some(route));
+            let entry = self.spawn_entry(database, Some(route), history);
             let wake = entry.wake.clone();
             profile.insert(database_path, entry);
             return wake;
@@ -255,9 +301,53 @@ impl SessionTemporalRefreshSchedulerRegistry {
             entry.wake.wake();
             return entry.wake.clone();
         }
-        let entry = self.spawn_entry(database, None);
+        let entry = self.spawn_entry(database, None, None);
         let wake = entry.wake.clone();
         profile.insert(database_path, entry);
+        wake
+    }
+
+    pub(in crate::daemon) async fn ensure_project_with_history(
+        &self,
+        owner: StoreOwnerKey,
+        database: Arc<RegisteredGlobalDb>,
+        history: SharedSessionHistoricalIngestor,
+    ) -> SessionTemporalRefreshWake {
+        let wake = self.ensure_project(owner.clone(), database).await;
+        if let Some(entry) = self.project.lock().await.get(&owner) {
+            let mut retained = entry
+                .history
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if retained.is_none() {
+                *retained = Some(history);
+                entry.state.mark_history_pending();
+            }
+            drop(retained);
+            entry.state.wake_history();
+        }
+        wake
+    }
+
+    pub(in crate::daemon) async fn ensure_profile_with_history(
+        &self,
+        database_path: std::path::PathBuf,
+        database: Arc<RegisteredGlobalDb>,
+        history: SharedSessionHistoricalIngestor,
+    ) -> SessionTemporalRefreshWake {
+        let wake = self.ensure_profile(database_path.clone(), database).await;
+        if let Some(entry) = self.profile.lock().await.get(&database_path) {
+            let mut retained = entry
+                .history
+                .write()
+                .unwrap_or_else(PoisonError::into_inner);
+            if retained.is_none() {
+                *retained = Some(history);
+                entry.state.mark_history_pending();
+            }
+            drop(retained);
+            entry.state.wake_history();
+        }
         wake
     }
 
@@ -310,7 +400,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             existing.wake.wake();
             return;
         }
-        let entry = self.spawn_entry(database, route);
+        let entry = self.spawn_entry(database, route, None);
         if let Some(staging) = staging {
             staging.cancel();
             staging.transfer_requests_to(&entry.state);
@@ -334,6 +424,21 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .await
             .keys()
             .any(|owner| database_paths.contains(&owner.graph_db_path))
+    }
+
+    pub(in crate::daemon) async fn cancel_historical_ingest(&self) {
+        let project = self.project.lock().await;
+        let profile = self.profile.lock().await;
+        for entry in project.values().chain(profile.values()) {
+            if let Some(history) = entry
+                .history
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+            {
+                history.cancel();
+            }
+        }
     }
 
     #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path

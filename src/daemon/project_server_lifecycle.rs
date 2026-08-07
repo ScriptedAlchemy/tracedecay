@@ -10,6 +10,13 @@
 
 use super::*;
 
+pub(super) async fn cancel_retained_session_history(store_administration: &StoreAdministration) {
+    store_administration
+        .session_temporal_refresh_schedulers()
+        .cancel_historical_ingest()
+        .await;
+}
+
 pub(super) async fn shutdown_project_servers(store_administration: &StoreAdministration) {
     store_administration.join_project_server_retirements().await;
     let servers = detach_project_servers(store_administration).await;

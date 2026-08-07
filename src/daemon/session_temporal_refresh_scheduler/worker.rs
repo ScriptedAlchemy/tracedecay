@@ -2,12 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
     SessionRefreshProgressV1, SessionRefreshStore, SessionStoreError,
 };
 
+use super::history::{SessionHistoricalIngestOutcome, SharedSessionHistoricalIngestor};
 use super::projector::{
     SessionTemporalRefreshEffect, SessionTemporalRefreshPolicy, SessionTemporalRefreshProjector,
     SessionTemporalRefreshProjectorError, SessionTemporalRefreshProjectorErrorClass,
@@ -27,9 +29,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     database: Arc<RegisteredGlobalDb>,
     state: Arc<SessionTemporalRefreshWakeState>,
     projector: Arc<dyn SessionTemporalRefreshProjector>,
+    history: Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     policy: SessionTemporalRefreshPolicy,
 ) {
     let mut retry_attempt = 0u32;
+    let mut history_retry_pending = false;
     state.mark_running();
     loop {
         if state.cancelled.load(Ordering::Acquire) {
@@ -39,6 +43,45 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.begin_pass();
             state.busy.store(true, Ordering::Release);
             state.pass_count.fetch_add(1, Ordering::AcqRel);
+            let history_outcome = if state.take_historical_dirty() {
+                let history = history
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                match history {
+                    Some(history) => Some(history.run_pass().await),
+                    None => None,
+                }
+            } else {
+                None
+            };
+            if let Some(outcome) = history_outcome {
+                state.record_history_outcome(outcome);
+            }
+            if matches!(
+                history_outcome,
+                Some(SessionHistoricalIngestOutcome::Cancelled)
+            ) || state.cancelled.load(Ordering::Acquire)
+            {
+                return;
+            }
+            match history_outcome {
+                Some(SessionHistoricalIngestOutcome::Retryable { reason_code, .. }) => {
+                    tracing::debug!(
+                        reason_code,
+                        "retained historical session ingest pass will retry"
+                    );
+                }
+                Some(SessionHistoricalIngestOutcome::Blocked { reason_code }) => {
+                    tracing::warn!(reason_code, "retained historical session ingest is blocked");
+                }
+                Some(
+                    SessionHistoricalIngestOutcome::Complete
+                    | SessionHistoricalIngestOutcome::Pending { .. }
+                    | SessionHistoricalIngestOutcome::Cancelled,
+                )
+                | None => {}
+            }
             let pass =
                 run_session_temporal_refresh_pass(&database, &state, projector.as_ref(), policy);
             tokio::pin!(pass);
@@ -54,9 +97,15 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || report.projected_batches > 0
                 || report.completed > 0
                 || report.failed > 0
-                || report.cancelled > 0;
+                || report.cancelled > 0
+                || history_outcome.is_some_and(SessionHistoricalIngestOutcome::made_progress);
+            let history_needs_another_pass =
+                history_outcome.is_some_and(SessionHistoricalIngestOutcome::needs_another_pass);
             if let Some(backlog) = report.backlog {
-                state.record_pass(backlog, made_progress);
+                state.record_pass(
+                    backlog.saturating_add(usize::from(history_needs_another_pass)),
+                    made_progress,
+                );
             }
             if let Some(class) = report.retry_class {
                 retry_attempt = retry_attempt.saturating_add(1);
@@ -67,7 +116,14 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     () = state.wake.notified() => {}
                     () = tokio::time::sleep(session_refresh_retry_delay(class, retry_attempt)) => {}
                 }
+            } else if history_needs_another_pass {
+                state.mark_running();
+                retry_attempt = 0;
+                history_retry_pending = true;
             } else {
+                if history_outcome.is_some() {
+                    history_retry_pending = false;
+                }
                 state.mark_running();
                 retry_attempt = 0;
                 if state.has_requests()
@@ -86,9 +142,20 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
         if state.dirty.load(Ordering::Acquire) {
             continue;
         }
-        tokio::select! {
-            () = state.wait_for_cancellation() => return,
-            () = wake => {}
+        if history_retry_pending {
+            tokio::select! {
+                () = state.wait_for_cancellation() => return,
+                () = wake => {}
+                () = tokio::time::sleep(Duration::from_millis(250)) => {
+                    history_retry_pending = false;
+                    state.wake_history();
+                },
+            }
+        } else {
+            tokio::select! {
+                () = state.wait_for_cancellation() => return,
+                () = wake => {}
+            }
         }
     }
 }

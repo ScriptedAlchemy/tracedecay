@@ -348,6 +348,7 @@ mod tests {
         let request = LcmPreflightRequest {
             provider: "cursor".to_string(),
             session_id: "session-1".to_string(),
+            messages: Vec::new(),
             current_tokens: Some(12),
             threshold_tokens: None,
             max_assembly_tokens: Some(8),

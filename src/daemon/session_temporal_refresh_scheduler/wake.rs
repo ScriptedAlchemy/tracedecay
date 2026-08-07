@@ -8,6 +8,13 @@ use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::MAX_PENDING_REFRESH_REQUESTS;
+use super::history::SessionHistoricalIngestOutcome;
+use crate::application::session::{
+    SessionProjectionServingState, SessionProjectionServingStatus,
+    SessionProjectionServingStatusPort, SessionProjectionStaleReason,
+    SessionProjectionUnavailableReason, SessionProjectionWorkerBlocker,
+    SessionProjectionWorkerRetryClass,
+};
 use crate::store::SessionRefreshRecoveryV1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,6 +86,15 @@ struct SessionTemporalRefreshWorkerTelemetry {
     blocker: Option<SessionTemporalRefreshBlocker>,
     retry_class: Option<SessionTemporalRefreshRetryClass>,
     unavailable_reason: Option<SessionTemporalRefreshUnavailableReason>,
+    historical_state: SessionHistoricalServingState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionHistoricalServingState {
+    Current,
+    Pending,
+    Retryable(String),
+    Blocked(String),
 }
 
 impl Default for SessionTemporalRefreshWorkerTelemetry {
@@ -91,12 +107,14 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
             blocker: Some(SessionTemporalRefreshBlocker::WorkerStopped),
             retry_class: None,
             unavailable_reason: Some(SessionTemporalRefreshUnavailableReason::Stopped),
+            historical_state: SessionHistoricalServingState::Current,
         }
     }
 }
 
 pub(super) struct SessionTemporalRefreshWakeState {
     pub(super) dirty: AtomicBool,
+    historical_dirty: AtomicBool,
     pub(super) requests: std::sync::Mutex<VecDeque<SessionRefreshBeginOrJoinRequestV1>>,
     pub(super) terminal_attempts: std::sync::Mutex<HashSet<String>>,
     pub(super) recovery_cycle_pending: std::sync::Mutex<VecDeque<String>>,
@@ -114,6 +132,7 @@ impl Default for SessionTemporalRefreshWakeState {
     fn default() -> Self {
         Self {
             dirty: AtomicBool::new(false),
+            historical_dirty: AtomicBool::new(false),
             requests: std::sync::Mutex::new(VecDeque::new()),
             terminal_attempts: std::sync::Mutex::new(HashSet::new()),
             recovery_cycle_pending: std::sync::Mutex::new(VecDeque::new()),
@@ -139,6 +158,10 @@ impl SessionTemporalRefreshWakeState {
 
     pub(super) fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::AcqRel)
+    }
+
+    pub(super) fn take_historical_dirty(&self) -> bool {
+        self.historical_dirty.swap(false, Ordering::AcqRel)
     }
 
     pub(super) fn take_requests(&self, limit: usize) -> Vec<SessionRefreshBeginOrJoinRequestV1> {
@@ -205,6 +228,11 @@ impl SessionTemporalRefreshWakeState {
         self.wake.notify_one();
     }
 
+    pub(super) fn wake_history(&self) {
+        self.historical_dirty.store(true, Ordering::Release);
+        self.wake();
+    }
+
     pub(super) fn mark_running(&self) {
         let mut telemetry = self
             .telemetry
@@ -220,6 +248,47 @@ impl SessionTemporalRefreshWakeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .last_pass_made_progress = false;
+    }
+
+    pub(super) fn mark_history_pending(&self) {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .historical_state = SessionHistoricalServingState::Pending;
+    }
+
+    pub(super) fn record_history_outcome(&self, outcome: SessionHistoricalIngestOutcome) {
+        let state = match outcome {
+            SessionHistoricalIngestOutcome::Complete => SessionHistoricalServingState::Current,
+            SessionHistoricalIngestOutcome::Pending { .. } => {
+                SessionHistoricalServingState::Pending
+            }
+            SessionHistoricalIngestOutcome::Retryable { reason_code, .. } => {
+                SessionHistoricalServingState::Retryable(reason_code.to_owned())
+            }
+            SessionHistoricalIngestOutcome::Blocked { reason_code } => {
+                SessionHistoricalServingState::Blocked(reason_code.to_owned())
+            }
+            SessionHistoricalIngestOutcome::Cancelled => return,
+        };
+        self.telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .historical_state = state;
+    }
+
+    pub(super) fn recover_history_after_worker_panic(&self) {
+        let should_retry = matches!(
+            &self
+                .telemetry
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .historical_state,
+            SessionHistoricalServingState::Pending | SessionHistoricalServingState::Retryable(_)
+        );
+        if should_retry {
+            self.wake_history();
+        }
     }
 
     pub(super) fn mark_recovering(
@@ -299,6 +368,85 @@ impl SessionTemporalRefreshWakeState {
             blocker: telemetry.blocker,
             retry_class: telemetry.retry_class,
             unavailable_reason,
+        }
+    }
+
+    fn serving_status(&self) -> SessionProjectionServingStatus {
+        let worker = self.status();
+        let historical_state = self
+            .telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .historical_state
+            .clone();
+        SessionProjectionServingStatus {
+            state: match worker.unavailable_reason {
+                Some(reason) => SessionProjectionServingState::Unavailable {
+                    reason: match reason {
+                        SessionTemporalRefreshUnavailableReason::Missing => {
+                            SessionProjectionUnavailableReason::WorkerMissing
+                        }
+                        SessionTemporalRefreshUnavailableReason::Recovering => {
+                            SessionProjectionUnavailableReason::WorkerRecovering
+                        }
+                        SessionTemporalRefreshUnavailableReason::Stalled => {
+                            SessionProjectionUnavailableReason::WorkerStalled
+                        }
+                        SessionTemporalRefreshUnavailableReason::Stopped => {
+                            SessionProjectionUnavailableReason::WorkerStopped
+                        }
+                    },
+                },
+                None => match historical_state {
+                    SessionHistoricalServingState::Current => {
+                        SessionProjectionServingState::Current
+                    }
+                    SessionHistoricalServingState::Pending => {
+                        SessionProjectionServingState::Stale {
+                            reason: SessionProjectionStaleReason::HistoricalConvergence,
+                        }
+                    }
+                    SessionHistoricalServingState::Retryable(reason_code) => {
+                        SessionProjectionServingState::Stale {
+                            reason: SessionProjectionStaleReason::HistoricalRetry { reason_code },
+                        }
+                    }
+                    SessionHistoricalServingState::Blocked(reason_code) => {
+                        SessionProjectionServingState::Stale {
+                            reason: SessionProjectionStaleReason::HistoricalBlocked { reason_code },
+                        }
+                    }
+                },
+            },
+            last_progress_at_unix_micros: worker.last_progress_at_unix_micros,
+            backlog: worker.backlog,
+            blocker: worker.blocker.map(|blocker| match blocker {
+                SessionTemporalRefreshBlocker::WorkerMissing => {
+                    SessionProjectionWorkerBlocker::WorkerMissing
+                }
+                SessionTemporalRefreshBlocker::WorkerPanicked => {
+                    SessionProjectionWorkerBlocker::WorkerPanicked
+                }
+                SessionTemporalRefreshBlocker::WorkerStopped => {
+                    SessionProjectionWorkerBlocker::WorkerStopped
+                }
+                SessionTemporalRefreshBlocker::Storage => SessionProjectionWorkerBlocker::Storage,
+                SessionTemporalRefreshBlocker::Projector => {
+                    SessionProjectionWorkerBlocker::Projector
+                }
+                SessionTemporalRefreshBlocker::Deadline => SessionProjectionWorkerBlocker::Deadline,
+            }),
+            retry_class: worker.retry_class.map(|retry_class| match retry_class {
+                SessionTemporalRefreshRetryClass::Storage => {
+                    SessionProjectionWorkerRetryClass::Storage
+                }
+                SessionTemporalRefreshRetryClass::Projector => {
+                    SessionProjectionWorkerRetryClass::Projector
+                }
+                SessionTemporalRefreshRetryClass::Deadline => {
+                    SessionProjectionWorkerRetryClass::Deadline
+                }
+            }),
         }
     }
 
@@ -568,6 +716,23 @@ impl SessionTemporalRefreshWake {
             state.wake();
         }
         disposition
+    }
+}
+
+impl SessionProjectionServingStatusPort for SessionTemporalRefreshWake {
+    fn serving_status(&self) -> SessionProjectionServingStatus {
+        self.target().map_or_else(
+            || SessionProjectionServingStatus {
+                state: SessionProjectionServingState::Unavailable {
+                    reason: SessionProjectionUnavailableReason::WorkerMissing,
+                },
+                last_progress_at_unix_micros: None,
+                backlog: 0,
+                blocker: Some(SessionProjectionWorkerBlocker::WorkerMissing),
+                retry_class: None,
+            },
+            |state| state.serving_status(),
+        )
     }
 }
 

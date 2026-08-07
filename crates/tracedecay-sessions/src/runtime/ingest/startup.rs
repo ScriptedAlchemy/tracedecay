@@ -43,6 +43,14 @@ impl TranscriptIngestOutcome {
     pub fn is_success(&self) -> bool {
         self.coverage.is_complete() && self.failures.is_empty()
     }
+
+    pub fn has_deferred_work(&self) -> bool {
+        !self.coverage.is_complete()
+    }
+
+    pub fn made_progress(&self) -> bool {
+        self.stats.sessions_upserted > 0 || self.stats.messages_upserted > 0
+    }
 }
 
 const STARTUP_USER_INGEST_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
@@ -62,23 +70,31 @@ pub(super) struct StartupUserIngestGuard {
     pub(super) completed: bool,
 }
 
+pub(super) enum StartupUserIngestClaim {
+    Acquired(StartupUserIngestGuard),
+    Running,
+    RecentlyCompleted,
+}
+
 impl StartupUserIngestGuard {
-    pub(super) fn claim(profile_root: PathBuf) -> Option<Self> {
+    pub(super) fn claim(profile_root: PathBuf) -> StartupUserIngestClaim {
         let ingests = STARTUP_USER_INGESTS
             .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
         let mut ingests = ingests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = ingests.entry(profile_root.clone()).or_default();
-        if state.running
-            || state
-                .last_completed
-                .is_some_and(|completed| completed.elapsed() < STARTUP_USER_INGEST_COOLDOWN)
+        if state.running {
+            return StartupUserIngestClaim::Running;
+        }
+        if state
+            .last_completed
+            .is_some_and(|completed| completed.elapsed() < STARTUP_USER_INGEST_COOLDOWN)
         {
-            return None;
+            return StartupUserIngestClaim::RecentlyCompleted;
         }
         state.running = true;
-        Some(Self {
+        StartupUserIngestClaim::Acquired(Self {
             profile_root,
             completed: false,
         })
@@ -149,8 +165,19 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
             vec![TranscriptCatchUpFailure::pass_cancelled()],
         );
     }
-    let Some(mut guard) = StartupUserIngestGuard::claim(profile_root.to_path_buf()) else {
-        return TranscriptIngestOutcome::new(TranscriptIngestStats::default(), Vec::new());
+    let mut guard = match StartupUserIngestGuard::claim(profile_root.to_path_buf()) {
+        StartupUserIngestClaim::Acquired(guard) => guard,
+        StartupUserIngestClaim::Running => {
+            return TranscriptIngestOutcome {
+                stats: TranscriptIngestStats::default(),
+                failures: Vec::new(),
+                coverage: IngestPassCoverage::Partial { deferred_units: 1 },
+                scheduling_state_written: false,
+            };
+        }
+        StartupUserIngestClaim::RecentlyCompleted => {
+            return TranscriptIngestOutcome::new(TranscriptIngestStats::default(), Vec::new());
+        }
     };
     if cancellation.is_cancelled() {
         return TranscriptIngestOutcome::new(

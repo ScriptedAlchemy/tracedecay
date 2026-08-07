@@ -18,7 +18,7 @@ use super::scheduler::{
     finish_user_provider_coverage, merge_project_provider_backpressure,
     plan_user_provider_admission,
 };
-use super::startup::{StartupUserIngestGuard, TranscriptIngestOutcome};
+use super::startup::{StartupUserIngestClaim, StartupUserIngestGuard, TranscriptIngestOutcome};
 use super::user::provider_selected;
 
 const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
@@ -445,17 +445,29 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
 #[test]
 fn startup_user_ingest_claims_are_single_flight_and_cancellation_safe() {
     let profile = tempfile::tempdir().unwrap().path().to_path_buf();
-    let first = StartupUserIngestGuard::claim(profile.clone()).expect("first claim");
-    assert!(StartupUserIngestGuard::claim(profile.clone()).is_none());
+    let StartupUserIngestClaim::Acquired(first) = StartupUserIngestGuard::claim(profile.clone())
+    else {
+        panic!("first claim must acquire");
+    };
+    assert!(matches!(
+        StartupUserIngestGuard::claim(profile.clone()),
+        StartupUserIngestClaim::Running
+    ));
 
     drop(first);
-    let mut retry = StartupUserIngestGuard::claim(profile.clone())
-        .expect("an incomplete claim must release immediately");
+    let StartupUserIngestClaim::Acquired(mut retry) =
+        StartupUserIngestGuard::claim(profile.clone())
+    else {
+        panic!("an incomplete claim must release immediately");
+    };
     retry.completed = true;
     drop(retry);
 
     assert!(
-        StartupUserIngestGuard::claim(profile).is_none(),
+        matches!(
+            StartupUserIngestGuard::claim(profile),
+            StartupUserIngestClaim::RecentlyCompleted
+        ),
         "a completed sweep should suppress the startup herd during cooldown"
     );
 }
