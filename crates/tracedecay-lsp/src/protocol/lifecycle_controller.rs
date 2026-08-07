@@ -1,5 +1,5 @@
 use super::{
-    AdmittedRoot, AnalyzerCancellationPort, Arc, AuthorizedLspWorkspace, BTreeMap,
+    AdmittedRoot, AnalyzerCancellationPort, Arc, AuthorizedLspWorkspace, BTreeMap, BTreeSet,
     CancellationOutcome, CapabilityAvailability, CapabilityParseError, ClientCapabilities,
     ContextController, ContextProjectionPort, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspGateway,
     DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController,
@@ -137,6 +137,7 @@ where
             dynamic_diagnostics: DynamicDiagnosticsController::default(),
             context: ContextController::default(),
             semantic: SemanticController::default(),
+            pending_workspace_mutation: None,
         }
     }
 
@@ -264,6 +265,94 @@ where
         self.context.pending_requests.clear();
         self.context.pending_expansions.clear();
         self.semantic.pending.clear();
+        self.pending_workspace_mutation = None;
+    }
+
+    /// Releases every session-local value bound to a root the daemon owner just
+    /// removed. Nothing here re-derives authority: the removed roots are the
+    /// exact ones the owner authorized dropping.
+    pub(super) fn clear_removed_workspace_root_state(&mut self, removed: &[AdmittedRoot]) {
+        let belongs_to_removed_root =
+            |uri: &str| removed.iter().any(|root| root.contains_document(uri));
+        let request_ids = self
+            .semantic
+            .pending
+            .iter()
+            .filter_map(|(request_id, pending)| {
+                pending
+                    .request
+                    .document_uri()
+                    .is_some_and(belongs_to_removed_root)
+                    .then(|| request_id.clone())
+            })
+            .chain(
+                self.context
+                    .pending_requests
+                    .iter()
+                    .filter_map(|(request_id, pending)| {
+                        pending
+                            .request
+                            .document_uri
+                            .as_deref()
+                            .is_some_and(belongs_to_removed_root)
+                            .then(|| request_id.clone())
+                    }),
+            )
+            .collect::<BTreeSet<_>>();
+        for request_id in request_ids {
+            let _ = self.cancel_request_and_upstream(&request_id);
+        }
+        self.lifecycle
+            .overlays
+            .retain_documents(|uri| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .debounce
+            .retain_documents(|uri| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .published
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .native_upstream
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .active_refreshes
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .workspace_results
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .workspace_snapshots
+            .retain(|root_uri, _| !removed.iter().any(|root| root.matches_root_uri(root_uri)));
+        self.diagnostics
+            .workspace_failures
+            .retain(|root_uri, _| !removed.iter().any(|root| root.matches_root_uri(root_uri)));
+        self.context.currentness.retain(|(_, uri), _| {
+            uri.as_deref()
+                .is_none_or(|uri| !belongs_to_removed_root(uri))
+        });
+        let in_flight = self.outbound.in_flight;
+        let queued = std::mem::take(&mut self.outbound.queue);
+        for (index, frame) in queued.into_iter().enumerate() {
+            let removed_publication = frame
+                .publication
+                .as_ref()
+                .is_some_and(|publication| belongs_to_removed_root(&publication.uri));
+            if removed_publication {
+                if let Some(publication) = &frame.publication {
+                    self.lifecycle.control.remove_publication(&publication.uri);
+                }
+                // The head frame of an in-flight write cannot be withdrawn: the
+                // peer is already reading those bytes.
+                if !(in_flight && index == 0) {
+                    self.outbound.queued_bytes = self
+                        .outbound
+                        .queued_bytes
+                        .saturating_sub(frame.payload.len());
+                    continue;
+                }
+            }
+            self.outbound.queue.push_back(frame);
+        }
     }
 
     pub(super) fn cancel_pending_operations(&mut self) {

@@ -2203,6 +2203,13 @@ where
         &self.workspace
     }
 
+    /// Installs a workspace the daemon owner already resolved and authorized.
+    /// The gateway never derives roots itself, so this is the only way an
+    /// admitted root set changes after `initialize`.
+    pub(crate) fn replace_workspace(&mut self, workspace: AuthorizedLspWorkspace) {
+        self.workspace = workspace;
+    }
+
     pub fn root_for_document(
         &self,
         document_uri: &str,

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use tracedecay_domain::ContentDigest;
-use tracedecay_lsp::OverlaySnapshot;
+use tracedecay_lsp::{
+    OverlayExtractionState, OverlayParseState, OverlayParseUnavailable, OverlaySnapshot,
+};
 
 use super::admit_overlay;
 
@@ -13,6 +15,8 @@ fn overlay(content_digest: ContentDigest) -> OverlaySnapshot {
         content_digest,
         text: Arc::from("fn current() {}"),
         ephemeral: true,
+        parse_state: OverlayParseState::Unavailable(OverlayParseUnavailable::StaleReport),
+        extraction_state: OverlayExtractionState::Unavailable(OverlayParseUnavailable::StaleReport),
     }
 }
 

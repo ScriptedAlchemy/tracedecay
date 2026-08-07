@@ -492,8 +492,7 @@ pub(crate) fn deferred_method_reason(method: &str) -> MethodUnavailableReason {
         | "textDocument/rename"
         | "textDocument/codeAction"
         | "workspace/diagnostic"
-        | "workspace/executeCommand"
-        | "workspace/didChangeWorkspaceFolders" => MethodUnavailableReason::ExplicitlyUnavailable,
+        | "workspace/executeCommand" => MethodUnavailableReason::ExplicitlyUnavailable,
         _ => MethodUnavailableReason::CapabilityNotNegotiated,
     }
 }

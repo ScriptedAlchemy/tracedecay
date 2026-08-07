@@ -61,6 +61,7 @@ use crate::session::{
     LspRequestFailure, LspRequestId, LspSessionControl, MAX_PUBLICATION_BYTES,
     PublicationAdmission, SessionLifecycle,
 };
+use crate::workspace::{WorkspaceFolderMutation, WorkspaceFolderMutationApplyError};
 
 /// A protocol actor allows bounded synchronous work before returning a typed
 /// cancellation response. Long-running adapters receive the same deadline via
@@ -124,6 +125,7 @@ where
     dynamic_diagnostics: DynamicDiagnosticsController,
     context: ContextController,
     semantic: SemanticController,
+    pending_workspace_mutation: Option<WorkspaceFolderMutation>,
 }
 
 impl<P, S, D> DaemonLspProtocolSession<P, S, D>
@@ -215,6 +217,81 @@ where
         }
     }
 
+    /// The one validated workspace-folder intent awaiting its daemon owner.
+    ///
+    /// The actor never resolves or authorizes a folder URI itself: it parses
+    /// and fences the client's notification, and the owner answers with either
+    /// [`Self::apply_workspace_folder_mutation`] or
+    /// [`Self::reject_workspace_folder_mutation`].
+    pub fn pending_workspace_folder_mutation(&self) -> Option<WorkspaceFolderMutation> {
+        self.pending_workspace_mutation.clone()
+    }
+
+    pub fn reject_workspace_folder_mutation(
+        &mut self,
+        mutation: &WorkspaceFolderMutation,
+    ) -> Result<(), WorkspaceFolderMutationApplyError> {
+        if self.pending_workspace_mutation.as_ref() != Some(mutation) {
+            return Err(WorkspaceFolderMutationApplyError::StaleWorkspace);
+        }
+        self.pending_workspace_mutation = None;
+        Ok(())
+    }
+
+    pub fn apply_workspace_folder_mutation(
+        &mut self,
+        mutation: &WorkspaceFolderMutation,
+        workspace: AuthorizedLspWorkspace,
+    ) -> Result<(), WorkspaceFolderMutationApplyError> {
+        if self.pending_workspace_mutation.as_ref() != Some(mutation)
+            || self.lifecycle.gateway.workspace().scope_set_digest()
+                != mutation.observed_scope_digest.as_ref()
+        {
+            return Err(WorkspaceFolderMutationApplyError::StaleWorkspace);
+        }
+        let removed_roots = self
+            .lifecycle
+            .gateway
+            .workspace()
+            .roots()
+            .iter()
+            .filter(|root| mutation.removed.iter().any(|uri| root.matches_root_uri(uri)))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.clear_removed_workspace_root_state(&removed_roots);
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
+        self.lifecycle.gateway.replace_workspace(workspace);
+        self.pending_workspace_mutation = None;
+        Ok(())
+    }
+
+    pub(crate) fn handle_workspace_folders_changed(
+        &mut self,
+        params: &Value,
+    ) -> Result<(), RpcFailure> {
+        self.require_ready()?;
+        if !self
+            .lifecycle
+            .gateway
+            .capabilities()
+            .workspace_folders_supported
+        {
+            return Err(RpcFailure::unavailable(
+                "workspace/didChangeWorkspaceFolders",
+                MethodUnavailableReason::CapabilityNotNegotiated,
+            ));
+        }
+        if self.pending_workspace_mutation.is_some() {
+            return Err(RpcFailure::invalid_params(
+                "a workspace folder mutation is already pending",
+            ));
+        }
+        self.pending_workspace_mutation =
+            WorkspaceFolderMutation::parse(params, self.lifecycle.gateway.workspace())?;
+        Ok(())
+    }
+
     /// Runs only coalesced overlay work. A daemon scheduler can call this when
     /// no new frame arrives so a quiet editor still receives its refresh.
     pub fn flush_due(&mut self, now_ms: u64) -> ProtocolDispatch {
@@ -250,14 +327,14 @@ where
         self.require_ready()?;
         let text_document = text_document(params)?;
         let uri = required_nonempty_string(text_document, "uri")?;
-        self.require_document_root(&uri)?;
+        let root = self.document_root(&uri)?;
         let language_id = required_nonempty_string(text_document, "languageId")?;
         let version = required_i64(text_document, "version")?;
         let text = required_string(text_document, "text")?;
         let snapshot = self
             .lifecycle
             .overlays
-            .open(uri.clone(), language_id, version, text)
+            .open(&root, uri.clone(), language_id, version, text)
             .map_err(|error| self.close_for_overlay_error(error))?;
         self.diagnostics.workspace_snapshots.clear();
         self.diagnostics.workspace_failures.clear();

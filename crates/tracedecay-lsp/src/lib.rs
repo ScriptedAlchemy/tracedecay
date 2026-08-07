@@ -42,6 +42,7 @@ mod provider;
 mod request_sequence;
 mod rpc;
 mod session;
+mod workspace;
 mod workspace_diagnostics;
 
 pub use bridge::{
@@ -99,7 +100,8 @@ pub use overlay::{
     MAX_OPEN_DOCUMENTS, MAX_OVERLAY_BYTES, MAX_PENDING_OVERLAY_DIAGNOSTICS,
     MAX_TOTAL_OVERLAY_BYTES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
     OVERLAY_DIAGNOSTIC_DEBOUNCE_MS, OVERLAY_DIAGNOSTIC_MAX_WAIT_MS, OverlayChange,
-    OverlayDiagnosticDebouncer, OverlayError, OverlayLimits, OverlaySnapshot, OverlayStore,
+    OverlayDiagnosticDebouncer, OverlayError, OverlayExtractionState, OverlayLimits,
+    OverlayParseState, OverlayParseUnavailable, OverlaySnapshot, OverlayStore,
 };
 pub use protocol::{
     ClientFrameAdmission, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession,
@@ -125,6 +127,7 @@ pub use session::{
     MAX_PUBLICATION_BYTES, PublicationAdmission, PublicationDelivery, PublicationState,
     RequestAdmission, SessionLifecycle,
 };
+pub use workspace::{WorkspaceFolderMutation, WorkspaceFolderMutationApplyError};
 pub use workspace_diagnostics::{
     CanonicalWorkspaceDiagnosticRefreshRequest, IndexedWorkspaceDocument,
     IndexedWorkspaceDocuments, MAX_WORKSPACE_DIAGNOSTIC_BYTES, MAX_WORKSPACE_DIAGNOSTIC_FANOUT,

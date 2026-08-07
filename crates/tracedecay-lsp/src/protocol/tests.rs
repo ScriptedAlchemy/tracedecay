@@ -473,6 +473,146 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
 }
 
 #[test]
+fn workspace_folder_notification_emits_one_fenced_mutation_without_local_apply() {
+    let left_digest = ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap();
+    let right_digest = ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap();
+    let observed_digest = ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap();
+    let workspace = AuthorizedLspWorkspace::new(
+        Some(observed_digest.clone()),
+        vec![
+            AdmittedRoot::authorized("file:///left", left_digest.clone()),
+            AdmittedRoot::authorized("file:///right", right_digest),
+        ],
+    )
+    .unwrap();
+    let gateway_capabilities = GatewayCapabilities {
+        supports_workspace_folders: true,
+        ..GatewayCapabilities::default()
+    };
+    let upstream = UpstreamCapabilities::default();
+    let mut session = DaemonLspProtocolSession::from_workspace_ports(
+        workspace,
+        negotiate_capabilities(
+            &ClientCapabilities::default(),
+            &gateway_capabilities,
+            &upstream,
+        ),
+        gateway_capabilities,
+        upstream,
+        Feedback::default(),
+        RoutingSemantics::default(),
+        Diagnostics,
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"workspaceFolders":[{"uri":"file:///left","name":"left"},{"uri":"file:///right","name":"right"}],"capabilities":{"general":{"positionEncodings":["utf-16"]},"workspace":{"workspaceFolders":true}}}}"#,
+        0,
+    );
+    session.drain_outbound();
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        1,
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///right/src/lib.rs","languageId":"rust","version":1,"text":"fn removed() {}"}}}"#,
+        2,
+    );
+    assert!(
+        session
+            .overlays()
+            .snapshot("file:///right/src/lib.rs")
+            .is_some()
+    );
+
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{"event":{"added":[{"uri":"file:///third","name":"third"}],"removed":[{"uri":"file:///right","name":"right"}]}}}"#,
+        3,
+    );
+    let mutation = session
+        .pending_workspace_folder_mutation()
+        .expect("one fenced workspace mutation");
+    assert_eq!(
+        mutation,
+        WorkspaceFolderMutation {
+            observed_scope_digest: Some(observed_digest),
+            active_root_uri: "file:///left".to_owned(),
+            added: vec!["file:///third".to_owned()],
+            removed: vec!["file:///right".to_owned()],
+            next_root_uris: vec!["file:///left".to_owned(), "file:///third".to_owned()],
+        }
+    );
+    // The actor holds the intent: nothing is admitted or released until the
+    // daemon owner resolves and authorizes the new root set.
+    assert!(
+        session
+            .overlays()
+            .snapshot("file:///right/src/lib.rs")
+            .is_some()
+    );
+    assert!(session.document_root("file:///third/src/lib.rs").is_err());
+
+    let next_workspace = AuthorizedLspWorkspace::new(
+        Some(ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap()),
+        vec![
+            AdmittedRoot::authorized("file:///left", left_digest),
+            AdmittedRoot::authorized(
+                "file:///third",
+                ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+            ),
+        ],
+    )
+    .unwrap();
+    session
+        .apply_workspace_folder_mutation(&mutation, next_workspace)
+        .expect("matching daemon acknowledgement");
+    assert!(
+        session
+            .overlays()
+            .snapshot("file:///right/src/lib.rs")
+            .is_none()
+    );
+    assert_eq!(
+        session
+            .document_root("file:///third/src/lib.rs")
+            .expect("new root")
+            .uri(),
+        "file:///third"
+    );
+    assert!(session.pending_workspace_folder_mutation().is_none());
+}
+
+#[test]
+fn workspace_folder_mutation_is_rejected_when_the_observed_workspace_moved() {
+    let mut session = session();
+    initialize(&mut session);
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"workspace/didChangeWorkspaceFolders","params":{"event":{"added":[{"uri":"file:///root/added"}],"removed":[]}}}"#,
+        2,
+    );
+    // The single-root session negotiated no workspace-folder capability, so the
+    // notification is typed-unavailable rather than silently retained.
+    assert!(session.pending_workspace_folder_mutation().is_none());
+
+    let mutation = WorkspaceFolderMutation {
+        observed_scope_digest: None,
+        active_root_uri: "file:///root".to_owned(),
+        added: vec!["file:///root/added".to_owned()],
+        removed: Vec::new(),
+        next_root_uris: vec!["file:///root".to_owned()],
+    };
+    assert_eq!(
+        session.reject_workspace_folder_mutation(&mutation),
+        Err(WorkspaceFolderMutationApplyError::StaleWorkspace)
+    );
+    assert_eq!(
+        session.apply_workspace_folder_mutation(
+            &mutation,
+            AuthorizedLspWorkspace::single(AdmittedRoot::new("file:///root")),
+        ),
+        Err(WorkspaceFolderMutationApplyError::StaleWorkspace)
+    );
+}
+
+#[test]
 fn workspace_diagnostics_preserve_ready_roots_when_one_root_fails() {
     let workspace = AuthorizedLspWorkspace::new(
         Some(ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap()),
@@ -573,7 +713,13 @@ fn context_request_binds_exact_session_overlay_digest() {
     let document_uri = "file:///root/a.rs";
     let mut overlays = OverlayStore::default();
     overlays
-        .open(document_uri, "rust", 1, "fn dirty() {}")
+        .open(
+            &AdmittedRoot::new("file:///root"),
+            document_uri,
+            "rust",
+            1,
+            "fn dirty() {}",
+        )
         .expect("open overlay");
     let mut request = ContextProjectionRequest {
         kind: ContextProjectionKind::test_run_results(),
