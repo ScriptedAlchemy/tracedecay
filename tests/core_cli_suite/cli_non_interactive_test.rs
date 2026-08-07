@@ -674,9 +674,13 @@ fn install_codex_automation_enables_tracedecay_daemon_loop_noninteractively() {
             .is_file(),
         "install --agent codex should still install the Codex plugin bundle"
     );
-    assert!(
-        !legacy_automation_dir.exists(),
-        "Codex automation install must remove the legacy native scheduled automation"
+    // Native lifecycle boundary (289eaa7747): install must not mutate
+    // Codex-owned automation state, including the legacy v0.0.10-v0.0.20
+    // native scheduled automation the daemon scheduler replaced.
+    assert_eq!(
+        std::fs::read_to_string(legacy_automation_dir.join("automation.toml")).unwrap(),
+        "status = \"ACTIVE\"\n",
+        "Codex automation install must leave Codex-native automation state untouched"
     );
     assert!(
         !project_root.join(".codex/automations").exists(),
