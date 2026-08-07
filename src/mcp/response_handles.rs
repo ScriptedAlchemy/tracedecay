@@ -609,12 +609,11 @@ fn duration_micros_u64(duration: Duration) -> u64 {
     duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
-#[allow(deprecated)]
 fn error_class(error: &TraceDecayError) -> &'static str {
     match error {
         TraceDecayError::File { .. } => "file",
         TraceDecayError::Parse { .. } => "parse",
-        TraceDecayError::Database { .. } | TraceDecayError::DatabaseOperation { .. } => "database",
+        TraceDecayError::Database { .. } => "database",
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
         TraceDecayError::ProfileResetRequired { .. } => "profile_reset_required",

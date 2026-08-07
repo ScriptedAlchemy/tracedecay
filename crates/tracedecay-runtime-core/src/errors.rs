@@ -25,16 +25,6 @@ pub enum TraceDecayError {
     #[error("database error: {message} (operation: {operation})")]
     Database { message: String, operation: String },
 
-    /// Retained for source compatibility. New database failures use
-    /// [`Self::Database`] so callers receive one stable public classification.
-    #[deprecated(note = "use TraceDecayError::Database")]
-    #[error("database error: {source} (operation: {operation})")]
-    DatabaseOperation {
-        operation: String,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
     #[error("search error: {message} (query: {query})")]
     Search { message: String, query: String },
 
@@ -167,9 +157,8 @@ impl TraceDecayError {
         }
     }
 
-    #[allow(deprecated)]
     pub fn is_database_error(&self) -> bool {
-        matches!(self, Self::Database { .. } | Self::DatabaseOperation { .. })
+        matches!(self, Self::Database { .. })
     }
 
     pub fn hook_runtime(

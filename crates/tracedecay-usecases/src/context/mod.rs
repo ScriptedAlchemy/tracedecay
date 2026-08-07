@@ -435,53 +435,6 @@ where
     }
 }
 
-/// Resolves the exact transport-neutral scope for one registered project
-/// root.
-///
-/// Binary-crate entry points (the CLI) cannot reach the daemon-owned identity
-/// helpers; this facade is the single public path so no caller re-implements
-/// repository/worktree/reference resolution ad hoc. It is the exact-root
-/// special case of [`resolve_registered_root_scope`]: the registered root and
-/// the served root are one and the same.
-#[deprecated(
-    note = "V2 RequestContext convergence compatibility facade: scope resolution moves behind the application boundary; deletion is gated on zero production callers"
-)]
-pub fn resolve_exact_root_scope(
-    project_root: &Path,
-    project_id: &ProjectId,
-) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
-    RegisteredScopeResolver::resolve(project_root, project_root, project_id)
-}
-
-/// Resolves the exact transport-neutral scope for one already-authorized
-/// registered project and the root the call will actually serve.
-///
-/// This is the single scope-resolution path behind the root facade: every
-/// query-facing surface (CLI, MCP, dashboard) converges here instead of
-/// re-implementing canonicalization guards, sibling-root authorization, or
-/// digest revalidation. `registered_root` is the registry's canonical root
-/// for the authorized project; `requested_root` is the worktree root the call
-/// will serve — the registered root, a path inside it, or a linked worktree
-/// of the same repository. Repository/worktree/reference identity itself
-/// stays with the daemon-owned authority; this facade only guards the
-/// crossing and delegates.
-///
-/// Every failure is explicit and fails closed: a relative requested root
-/// (there is no CWD fallback), a root that cannot be canonicalized, an
-/// unauthorized sibling root naming a different repository, an identity the
-/// daemon-owned authority cannot resolve, or a resolved scope whose digest
-/// does not match its fields.
-#[deprecated(
-    note = "V2 RequestContext convergence compatibility facade: scope resolution moves behind the application boundary; deletion is gated on zero production callers"
-)]
-pub fn resolve_registered_root_scope(
-    registered_root: &Path,
-    requested_root: &Path,
-    project_id: &ProjectId,
-) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
-    RegisteredScopeResolver::resolve(registered_root, requested_root, project_id)
-}
-
 /// The explicit failure states when the root orchestration context crosses
 /// into the transport-neutral application surface. Every variant fails
 /// closed: no path, CWD, or sibling-root fallback exists at this boundary.
@@ -937,7 +890,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn exact_root_scope_resolution_is_stable_and_valid() {
         let temp = tempfile::TempDir::new().unwrap();
         for args in [
@@ -965,8 +917,8 @@ mod tests {
             .unwrap()
         );
 
-        let first = resolve_exact_root_scope(&root, &project_id).unwrap();
-        let second = resolve_exact_root_scope(&root, &project_id).unwrap();
+        let first = RegisteredScopeResolver::resolve(&root, &root, &project_id).unwrap();
+        let second = RegisteredScopeResolver::resolve(&root, &root, &project_id).unwrap();
 
         assert_eq!(first, second);
         first.validate().unwrap();

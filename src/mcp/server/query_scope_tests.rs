@@ -66,12 +66,14 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
         Some("refs/heads/main"),
     );
 
-    // The entry-point scope equals the scope the canonical facade derives for
-    // the same exact root: one resolution path, not two.
-    #[allow(deprecated)]
-    let expected =
-        crate::application::context::resolve_exact_root_scope(&project_root, &scope.project_id)
-            .expect("facade resolves the same root");
+    // The entry-point scope equals the scope the canonical resolver derives
+    // for the same exact root: one resolution path, not two.
+    let expected = crate::application::context::RegisteredScopeResolver::resolve(
+        &project_root,
+        &project_root,
+        &scope.project_id,
+    )
+    .expect("canonical resolver resolves the same root");
     assert_eq!(
         scope, &expected,
         "the routed scope must equal the canonical exact-root resolution"

@@ -9,8 +9,8 @@
 //! Query-facing tool entry points resolve their project scope ONCE, through
 //! the already-authorized registry context, into the transport-neutral
 //! `tracedecay_application::ResolvedScope`. The resolution itself is the
-//! single consolidated path behind the root façade
-//! (`crate::application::context::resolve_registered_root_scope`); this module
+//! single consolidated canonical path
+//! (`crate::application::context::RegisteredScopeResolver`); this module
 //! only adapts the registry context into that path and preserves the MCP
 //! error taxonomy. Every failure state stays explicit: a CWD-relative root, a
 //! non-canonical registry identity, an unauthorized sibling root, or an
@@ -147,10 +147,7 @@ pub(crate) fn resolve_query_scope(
                 project_id: owner.project.project_id.clone(),
             }
         })?;
-    #[allow(deprecated)]
-    // the MCP surface crosses through the deprecated root façade until the
-    // application boundary owns scope resolution
-    let resolved = crate::application::context::resolve_registered_root_scope(
+    let resolved = crate::application::context::RegisteredScopeResolver::resolve(
         Path::new(&owner.project.canonical_root),
         requested_root,
         &project_id,

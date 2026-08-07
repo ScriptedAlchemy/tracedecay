@@ -196,11 +196,6 @@ fn is_readonly_database_error(err: &TraceDecayError) -> bool {
         TraceDecayError::Database { message, .. } => {
             message.to_ascii_lowercase().contains("readonly database")
         }
-        #[allow(deprecated)]
-        TraceDecayError::DatabaseOperation { source, .. } => source
-            .to_string()
-            .to_ascii_lowercase()
-            .contains("readonly database"),
         _ => false,
     }
 }
