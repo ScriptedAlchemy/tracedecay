@@ -147,9 +147,13 @@ impl TraceDecay {
         let git_remote_url = git_remote_url(&self.project_root);
 
         let previous_canonical_root = if primary_root.is_some() {
+            // Propagated: a database fault here must not read as "no prior
+            // registration" and skip the stale-canonical-root repair warning
+            // below. Absence (a truthful `Ok(None)`) still collapses to
+            // `None`, same as before.
             global_db
                 .get_code_project(project_id)
-                .await
+                .await?
                 .map(|record| record.canonical_root)
         } else {
             None
@@ -178,10 +182,12 @@ impl TraceDecay {
             // The registry now points canonical_root/display_root at the
             // primary checkout; keep this worktree itself resolvable for
             // future lookups by registering its own path as an alias.
+            // Propagated verbatim, same as `upsert_code_project` above: the
+            // registry now reports its own database-fault state instead of
+            // this call site's generic "upsert worktree alias failed".
             global_db
                 .upsert_project_alias(&self.project_root, &project.project_id)
-                .await
-                .ok_or_else(|| registry_registration_error("upsert worktree alias failed"))?;
+                .await?;
 
             let repaired_stale_worktree_root = previous_canonical_root.is_some_and(|previous| {
                 previous != RegisteredGlobalDb::canonical_project_key(primary_root)
@@ -214,8 +220,7 @@ impl TraceDecay {
                 last_verified_at: Some(now),
                 last_write_at: Some(now),
             })
-            .await
-            .ok_or_else(|| registry_registration_error("upsert store instance failed"))?;
+            .await?;
 
         if let Some(meta) = meta {
             for (branch_name, entry) in meta.branches {
@@ -237,8 +242,7 @@ impl TraceDecay {
                         last_synced_at: entry.last_synced_at.parse::<i64>().ok(),
                         writable: true,
                     })
-                    .await
-                    .ok_or_else(|| registry_registration_error("upsert graph scope failed"))?;
+                    .await?;
             }
         }
 
@@ -282,10 +286,7 @@ impl TraceDecay {
             );
         }
         for artifact in artifacts {
-            global_db
-                .upsert_store_artifact(artifact)
-                .await
-                .ok_or_else(|| registry_registration_error("upsert store artifact failed"))?;
+            global_db.upsert_store_artifact(artifact).await?;
         }
 
         LAST_REGISTERED_DIGEST

@@ -594,7 +594,7 @@ impl HostAdmissionTestRuntimeV1 {
         &self,
         alias_path: &Path,
         project_id: &str,
-    ) -> Option<crate::global_db::ProjectAliasRecord> {
+    ) -> Result<crate::global_db::ProjectAliasRecord> {
         self.profile_database
             .upsert_project_alias(alias_path, project_id)
             .await
@@ -604,7 +604,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn upsert_store_instance(
         &self,
         upsert: crate::global_db::StoreInstanceUpsert,
-    ) -> Option<crate::global_db::StoreInstanceRecord> {
+    ) -> Result<crate::global_db::StoreInstanceRecord> {
         self.profile_database.upsert_store_instance(upsert).await
     }
 

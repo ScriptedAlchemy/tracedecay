@@ -84,7 +84,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn get_code_project(
         &self,
         project_id: &str,
-    ) -> Option<crate::global_db::CodeProjectRecord> {
+    ) -> Result<Option<crate::global_db::CodeProjectRecord>> {
         self.profile_database.get_code_project(project_id).await
     }
 
@@ -250,7 +250,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn upsert_graph_scope(
         &self,
         upsert: crate::global_db::GraphScopeUpsert,
-    ) -> Option<crate::global_db::GraphScopeRecord> {
+    ) -> Result<crate::global_db::GraphScopeRecord> {
         self.profile_database.upsert_graph_scope(upsert).await
     }
 
@@ -258,7 +258,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub async fn upsert_store_artifact(
         &self,
         upsert: crate::global_db::StoreArtifactUpsert,
-    ) -> Option<crate::global_db::StoreArtifactRecord> {
+    ) -> Result<crate::global_db::StoreArtifactRecord> {
         self.profile_database.upsert_store_artifact(upsert).await
     }
 }
