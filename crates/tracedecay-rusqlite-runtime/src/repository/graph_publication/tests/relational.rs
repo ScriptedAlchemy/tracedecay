@@ -212,7 +212,7 @@ fn dependency_decode_rejects_non_contiguous_ordinals() {
         b"dependency",
     );
     let (control, probe) = context("ordinal.dependency.append");
-    let operation = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let _operation = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     append_with_fresh_context(&mut storage, &dependency_replay, "ordinal.dependency").unwrap();
     advance_head(&mut storage, &dependency_replay);
 
@@ -258,7 +258,7 @@ fn retirement_refuses_active_inbound_dependents() {
     let fixture = Fixture::new();
     let mut storage = fixture.storage();
     let (control, probe) = context("dependency-retirement");
-    let operation = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let _operation = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
     let first = replay(
         projection("dependency"),
         "generation.dependency.1",

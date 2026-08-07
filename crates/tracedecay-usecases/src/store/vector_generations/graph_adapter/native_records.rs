@@ -52,10 +52,15 @@ pub(super) fn generation_vector_entity_id(
 use support::{
     build_entity_id, build_id, bytes_property, content_digest, corrupt, digest, entity, entity_id,
     generation_entity_id, generation_id, graph_label, i64_property, insert_entity, insert_relation,
-    optional_bytes, optional_bytes_property, optional_digest_property, optional_generation,
-    parse_id, properties, property_name, relation, relation_kind, require_labels, required_bytes,
-    required_property, required_string, required_u64, scoped_entity_id, string_property,
+    optional_bytes, optional_digest_property, optional_generation, parse_id, properties,
+    property_name, relation, relation_kind, require_labels, required_bytes, required_property,
+    required_string, required_u64, scoped_entity_id, string_property,
 };
+
+// Only the `#[cfg(test)]` legacy-state encoder still reads this helper, so the
+// import would be dead in the non-test build of the lib target.
+#[cfg(test)]
+use support::optional_bytes_property;
 
 pub(super) fn read_cataloged_generation_records(
     snapshot: &SemanticVectorVerifiedRead,

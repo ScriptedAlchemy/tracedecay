@@ -153,12 +153,12 @@ fn graph_with_accepted_relation_replan(
         id(proposal_id),
         id(task_id),
         graph.version(),
-        dependencies.iter().map(|value| id(*value)).collect(),
+        dependencies.iter().map(|value| id(value)).collect(),
         informational_relations
             .iter()
-            .map(|value| id(*value))
+            .map(|value| id(value))
             .collect(),
-        causal_candidates.iter().map(|value| id(*value)).collect(),
+        causal_candidates.iter().map(|value| id(value)).collect(),
     )
     .unwrap();
     graph
@@ -353,9 +353,9 @@ fn relation_replanning_rejects_stale_unknown_duplicate_self_and_cyclic_proposals
             id(proposal),
             id(task),
             original.version(),
-            dependencies.iter().map(|value| id(*value)).collect(),
-            informational.iter().map(|value| id(*value)).collect(),
-            causal.iter().map(|value| id(*value)).collect(),
+            dependencies.iter().map(|value| id(value)).collect(),
+            informational.iter().map(|value| id(value)).collect(),
+            causal.iter().map(|value| id(value)).collect(),
         )
     };
     assert_eq!(

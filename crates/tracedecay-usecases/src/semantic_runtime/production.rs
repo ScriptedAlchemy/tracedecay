@@ -780,7 +780,7 @@ impl ProductionSemanticRuntimeV1 {
             .retained(&deletion.request.changes.to_generation)
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
         let deletion_store = evaluation_projection_case_store(&deletion_retained, &deletion)?;
-        let deletion_publication = publish_evaluation_projection_case_isolated(
+        let _deletion_publication = publish_evaluation_projection_case_isolated(
             &deletion_store,
             &cancellation,
             sources.deletion,

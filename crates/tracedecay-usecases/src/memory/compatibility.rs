@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1, FactId, FactLineageEventV1, FactOwnerV1, LocatorDigest,
-    ProvenanceId, SourceStoreId,
+    ProvenanceId,
 };
 use tracedecay_store::{
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
@@ -34,9 +34,7 @@ use tracedecay_runtime_core::memory::types::{
 
 use super::MemoryApplication;
 use super::context::{MemoryOperationContext, validate_operation_component};
-use super::error::{
-    MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
-};
+use super::error::{MemoryApplicationError, MemoryCompatibilityScope};
 use super::sanitize::{SanitizedAddFactRequestV1, sanitize_add_fact_request};
 
 /// Converts a live automation proposal without manufacturing a legacy numeric
