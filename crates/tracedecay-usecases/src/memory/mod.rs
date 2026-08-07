@@ -8,11 +8,11 @@ use tracedecay_store::{LegacyFactQuery, ProjectMemoryFactTargetV1};
 
 mod anchors;
 mod canonical;
-mod compatibility;
 mod context;
 mod converge;
 mod dashboard;
 mod error;
+mod project_memory;
 mod sanitize;
 mod v1;
 
@@ -22,7 +22,7 @@ mod tests;
 pub use anchors::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
-pub use compatibility::{automation_fact_proposal_add_command, with_automation_run_id};
+pub use project_memory::{automation_fact_proposal_add_command, with_automation_run_id};
 pub use context::MemoryOperationContext;
 pub use error::{
     MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
