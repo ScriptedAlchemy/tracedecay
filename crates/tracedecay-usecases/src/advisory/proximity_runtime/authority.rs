@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use serde_json::Value;
 use tracedecay_application::RequestContext;
@@ -19,6 +20,7 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, FileOccurrenceId, ObservationScopeV1, SourceSpan,
     SymbolOccurrenceId, UtcMicros,
 };
+use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
 use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
 
 use super::{
@@ -29,7 +31,8 @@ use crate::store::GlobalDbObservationStore;
 use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::git_correlation::{
-    GitRefFilter, SessionsForQuery, normalize_worktree, sessions_for,
+    GitEvidenceProjectionStore, GitRefFilter, SessionsForQuery, git_evidence_projection_identity,
+    normalize_worktree,
 };
 
 const MAX_ACTIVE_SESSIONS_V1: usize = 32;
@@ -157,21 +160,25 @@ impl ProductionProximityEvidenceAuthorityV1 {
         };
         let observed_seconds = request.observed_at.0.div_euclid(1_000_000);
         let since = observed_seconds.saturating_sub(ACTIVITY_HORIZON_SECONDS_V1);
-        let session_snapshot = self.sessions.read_snapshot().await.ok()?;
         // The legacy path column is only a bounded lookup hint. Exact identity
         // was already admitted by typed project/repository/worktree scope, and
         // saved-generation content is rechecked before publication.
-        let hits = sessions_for(
-            &session_snapshot,
-            &SessionsForQuery {
-                git_ref: GitRefFilter::Worktree(self.normalized_worktree.clone()),
-                since: Some(since),
-                until: Some(observed_seconds),
-                limit: MAX_ACTIVE_SESSIONS_V1,
-            },
-        )
-        .await
-        .ok()?;
+        let projection =
+            git_evidence_projection_identity(GraphNamespace::new("project").ok()?).ok()?;
+        let snapshot = self
+            .sessions
+            .project_graph_runtime()?
+            .verified_snapshot(&projection, Arc::new(AtomicBool::new(false)))
+            .ok()?;
+        let store =
+            GitEvidenceProjectionStore::from_verified_snapshot(snapshot, Arc::new(NeverCancelled))
+                .ok()?;
+        let hits = store.sessions_for(&SessionsForQuery {
+            git_ref: GitRefFilter::Worktree(self.normalized_worktree.clone()),
+            since: Some(since),
+            until: Some(observed_seconds),
+            limit: MAX_ACTIVE_SESSIONS_V1,
+        });
         let mut partial = hits.len() == MAX_ACTIVE_SESSIONS_V1;
         let mut active = BTreeMap::new();
         for hit in hits {

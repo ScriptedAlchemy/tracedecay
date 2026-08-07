@@ -90,12 +90,10 @@ fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> T
     generic_tool_result(Some(project_root), args, &payload, vec![])
 }
 
-/// Best-effort per-project session↔git correlation index health for the
-/// diagnostics payload. Read-only and fail-open: a missing or unopenable store,
-/// or absent correlation tables, is reported as an explicitly *empty* index
-/// (with a remediation notice) rather than omitted — so an unpopulated
-/// `session_git_spans` (which makes `tracedecay_sessions_for` silently return
-/// nothing) is always visible here.
+/// Best-effort per-project session↔git evidence graph health.
+///
+/// Read-only and fail-open: an unavailable verified projection is reported as
+/// explicitly empty rather than omitted.
 async fn session_correlation_health_json(
     session_db: Option<&crate::global_db::RegisteredGlobalDb>,
 ) -> Value {
@@ -107,13 +105,14 @@ async fn session_correlation_health_json(
         None => None,
     };
     match health {
-        Some(health) if health.tables_present => {
+        Some(health) if health.projection_available => {
             let empty = health.is_empty();
             json!({
-                "tables_present": true,
+                "projection_available": true,
+                "generation": health.generation,
+                "source_watermark": health.source_watermark,
                 "span_count": health.span_count,
                 "commit_count": health.commit_count,
-                "last_span_write": health.last_span_write,
                 "backfill_watermark": health.backfill_watermark,
                 "index_empty": empty,
                 "notice": if empty {
@@ -124,10 +123,11 @@ async fn session_correlation_health_json(
             })
         }
         _ => json!({
-            "tables_present": false,
+            "projection_available": false,
+            "generation": Value::Null,
+            "source_watermark": Value::Null,
             "span_count": 0,
             "commit_count": 0,
-            "last_span_write": Value::Null,
             "backfill_watermark": Value::Null,
             "index_empty": true,
             "notice": "correlation index not yet created — `tracedecay_sessions_for` will return nothing until it is populated; bounded convergence runs on daemon startup, or run `tracedecay sessions git-sync` to schedule it now",

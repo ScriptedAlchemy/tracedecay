@@ -262,15 +262,12 @@ impl HostAdmissionTestRuntimeV1 {
             message: "test facade requires an exact provider".to_owned(),
         })?;
         let database = self.session_database_for_test(scope)?;
-        let snapshot = database.read_snapshot().await?;
-        let scoped_ids =
-            crate::sessions::git_correlation::session_ids_for_scope(&snapshot, git_filter)
-                .await
-                .map_err(|error| crate::errors::TraceDecayError::Database {
-                    operation: "resolve registered git-scoped sessions".to_owned(),
-                    message: error.to_string(),
-                })?;
-        drop(snapshot);
+        let scoped_ids = crate::store::GlobalDbGitCorrelationStore::new(database)
+            .session_ids_for_scope(git_filter)
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "resolve registered git-scoped sessions".to_owned(),
+                message: error.to_string(),
+            })?;
         let mut results = self
             .search_session_messages_filtered_for_test(
                 scope,
@@ -281,15 +278,12 @@ impl HostAdmissionTestRuntimeV1 {
                 filters,
             )
             .await?;
-        if let Some(scoped_ids) = scoped_ids {
-            results.retain(|result| {
-                scoped_ids.iter().any(|(candidate_provider, session_id)| {
-                    (candidate_provider.is_empty()
-                        || candidate_provider == &result.session.provider)
-                        && session_id == &result.session.session_id
-                })
-            });
-        }
+        results.retain(|result| {
+            scoped_ids.iter().any(|(candidate_provider, session_id)| {
+                (candidate_provider.is_empty() || candidate_provider == &result.session.provider)
+                    && session_id == &result.session.session_id
+            })
+        });
         results.truncate(limit);
         Ok(results)
     }

@@ -5,6 +5,7 @@ use super::lcm_args::{
 };
 use super::lcm_compact::truncate_chars;
 use super::*;
+use crate::sessions::git_correlation::GitCorrelationError;
 
 const MESSAGE_SEARCH_SNIPPET_CHARS: usize = 240;
 
@@ -395,12 +396,31 @@ pub(in super::super) async fn handle_sessions_for(
         // index that simply had no rows matching this git ref.
         let correlation = crate::store::GlobalDbGitCorrelationStore::new(db);
         let health = correlation.correlation_index_health().await.ok();
-        let results = correlation
-            .sessions_for_with_relation(&query, relation)
-            .await
-            .map_err(|err| TraceDecayError::Config {
-                message: err.to_string(),
-            })?;
+        let results = match correlation.sessions_for_with_relation(&query, relation).await {
+            Ok(results) => results,
+            // A Git-evidence projection whose verified head has not been
+            // published yet is a typed unavailable state, not a transport
+            // error: report it as data so callers can distinguish "not
+            // converged yet" from a genuine dispatch failure.
+            Err(err @ GitCorrelationError::Unavailable(_)) => {
+                return Ok(tool_json(
+                    Some(cg.project_root()),
+                    &args,
+                    &json!({
+                        "status": "unavailable",
+                        "problem_code": "sessions.git-evidence.unavailable",
+                        "message": err.to_string(),
+                        "results": [],
+                        "count": 0
+                    }),
+                ));
+            }
+            Err(err) => {
+                return Err(TraceDecayError::Config {
+                    message: err.to_string(),
+                });
+            }
+        };
         // A commit attributed only by time overlap (or a migrated v2 store) has
         // observed rows but no producer, so the producer-default query is
         // empty. That must not read as "no session touched this commit": look
@@ -420,9 +440,8 @@ pub(in super::super) async fn handle_sessions_for(
         (results, health, observed_fallback)
     };
 
-    // The index is "empty" when there is no store, the correlation tables are
-    // absent, or the row family for this ref kind is empty (spans for
-    // branch/worktree, commit rows for commit). That must not read as a genuine
+    // The index is "empty" when there is no verified projection or the graph
+    // family for this ref kind is empty. That must not read as a genuine
     // "no sessions matched" result.
     let index_empty = index_health
         .as_ref()
@@ -440,10 +459,11 @@ pub(in super::super) async fn handle_sessions_for(
     });
     if let Some(health) = &index_health {
         payload["index"] = json!({
-            "tables_present": health.tables_present,
+            "projection_available": health.projection_available,
+            "generation": health.generation,
+            "source_watermark": health.source_watermark,
             "span_count": health.span_count,
             "commit_count": health.commit_count,
-            "last_span_write": health.last_span_write,
             "backfill_watermark": health.backfill_watermark,
         });
     }
