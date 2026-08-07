@@ -609,3 +609,93 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
         .expect("symbol entity exists");
     assert_eq!(summary.metadata, None, "absent metadata stays absent");
 }
+
+/// The dashboard's degree-pool and top-connected panels aggregated the whole
+/// `edges` table twice per read — the same whole-graph scan class that broke
+/// strata at scale. The bounded replacement must rank deterministically and
+/// must say so when its examination budget stopped the scan.
+#[test]
+fn degree_ranking_is_deterministic_and_bounded() {
+    let reader = reader(&store_for(production_manifest()));
+
+    // alpha::run 1 out + 1 in, beta::run 0 out + 2 in, beta::Runner 1 out,
+    // gamma::main 1 out. Total degree descending, then qualified name.
+    let ranking = reader
+        .degree_ranking(2, 16, request())
+        .expect("bounded degree ranking");
+    assert!(ranking.complete, "a budget above the symbol count is complete");
+    assert_eq!(ranking.symbols_examined, 4);
+    assert_eq!(
+        ranking
+            .ranked
+            .iter()
+            .map(|entry| entry.occurrence.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["sym.alpha.run".to_owned(), "sym.beta.run".to_owned()],
+        "equal-degree symbols break ties by qualified name, not by scan order"
+    );
+    assert_eq!(
+        (ranking.ranked[0].outgoing, ranking.ranked[0].incoming),
+        (1, 1)
+    );
+
+    let full = reader
+        .degree_ranking(16, 16, request())
+        .expect("full degree ranking");
+    assert_eq!(
+        full.ranked
+            .iter()
+            .map(|entry| entry.occurrence.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec![
+            "sym.alpha.run".to_owned(),
+            "sym.beta.run".to_owned(),
+            "sym.beta.runner".to_owned(),
+            "sym.gamma.main".to_owned(),
+        ],
+        "a top size past the symbol count ranks every symbol, still totally ordered"
+    );
+}
+
+/// A ranking over a prefix of the graph must never be reported as the graph's
+/// ranking — the examination budget bounds the scan, and reaching it is
+/// truthful truncation rather than a silent partial answer.
+#[test]
+fn an_exhausted_ranking_budget_is_reported_not_hidden() {
+    let reader = reader(&store_for(production_manifest()));
+
+    let ranking = reader
+        .degree_ranking(16, 2, request())
+        .expect("budget-truncated ranking");
+
+    assert!(
+        !ranking.complete,
+        "a scan stopped by its examination budget is not a complete ranking"
+    );
+    assert_eq!(ranking.symbols_examined, 2);
+    assert_eq!(ranking.ranked.len(), 2);
+}
+
+#[test]
+fn degree_ranking_refuses_zero_sized_requests() {
+    let reader = reader(&store_for(production_manifest()));
+
+    assert!(matches!(
+        reader.degree_ranking(0, 16, request()),
+        Err(CodeGraphProjectionError::Contract(_))
+    ));
+    assert!(matches!(
+        reader.degree_ranking(16, 0, request()),
+        Err(CodeGraphProjectionError::Contract(_))
+    ));
+}
+
+#[test]
+fn degree_ranking_denies_a_cancelled_read() {
+    let reader = reader(&store_for(production_manifest()));
+
+    assert!(matches!(
+        reader.degree_ranking(4, 16, Arc::new(CancelledNow)),
+        Err(CodeGraphProjectionError::Cancelled)
+    ));
+}

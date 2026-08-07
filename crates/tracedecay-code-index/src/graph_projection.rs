@@ -33,9 +33,10 @@ pub use self::builder::build_published_code_graph_manifest_checked;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
 use self::interactive::SymbolCatalog;
 pub use self::interactive::{
-    CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1, CodeGraphImpactedSymbolV1,
-    CodeGraphInteractiveReader, CodeGraphPathSearchV1, CodeGraphSemanticEdgeV1,
-    CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
+    CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
+    CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
+    CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
+    CodeGraphSymbolSummaryV1,
 };
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
 use crate::lineage::LineageSymbolRecordV1;
