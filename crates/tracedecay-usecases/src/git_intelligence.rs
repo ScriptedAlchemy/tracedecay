@@ -30,14 +30,14 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use serde::Serialize;
-use tracedecay_code_index::git_projection::{
-    GitTopologyProjectionError, GitTopologyProjectionV1, GitTopologyRefV1,
-    git_topology_ref_watermark,
-};
 pub use tracedecay_application::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
     GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
     GitIntelligenceError, GitReadPort, NativeHistoricalBlobReaderV1,
+};
+use tracedecay_code_index::git_projection::{
+    GitTopologyProjectionError, GitTopologyProjectionV1, GitTopologyRefV1,
+    git_topology_ref_watermark,
 };
 use tracedecay_domain::git::{
     GitBlameAvailabilityV1, GitBlameLineV1, GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1,
