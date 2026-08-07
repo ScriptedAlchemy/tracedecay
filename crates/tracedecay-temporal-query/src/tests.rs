@@ -5,10 +5,13 @@ use std::sync::{
 };
 
 use tracedecay_domain::{
-    HydrationStateV1, MessageOccurrenceIdV1, RetrievalAnchorId, RetrievalGrainV1,
-    SessionAuthorityClassV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
-    SessionSummaryIdV1, SessionSummaryRecordV1, SignedCursorKeyRefV1, SummarySourceHorizonV1,
-    TemporalAssertionKindV1, TemporalModeV1, TemporalValidityV1, UtcMicros,
+    AuthorizationRevision, ComponentRevision, FreshnessVectorDigest, FusionProfileId,
+    HydrationStateV1, MessageOccurrenceIdV1, PrincipalId, RepositoryId, RetrievalAnchorId,
+    RetrievalBudget, RetrievalGrainV1, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverKind, ScoreDomainId, SessionAuthorityClassV1, SessionCursorKeyIdV1,
+    SessionCursorVersionV1, SessionId, SessionSummaryIdV1, SessionSummaryRecordV1,
+    SignedCursorKeyRefV1, SingleRootScopeV1, SummarySourceHorizonV1, TemporalAssertionKindV1,
+    TemporalCandidateChannelV1, TemporalModeV1, TemporalValidityV1, UtcMicros, VectorWatermark,
 };
 
 use super::candidates::{CandidateChannel, CandidatePlan};
@@ -21,8 +24,9 @@ use super::hydration::{
 use super::ports::{
     BindingDigest, CandidatePageSink, ExecutionLimits, InMemoryCursorAuthenticator, KernelVersions,
     PageKey, PageRequest, PageStatus, PortFuture, SummarySourceRecord, TemporalExecutionSnapshot,
+    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
     TemporalPortError, TemporalReadPort, TemporalRecord, TemporalRecordPageSink,
-    TemporalSnapshotRequest, TemporalWatermarks,
+    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
 };
 use super::ranking::{DiversityLimits, RankingCandidate, RankingError};
 use super::resolution::summary::SummarySourceState;
@@ -31,7 +35,7 @@ use super::resolution::types::{
 };
 use super::{
     TemporalKernelError, TemporalKernelRequest, execute_temporal_candidate_export,
-    execute_temporal_kernel,
+    execute_temporal_kernel, hydrate_temporal_candidate_selection,
 };
 use crate::test_support::block_on;
 
@@ -409,9 +413,146 @@ fn candidate_export_ranks_without_reading_payload_bytes() {
 
         assert_eq!(export.ranked().len(), 1);
         assert!(export.next_cursor().is_some());
+        assert_eq!(export.coverage().examined, 2);
+        assert_eq!(export.coverage().eligible, 2);
+        assert_eq!(export.coverage().excluded, 0);
+        assert_eq!(export.coverage().capped, 1);
         assert!(
             hydrator.calls.lock().expect("calls lock").is_empty(),
             "candidate export must not authorize or read payload bytes",
+        );
+    });
+}
+
+#[test]
+fn candidate_export_projects_lossless_temporal_evidence_without_hydration() {
+    block_on(async {
+        let port = basic_port();
+        let hydrator = FakeHydrator::default();
+        let mut temporal_request = request(TemporalModeV1::Current, 2);
+        let participant = TemporalParticipantGeneration::new(
+            SessionId::new("session-1").expect("session"),
+            "source-1",
+            temporal_request.snapshot.watermarks(),
+            temporal_request.snapshot.watermarks().projection,
+            &temporal_request.snapshot.versions().configuration_digest,
+            temporal_request.snapshot.access_digest(),
+            TemporalParticipantAuthorization::Authorized,
+            TemporalSourceAccess::Available,
+        )
+        .expect("participant");
+        temporal_request.snapshot = temporal_request
+            .snapshot
+            .with_participant_manifest(
+                TemporalParticipantManifest::new(vec![participant]).expect("manifest"),
+            )
+            .expect("authoritative manifest");
+        let export = execute_temporal_candidate_export(
+            &temporal_request,
+            &port,
+            &authenticator("key-1", 1, 7),
+        )
+        .await
+        .expect("ranked compact export");
+        let request = RetrievalRequest {
+            principal: PrincipalId::try_from("principal.fixture".to_owned()).expect("principal"),
+            scope: RetrievalScope {
+                privacy_domain: tracedecay_domain::PrivacyDomainId::new("privacy.fixture")
+                    .expect("privacy"),
+                root: SingleRootScopeV1 {
+                    repository: RepositoryId::new("repository.fixture").expect("repository"),
+                    worktree: None,
+                    reference: None,
+                },
+            },
+            temporal_mode: TemporalModeV1::Current,
+            snapshot: RetrievalSnapshot {
+                watermarks: VectorWatermark::default(),
+                freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "f".repeat(64)))
+                    .expect("freshness"),
+                authorization_revision: AuthorizationRevision::try_from(
+                    "authorization.fixture.v1".to_owned(),
+                )
+                .expect("authorization"),
+                captured_at: UtcMicros(23),
+            },
+            profile_id: FusionProfileId::try_from("profile.fixture.v1".to_owned())
+                .expect("profile"),
+            budget: RetrievalBudget {
+                max_candidates_per_lane: 8,
+                max_fused_candidates: 8,
+                max_hydrated_results: 4,
+                max_hydration_bytes: 4_096,
+                deadline_micros: None,
+            },
+        };
+
+        let batch = export
+            .to_retriever_batch(
+                &request,
+                ComponentRevision::try_from("retriever.temporal.v1".to_owned()).expect("revision"),
+                ScoreDomainId::try_from("score.temporal.v1".to_owned()).expect("score domain"),
+                ComponentRevision::try_from("policy.temporal.v1".to_owned()).expect("policy"),
+            )
+            .expect("canonical retriever batch");
+
+        assert_eq!(batch.candidates.len(), 2);
+        assert!(
+            batch
+                .candidates
+                .iter()
+                .all(|candidate| candidate.retriever == RetrieverKind::Temporal)
+        );
+        assert_eq!(batch.coverage.examined, 2);
+        assert!(batch.continuation.is_some());
+        assert_eq!(
+            batch
+                .evidence_by_occurrence
+                .values()
+                .next()
+                .expect("evidence")
+                .contributions[0]
+                .channel,
+            TemporalCandidateChannelV1::Phrase,
+        );
+        assert!(
+            hydrator.calls.lock().expect("calls lock").is_empty(),
+            "compact projection must not authorize or read payload bytes",
+        );
+    });
+}
+
+#[test]
+fn selection_hydration_reads_only_the_globally_selected_temporal_anchors() {
+    block_on(async {
+        let port = basic_port();
+        let temporal_request = request(TemporalModeV1::Current, 2);
+        let export = execute_temporal_candidate_export(
+            &temporal_request,
+            &port,
+            &authenticator("key-1", 1, 7),
+        )
+        .await
+        .expect("ranked compact export");
+        let mut hydrator = FakeHydrator::default();
+        hydrator.payloads.insert(anchor("b"), b"selected".to_vec());
+
+        let result = hydrate_temporal_candidate_selection(
+            &temporal_request,
+            export,
+            &[anchor("b")],
+            &hydrator,
+            &Words,
+        )
+        .await
+        .expect("selected hydration");
+
+        assert_eq!(result.ranked.len(), 1);
+        assert_eq!(result.ranked[0].anchor_id, anchor("b"));
+        assert_eq!(result.hydrated.len(), 1);
+        assert_eq!(
+            hydrator.calls.lock().expect("calls lock").as_slice(),
+            ["authorize:b", "read:b"],
         );
     });
 }
