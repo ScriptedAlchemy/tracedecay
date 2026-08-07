@@ -202,6 +202,129 @@ where
     }
 }
 
+/// Outcome of a cap-preserving keyset scan.
+///
+/// `exceeded` is the whole point: it is proven by reading one row past `cap`,
+/// never inferred from a truncated `items`. When `exceeded` is `false`, `items`
+/// is the complete set and may be used as a measurement; when it is `true`,
+/// `items` holds exactly `cap` rows and is only good for reporting that the
+/// budget was passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CappedRowidScan<T> {
+    /// Rows read, never more than the requested cap.
+    pub items: Vec<T>,
+    /// Whether at least one row beyond the cap exists.
+    pub exceeded: bool,
+}
+
+/// Reads a table through `rowid` keyset pages, stopping as soon as one row past
+/// `cap` has been seen.
+///
+/// A bounded read that proves its own budget with a single
+/// `… LIMIT cap + 1` statement does not work here: the `SQLite` runtime refuses
+/// any query that materializes more than its per-query row limit outright, so a
+/// budget larger than that limit turns the budget check itself into a hard
+/// failure at exactly the scale it exists to protect. Paging fixes that, but a
+/// naive paged rewrite reintroduces the opposite defect — reading the whole
+/// table just to discover it was too large, or worse, silently returning a
+/// truncated result that reads as a complete measurement.
+///
+/// This helper keeps both properties: every query stays within one page, and
+/// the scan stops at `cap + 1` rows with [`CappedRowidScan::exceeded`] set.
+///
+/// `page_sql` has the same shape [`collect_rowid_pages_with`] requires:
+/// `leading_params` bind first as `?1..?N`, then the exclusive `rowid` cursor
+/// and the page row budget, with `rowid` appended after the columns `map_fn`
+/// reads at position `cursor_index` and an `ORDER BY rowid`.
+pub async fn collect_rowid_pages_capped_with<T, C>(
+    conn: &C,
+    page_sql: &str,
+    leading_params: &[Value],
+    cursor_index: i32,
+    map_fn: fn(&Row) -> std::result::Result<T, Error>,
+    operation: &str,
+    cap: usize,
+) -> Result<CappedRowidScan<T>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+{
+    let mut items: Vec<T> = Vec::new();
+    let mut after_rowid = i64::MIN;
+    loop {
+        // Never request more than one page, and never more than the single row
+        // past the cap that the over-budget proof needs.
+        let remaining = cap.saturating_sub(items.len()).saturating_add(1);
+        let page_budget = i64::try_from(remaining)
+            .unwrap_or(FULL_SCAN_PAGE_ROWS)
+            .min(FULL_SCAN_PAGE_ROWS);
+        let mut page_params: Vec<Value> = Vec::with_capacity(leading_params.len() + 2);
+        page_params.extend_from_slice(leading_params);
+        page_params.push(Value::Integer(after_rowid));
+        page_params.push(Value::Integer(page_budget));
+        let mut rows = conn
+            .query(page_sql, crate::db::engine::params_from_iter(page_params))
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query capped page: {e}"),
+                operation: operation.to_string(),
+            })?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read capped row: {e}"),
+            operation: operation.to_string(),
+        })? {
+            let rowid: i64 = row
+                .get(cursor_index)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read capped page cursor: {e}"),
+                    operation: operation.to_string(),
+                })?;
+            if rowid <= after_rowid {
+                return Err(TraceDecayError::Database {
+                    message: "capped table scan page did not advance".to_string(),
+                    operation: operation.to_string(),
+                });
+            }
+            after_rowid = rowid;
+            page_rows += 1;
+            if items.len() == cap {
+                // The row past the cap proves the budget was exceeded. It is
+                // deliberately not collected: `items` stays exactly `cap` long.
+                return Ok(CappedRowidScan {
+                    items,
+                    exceeded: true,
+                });
+            }
+            items.push(map_fn(&row).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to map capped row: {e}"),
+                operation: operation.to_string(),
+            })?);
+        }
+        if page_rows < page_budget {
+            return Ok(CappedRowidScan {
+                items,
+                exceeded: false,
+            });
+        }
+    }
+}
+
+/// [`collect_rowid_pages_capped_with`] for a scan that binds no parameters of
+/// its own.
+pub async fn collect_rowid_pages_capped<T, C>(
+    conn: &C,
+    page_sql: &str,
+    cursor_index: i32,
+    map_fn: fn(&Row) -> std::result::Result<T, Error>,
+    operation: &str,
+    cap: usize,
+) -> Result<CappedRowidScan<T>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+{
+    collect_rowid_pages_capped_with(conn, page_sql, &[], cursor_index, map_fn, operation, cap).await
+}
+
 /// Collects all rows from a `Rows` iterator into a `Vec<T>` using the given
 /// row-mapping function. This helper never constructs SQL; callers must build
 /// and parameterize queries before invoking it.

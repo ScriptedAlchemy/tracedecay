@@ -39,7 +39,7 @@ use super::files::FILE_PATH_PAGE_SQL;
 use super::nodes::{
     NODES_BY_KIND_PAGE_SQL, NodesByFilesPageKey, read_nodes_by_files_page_controlled,
 };
-use super::sql::{collect_rowid_pages, collect_rowid_pages_with};
+use super::sql::{collect_rowid_pages, collect_rowid_pages_capped, collect_rowid_pages_with};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingConnection<'a> {
@@ -857,6 +857,118 @@ async fn dead_code_candidates_page_past_the_runtime_query_limit() {
     assert_eq!(i64::try_from(seen.len()).expect("candidate count"), ROWS);
     let unique: std::collections::HashSet<&String> = seen.iter().collect();
     assert_eq!(unique.len(), seen.len(), "a page repeated a candidate");
+}
+
+/// A budgeted read may not prove its budget with one `LIMIT budget + 1`
+/// statement: a response-path budget is far larger than the runtime's
+/// per-query materialization limit, so the proof query is refused at exactly
+/// the scale the budget guards. This is the live strata defect —
+/// `build_file_adjacency_bounded` issued `SELECT path FROM files ORDER BY path
+/// LIMIT 50_001` and the dashboard answered 500 on a real index.
+#[tokio::test]
+async fn budget_proof_statements_are_refused_above_the_runtime_query_limit() {
+    let directory = TempDir::new().expect("budget proof tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+
+    assert_unpaged_statement_refused(&conn, "SELECT path FROM files ORDER BY path LIMIT 50001")
+        .await;
+}
+
+/// The capped scan replaces that statement: it pages, and it stops one row past
+/// the cap instead of reading the table to discover it was too large.
+#[tokio::test]
+async fn capped_pages_prove_over_budget_without_reading_the_whole_table() {
+    let directory = TempDir::new().expect("capped scan tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let counted = CountingConnection {
+        inner: &conn,
+        queries: AtomicUsize::new(0),
+    };
+
+    // A cap well under the seeded row count: over-budget is proven, the
+    // retained rows stop exactly at the cap, and the cost is the cap — not the
+    // table. One page covers it, so exactly one query is issued.
+    let capped = collect_rowid_pages_capped(
+        &counted,
+        FILE_PATH_PAGE_SQL,
+        1,
+        |row| row.get::<String>(0),
+        "file_paths_capped",
+        1_500,
+    )
+    .await
+    .expect("a capped scan must not exceed the runtime materialization limit");
+    assert!(capped.exceeded, "the fixture holds far more than the cap");
+    assert_eq!(capped.items.len(), 1_500, "a capped scan may not overrun");
+    assert_eq!(
+        counted.queries.load(Ordering::Relaxed),
+        1,
+        "a cap under one page is one query, not a whole-table scan",
+    );
+}
+
+/// The other direction: under the cap, the scan is a complete measurement —
+/// every row, exactly once, and `exceeded` false.
+#[tokio::test]
+async fn capped_pages_return_the_complete_set_when_under_budget() {
+    let directory = TempDir::new().expect("under budget tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+
+    let capped = collect_rowid_pages_capped(
+        &*conn,
+        FILE_PATH_PAGE_SQL,
+        1,
+        |row| row.get::<String>(0),
+        "file_paths_capped",
+        50_000,
+    )
+    .await
+    .expect("a capped scan must not exceed the runtime materialization limit");
+    assert!(
+        !capped.exceeded,
+        "the seeded file count is under the 50 000 budget"
+    );
+    assert_eq!(i64::try_from(capped.items.len()).expect("file count"), ROWS);
+    let unique: std::collections::HashSet<&String> = capped.items.iter().collect();
+    assert_eq!(unique.len(), capped.items.len(), "a page repeated a row");
+}
+
+/// The boundary the budget check turns on: exactly `cap` rows is complete,
+/// `cap - 1` is over budget. An off-by-one here either rejects a legal
+/// measurement or reports a truncated one as complete.
+#[tokio::test]
+async fn capped_scan_boundary_is_exact_at_the_budget() {
+    let directory = TempDir::new().expect("boundary tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+
+    let exact = collect_rowid_pages_capped(
+        &*conn,
+        FILE_PATH_PAGE_SQL,
+        1,
+        |row| row.get::<String>(0),
+        "file_paths_capped",
+        usize::try_from(ROWS).expect("cap"),
+    )
+    .await
+    .expect("exact-budget scan");
+    assert!(!exact.exceeded, "exactly the budget is within the budget");
+    assert_eq!(i64::try_from(exact.items.len()).expect("count"), ROWS);
+
+    let one_short = collect_rowid_pages_capped(
+        &*conn,
+        FILE_PATH_PAGE_SQL,
+        1,
+        |row| row.get::<String>(0),
+        "file_paths_capped",
+        usize::try_from(ROWS - 1).expect("cap"),
+    )
+    .await
+    .expect("one-short scan");
+    assert!(one_short.exceeded, "one row past the budget is over budget");
+    assert_eq!(
+        i64::try_from(one_short.items.len()).expect("count"),
+        ROWS - 1
+    );
 }
 
 /// The shared helper's unparameterized entry point still has to page — the

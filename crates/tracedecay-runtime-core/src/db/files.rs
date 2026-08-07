@@ -5,7 +5,7 @@ use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_file;
-use super::sql::collect_rowid_pages;
+use super::sql::{CappedRowidScan, collect_rowid_pages, collect_rowid_pages_capped};
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
@@ -178,6 +178,36 @@ impl Database {
         .await?;
         paths.sort_unstable();
         Ok(paths)
+    }
+
+    /// Returns the indexed logical paths, stopping one row past `cap`.
+    ///
+    /// For response-path reads that carry a hard file budget. Asking the
+    /// database to prove the budget with a single `… LIMIT cap + 1` fails at
+    /// exactly the scale the budget exists for: the runtime refuses any query
+    /// materializing more than its per-query row limit, and a dashboard-sized
+    /// budget is far past it. This pages instead and stops as soon as the
+    /// budget is known to be exceeded, so an over-budget project costs `cap`
+    /// rows rather than the whole `files` table.
+    ///
+    /// [`CappedRowidScan::items`] is sorted and complete only when
+    /// [`CappedRowidScan::exceeded`] is `false`. When it is `true` the retained
+    /// rows are an arbitrary `cap`-sized prefix in `rowid` order and must not be
+    /// reported as a measurement.
+    pub async fn file_paths_capped(&self, cap: usize) -> Result<CappedRowidScan<String>> {
+        let mut scan = collect_rowid_pages_capped(
+            &self.engine_conn(),
+            FILE_PATH_PAGE_SQL,
+            1,
+            |row| row.get::<String>(0),
+            "file_paths_capped",
+            cap,
+        )
+        .await?;
+        if !scan.exceeded {
+            scan.items.sort_unstable();
+        }
+        Ok(scan)
     }
 
     /// Returns one keyset page of `(path, size)` pairs for token accounting.

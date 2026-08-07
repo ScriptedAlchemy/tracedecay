@@ -64,7 +64,8 @@ pub(crate) use retrieval_anchor_authority::{
 };
 pub use search::DependencyImportUse;
 pub use sql::{
-    FULL_SCAN_PAGE_ROWS, build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with,
+    CappedRowidScan, FULL_SCAN_PAGE_ROWS, build_qmark_placeholders, collect_rowid_pages,
+    collect_rowid_pages_capped, collect_rowid_pages_capped_with, collect_rowid_pages_with,
 };
 pub use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,
