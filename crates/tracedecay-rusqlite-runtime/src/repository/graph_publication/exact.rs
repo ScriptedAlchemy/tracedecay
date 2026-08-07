@@ -54,6 +54,31 @@ trait ExactQueryAuthority {
     fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()>;
 }
 
+pub(super) enum ExactPublicationRead {
+    Snapshot(ExactSqlReadSnapshot),
+    Transaction(Option<ExactSqlTransaction>),
+}
+
+impl ExactQueryAuthority for ExactPublicationRead {
+    fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.query(statement).map_err(|_| ()),
+            Self::Transaction(Some(transaction)) => transaction.query(statement).map_err(|_| ()),
+            Self::Transaction(None) => Err(()),
+        }
+    }
+}
+
+impl Drop for ExactPublicationRead {
+    fn drop(&mut self) {
+        if let Self::Transaction(transaction) = self
+            && let Some(transaction) = transaction.take()
+        {
+            let _ = transaction.rollback();
+        }
+    }
+}
+
 impl ExactQueryAuthority for ExactSqlTransaction {
     fn exact_query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ()> {
         self.query(statement).map_err(|_| ())
@@ -264,7 +289,7 @@ pub(crate) fn append_replay_in_transaction(
             }
             GraphReplayAppendOutcomeV1::ExactVerifiedReplay {
                 replay: exact.clone(),
-                receipt,
+                receipt: Box::new(receipt),
             }
         } else {
             GraphReplayAppendOutcomeV1::ExactReplay(exact.clone())
@@ -946,4 +971,3 @@ impl GraphPublicationStoreV1 for GraphPublicationExactSqlStorage {
         Ok(GraphVerifiedHeadCasOutcomeV1::Advanced(next))
     }
 }
-

@@ -58,7 +58,7 @@ impl ReaderQueryExecutor for NoReads {
 struct Fixture {
     _directory: TempDir,
     _writer: PersistentWriter,
-    _readers: ReaderPool<NoReads>,
+    readers: ReaderPool<NoReads>,
     handle: ExactSqlHandle,
 }
 
@@ -105,7 +105,7 @@ impl Fixture {
         Self {
             _directory: directory,
             _writer: writer,
-            _readers: readers,
+            readers,
             handle,
         }
     }
@@ -597,6 +597,53 @@ fn append_and_verified_head_cas_each_require_a_fresh_commit_fence() {
     assert_eq!(second_page.records.len(), 1);
     assert_eq!(second_page.records[0].publication, second);
     assert_eq!(second_page.continuation, None);
+}
+
+#[test]
+fn fallback_read_releases_writer_before_verified_head_cas() {
+    let fixture = Fixture::new();
+    let publication = replay(
+        projection("writer-only"),
+        "generation.1",
+        "publish.1",
+        'a',
+        'b',
+        None,
+        b"writer-only",
+    );
+    let mut storage = fixture.storage();
+    append_with_fresh_context(&mut storage, &publication, "writer-only.append").unwrap();
+
+    fixture.readers.begin_shutdown_drain();
+    let (read_control, read_probe) = control_and_probe("writer-only.read", None);
+    let read_context =
+        GraphPublicationOperationContextV1::new(&read_control, &read_probe).unwrap();
+    assert!(matches!(
+        storage.replay(&publication.key, &read_context).unwrap(),
+        GraphPublicationReplayLookupV1::Active(_)
+    ));
+
+    let (cas_control, cas_probe) = control_and_probe("writer-only.cas", None);
+    let cas_context = GraphPublicationOperationContextV1::new(&cas_control, &cas_probe).unwrap();
+    let outcome = storage
+        .compare_and_swap_verified_head(
+            &GraphVerifiedHeadCompareAndSwapV1 {
+                publication_key: publication.key.clone(),
+                input_digest: publication.input_digest.clone(),
+                dependency_generation_closure_digest: publication
+                    .dependency_generation_closure_digest
+                    .clone(),
+                recovered_digest: publication.expected_recovered_digest.clone(),
+                expected_prior_head: None,
+            },
+            &cas_context,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        GraphVerifiedHeadCasOutcomeV1::Advanced(_)
+    ));
 }
 
 #[test]

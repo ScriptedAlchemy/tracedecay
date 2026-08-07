@@ -11,8 +11,8 @@ use tracedecay_store::{
 };
 
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRow,
-    ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
+    ExactSqlError, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlRow, ExactSqlStatement,
+    ExactSqlTransaction, ExactSqlValue,
 };
 
 use super::super::{
@@ -21,8 +21,8 @@ use super::super::{
     decode_verified_head, ensure_not_interrupted, sequence_from_i64, sequence_to_i64,
 };
 use super::{
-    ExactQueryAuthority, REPLAY_COLUMNS, REPLAY_METADATA_COLUMNS, REPLAY_READER_ACQUIRE_SLICE,
-    TOMBSTONE_COLUMNS,
+    ExactPublicationRead, ExactQueryAuthority, REPLAY_COLUMNS, REPLAY_METADATA_COLUMNS,
+    REPLAY_READER_ACQUIRE_SLICE, TOMBSTONE_COLUMNS,
 };
 
 pub(super) fn begin(
@@ -81,20 +81,23 @@ pub(super) fn ensure_shard_owner(
 pub(super) fn begin_read(
     handle: &ExactSqlHandle,
     context: &GraphPublicationOperationContextV1<'_>,
-) -> GraphPublicationStoreResultV1<ExactSqlReadSnapshot> {
+) -> GraphPublicationStoreResultV1<ExactPublicationRead> {
     loop {
         ensure_not_interrupted(context)?;
         match handle.begin_read_snapshot(REPLAY_READER_ACQUIRE_SLICE) {
             Ok(snapshot) => {
                 ensure_not_interrupted(context)?;
-                return Ok(snapshot);
+                return Ok(ExactPublicationRead::Snapshot(snapshot));
             }
             Err(ExactSqlError::Busy) => {
                 ensure_not_interrupted(context)?;
             }
             Err(_) => {
                 ensure_not_interrupted(context)?;
-                return Err(GraphPublicationStoreErrorV1::Infrastructure);
+                return handle
+                    .begin_deferred()
+                    .map(|transaction| ExactPublicationRead::Transaction(Some(transaction)))
+                    .map_err(|_| GraphPublicationStoreErrorV1::Infrastructure);
             }
         }
     }
