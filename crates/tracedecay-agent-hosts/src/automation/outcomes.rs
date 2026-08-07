@@ -517,7 +517,7 @@ async fn applied_at_from_lineage<A: ProjectMemoryFactStore>(
         ))
     })?;
     let history = application
-        .get_compatibility_history(query)
+        .get_project_memory_history(query)
         .await
         .map_err(|error| {
             config_error(format!(

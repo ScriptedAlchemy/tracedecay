@@ -108,7 +108,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         fact_id: i64,
         limit: usize,
     ) -> Result<ProjectMemoryFactFeedbackHistoryV1, MemoryApplicationError> {
-        self.get_compatibility_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
+        self.get_project_memory_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
             self.legacy_compatibility_target(fact_id)?,
             None,
             limit,

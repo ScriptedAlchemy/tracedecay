@@ -240,7 +240,7 @@ pub(super) fn project_memory_status_v1(
     })
 }
 
-pub(super) fn compatibility_fact_record(
+pub(super) fn project_memory_fact_record(
     scope: &MemoryCompatibilityScope,
     fact: &tracedecay_store::ProjectMemoryFactV1,
 ) -> Result<FactRecord, MemoryApplicationError> {
@@ -286,12 +286,12 @@ pub(super) fn compatibility_fact_record(
     })
 }
 
-pub(super) fn compatibility_projection_record(
+pub(super) fn project_memory_projection_record(
     scope: &MemoryCompatibilityScope,
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<FactRecord, MemoryApplicationError> {
     match projection {
-        ProjectMemoryFactProjectionV1::Available(fact) => compatibility_fact_record(scope, fact),
+        ProjectMemoryFactProjectionV1::Available(fact) => project_memory_fact_record(scope, fact),
         ProjectMemoryFactProjectionV1::Unavailable(_) => {
             Err(MemoryApplicationError::IncompatibleLegacyProjection {
                 invariant: "available legacy fact projection",
@@ -312,7 +312,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let after_fact_id = query.after_fact_id().cloned();
         let limit = query.limit();
         let page = self.authority.list_project_memory_facts(query).await?;
-        validate_compatibility_page(&self.owner, after_fact_id.as_ref(), limit, &page)?;
+        validate_project_memory_page(&self.owner, after_fact_id.as_ref(), limit, &page)?;
         Ok(page)
     }
 
@@ -324,7 +324,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let after = query.after().cloned();
         let limit = query.limit();
         let page = self.authority.search_project_memory_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
@@ -336,7 +336,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let after = query.after().cloned();
         let limit = query.limit();
         let page = self.authority.probe_project_memory_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
@@ -348,7 +348,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let after = query.after().cloned();
         let limit = query.limit();
         let page = self.authority.related_project_memory_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
@@ -360,7 +360,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         let after = query.after().cloned();
         let limit = query.limit();
         let page = self.authority.reason_project_memory_facts(query).await?;
-        validate_compatibility_search_page(&self.owner, after.as_ref(), limit, &page)?;
+        validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
 
@@ -398,7 +398,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .get_project_memory_fact(target.clone())
             .await?;
         if let Some(projection) = &result {
-            validate_compatibility_projection(&self.owner, &target, projection)?;
+            validate_project_memory_projection(&self.owner, &target, projection)?;
         }
         Ok(result)
     }
@@ -437,7 +437,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(result)
     }
 
-    pub async fn get_compatibility_history(
+    pub async fn get_project_memory_history(
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
     ) -> Result<ProjectMemoryFactHistoryV1, MemoryApplicationError> {
@@ -470,7 +470,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Pure history snapshot. Incomplete repair is surfaced in the returned
     /// progress; callers must use an explicit repair command to advance it.
-    pub async fn get_compatibility_feedback_history(
+    pub async fn get_project_memory_feedback_history(
         &self,
         query: ProjectMemoryFactFeedbackHistoryQueryV1,
     ) -> Result<ProjectMemoryFactFeedbackHistoryV1, MemoryApplicationError> {
@@ -514,7 +514,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .inspect_project_memory_fact(target.clone())
             .await?;
         if let Some(inspection) = &inspection {
-            validate_compatibility_inspection(&self.owner, &target, inspection)?;
+            validate_project_memory_inspection(&self.owner, &target, inspection)?;
         }
         Ok(inspection)
     }
@@ -525,7 +525,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     ) -> Result<ProjectMemoryFactAddOutcomeV1, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
         let outcome = self.authority.add_project_memory_fact(request).await?;
-        validate_compatibility_add_outcome(&self.owner, &outcome)?;
+        validate_project_memory_add_outcome(&self.owner, &outcome)?;
         Ok(outcome)
     }
 
@@ -536,7 +536,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
         let outcome = self.authority.update_project_memory_fact(request).await?;
-        validate_compatibility_projection(&self.owner, &target, outcome.fact())?;
+        validate_project_memory_projection(&self.owner, &target, outcome.fact())?;
         Ok(outcome)
     }
 
@@ -551,7 +551,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         // never resolved within the authority's single remove transaction;
         // there is no projection to validate in that case.
         if let Some(fact) = outcome.fact() {
-            validate_compatibility_projection(&self.owner, &target, fact)?;
+            validate_project_memory_projection(&self.owner, &target, fact)?;
         }
         Ok(outcome)
     }
@@ -566,7 +566,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .authority
             .record_project_memory_fact_feedback(request)
             .await?;
-        validate_compatibility_projection(&self.owner, &target, outcome.fact())?;
+        validate_project_memory_projection(&self.owner, &target, outcome.fact())?;
         Ok(outcome)
     }
 
@@ -615,7 +615,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .authority
             .submit_project_memory_fact_proposal(proposal_id.clone(), request, submitter)
             .await?;
-        validate_compatibility_proposal(&self.owner, &proposal_id, &proposal)?;
+        validate_project_memory_proposal(&self.owner, &proposal_id, &proposal)?;
         Ok(proposal)
     }
 
@@ -628,7 +628,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .get_project_memory_fact_proposal(self.owner.clone(), proposal_id.clone())
             .await?;
         if let Some(proposal) = &proposal {
-            validate_compatibility_proposal(&self.owner, &proposal_id, proposal)?;
+            validate_project_memory_proposal(&self.owner, &proposal_id, proposal)?;
         }
         Ok(proposal)
     }
@@ -648,7 +648,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 limit,
             )
             .await?;
-        validate_compatibility_proposal_page(
+        validate_project_memory_proposal_page(
             &self.owner,
             after_proposal_id.as_ref(),
             limit,
@@ -683,7 +683,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 reason,
             )
             .await?;
-        validate_compatibility_proposal(&self.owner, &proposal_id, &proposal)?;
+        validate_project_memory_proposal(&self.owner, &proposal_id, &proposal)?;
         if proposal.revision() <= expected_revision {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "compatibility proposal rejection revision",
@@ -717,7 +717,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .promote_project_memory_fact_proposal_with_disposition(request)
             .await?;
         let proposal = result.proposal();
-        validate_compatibility_proposal(&self.owner, &proposal_id, proposal)?;
+        validate_project_memory_proposal(&self.owner, &proposal_id, proposal)?;
         let revision_is_valid = match result.disposition() {
             ProjectMemoryFactProposalPromotionDispositionV1::NewlyPromoted
             | ProjectMemoryFactProposalPromotionDispositionV1::Quarantined => {
@@ -750,7 +750,7 @@ pub(super) fn compatibility_projection_targets(
         .collect()
 }
 
-fn validate_compatibility_page(
+fn validate_project_memory_page(
     owner: &FactOwnerV1,
     after_fact_id: Option<&FactId>,
     limit: usize,
@@ -781,7 +781,7 @@ fn validate_compatibility_page(
     Ok(())
 }
 
-fn validate_compatibility_search_page(
+fn validate_project_memory_search_page(
     owner: &FactOwnerV1,
     after: Option<&ProjectMemoryFactSearchCursorV1>,
     limit: usize,
@@ -860,7 +860,7 @@ pub(super) fn validate_lineage(
     Ok(())
 }
 
-fn validate_compatibility_projection(
+fn validate_project_memory_projection(
     owner: &FactOwnerV1,
     target: &ProjectMemoryFactTargetV1,
     projection: &ProjectMemoryFactProjectionV1,
@@ -893,7 +893,7 @@ fn validate_compatibility_projection(
     Ok(())
 }
 
-fn validate_compatibility_inspection(
+fn validate_project_memory_inspection(
     owner: &FactOwnerV1,
     target: &ProjectMemoryFactTargetV1,
     inspection: &ProjectMemoryFactInspectionV1,
@@ -944,7 +944,7 @@ fn validate_compatibility_inspection(
     }
 }
 
-fn validate_compatibility_add_outcome(
+fn validate_project_memory_add_outcome(
     owner: &FactOwnerV1,
     outcome: &ProjectMemoryFactAddOutcomeV1,
 ) -> Result<(), MemoryApplicationError> {
@@ -962,7 +962,7 @@ fn validate_compatibility_add_outcome(
     Ok(())
 }
 
-fn validate_compatibility_proposal(
+fn validate_project_memory_proposal(
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
     proposal: &ProjectMemoryFactProposalRecordV1,
@@ -978,7 +978,7 @@ fn validate_compatibility_proposal(
     Ok(())
 }
 
-fn validate_compatibility_proposal_page(
+fn validate_project_memory_proposal_page(
     owner: &FactOwnerV1,
     after_proposal_id: Option<&ProvenanceId>,
     limit: usize,

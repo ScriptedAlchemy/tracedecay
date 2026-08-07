@@ -452,7 +452,7 @@ async fn facts_section(
             });
         }
     };
-    let status = match memory.compatibility_memory_status().await {
+    let status = match memory.project_memory_status().await {
         Ok(status) => status,
         Err(err) => {
             return json!({

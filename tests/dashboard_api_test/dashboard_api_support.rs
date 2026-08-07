@@ -297,7 +297,7 @@ pub(crate) async fn apply_dashboard_automation_fact(
     )
     .unwrap_or_else(|error| panic!("derive outcome proposal identity: {error}"));
     let submitted = memory
-        .submit_compatibility_fact_proposal(context.operation_id().clone(), command, None)
+        .submit_project_memory_fact_proposal(context.operation_id().clone(), command, None)
         .await
         .unwrap_or_else(|error| panic!("submit outcome proposal: {error}"));
     let promotion = ProjectMemoryFactProposalPromotionV1::new(
@@ -308,7 +308,7 @@ pub(crate) async fn apply_dashboard_automation_fact(
     )
     .unwrap_or_else(|error| panic!("build outcome proposal promotion: {error}"));
     let applied = memory
-        .promote_compatibility_fact_proposal(promotion)
+        .promote_project_memory_fact_proposal(promotion)
         .await
         .unwrap_or_else(|error| panic!("promote outcome proposal: {error}"));
     let canonical_fact_id = applied
@@ -352,7 +352,7 @@ pub(crate) async fn delete_dashboard_automation_fact(
             .unwrap_or_else(|error| panic!("build outcome canonical fact target: {error}")),
     );
     let expected_last_event_id = match memory
-        .get_compatibility_fact(target.clone())
+        .get_project_memory_fact(target.clone())
         .await
         .unwrap_or_else(|error| panic!("inspect outcome fact before deletion: {error}"))
     {
@@ -361,7 +361,7 @@ pub(crate) async fn delete_dashboard_automation_fact(
     };
     assert!(
         memory
-            .remove_compatibility_fact(
+            .remove_project_memory_fact(
                 ProjectMemoryFactRemoveCommandV1::new(
                     target,
                     context.operation_id().clone(),

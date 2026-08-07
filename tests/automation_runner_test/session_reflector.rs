@@ -668,7 +668,7 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
     assert_eq!(applied[0].run_id, HIGH_ENTROPY_RUN_ID);
 
     let typed_proposal = memory
-        .get_compatibility_fact_proposal(
+        .get_project_memory_fact_proposal(
             tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap(),
         )
         .await
@@ -683,7 +683,7 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         .expect("auto-applied proposal has a canonical fact id")
         .clone();
     let projection = memory
-        .get_compatibility_fact(tracedecay_store::ProjectMemoryFactTargetV1::Canonical(
+        .get_project_memory_fact(tracedecay_store::ProjectMemoryFactTargetV1::Canonical(
             tracedecay_store::ProjectMemoryFactIdV1::new(owner, canonical_fact_id).unwrap(),
         ))
         .await
@@ -874,7 +874,7 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
     .await
     .unwrap();
     let proposals = memory
-        .list_compatibility_fact_proposals(
+        .list_project_memory_fact_proposals(
             Some(tracedecay_store::ProjectMemoryFactProposalStateV1::PendingApproval),
             None,
             10,
@@ -1550,7 +1550,7 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
     assert_eq!(second.len(), 1);
 
     let proposals = memory
-        .list_compatibility_fact_proposals(
+        .list_project_memory_fact_proposals(
             Some(tracedecay_store::ProjectMemoryFactProposalStateV1::PendingApproval),
             None,
             10,
@@ -1630,12 +1630,12 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     assert_eq!(applied.len(), 1);
     let applied_id = tracedecay_domain::ProvenanceId::new(applied[0].proposal_id.clone()).unwrap();
     let submitted = memory
-        .get_compatibility_fact_proposal(applied_id.clone())
+        .get_project_memory_fact_proposal(applied_id.clone())
         .await
         .unwrap()
         .expect("submitted authority proposal");
     memory
-        .promote_compatibility_fact_proposal(
+        .promote_project_memory_fact_proposal(
             tracedecay_store::ProjectMemoryFactProposalPromotionV1::new(
                 owner,
                 applied_id.clone(),
@@ -1647,7 +1647,7 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         .await
         .unwrap();
     let applied_before = memory
-        .get_compatibility_fact_proposal(applied_id.clone())
+        .get_project_memory_fact_proposal(applied_id.clone())
         .await
         .unwrap()
         .expect("applied authority proposal");
@@ -1690,7 +1690,7 @@ async fn session_fact_proposals_never_mutate_applied_records() {
     assert_eq!(recorded[0].state, FactProposalState::PendingApproval);
 
     let proposals = memory
-        .list_compatibility_fact_proposals(None, None, 10)
+        .list_project_memory_fact_proposals(None, None, 10)
         .await
         .unwrap();
     assert_eq!(

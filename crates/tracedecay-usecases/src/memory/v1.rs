@@ -21,8 +21,8 @@ use tracedecay_runtime_core::memory::types::{
 
 use super::MemoryApplication;
 use super::compatibility::{
-    compatibility_add_command, compatibility_confidence, compatibility_fact_record,
-    compatibility_projection_record, compatibility_projection_targets, fact_category, legacy_i64,
+    compatibility_add_command, compatibility_confidence, compatibility_projection_targets,
+    fact_category, legacy_i64, project_memory_fact_record, project_memory_projection_record,
     project_memory_status_v1,
 };
 use super::context::MemoryOperationContext;
@@ -245,7 +245,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .iter()
             .map(|item| {
                 Ok(ContradictionResult {
-                    existing_fact: compatibility_fact_record(
+                    existing_fact: project_memory_fact_record(
                         &self.compatibility_scope,
                         item.existing(),
                     )?,
@@ -302,7 +302,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .facts()
             .iter()
             .filter(|fact| matches!(fact, ProjectMemoryFactProjectionV1::Available(_)))
-            .map(|fact| compatibility_projection_record(&self.compatibility_scope, fact))
+            .map(|fact| project_memory_projection_record(&self.compatibility_scope, fact))
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(context) = context.as_ref() {
             self.record_v1_retrieval(targets, context, false).await?;
@@ -320,7 +320,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             // the V1 contract; only reachable payloads project to records.
             None | Some(ProjectMemoryFactProjectionV1::Unavailable(_)) => Ok(None),
             Some(projection) => {
-                compatibility_projection_record(&self.compatibility_scope, &projection).map(Some)
+                project_memory_projection_record(&self.compatibility_scope, &projection).map(Some)
             }
         }
     }
@@ -364,7 +364,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             )?)
             .await?;
         Ok(V1UpdateFactOutcome::Updated(Box::new(
-            compatibility_projection_record(&self.compatibility_scope, outcome.fact())?,
+            project_memory_projection_record(&self.compatibility_scope, outcome.fact())?,
         )))
     }
 
@@ -439,7 +439,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 invariant: "legacy feedback event identity",
             },
         )?;
-        let fact = compatibility_projection_record(&self.compatibility_scope, outcome.fact())?;
+        let fact = project_memory_projection_record(&self.compatibility_scope, outcome.fact())?;
         Ok(tracedecay_runtime_core::memory::types::FeedbackResult {
             event_id,
             fact_id: fact.fact_id,
@@ -476,7 +476,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         limit: usize,
     ) -> Result<V1FactTrustHistoryV1, MemoryApplicationError> {
         let history = self
-            .get_compatibility_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
+            .get_project_memory_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
                 self.legacy_compatibility_target(fact_id)?,
                 None,
                 limit,
@@ -587,7 +587,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             .map(|hit| {
                 let scores = hit.scores();
                 Ok(FactSearchResult {
-                    fact: compatibility_fact_record(&self.compatibility_scope, hit.fact())?,
+                    fact: project_memory_fact_record(&self.compatibility_scope, hit.fact())?,
                     score: f64::from(scores.score_millionths()) / 1_000_000.0,
                     fts_score: f64::from(scores.fts_score_millionths()) / 1_000_000.0,
                     jaccard_score: f64::from(scores.jaccard_score_millionths()) / 1_000_000.0,
@@ -637,7 +637,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     ) -> Result<AddFactOutcome, MemoryApplicationError> {
         let fact = outcome
             .fact()
-            .map(|fact| compatibility_projection_record(&self.compatibility_scope, fact))
+            .map(|fact| project_memory_projection_record(&self.compatibility_scope, fact))
             .transpose()?;
         let closest_fact_id = match outcome.closest_fact_id() {
             Some(id) => {
@@ -648,7 +648,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                         invariant: "closest legacy fact mapping",
                     })?;
                 Some(
-                    compatibility_projection_record(&self.compatibility_scope, &projection)?
+                    project_memory_projection_record(&self.compatibility_scope, &projection)?
                         .fact_id,
                 )
             }

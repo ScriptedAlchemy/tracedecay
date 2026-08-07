@@ -859,7 +859,7 @@ async fn compatibility_reads_use_finite_owner_bound_authority_methods() {
     );
     assert!(
         application
-            .get_compatibility_history(
+            .get_project_memory_history(
                 ProjectMemoryFactHistoryQueryV1::new(target.clone(), None, 10).unwrap(),
             )
             .await

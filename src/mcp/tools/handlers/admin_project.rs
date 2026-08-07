@@ -4,9 +4,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
-    FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalStateV1,
+    FactProposalStoreError, FactStoreError, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalStateV1, ProjectMemoryStoreError,
 };
 
 use crate::application::memory::{MemoryApplication, MemoryApplicationError};
@@ -120,8 +119,8 @@ fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
 fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value> {
     let reason = match error {
         MemoryApplicationError::Compatibility(
-            FactCompatibilityStoreError::Store(FactStoreError::Storage { source, .. })
-            | FactCompatibilityStoreError::Proposal(
+            ProjectMemoryStoreError::Store(FactStoreError::Storage { source, .. })
+            | ProjectMemoryStoreError::Proposal(
                 FactProposalStoreError::Store(FactStoreError::Storage { source, .. })
                 | FactProposalStoreError::Storage { source, .. },
             ),
@@ -140,8 +139,8 @@ fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value
             }
         }
         MemoryApplicationError::Compatibility(
-            FactCompatibilityStoreError::Store(FactStoreError::Contract(_))
-            | FactCompatibilityStoreError::Proposal(FactProposalStoreError::Store(
+            ProjectMemoryStoreError::Store(FactStoreError::Contract(_))
+            | ProjectMemoryStoreError::Proposal(FactProposalStoreError::Store(
                 FactStoreError::Contract(_),
             )),
         ) => "compatibility_proposal_authority_incompatible",
@@ -378,7 +377,7 @@ pub(super) async fn handle_admin_project(
                 .map(parse_fact_proposal_state)
                 .transpose()?;
             match memory
-                .list_compatibility_fact_proposals(state, None, limit)
+                .list_project_memory_fact_proposals(state, None, limit)
                 .await
             {
                 Ok(page) => {
@@ -405,7 +404,7 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let memory = project_memory_application(cg, &db)?;
             let proposal = memory
-                .get_compatibility_fact_proposal(proposal_id)
+                .get_project_memory_fact_proposal(proposal_id)
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| TraceDecayError::Config {
@@ -418,7 +417,7 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let memory = project_memory_application(cg, &db)?;
             let proposal = memory
-                .get_compatibility_fact_proposal(proposal_id.clone())
+                .get_project_memory_fact_proposal(proposal_id.clone())
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| TraceDecayError::Config {
@@ -434,7 +433,7 @@ pub(super) async fn handle_admin_project(
                 message: format!("invalid fact proposal promotion: {error}"),
             })?;
             let proposal = memory
-                .promote_compatibility_fact_proposal(promotion)
+                .promote_project_memory_fact_proposal(promotion)
                 .await
                 .map_err(memory_application_error)?;
             crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
@@ -449,14 +448,14 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let memory = project_memory_application(cg, &db)?;
             let current = memory
-                .get_compatibility_fact_proposal(proposal_id.clone())
+                .get_project_memory_fact_proposal(proposal_id.clone())
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "fact proposal not found".to_string(),
                 })?;
             let proposal = memory
-                .reject_compatibility_fact_proposal(
+                .reject_project_memory_fact_proposal(
                     proposal_id,
                     current.revision(),
                     cli_reviewer()?,
@@ -640,7 +639,7 @@ mod tests {
         )
         .unwrap();
         memory
-            .submit_compatibility_fact_proposal(
+            .submit_project_memory_fact_proposal(
                 ProvenanceId::new(proposal_id.to_owned()).unwrap(),
                 request,
                 Some(actor),
@@ -652,7 +651,7 @@ mod tests {
     #[test]
     fn missing_compatibility_proposal_bank_is_a_typed_unavailable_list() {
         let error = MemoryApplicationError::Compatibility(
-            tracedecay_store::FactCompatibilityStoreError::Store(
+            tracedecay_store::ProjectMemoryStoreError::Store(
                 tracedecay_store::FactStoreError::Storage {
                     operation: "read compatibility fact projection",
                     source: Box::new(std::io::Error::other(

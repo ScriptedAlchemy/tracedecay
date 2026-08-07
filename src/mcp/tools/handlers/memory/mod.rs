@@ -1009,7 +1009,7 @@ mod tests {
         }
 
         let first_page = memory
-            .search_compatibility_facts(
+            .search_project_memory_facts(
                 cursor_search_query(owner.clone(), "cursor fixture", None).unwrap(),
             )
             .await
@@ -1019,13 +1019,13 @@ mod tests {
             .cloned()
             .expect("the first finite page must provide its real cursor");
         let second_page = memory
-            .search_compatibility_facts(
+            .search_project_memory_facts(
                 cursor_search_query(owner.clone(), "cursor fixture", Some(cursor.clone())).unwrap(),
             )
             .await
             .unwrap();
         let replay_page = memory
-            .search_compatibility_facts(
+            .search_project_memory_facts(
                 cursor_search_query(owner.clone(), "cursor fixture", Some(cursor)).unwrap(),
             )
             .await
@@ -1083,7 +1083,7 @@ mod tests {
             );
         }
         let profile_first_page = profile_memory
-            .search_compatibility_facts(
+            .search_project_memory_facts(
                 cursor_search_query(profile_owner, "profile cursor fixture", None).unwrap(),
             )
             .await
