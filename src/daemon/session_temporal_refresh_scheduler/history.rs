@@ -7,11 +7,11 @@ use crate::application::observation::ObservationCancellation;
 use crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1;
 use crate::global_db::RegisteredGlobalDb;
 
-pub(super) type SessionHistoricalIngestPass<'a> =
+pub(in crate::daemon) type SessionHistoricalIngestPass<'a> =
     Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SessionHistoricalIngestOutcome {
+pub(in crate::daemon) enum SessionHistoricalIngestOutcome {
     Complete,
     Pending {
         made_progress: bool,
@@ -44,12 +44,12 @@ impl SessionHistoricalIngestOutcome {
     }
 }
 
-pub(super) trait SessionHistoricalIngestor: Send + Sync {
+pub(in crate::daemon) trait SessionHistoricalIngestor: Send + Sync {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_>;
     fn cancel(&self);
 }
 
-pub(super) type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
+pub(in crate::daemon) type SharedSessionHistoricalIngestor = Arc<dyn SessionHistoricalIngestor>;
 
 pub(in crate::daemon) struct ProjectSessionHistoricalIngestor {
     database: Arc<RegisteredGlobalDb>,
