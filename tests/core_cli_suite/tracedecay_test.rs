@@ -6,6 +6,7 @@ use tempfile::TempDir;
 use tracedecay::application::edit::{
     SourceEditApplicationResult, execute_source_edit, preview_source_edit_expected_state,
 };
+use tracedecay::branch::BranchAddOutcome;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, is_test_file};
 use tracedecay::types::{EdgeKind, NodeKind};
@@ -464,7 +465,7 @@ async fn test_check_file_staleness_deleted_indexed_file() {
 }
 
 #[tokio::test]
-async fn open_auto_tracks_branch_and_sync_does_not_mutate_main_db() {
+async fn branch_tracking_is_explicit_and_sync_does_not_mutate_main_db() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path();
     fs::create_dir_all(project.join("src")).unwrap();
@@ -492,6 +493,30 @@ async fn open_auto_tracks_branch_and_sync_does_not_mutate_main_db() {
     run_git(project, &["add", "."]);
     run_git(project, &["commit", "-m", "feature"]);
 
+    // Branch tracking is explicit: a plain open on a branch that was never
+    // added must not silently start tracking it. Before the first
+    // `branch add` no branch metadata exists, so the open reports the live
+    // git branch but serves the single project store without a branch
+    // provenance scope.
+    let untracked_cg = TraceDecay::open(project).await.unwrap();
+    assert_eq!(untracked_cg.active_branch(), Some("feature/sync-safety"));
+    assert_eq!(
+        untracked_cg.serving_branch(),
+        None,
+        "an open must not auto-track the live branch"
+    );
+    assert!(!untracked_cg.is_fallback());
+    drop(untracked_cg);
+
+    let outcome = TraceDecay::add_branch_tracking(project, "feature/sync-safety")
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        BranchAddOutcome::Added,
+        "explicit registration must track the branch"
+    );
+
     let feature_cg = TraceDecay::open(project).await.unwrap();
     assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
     assert_eq!(feature_cg.serving_branch(), Some("feature/sync-safety"));
@@ -502,15 +527,16 @@ async fn open_auto_tracks_branch_and_sync_does_not_mutate_main_db() {
             Err(TraceDecayError::SyncLock { .. }) if attempt < 39 => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            Err(err) => panic!("auto-tracked branch sync should write to the branch DB: {err}"),
+            Err(err) => panic!("tracked branch sync should write to the branch scope: {err}"),
         }
     }
+    drop(feature_cg);
 
     let main_cg = TraceDecay::open_branch(project, "main").await.unwrap();
     let main_files = main_cg.get_all_files().await.unwrap();
     assert!(
         !main_files.iter().any(|file| file.path == "src/feature.rs"),
-        "auto-tracked branch sync must not insert feature files into the main DB"
+        "tracked branch sync must not insert feature files into the main branch scope"
     );
 }
 
