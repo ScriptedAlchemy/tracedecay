@@ -378,6 +378,7 @@ impl ProjectOpenTasks {
                 message: "project open denied: authenticated profile was remotely deleted"
                     .to_owned(),
                 retry_at: None,
+                typed: None,
             });
         }
         if let Some(entry) = registry.retiring.get(&route) {
