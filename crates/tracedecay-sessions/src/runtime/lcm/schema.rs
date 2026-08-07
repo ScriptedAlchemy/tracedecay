@@ -163,26 +163,50 @@ pub async fn ensure_lcm_schema(conn: &Connection) -> Result<(), LcmError> {
     }
 }
 
-pub async fn ensure_lcm_schema_in_transaction(
-    conn: &(impl Executor + ?Sized),
-) -> Result<(), LcmError> {
+/// LCM schema state of a profile store that may be admitted without a reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LcmSchemaAdmission {
+    /// The store already carries the exact current LCM schema.
+    Current,
+    /// The store carries no LCM schema and no legacy session content, so the
+    /// current schema may be installed.
+    Fresh,
+}
+
+/// Read-only classification of a profile store's LCM schema state.
+///
+/// A store whose persisted marker is not the current version, or that carries
+/// LCM objects or legacy session content without a marker, requires an
+/// explicit profile reset. Admission callers run this before other schema
+/// authorities so the truthful LCM state is surfaced rather than masked by a
+/// coarser authority's reset.
+pub async fn require_admissible_lcm_schema(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<LcmSchemaAdmission, LcmError> {
     match stored_schema_version(conn).await? {
-        Some(LCM_SCHEMA_VERSION) => return Ok(()),
-        Some(found_version) => {
-            return Err(LcmError::ProfileResetRequired {
-                found_version: Some(found_version),
-                required_version: LCM_SCHEMA_VERSION,
-            });
-        }
+        Some(LCM_SCHEMA_VERSION) => Ok(LcmSchemaAdmission::Current),
+        Some(found_version) => Err(LcmError::ProfileResetRequired {
+            found_version: Some(found_version),
+            required_version: LCM_SCHEMA_VERSION,
+        }),
         None if lcm_schema_objects_exist(conn).await?
             || legacy_session_content_exists(conn).await? =>
         {
-            return Err(LcmError::ProfileResetRequired {
+            Err(LcmError::ProfileResetRequired {
                 found_version: None,
                 required_version: LCM_SCHEMA_VERSION,
-            });
+            })
         }
-        None => {}
+        None => Ok(LcmSchemaAdmission::Fresh),
+    }
+}
+
+pub async fn ensure_lcm_schema_in_transaction(
+    conn: &(impl Executor + ?Sized),
+) -> Result<(), LcmError> {
+    match require_admissible_lcm_schema(conn).await? {
+        LcmSchemaAdmission::Current => return Ok(()),
+        LcmSchemaAdmission::Fresh => {}
     }
 
     conn.execute_batch(
