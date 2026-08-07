@@ -701,7 +701,7 @@ fn ready_and_published_cancel_preserve_heads_and_historical_snapshot_bytes() {
             SemanticVectorPublishedGenerationLookup::Published {
                 record,
                 verified_head,
-            } if record.plan == first && verified_head == first_head
+            } if record.plan == first && *verified_head == first_head
         ));
     });
     let historical = with_context("preserve-first.historical", |context| {
