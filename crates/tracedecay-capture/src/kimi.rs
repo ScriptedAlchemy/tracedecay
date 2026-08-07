@@ -132,7 +132,7 @@ fn message_content(content: &Value) -> Option<Value> {
         .filter(|item| item.get("type").and_then(Value::as_str) != Some("think"))
         .cloned()
         .collect::<Vec<_>>();
-    (!visible.is_empty()).then(|| Value::Array(visible))
+    (!visible.is_empty()).then_some(Value::Array(visible))
 }
 
 fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
