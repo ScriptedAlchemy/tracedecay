@@ -571,6 +571,17 @@ pub(super) fn code_index_search_executor(
                             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
                             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest.as_str(),
                         ),
+                        // A request the retrieval pipeline itself rejected
+                        // (page/cursor shape, budget contract) is the caller's
+                        // typed invalid_request, not an internal failure.
+                        QuerySearchExecutionErrorV1::Authority(
+                            tracedecay_query::retrieval::QueryAuthorityErrorV1::Retrieval(
+                                tracedecay_domain::RetrievalError::InvalidRequest(_),
+                            ),
+                        ) => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                            code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest.as_str(),
+                        ),
                         QuerySearchExecutionErrorV1::Retrieval(_)
                         | QuerySearchExecutionErrorV1::Authority(_) => (
                             code_search::CodeIndexSearchUnavailableReasonV1::Internal,

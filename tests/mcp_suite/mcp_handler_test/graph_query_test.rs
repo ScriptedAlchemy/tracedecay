@@ -37,6 +37,47 @@ async fn fallback_allowed_without_executor_never_serves_legacy_fallback() {
     assert_eq!(payload["semantic"]["status"].as_str(), Some("unavailable"));
 }
 
+/// A `limit` above the accepted retrieval budget must serve a budget-bounded
+/// page (any fused remainder rides the `next_cursor` continuation), not fail
+/// closed. The tool contract accepts `limit` up to 500 as an upper bound, but
+/// composition pagination refuses pages above the evaluated profile's
+/// `max_fused_candidates`; passing the raw limit through as the page size
+/// failed every high-limit search as a typed `search_failed` (Internal) once
+/// a generation was bound.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_search",
+        json!({ "query": "helper", "limit": 200 }),
+    )
+    .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
+    assert!(
+        payload["status"].is_null(),
+        "high-limit search must not fail closed: {payload}"
+    );
+    let results = payload["results"]
+        .as_array()
+        .expect("high-limit search results");
+    assert!(
+        !results.is_empty(),
+        "high-limit search must return the fused candidates: {payload}"
+    );
+    assert!(results.len() <= 200, "results must respect the caller limit");
+    assert!(
+        payload["code_generation"].as_str().is_some(),
+        "search must have served from a bound generation: {payload}"
+    );
+    fixture.harness.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_grep_literal_hit_is_enriched_with_symbol() {
     let (cg, _dir) = setup_project().await;

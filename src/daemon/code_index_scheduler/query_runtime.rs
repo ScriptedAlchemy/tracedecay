@@ -496,13 +496,22 @@ impl CodeIndexSchedulerRegistryV1 {
             CompositionLaneInput::new(RetrieverKind::Graph, graph)
                 .map_err(QueryAuthorityErrorV1::from)?,
         ];
+        // The caller's page size is an upper bound on results, while
+        // composition pagination refuses any page larger than the accepted
+        // profile's deterministic budget (`max_fused_candidates`). Serve
+        // budget-bounded pages instead of failing every request whose limit
+        // exceeds the evaluated budget. Nothing is silently dropped: a page
+        // smaller than the fused set always returns a continuation cursor.
+        let page_size = input
+            .page_size
+            .min(request.budget.max_fused_candidates as usize);
         let authorized = self
             .compose_query_fallback(
                 scope,
                 request,
                 query_view,
                 lanes,
-                input.page_size,
+                page_size,
                 input.cursor.as_ref(),
             )
             .await?;
