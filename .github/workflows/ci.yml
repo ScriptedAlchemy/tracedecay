@@ -90,14 +90,14 @@ jobs:
       - name: Test release version drift guard
         run: bash tests/release_drift_check_test.sh
 
-      - name: Test release workflow contract
-        run: bash tests/release_workflow_contract_test.sh
+      # The workflow-contract pin scripts were replaced by the safety-guard
+      # assertions (f3b065545) and the dogfood surface was retired (b73a8a396);
+      # this job keeps the guards that protect the shipped release flow.
+      - name: Check release safety guards
+        run: bash tests/release_safety_test.sh
 
       - name: Test GitHub release installer
         run: bash tests/install_script_test.sh
-
-      - name: Test local dogfood command contract
-        run: bash tests/dogfood_command_test.sh
 
       - name: Check release version drift
         run: scripts/check-release-drift.sh
