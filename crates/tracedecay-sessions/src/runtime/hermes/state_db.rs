@@ -527,7 +527,13 @@ pub(super) async fn try_ingest_state_db_for_projects(
             &destination_matchers,
             source,
             &mut destination_routes,
-        );
+        )
+        .map_err(|_| {
+            format!(
+                "could not classify Hermes rows from '{}' because project membership is unknown",
+                source.state_db.display()
+            )
+        })?;
         for (index, destination) in destinations.iter().enumerate() {
             let admitted = admit_rows_with_admission(
                 destination.admission,

@@ -1362,3 +1362,109 @@ async fn multi_page_session_emits_one_usage_checkpoint_and_a_later_frontier_upda
         }
     )));
 }
+
+mod destination_routing_tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::runtime::shared::{ProjectRootMatcher, StoredCursor};
+
+    use super::super::ingest::HermesProfileSource;
+    use super::super::routing::turn_project_locations_for_destinations;
+    use super::super::rows::HermesRow;
+
+    static IDENTITY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn retrying_identity(
+        path: &Path,
+    ) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
+        let root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+            .unwrap_or(path);
+        if IDENTITY_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+            return tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown;
+        }
+        tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Resolved(
+            tracedecay_runtime_core::worktree::GitRepoIdentity {
+                worktree_root: root.to_path_buf(),
+                common_dir: root.join(".git"),
+            },
+        )
+    }
+
+    fn row_with_cwd(cwd: &Path) -> HermesRow {
+        HermesRow {
+            id: 1,
+            session_id: "session".to_string(),
+            role: "user".to_string(),
+            content: Some("retry me".to_string()),
+            reasoning: None,
+            tool_name: None,
+            tool_calls: None,
+            timestamp: None,
+            session_model: None,
+            parent_session_id: None,
+            session_cwd: Some(cwd.to_string_lossy().to_string()),
+            session_source: None,
+            session_title: None,
+            session_started_at: None,
+            session_ended_at: None,
+            session_input_tokens: None,
+            session_output_tokens: None,
+            session_cache_read_tokens: None,
+            session_cache_write_tokens: None,
+            session_reasoning_tokens: None,
+            is_session_usage_frontier: false,
+            active: 1,
+            sql_value_oversized: false,
+            sql_measured_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn unknown_destination_route_retries_without_advancing_cursor() {
+        IDENTITY_ATTEMPTS.store(0, Ordering::SeqCst);
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        let rows = vec![row_with_cwd(&cwd)];
+        let source = HermesProfileSource {
+            state_db: temp.path().join("state.db"),
+            legacy_project_pin: None,
+            profile: None,
+        };
+        let previous = StoredCursor::default();
+        let mut persisted = previous;
+        let mut routes = HashMap::new();
+
+        let first_matchers = vec![ProjectRootMatcher::new_with_identity_resolver(
+            &project_root,
+            retrying_identity,
+        )];
+        assert!(
+            turn_project_locations_for_destinations(&rows, &first_matchers, &source, &mut routes)
+                .is_err()
+        );
+        assert_eq!(persisted, previous);
+        assert!(routes.is_empty(), "unknown routes must not be cached");
+
+        let retry_matchers = vec![ProjectRootMatcher::new_with_identity_resolver(
+            &project_root,
+            retrying_identity,
+        )];
+        let locations =
+            turn_project_locations_for_destinations(&rows, &retry_matchers, &source, &mut routes)
+                .expect("the same source rows should route after identity recovers");
+        assert_eq!(
+            locations[0].by_row_id.get(&1).copied(),
+            Some("session_cwd"),
+            "recovered identity must route the deferred row to its destination"
+        );
+        persisted.position = rows[0].id as u64;
+        assert!(persisted.position > previous.position);
+        assert_eq!(IDENTITY_ATTEMPTS.load(Ordering::SeqCst), 3);
+    }
+}

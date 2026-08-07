@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::runtime::shared::ProjectRootMatcher;
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcher};
 
 use super::ingest::HermesProfileSource;
 use super::rows::HermesRow;
@@ -100,12 +100,20 @@ pub(super) struct DestinationTurnLocations {
     pub by_row_id: HashMap<i64, &'static str>,
 }
 
+/// A destination route could not be decided because a bounded git identity
+/// lookup timed out. The caller must fail the whole page (without advancing
+/// its cursor) so the same rows are re-routed on the next sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DestinationRoutingError {
+    UnknownMembership,
+}
+
 pub(super) fn turn_project_locations_for_destinations(
     rows: &[HermesRow],
     destination_matchers: &[ProjectRootMatcher],
     source: &HermesProfileSource,
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) -> Vec<DestinationTurnLocations> {
+) -> Result<Vec<DestinationTurnLocations>, DestinationRoutingError> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     for row in rows {
         by_session.entry(&row.session_id).or_default().push(row);
@@ -135,7 +143,7 @@ pub(super) fn turn_project_locations_for_destinations(
         let mut fallbacks = vec![false; destination_matchers.len()];
         for cwd in fallback_candidates {
             for destination_index in
-                matching_destinations(&cwd, destination_matchers, destination_routes)
+                matching_destinations(&cwd, destination_matchers, destination_routes)?
             {
                 fallbacks[destination_index] = true;
             }
@@ -150,7 +158,7 @@ pub(super) fn turn_project_locations_for_destinations(
                     fallback_provenance,
                     &mut locations,
                     destination_routes,
-                );
+                )?;
                 turn.clear();
             }
             turn.push(row);
@@ -162,9 +170,9 @@ pub(super) fn turn_project_locations_for_destinations(
             fallback_provenance,
             &mut locations,
             destination_routes,
-        );
+        )?;
     }
-    locations
+    Ok(locations)
 }
 
 fn assign_turn_locations_for_destinations(
@@ -174,7 +182,7 @@ fn assign_turn_locations_for_destinations(
     fallback_provenance: &'static str,
     locations: &mut [DestinationTurnLocations],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) {
+) -> Result<(), DestinationRoutingError> {
     let explicit_paths = rows
         .iter()
         .rev()
@@ -185,7 +193,7 @@ fn assign_turn_locations_for_destinations(
     if has_explicit_paths {
         for path in explicit_paths {
             for destination_index in
-                matching_destinations(&path, destination_matchers, destination_routes)
+                matching_destinations(&path, destination_matchers, destination_routes)?
             {
                 selected[destination_index] = true;
             }
@@ -205,23 +213,31 @@ fn assign_turn_locations_for_destinations(
                 .extend(rows.iter().map(|row| (row.id, provenance)));
         }
     }
+    Ok(())
 }
 
 fn matching_destinations(
     path: &Path,
     destination_matchers: &[ProjectRootMatcher],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, DestinationRoutingError> {
     if let Some(indices) = destination_routes.get(path) {
-        return indices.clone();
+        return Ok(indices.clone());
     }
-    let indices = destination_matchers
-        .iter()
-        .enumerate()
-        .filter_map(|(index, matcher)| matcher.contains(path).then_some(index))
-        .collect::<Vec<_>>();
+    let mut indices = Vec::new();
+    for (index, matcher) in destination_matchers.iter().enumerate() {
+        match matcher.contains_status(path) {
+            ProjectMembership::Match => indices.push(index),
+            ProjectMembership::NoMatch => {}
+            // Do not cache: an undecided route must be re-resolved, not
+            // remembered as "matches nothing".
+            ProjectMembership::Unknown => {
+                return Err(DestinationRoutingError::UnknownMembership);
+            }
+        }
+    }
     destination_routes.insert(path.to_path_buf(), indices.clone());
-    indices
+    Ok(indices)
 }
 
 fn assign_turn_location(
