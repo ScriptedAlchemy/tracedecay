@@ -417,6 +417,11 @@ pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
         ScopeDimension::Branch,
         ScopeDimension::Session,
         ScopeDimension::Resource,
+        // The daemon-retained configuration authority resolves layers for
+        // every surface, so configuration-scoped capabilities are
+        // discoverable here; omitting this dimension hid every
+        // `tracedecay_configuration_*` binding from live `tools/list`.
+        ScopeDimension::ConfigurationLayer,
     ]
     .into_iter()
     .collect()
