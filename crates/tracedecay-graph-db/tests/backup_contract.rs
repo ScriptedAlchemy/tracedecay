@@ -104,6 +104,7 @@ fn seeded_store(root: &Path) -> PathBuf {
         vec![GraphMutation::UpsertEntity(entity("a"))],
     ))
     .unwrap();
+    drop(db);
     assert!(registered.close().unwrap());
     graph_path(root)
 }
@@ -151,6 +152,7 @@ fn full_backup_restores_the_fenced_snapshot_and_excludes_later_writes() {
         ],
     ))
     .unwrap();
+    drop(db);
     assert!(registered.close().unwrap());
 
     fs::create_dir(&restored_root).unwrap();
@@ -164,8 +166,10 @@ fn full_backup_restores_the_fenced_snapshot_and_excludes_later_writes() {
     let from_a = restored.traverse(traversal("a")).unwrap();
     assert_eq!(from_a.visits.len(), 1);
     assert_eq!(from_a.visits[0].entity.as_str(), "a");
-    let from_b = restored.traverse(traversal("b")).unwrap();
-    assert!(from_b.visits.is_empty());
+    // The post-backup entity is absent from the restored fenced snapshot.
+    let missing = restored.traverse(traversal("b")).unwrap_err();
+    assert!(matches!(missing, GraphDbError::InvalidRequest { .. }));
+    drop(restored);
     assert!(registered.close().unwrap());
 }
 
@@ -182,6 +186,7 @@ fn backup_rejects_a_source_still_held_open_by_its_owner() {
 
     assert!(matches!(error, GraphDbError::Unavailable { .. }));
     assert!(!backup.exists());
+    drop(_db);
     assert!(registered.close().unwrap());
 }
 
