@@ -1,6 +1,8 @@
 //! Credential, revision, and audit persistence tests.
 
-use super::super::mutation::{commit_configuration_transaction, validate_commit_bindings};
+use super::super::mutation::{
+    commit_configuration_transaction, map_store_error, validate_commit_bindings,
+};
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
     ConfigurationStoreError, CredentialWritePort, params,
@@ -424,5 +426,125 @@ async fn failed_configuration_commit_leaves_no_partial_revision_receipt_or_audit
     assert_eq!(
         count(&connection, "configuration_change_plan_events").await,
         1
+    );
+}
+
+/// Byte-exact dump of a store canonically initialized by registry revision 3
+/// (tip aae945bf54), whose current snapshot carries the retired
+/// `query.default_collection.v1` entry with genuine revision-3 digests.
+const REVISION_THREE_STORE_FIXTURE: &str =
+    include_str!("fixtures/configuration-registry-revision3.sql");
+
+const RETIRED_DEFAULT_COLLECTION_SETTING_KEY: &str = "query.default_collection.v1";
+
+async fn revision_three_store() -> (tempfile::TempDir, TestConnection) {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = TestConnection::open(&directory.path().join("configuration.db"));
+    connection
+        .execute_batch(REVISION_THREE_STORE_FIXTURE)
+        .await
+        .unwrap();
+    (directory, connection)
+}
+
+/// The registry-revision-4 cutover retired `query.default_collection.v1`
+/// without a data migration: the configuration store's durable contract is
+/// exact-final-shape fail-closed, so a store still carrying the retired entry
+/// surfaces the typed reset state instead of being interpreted or repaired.
+#[tokio::test]
+async fn store_carrying_the_retired_default_collection_entry_fails_closed_typed() {
+    let (_directory, connection) = revision_three_store().await;
+
+    // The SQL shape is unchanged between registry revisions 3 and 4, so
+    // schema admission still passes; the reset must come from the retired
+    // entry itself, not from a DDL mismatch.
+    assert!(
+        crate::configuration::schema::fresh_configuration_store_evidence(&*connection)
+            .await
+            .unwrap()
+            .is_none(),
+        "a populated revision-3 store must not present as fresh"
+    );
+    crate::configuration::schema::admit_configuration_schema(&*connection, None)
+        .await
+        .unwrap();
+
+    let store = ConfigurationSqlStore::new(&connection);
+    let current = store.current_revision().await;
+    let Err(ConfigurationStoreError::InvalidData(reason)) = current else {
+        panic!("revision-3 snapshot with a retired entry must be invalid data: {current:?}");
+    };
+    assert!(
+        reason.contains("decode configuration snapshot entry"),
+        "reset reason must cite the snapshot entry decode: {reason}"
+    );
+    assert!(
+        reason.contains("default_collection"),
+        "reset reason must name the retired value: {reason}"
+    );
+    assert!(
+        matches!(
+            map_store_error(ConfigurationStoreError::InvalidData(reason)),
+            ConfigurationError::ResetRequired { .. }
+        ),
+        "invalid store data must surface as the typed reset state"
+    );
+
+    // The rollback target read uses the same revision read path and must fail
+    // closed the same way instead of resurrecting the retired value.
+    let target = store
+        .read_revision(&id("configuration.revision.root"))
+        .await;
+    assert!(
+        matches!(target, Err(ConfigurationStoreError::InvalidData(_))),
+        "rollback-target read of a retired-entry revision must fail closed: {target:?}"
+    );
+
+    // Fail-closed means untouched: the store is never silently repaired.
+    let mut rows = connection
+        .query(
+            "SELECT COUNT(*) FROM configuration_entries WHERE key = ?1",
+            params![RETIRED_DEFAULT_COLLECTION_SETTING_KEY],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+        1,
+        "the retired entry must survive the failed read untouched"
+    );
+}
+
+#[tokio::test]
+async fn fresh_stores_resolve_without_the_retired_default_collection_setting() {
+    let registry = ConfigurationRegistry::core().unwrap();
+    let retired = SettingKey::new(RETIRED_DEFAULT_COLLECTION_SETTING_KEY).unwrap();
+    assert!(
+        registry.definition(&retired).is_err(),
+        "registry revision 4 must not define the retired setting"
+    );
+    // Any ingest of the retired key is rejected at the registry boundary.
+    assert!(
+        registry
+            .validate_value(&retired, &ConfigurationValueV1::Boolean(true))
+            .is_err(),
+        "values for the retired key must be rejected on ingest"
+    );
+
+    let resolution = resolve_configuration(&registry, &[]).unwrap();
+    assert!(
+        !resolution.snapshot.effective_values.contains_key(&retired),
+        "fresh resolution must not manufacture the retired setting"
+    );
+
+    let (_directory, connection) = setup().await;
+    seed_revision(&connection, &root_revision()).await;
+    let current = ConfigurationSqlStore::new(&connection)
+        .current_revision()
+        .await
+        .unwrap();
+    assert!(
+        !current.snapshot.effective_values.contains_key(&retired),
+        "a canonically initialized revision-4 store must not carry the retired setting"
     );
 }

@@ -226,8 +226,8 @@ mod tests {
             },
             revision_id: id("revision.project.1"),
             entries: BTreeMap::from([(
-                id("query.default_collection.v1"),
-                ConfigurationValueV1::DefaultCollection(None),
+                id("user.upload_enabled.v1"),
+                ConfigurationValueV1::Boolean(true),
             )]),
         };
         assert!(resolve_configuration(&registry, &[layer]).is_err());
@@ -238,8 +238,8 @@ mod tests {
             },
             revision_id: id("revision.profile.1"),
             entries: BTreeMap::from([(
-                id("query.default_collection.v1"),
-                ConfigurationValueV1::DefaultCollection(None),
+                id("user.upload_enabled.v1"),
+                ConfigurationValueV1::Boolean(true),
             )]),
         };
         assert!(resolve_configuration(&registry, &[user_layer]).is_ok());

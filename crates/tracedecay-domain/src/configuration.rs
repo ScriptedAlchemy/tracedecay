@@ -30,7 +30,6 @@ const PROTECTED_CHANGE_DIGEST_DOMAIN: &str = "tracedecay.configuration.protected
 /// Canonical setting keys owned by the configuration control plane.
 pub const SOURCE_BINDINGS_SETTING_KEY: &str = "scope.source_bindings.v1";
 pub const ACCESS_RULES_SETTING_KEY: &str = "scope.access_rules.v1";
-pub const DEFAULT_COLLECTION_SETTING_KEY: &str = "query.default_collection.v1";
 pub const ANALYZER_SETTINGS_SETTING_KEY: &str = "analyzer.settings.v1";
 pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
 pub const WORK_EXECUTABLE_BINDINGS_SETTING_KEY: &str = "work.executable_bindings.v1";
@@ -74,7 +73,6 @@ pub const TELEMETRY_TIMINGS_SETTING_KEY: &str = "telemetry.timings.v1";
 pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     SOURCE_BINDINGS_SETTING_KEY,
     ACCESS_RULES_SETTING_KEY,
-    DEFAULT_COLLECTION_SETTING_KEY,
     ANALYZER_SETTINGS_SETTING_KEY,
     WORK_TOPOLOGY_POLICY_SETTING_KEY,
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
@@ -118,7 +116,6 @@ validated_string_newtype!(
     SourceBindingId => "source binding id",
     AccessRuleId => "access rule id",
     QueryCollectionId => "query collection id",
-    WorkspaceCollectionId => "workspace collection id",
     ConfigurationRevisionId => "configuration revision id",
     ConfigurationSnapshotId => "configuration snapshot id",
     ChangePlanId => "configuration change plan id",
@@ -508,7 +505,6 @@ pub enum ConfigurationValueKindV1 {
     StringList,
     SourceBindings,
     AccessRules,
-    DefaultCollection,
     AnalyzerSettings,
     WorkTopologyPolicy,
     WorkExecutableBindings,
@@ -618,24 +614,6 @@ impl ContextScoutSettingsV1 {
             });
         }
         self.limits.validate()
-    }
-}
-
-/// A reference-only selector. It is convenience input, never collection
-/// authority or membership evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", content = "id")]
-pub enum CollectionSelectorV1 {
-    Query(QueryCollectionId),
-    Workspace(WorkspaceCollectionId),
-}
-
-impl CollectionSelectorV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        match self {
-            Self::Query(id) => id.validate(),
-            Self::Workspace(id) => id.validate(),
-        }
     }
 }
 
@@ -899,7 +877,6 @@ pub enum ConfigurationValueV1 {
     StringList(Vec<String>),
     SourceBindings(Vec<ScopeSourceBinding>),
     AccessRules(Vec<ScopeAccessRule>),
-    DefaultCollection(Option<CollectionSelectorV1>),
     AnalyzerSettings(AnalyzerSettingsV1),
     WorkTopologyPolicy(Box<WorkTopologyPolicyV1>),
     WorkExecutableBindings(Vec<WorkExecutableBindingV1>),
@@ -916,7 +893,6 @@ impl ConfigurationValueV1 {
             Self::StringList(_) => ConfigurationValueKindV1::StringList,
             Self::SourceBindings(_) => ConfigurationValueKindV1::SourceBindings,
             Self::AccessRules(_) => ConfigurationValueKindV1::AccessRules,
-            Self::DefaultCollection(_) => ConfigurationValueKindV1::DefaultCollection,
             Self::AnalyzerSettings(_) => ConfigurationValueKindV1::AnalyzerSettings,
             Self::WorkTopologyPolicy(_) => ConfigurationValueKindV1::WorkTopologyPolicy,
             Self::WorkExecutableBindings(_) => ConfigurationValueKindV1::WorkExecutableBindings,
@@ -952,9 +928,6 @@ impl ConfigurationValueV1 {
                 }
                 Ok(())
             }
-            Self::DefaultCollection(selector) => selector
-                .as_ref()
-                .map_or(Ok(()), CollectionSelectorV1::validate),
             Self::AnalyzerSettings(settings) => settings.validate(),
             Self::WorkTopologyPolicy(policy) => policy.validate(),
             Self::WorkExecutableBindings(bindings) => validate_work_executable_bindings(bindings),
@@ -1090,7 +1063,6 @@ pub enum ScopeControlOperationV1 {
     SourceUnbind,
     AccessRuleUpsert,
     AccessRuleRemove,
-    SetDefaultCollection,
     ReplaceTopologyPolicy,
     Rollback,
 }

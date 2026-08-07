@@ -7,11 +7,11 @@ use tracedecay_domain::DomainError;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, ANALYZER_SETTINGS_SETTING_KEY, AnalyzerSettingsV1,
     CONFIGURATION_SETTING_KEYS_V1, CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationValueKindV1,
-    ConfigurationValueV1, ContextScoutSettingsV1, DEFAULT_COLLECTION_SETTING_KEY,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY, INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY, RestartRequirementV1,
-    SEMANTIC_RUNTIME_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
+    ConfigurationValueV1, ContextScoutSettingsV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
+    DeprecationStateV1, INDEX_EXCLUDE_SETTING_KEY, INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
+    INDEX_GIT_IGNORE_SETTING_KEY, INDEX_INCLUDE_SETTING_KEY, INDEX_MAX_FILE_SIZE_SETTING_KEY,
+    INDEX_TRACK_CALL_SITES_SETTING_KEY, RestartRequirementV1, SEMANTIC_RUNTIME_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
     SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
@@ -35,7 +35,7 @@ pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 3;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 4;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -96,16 +96,6 @@ impl ConfigurationRegistry {
             default_value: ConfigurationValueV1::AccessRules(Vec::new()),
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
-            restart_requirement: RestartRequirementV1::None,
-            deprecation: DeprecationStateV1::Active,
-        })?;
-        registry.register(SettingDefinitionV1 {
-            key: setting_key(DEFAULT_COLLECTION_SETTING_KEY)?,
-            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
-            value_kind: ConfigurationValueKindV1::DefaultCollection,
-            default_value: ConfigurationValueV1::DefaultCollection(None),
-            sensitivity: SettingSensitivityV1::Public,
-            scope: SettingScopeV1::UserProfile,
             restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;

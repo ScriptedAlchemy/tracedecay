@@ -106,25 +106,6 @@ impl EvidenceSpanIdV1 {
     }
 }
 
-/// Burst-specific identity wrapper over [`DerivedEvidenceIdV1`].
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(transparent)]
-pub struct EvidenceBurstIdV1(DerivedEvidenceIdV1);
-
-impl EvidenceBurstIdV1 {
-    pub fn new(value: impl Into<String>) -> Result<Self, SessionContractError> {
-        Ok(Self(DerivedEvidenceIdV1::new(value)?))
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
-    pub fn as_derived(&self) -> &DerivedEvidenceIdV1 {
-        &self.0
-    }
-}
-
 /// One ordered member of a derived span or burst.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
