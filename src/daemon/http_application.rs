@@ -39,6 +39,14 @@ type ProjectRouterResolverFuture =
     Pin<Box<dyn Future<Output = Result<Option<Router>>> + Send + 'static>>;
 type ProjectRouterResolver =
     Arc<dyn Fn(ProjectId) -> ProjectRouterResolverFuture + Send + Sync + 'static>;
+type RemoteDeletionExecutorFuture =
+    Pin<Box<dyn Future<Output = super::remote_deletion::RemoteDeletionReceipt> + Send + 'static>>;
+pub(super) type RemoteDeletionExecutor = Arc<
+    dyn Fn(super::remote_deletion::RemoteDeletionHttpRequest) -> RemoteDeletionExecutorFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectRouterResolutionError {
@@ -98,6 +106,7 @@ pub(super) struct DaemonHttpApplicationRegistry {
     resolver_admission: Arc<Semaphore>,
     remote: Arc<SyncRwLock<Option<RemoteHttpApplicationMount>>>,
     active: Arc<AtomicBool>,
+    remote_deletion_executor: Arc<SyncRwLock<Option<RemoteDeletionExecutor>>>,
 }
 
 impl Default for DaemonHttpApplicationRegistry {
@@ -108,6 +117,7 @@ impl Default for DaemonHttpApplicationRegistry {
             resolver_admission: Arc::new(Semaphore::new(MAX_HTTP_APPLICATION_COLD_RESOLUTIONS)),
             remote: Arc::new(SyncRwLock::new(None)),
             active: Arc::new(AtomicBool::new(false)),
+            remote_deletion_executor: Arc::new(SyncRwLock::new(None)),
         }
     }
 }
@@ -166,6 +176,35 @@ impl DaemonHttpApplicationRegistry {
         Ok(())
     }
 
+    pub(super) fn install_remote_deletion_executor<F, Fut>(&self, executor: F) -> Result<()>
+    where
+        F: Fn(super::remote_deletion::RemoteDeletionHttpRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = super::remote_deletion::RemoteDeletionReceipt> + Send + 'static,
+    {
+        let mut slot =
+            self.remote_deletion_executor
+                .write()
+                .map_err(|_| TraceDecayError::Config {
+                    message: "daemon remote deletion executor lock is poisoned".to_owned(),
+                })?;
+        if slot.is_some() {
+            return Err(TraceDecayError::Config {
+                message: "daemon remote deletion executor is already installed".to_owned(),
+            });
+        }
+        *slot = Some(Arc::new(move |request| Box::pin(executor(request))));
+        Ok(())
+    }
+
+    pub(super) fn remote_deletion_executor(&self) -> Result<Option<RemoteDeletionExecutor>> {
+        self.remote_deletion_executor
+            .read()
+            .map(|executor| executor.clone())
+            .map_err(|_| TraceDecayError::Config {
+                message: "daemon remote deletion executor lock is poisoned".to_owned(),
+            })
+    }
+
     async fn resolve(
         &self,
         project_id: &str,
@@ -215,6 +254,15 @@ impl DaemonHttpApplicationRegistry {
                 any(dispatch_project_application),
             )
             .route("/remote-nodes/provision", post(provision_remote_node))
+            // Deletion lifecycle intake. The upstream lanes mounted this at
+            // `/remote/deletions`; at this tip `/remote` is a nest point for the
+            // Remote Brain router, so the local admission surface uses the same
+            // hyphenated convention as `/remote-nodes/provision` to stay
+            // conflict-free with that nest.
+            .route(
+                "/remote-deletions",
+                post(super::remote_deletion::dispatch_remote_deletion),
+            )
             .with_state(self.clone())
             .layer(middleware::from_fn_with_state(
                 admission,

@@ -2,7 +2,11 @@
 use std::sync::Arc;
 
 #[cfg(test)]
-use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
+use super::{
+    AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb, RemoteDeletionCleanupState,
+    RemoteDeletionFailureCode, RemoteDeletionPhase, RemoteDeletionTarget, RemoteDeletionTombstone,
+    RemoteDeletionTombstoneRecordOutcome, RemoteDeletionTombstoneTransitionOutcome,
+};
 
 pub mod harness;
 #[cfg(test)]
@@ -47,6 +51,89 @@ async fn row_count(db: &RegisteredGlobalDb, table: &str) -> i64 {
         .await
         .unwrap();
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+}
+
+#[tokio::test]
+async fn remote_deletion_tombstone_preserves_exact_identity_and_cleanup_state() {
+    let harness = RegisteredGlobalDbHarness::open("remote-deletion-state").await;
+    let pending = RemoteDeletionTombstone {
+        target: RemoteDeletionTarget::Project,
+        profile_id: "profile.remote-deletion".to_owned(),
+        project_id: Some("proj.remote-deletion".to_owned()),
+        tombstone_id: "tombstone.remote-deletion".to_owned(),
+        recorded_at_micros: 100,
+        cleanup: RemoteDeletionCleanupState::Pending,
+    };
+
+    assert_eq!(
+        harness
+            .registered
+            .record_remote_deletion_tombstone(pending.clone())
+            .await
+            .expect("record deletion tombstone"),
+        RemoteDeletionTombstoneRecordOutcome::Recorded(pending.clone())
+    );
+    assert_eq!(
+        harness
+            .registered
+            .record_remote_deletion_tombstone(RemoteDeletionTombstone {
+                recorded_at_micros: 200,
+                ..pending.clone()
+            })
+            .await
+            .expect("replay deletion tombstone"),
+        RemoteDeletionTombstoneRecordOutcome::Replayed(pending.clone())
+    );
+    assert_eq!(
+        harness
+            .registered
+            .record_remote_deletion_tombstone(RemoteDeletionTombstone {
+                tombstone_id: "tombstone.replacement".to_owned(),
+                recorded_at_micros: 300,
+                ..pending.clone()
+            })
+            .await
+            .expect("classify replacement tombstone"),
+        RemoteDeletionTombstoneRecordOutcome::Conflict {
+            existing: pending.clone()
+        }
+    );
+
+    let settling = RemoteDeletionCleanupState::Settling {
+        failure_code: RemoteDeletionFailureCode::RuntimeOwnersSettling,
+        phase: RemoteDeletionPhase::CancelRuntimeOwners,
+        retryable: true,
+    };
+    let settled_record = RemoteDeletionTombstone {
+        cleanup: settling.clone(),
+        ..pending.clone()
+    };
+    assert_eq!(
+        harness
+            .registered
+            .transition_remote_deletion_tombstone(
+                &pending,
+                RemoteDeletionCleanupState::Pending,
+                settling,
+            )
+            .await
+            .expect("persist settling state"),
+        RemoteDeletionTombstoneTransitionOutcome::Updated(settled_record.clone())
+    );
+    assert_eq!(
+        harness
+            .registered
+            .transition_remote_deletion_tombstone(
+                &pending,
+                RemoteDeletionCleanupState::Pending,
+                RemoteDeletionCleanupState::Deleted,
+            )
+            .await
+            .expect("reject stale cleanup transition"),
+        RemoteDeletionTombstoneTransitionOutcome::StateChanged {
+            existing: settled_record
+        }
+    );
 }
 
 #[tokio::test]

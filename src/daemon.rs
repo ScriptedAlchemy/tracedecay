@@ -250,6 +250,7 @@ pub use production_harness::ProductionProjectCompositionHarnessV1;
 pub use production_harness::capture_exact_git_snapshot_for_test;
 mod profile_host_admission_replay;
 mod projectless;
+mod remote_deletion;
 #[cfg(test)]
 use projectless::projectless_tools_call_response;
 use projectless::{
