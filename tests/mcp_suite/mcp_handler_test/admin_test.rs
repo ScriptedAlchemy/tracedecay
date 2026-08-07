@@ -513,8 +513,19 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         HostAdmissionTestRuntimeV1::project_scoped(&profile_root, cg.project_root(), project_id)
             .await
             .unwrap();
+    // One profile end to end: the target must init with the same explicit
+    // profile/global-db pair its read-only reopen below uses. Env-derived
+    // targets at init point the global DB at the env override while the
+    // explicit reopen derives it from the profile root, splitting one
+    // project across two configuration stores — and the reopen correctly
+    // refuses the uninitialized one instead of sealing a revision through a
+    // read-only open.
+    let target_options = tracedecay::tracedecay::TraceDecayOpenOptions {
+        global_db_path: Some(profile_root.join("global.db")),
+        profile_root: Some(profile_root.clone()),
+    };
     let target_cg = TestTraceDecay::new(
-        fixture::init_project_from_template(target_project)
+        fixture::init_project_from_template_with_options(target_project, target_options.clone())
             .await
             .unwrap(),
     );
@@ -547,13 +558,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
     .await
     .unwrap();
     let target_graph = target_runtime
-        .open_project_graph_read_only_for_test(
-            target_project,
-            tracedecay::tracedecay::TraceDecayOpenOptions {
-                global_db_path: Some(profile_root.join("global.db")),
-                profile_root: Some(profile_root.clone()),
-            },
-        )
+        .open_project_graph_read_only_for_test(target_project, target_options)
         .await
         .expect("target project graph opens through its own scoped runtime");
     let server = tracedecay::mcp::McpServer::new_with_retained_test_graphs_for_test(
