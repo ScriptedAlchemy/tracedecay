@@ -1377,6 +1377,7 @@ impl DeterministicCodeChunker {
             }
             reparsed = extractor.extract(&file.file.logical_path, source);
             reparsed.sanitize();
+            reparsed.canonicalize_order();
             &reparsed
         };
         if cancellation.is_cancelled() {

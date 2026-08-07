@@ -440,6 +440,45 @@ impl ExtractionResult {
                 .push(format!("stripped {removed} node(s) with empty names"));
         }
     }
+
+    /// Deterministic canonical row order shared by full-document and
+    /// incremental extraction, so identical content serializes byte-identically
+    /// regardless of traversal path: file rows first, then source position with
+    /// enclosing (larger) spans before their children, with the content-hash id
+    /// as the final total-order tiebreaker.
+    pub fn canonicalize_order(&mut self) {
+        self.nodes.sort_by(|left, right| {
+            let left_is_file = left.kind == NodeKind::File;
+            let right_is_file = right.kind == NodeKind::File;
+            right_is_file
+                .cmp(&left_is_file)
+                .then_with(|| left.start_line.cmp(&right.start_line))
+                .then_with(|| left.start_column.cmp(&right.start_column))
+                .then_with(|| right.end_line.cmp(&left.end_line))
+                .then_with(|| right.end_column.cmp(&left.end_column))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        self.edges.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.target.cmp(&right.target))
+                .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
+        });
+        self.unresolved_refs.sort_by(|left, right| {
+            left.line
+                .cmp(&right.line)
+                .then_with(|| left.column.cmp(&right.column))
+                .then_with(|| left.from_node_id.cmp(&right.from_node_id))
+                .then_with(|| left.reference_name.cmp(&right.reference_name))
+                .then_with(|| {
+                    left.reference_kind
+                        .as_str()
+                        .cmp(right.reference_kind.as_str())
+                })
+        });
+    }
 }
 
 /// A subgraph containing a subset of nodes and edges.
