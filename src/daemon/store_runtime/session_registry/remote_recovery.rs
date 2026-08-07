@@ -878,7 +878,7 @@ fn observe_control(
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) | Err(INTERRUPTION_CANCELLED) | Err(INTERRUPTION_DEADLINE) => {}
+            Ok(_) | Err(INTERRUPTION_CANCELLED | INTERRUPTION_DEADLINE) => {}
             Err(_) => tracing::warn!("remote recovery interruption state is invalid"),
         }
     }

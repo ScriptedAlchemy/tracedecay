@@ -252,6 +252,14 @@ required-features = ["test-transport"]
 name = "v2_surface_mount_conformance"
 path = "tests/v2_surface_mount_conformance.rs"
 required-features = ["test-transport"]
+
+# Drives the seven-step production Work loop — create, evidence, proposal,
+# acceptance, admission, a real spawned provider step, receipt, replan —
+# through one live daemon's published HTTP application endpoint.
+[[test]]
+name = "work_loop_journey"
+path = "tests/work_loop_journey.rs"
+required-features = ["test-transport"]
 [dependencies]
 axum = "0.8"
 tower = "0.5"

@@ -566,11 +566,7 @@ fn retrieval_command(
                     SessionSearchTimeRange::default(),
                 )
             }
-            DashboardLcmReadRequestV1::Timeline {
-                session_id,
-                limit: _,
-                ..
-            } => {
+            DashboardLcmReadRequestV1::Timeline { session_id, .. } => {
                 let root = session_id
                     .as_deref()
                     .unwrap_or("session.dashboard-lcm.root");

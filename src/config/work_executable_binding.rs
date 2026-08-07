@@ -4,7 +4,6 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -37,18 +36,6 @@ impl ResolvedWorkExecutableBinding {
 
     pub(crate) fn executable(&self) -> &WorkExecutableReference {
         &self.executable
-    }
-
-    pub(crate) const fn backend(&self) -> WorkProviderBackendV1 {
-        self.backend
-    }
-
-    pub(crate) const fn protocol(&self) -> WorkProviderProtocol {
-        self.protocol
-    }
-
-    pub(crate) const fn capability(&self) -> WorkExecutableCapabilityV1 {
-        self.capability
     }
 
     pub(crate) fn configuration_revision_id(&self) -> &ConfigurationRevisionId {
@@ -121,13 +108,6 @@ impl PinnedWorkExecutableBindingResolver {
             configuration_snapshot_id: configuration.snapshot.snapshot_id.clone(),
         })
     }
-
-    pub(crate) fn shared_from_configuration(
-        configuration: &PinnedRuntimeConfiguration,
-    ) -> Result<Arc<dyn WorkExecutableBindingResolver + Send + Sync>, WorkExecutableBindingError>
-    {
-        Ok(Arc::new(Self::from_configuration(configuration)?))
-    }
 }
 
 impl WorkExecutableBindingResolver for PinnedWorkExecutableBindingResolver {
@@ -194,7 +174,7 @@ fn digest_file(path: &Path) -> std::io::Result<(ManifestDigest, u64)> {
     }
     let mut hasher = Sha256::new();
     let mut bytes = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {

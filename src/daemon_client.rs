@@ -952,7 +952,7 @@ pub struct SemanticEvaluationPublicationResultV1 {
 }
 
 pub(crate) fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
-    let now = current_system_micros().map(|now| now.0).unwrap_or(i64::MAX);
+    let now = current_system_micros().map_or(i64::MAX, |now| now.0);
     let remaining = deadline.expires_at.0.checked_sub(now)?;
     (remaining > 0).then(|| Duration::from_micros(remaining as u64))
 }
@@ -978,9 +978,7 @@ mod tests {
         DaemonInvocationError, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
         semantic_evaluation_application_problem,
     };
-    use tracedecay_application::{
-        ApplicationProblem, ApplicationProblemKind, CancellationStage, RetryDirective,
-    };
+    use tracedecay_application::{ApplicationProblem, ApplicationProblemKind, CancellationStage};
 
     #[test]
     fn daemon_invocation_errors_keep_canonical_problem_categories() {

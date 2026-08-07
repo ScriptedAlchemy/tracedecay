@@ -7,8 +7,7 @@
 use std::collections::BTreeMap;
 
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -375,38 +374,14 @@ pub async fn observatory(
     Json(envelope)
 }
 
-/// Transport-neutral HTTP representation over the same application model.
-pub async fn observatory_http(State(state): State<DashboardState>) -> Response {
-    let model = observatory_model(&state).await;
-    match crate::application::observability::observatory_http_value(&model) {
-        Ok(value) => Json(value).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-/// Public JSON export. No dashboard projection or formula is applied.
-pub async fn observatory_export(State(state): State<DashboardState>) -> Response {
-    let model = observatory_model(&state).await;
-    match crate::application::observability::observatory_export_bytes(&model) {
-        Ok(bytes) => (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                ),
-                (
-                    header::CONTENT_DISPOSITION,
-                    HeaderValue::from_static(
-                        "attachment; filename=\"tracedecay-observatory-v1.json\"",
-                    ),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
+// `observatory_http` / `observatory_export` are deleted with their last caller.
+// They mounted `/api/plugins/analytics/observatory{,/export}`, which served the
+// same application model as `/api/observatory` — the route the Observatory
+// workspace actually reads (`CanonicalObservations.tsx`) — one without the
+// envelope and one with a download disposition. No dashboard, SDK, CLI, or MCP
+// caller ever bound to either; the only reader was a parity test asserting the
+// aliases agreed with the canonical route, which is a test of the duplication
+// rather than of any behavior a consumer depends on.
 
 async fn observatory_model(state: &DashboardState) -> ObservatoryReadModelV1 {
     let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);

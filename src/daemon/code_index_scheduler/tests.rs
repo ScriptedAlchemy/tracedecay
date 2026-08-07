@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -44,15 +44,7 @@ use crate::semantic_code::{
     production_fastembed_catalog,
 };
 #[cfg(feature = "semantic-fastembed")]
-use crate::store::vector_generations::GraphVectorGenerationStoreV1;
-#[cfg(feature = "semantic-fastembed")]
-use tracedecay_graph_db::{GraphDb, GraphDbOwner, NeverCancelled};
-#[cfg(feature = "semantic-fastembed")]
-use tracedecay_store::{
-    BrainId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
-    canonical_store_locator_digest,
-};
+use tracedecay_graph_db::NeverCancelled;
 
 use super::{
     CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexReconcileOutcomeV1,
@@ -1169,7 +1161,7 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
         tracedecay_domain::CodeGenerationId::new("generation.latest").expect("latest generation");
     let stale =
         tracedecay_domain::CodeGenerationId::new("generation.stale").expect("stale generation");
-    let vector = tracedecay_domain::VectorGenerationIdV1::new(
+    let _vector = tracedecay_domain::VectorGenerationIdV1::new(
         tracedecay_domain::canonical_sha256(&"semantic-mcp-vector").expect("vector digest"),
     );
 

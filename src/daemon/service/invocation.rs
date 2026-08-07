@@ -246,9 +246,9 @@ pub(crate) use types::{
 // from `service::project_runtime`. Re-export at the same absolute reach the
 // definitions themselves now declare via `pub(in crate::daemon::service)`.
 pub(crate) use registrars::{
-    DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
-    DaemonConfigurationRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar,
-    DaemonFeedbackRuntimeRegistrationError, DaemonLspOwnerRegistrar, DaemonWorkRuntimeRegistrar,
+    DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
+    DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
+    DaemonLspOwnerRegistrar, DaemonWorkRuntimeRegistrar,
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,

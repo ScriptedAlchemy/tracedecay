@@ -47,8 +47,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracedecay_runtime_core::cancellation::MonotonicDeadline;
 use tracedecay_runtime_core::git_discovery::{
-    GitDiscoveryUnknown, GitRepositoryIdentity, GitRepositoryIdentityOutcome,
-    discover_repository_identity,
+    GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity,
 };
 
 use crate::config::SyncConfig;
@@ -804,13 +803,6 @@ enum OperationObservation {
     Cancelled,
 }
 
-fn observation_stopped(
-    cancellation: &crate::application::context::CancellationToken,
-    deadline: StdInstant,
-) -> bool {
-    cancellation.is_cancelled() || StdInstant::now() >= deadline
-}
-
 fn watch_observation_stopped(cancellation: &WatchCancellation, deadline: StdInstant) -> bool {
     cancellation.is_cancelled() || StdInstant::now() >= deadline
 }
@@ -959,7 +951,7 @@ async fn request_freshness_for_repository(
         }
         result = tokio::time::timeout(GIT_OBSERVATION_BUDGET, &mut blocking) => match result {
             Ok(Ok(Some(roots))) => roots,
-            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
+            Ok(Ok(None) | Err(_)) | Err(_) => {
                 retain_freshness_retry(state, retry_roots);
                 return;
             }

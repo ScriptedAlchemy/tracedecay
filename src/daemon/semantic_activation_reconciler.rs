@@ -48,14 +48,14 @@ impl DaemonSemanticActivationReconcilerV1 {
                     let mut backoff = REOBSERVATION_INITIAL_BACKOFF;
                     loop {
                         let observed = tokio::select! {
-                            _ = worker_cancellation.cancelled() => return,
+                            () = worker_cancellation.cancelled() => return,
                             observed = tokio::time::timeout(
                                 REOBSERVATION_UNIT_DEADLINE,
                                 coordinator.reobserve_current_activation(),
                             ) => observed,
                         };
                         match observed {
-                            Ok(Ok(Some(_))) | Ok(Ok(None)) => break,
+                            Ok(Ok(Some(_) | None)) => break,
                             Ok(Err(
                                 SemanticActivationCoordinationErrorV1::Rejected
                                 | SemanticActivationCoordinationErrorV1::Conflict,
@@ -67,8 +67,8 @@ impl DaemonSemanticActivationReconcilerV1 {
                             | Err(_) => {}
                         }
                         tokio::select! {
-                            _ = worker_cancellation.cancelled() => return,
-                            _ = tokio::time::sleep(backoff) => {}
+                            () = worker_cancellation.cancelled() => return,
+                            () = tokio::time::sleep(backoff) => {}
                         }
                         backoff = backoff.saturating_mul(2).min(REOBSERVATION_MAX_BACKOFF);
                         let latest = lifecycle_events.borrow_and_update().clone();
@@ -79,7 +79,7 @@ impl DaemonSemanticActivationReconcilerV1 {
                     }
                 }
                 let changed = tokio::select! {
-                    _ = worker_cancellation.cancelled() => return,
+                    () = worker_cancellation.cancelled() => return,
                     changed = lifecycle_events.changed() => changed,
                 };
                 if changed.is_err() {
@@ -106,6 +106,20 @@ impl DaemonSemanticActivationReconcilerV1 {
     }
 }
 
+impl Drop for DaemonSemanticActivationReconcilerV1 {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(task) = self
+            .task
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,19 +140,5 @@ mod tests {
                 artifact_digest: current.artifact_digest,
             }
         ));
-    }
-}
-
-impl Drop for DaemonSemanticActivationReconcilerV1 {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        if let Some(task) = self
-            .task
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            task.abort();
-        }
     }
 }

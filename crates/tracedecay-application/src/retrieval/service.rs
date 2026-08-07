@@ -6,9 +6,7 @@
 use std::future::Future;
 
 use tracedecay_domain::UtcMicros;
-use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 
-use crate::authorization::{AuthorizationAdmission, AuthorizationPort, AuthorizationService};
 use crate::context::{RequestAdmission, RequestContext};
 use crate::handlers::ApplicationOperation;
 use crate::result::{
@@ -30,34 +28,6 @@ pub(super) fn problem_envelope<T>(
         context.request_id().clone(),
         problem,
     ))
-}
-
-pub(super) fn evidence_envelope<T, A, E>(
-    context: &RequestContext,
-    operation: &ApplicationOperation,
-    authorization: &AuthorizationService<A, E>,
-    admission: &AuthorizationAdmission,
-    outcome: RetrievalPortOutcome<T>,
-    started_at: UtcMicros,
-) -> ApplicationResult<T>
-where
-    A: AuthorizationPort,
-    E: SourceAuthorizationEvaluator,
-{
-    let mut prepared = prepare_evidence_for_publication(context, outcome);
-    let mut authority = admission.receipt().clone();
-    if prepared.requires_recheck {
-        match authorization.recheck_publication(
-            context,
-            operation,
-            admission,
-            prepared.evidence.finished_at,
-        ) {
-            Ok(rechecked) => authority = rechecked,
-            Err(_) => prepared.deny_publication(),
-        }
-    }
-    finish_evidence_envelope(context, operation, authority, prepared, started_at)
 }
 
 pub(super) async fn evidence_envelope_with_async_publication_recheck<T, F, Fut>(

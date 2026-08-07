@@ -1324,14 +1324,6 @@ fn project_api_router() -> Router<DashboardState> {
             get(analytics_api::overview),
         )
         .route("/api/observatory", get(analytics_api::observatory))
-        .route(
-            "/api/plugins/analytics/observatory",
-            get(analytics_api::observatory_http),
-        )
-        .route(
-            "/api/plugins/analytics/observatory/export",
-            get(analytics_api::observatory_export),
-        )
         .route("/api/plugins/analytics/agents", get(analytics_api::agents))
         .route("/api/plugins/analytics/hints", get(analytics_api::hints))
         .route("/api/plugins/analytics/usage", get(analytics_api::usage))
@@ -1359,11 +1351,6 @@ fn project_api_router() -> Router<DashboardState> {
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
         .route("/api/costs", get(savings_api::costs))
-        .route("/api/plugins/savings/costs", get(savings_api::costs_http))
-        .route(
-            "/api/plugins/savings/costs/export",
-            get(savings_api::costs_export),
-        )
         .route("/api/plugins/savings/ledger", get(savings_api::ledger))
         .route("/api/plugins/savings/sessions", get(savings_api::sessions))
         .route("/api/plugins/savings/models", get(savings_api::models))

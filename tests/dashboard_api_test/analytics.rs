@@ -699,8 +699,21 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
     });
 }
 
+/// The canonical Observatory and Costs reads stamp real observed windows.
+///
+/// This test previously also read `/api/plugins/analytics/observatory{,/export}`
+/// and `/api/plugins/savings/costs{,/export}` and asserted all four agreed with
+/// the two canonical routes. Those four were alias mounts over the very same
+/// `observatory_model`/`costs_model` the canonical routes serve, with no
+/// dashboard, SDK, CLI, or MCP consumer; they are deleted, and with them the
+/// assertions that a value equalled itself read through a second URL.
+///
+/// What survives is the part that was never about the duplication: each
+/// canonical read must carry its metrics with a genuine `temporal.horizon`
+/// rather than an absent or inverted window — enforced inside
+/// `metric_parity_view`, which panics on a metric that omits one.
 #[test]
-fn observatory_and_costs_http_dashboard_export_preserve_value_and_coverage() {
+fn canonical_observatory_and_costs_reads_stamp_real_observed_windows() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -713,52 +726,16 @@ fn observatory_and_costs_http_dashboard_export_preserve_value_and_coverage() {
             get_json(&agent, &format!("{}/api/observatory", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(observatory_dashboard["schema_revision"], 1);
-        let (status, observatory_http) = get_json(
-            &agent,
-            &format!("{}/api/plugins/analytics/observatory", fixture.base_url),
-        );
-        assert_eq!(status, 200);
-        let (status, observatory_export) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/analytics/observatory/export",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(
-            metric_parity_view(&observatory_dashboard["payload"]["metrics"]),
-            metric_parity_view(&observatory_http["metrics"])
-        );
-        assert_eq!(
-            metric_parity_view(&observatory_http["metrics"]),
-            metric_parity_view(&observatory_export["metrics"])
-        );
+        assert!(!metric_parity_view(&observatory_dashboard["payload"]["metrics"]).is_empty());
 
         let (status, costs_dashboard) =
             get_json(&agent, &format!("{}/api/costs", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(costs_dashboard["schema_revision"], 1);
-        let (status, costs_http) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/costs", fixture.base_url),
-        );
-        assert_eq!(status, 200);
-        let (status, costs_export) = get_json(
-            &agent,
-            &format!("{}/api/plugins/savings/costs/export", fixture.base_url),
-        );
-        assert_eq!(status, 200);
         for series in ["usage", "estimated_cost"] {
-            assert_eq!(
-                metric_parity_view(&costs_dashboard["payload"][series]),
-                metric_parity_view(&costs_http[series]),
-                "costs {series} drifted between the dashboard and plugin reads"
-            );
-            assert_eq!(
-                metric_parity_view(&costs_http[series]),
-                metric_parity_view(&costs_export[series]),
-                "costs {series} drifted between the plugin read and its export"
+            assert!(
+                !metric_parity_view(&costs_dashboard["payload"][series]).is_empty(),
+                "costs {series} carried no metrics to check a horizon on"
             );
         }
     });

@@ -21,6 +21,7 @@
 //! - `"estimated"` — the chars/4 heuristic the LCM views use
 //!   (`(LENGTH(text)+3)/4`), the fallback when the `token-counting`
 //!   feature is compiled out.
+//!
 //! Provider billing counters are exposed separately as provider-usage events;
 //! they are never treated as message counts.
 //!
@@ -31,7 +32,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -626,34 +627,13 @@ pub async fn costs(
     Json(envelope)
 }
 
-pub async fn costs_http(State(state): State<DashboardState>) -> Response {
-    let model = costs_model(&state).await;
-    match crate::application::observability::costs_http_value(&model) {
-        Ok(value) => Json(value).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
-
-pub async fn costs_export(State(state): State<DashboardState>) -> Response {
-    let model = costs_model(&state).await;
-    match crate::application::observability::costs_export_bytes(&model) {
-        Ok(bytes) => (
-            [
-                (
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/json"),
-                ),
-                (
-                    header::CONTENT_DISPOSITION,
-                    HeaderValue::from_static("attachment; filename=\"tracedecay-costs-v1.json\""),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    }
-}
+// `costs_http` / `costs_export` are deleted with their last caller, for the
+// same reason as their Observatory twins above `observatory_model`. They
+// mounted `/api/plugins/savings/costs{,/export}` over the identical
+// `costs_model` that `/api/costs` — the route `CanonicalCosts.tsx` reads —
+// already serves. The savings family's OTHER routes (`overview`, `ledger`,
+// `sessions`, `models`, `pricing`) are not aliases: each is the sole mount of
+// its handler and has live consumers, so they stay.
 
 async fn costs_model(state: &DashboardState) -> CostsReadModelV1 {
     let provider_scope = provider_usage_scope(state);

@@ -214,7 +214,7 @@ fn publish_staged_replay_seal_with_before_install(
     }
     let StagedReplaySeal {
         path,
-        mut file,
+        file,
         fingerprint: _,
         existing,
     } = staged;
@@ -458,7 +458,7 @@ pub(super) fn stage_project_graph_replay_unlink(
             }))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => return Err(GraphDbError::unavailable(error.to_string())),
+        Err(error) => Err(GraphDbError::unavailable(error.to_string())),
     }
 }
 

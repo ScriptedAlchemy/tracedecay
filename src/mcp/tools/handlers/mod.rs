@@ -577,8 +577,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 }
                 // Typed daemon surface tools already returned above; reaching here means
                 // the name resolves to no reachable dispatch entry.
-                Some(McpToolDispatchGroup::ApplicationSurface)
-                | Some(McpToolDispatchGroup::MultiRoot)
+                Some(McpToolDispatchGroup::ApplicationSurface | McpToolDispatchGroup::MultiRoot)
                 | None => Err(unknown_tool_error(tool_name)),
             }
         };
