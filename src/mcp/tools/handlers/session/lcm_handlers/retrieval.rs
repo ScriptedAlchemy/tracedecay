@@ -53,24 +53,27 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_load_session(
             SessionRetrievalUnavailable::service_not_configured(),
         ),
     };
+    // Every non-terminal arm carries its own page, so the page leaves the
+    // match already bound. It used to be threaded through an `Option` that a
+    // later `expect` had to re-assert, which made a future non-terminal
+    // outcome without a page a panic in an MCP request path instead of a
+    // compile error here.
     let (page, status, omitted) = match outcome {
-        SessionRetrievalServiceOutcome::Complete { page, .. } => (Some(page), "ok", 0),
+        SessionRetrievalServiceOutcome::Complete { page, .. } => (page, "ok", 0),
         SessionRetrievalServiceOutcome::CompleteZero { temporal, .. } => (
-            Some(SessionRetrievalPageView {
+            SessionRetrievalPageView {
                 results: Vec::new(),
                 temporal,
-            }),
+            },
             "ok",
             0,
         ),
-        SessionRetrievalServiceOutcome::Partial { page, omitted, .. } => {
-            (Some(page), "partial", omitted)
-        }
+        SessionRetrievalServiceOutcome::Partial { page, omitted, .. } => (page, "partial", omitted),
         SessionRetrievalServiceOutcome::Stale { temporal, .. } => (
-            Some(SessionRetrievalPageView {
+            SessionRetrievalPageView {
                 results: Vec::new(),
                 temporal,
-            }),
+            },
             "stale",
             0,
         ),
@@ -83,10 +86,6 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_load_session(
             ));
         }
     };
-    // The match above returns early for every terminal outcome, so a
-    // non-terminal outcome always carries a page.
-    #[allow(clippy::expect_used)]
-    let page = page.expect("page exists for non-terminal LCM outcome");
     let messages = page
         .results
         .into_iter()

@@ -130,10 +130,16 @@ pub(super) struct SharedCodeIndexBytePoolV1 {
 impl SharedCodeIndexBytePoolV1 {
     fn intern(&self, bytes: Vec<u8>) -> (ContentDigest, Arc<[u8]>) {
         let digest = content_digest(&bytes);
+        // The guarded value is a weak-reference cache keyed by content digest:
+        // every critical section is a lookup or an insert, so a poisoned lock
+        // can only mean an unrelated thread unwound while holding it, never
+        // that the map is half-written. Recovering the guard keeps indexing
+        // serving instead of turning one unrelated panic into a permanent
+        // daemon-wide code-index outage.
         let mut pool = self
             .bytes
             .lock()
-            .unwrap_or_else(|_| panic!("code-index byte-pool lock"));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(shared) = pool.get(&digest).and_then(Weak::upgrade) {
             self.reused.fetch_add(1, Ordering::Relaxed);
             return (digest, shared);

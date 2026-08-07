@@ -233,23 +233,24 @@ pub(super) fn try_parse_claude_transcript(
         return Ok(None);
     }
 
-    if let Some(skipped) = scan.skipped_frames.iter().find(|frame| {
-        matches!(
-            frame.reason,
-            ClaudeSkippedFrameReason::Malformed | ClaudeSkippedFrameReason::Oversized
-        )
+    // Selecting the frame and naming its reason in one total match keeps the
+    // non-durable reasons and the reported reason string from drifting apart;
+    // the previous split form had to assert the remaining variants away.
+    if let Some((skipped, reason)) = scan.skipped_frames.iter().find_map(|frame| {
+        let reason = match frame.reason {
+            ClaudeSkippedFrameReason::Malformed => "malformed",
+            ClaudeSkippedFrameReason::Oversized => "oversized",
+            ClaudeSkippedFrameReason::Whitespace | ClaudeSkippedFrameReason::OutOfScope => {
+                return None;
+            }
+        };
+        Some((frame, reason))
     }) {
         return Err(TranscriptIngestError::NonDurableRecord {
             provider: PROVIDER,
             offset: skipped.offset,
             end_offset: skipped.end_offset,
-            reason: match skipped.reason {
-                ClaudeSkippedFrameReason::Malformed => "malformed",
-                ClaudeSkippedFrameReason::Oversized => "oversized",
-                ClaudeSkippedFrameReason::Whitespace | ClaudeSkippedFrameReason::OutOfScope => {
-                    unreachable!()
-                }
-            },
+            reason,
         });
     }
 

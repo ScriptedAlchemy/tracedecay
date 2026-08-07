@@ -2342,8 +2342,12 @@ where
             }
             GatewayResponse::Unavailable(unavailable) => GatewayResponse::Unavailable(unavailable),
             GatewayResponse::RequestFailed(failure) => GatewayResponse::RequestFailed(failure),
-            GatewayResponse::Partial { .. } => unreachable!("feedback admission is never partial"),
-            GatewayResponse::Pending => unreachable!("feedback admission is never pending"),
+            // Feedback admission returns none of these today. If a future
+            // admission path does, the honest answer for an LSP request is
+            // "not settled yet, ask again" — the admission carries no
+            // diagnostics payload to project, and panicking here would take
+            // down the request loop over a recoverable state.
+            GatewayResponse::Partial { .. } | GatewayResponse::Pending => GatewayResponse::Pending,
         }
     }
 
