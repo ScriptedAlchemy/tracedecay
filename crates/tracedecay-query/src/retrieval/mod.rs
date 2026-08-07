@@ -21,6 +21,7 @@ pub mod fusion;
 pub mod graph;
 pub mod hydrate;
 pub mod lexical;
+pub mod observation;
 mod ordering;
 pub mod ports;
 pub mod prepared_query;
@@ -33,6 +34,10 @@ pub use self::execution::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
     NativeSemanticRecordV1, NativeSymbolRecordV1, QueryExecutionContractErrorV1,
+};
+pub use self::observation::{
+    ContextUseOutcomeV1, ObservedWithCoverageV1, RetrievalPipelineObservationV1,
+    observe_composition, observe_context_outcome,
 };
 pub use self::ports::{
     ExactTermPostingReadPort, GraphEvidenceReadPort, LexicalPostingReadPort, RetrievalPortError,
