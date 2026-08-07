@@ -47,6 +47,10 @@ name = "cross_projection_contract"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "durability_crash_contract"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "open_error_contract"
 required-features = ["test-helpers"]
 
