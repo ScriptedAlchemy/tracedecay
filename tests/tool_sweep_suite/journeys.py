@@ -285,6 +285,58 @@ def _source_edit(
     return PreparedJourney(apply, cleanup)
 
 
+def _journaled_rollback(
+    fixture: dict[str, str], call: Call, deadline: Deadline,
+) -> PreparedJourney:
+    """Produce one completed move_symbol effect whose receipt mints every
+    rollback identity, then verify the journaled inverse restores the exact
+    retained preimages."""
+    original = _source_snapshot(fixture, ("src/lib.rs", "src/relocated.rs"))
+    forward = {
+        "symbol": fixture["qualified_name"],
+        "dest_file": "src/relocated.rs",
+        "dry_run": False,
+        "update_references": False,
+        "format": "json",
+    }
+    apply = _source_apply(call, "tracedecay_move_symbol", forward, deadline)
+    applied = call("tracedecay_move_symbol", apply, deadline("tracedecay_move_symbol"))
+    if not has_true(applied, "success"):
+        raise JourneyError("rollback producer move did not complete successfully")
+    if _source_snapshot(fixture, tuple(original)) == original:
+        raise JourneyError("rollback producer move did not change fixture source")
+    effect_id = first_value(applied, {"effect_id"})
+    input_digest = first_value(applied, {"input_digest"})
+    committed_state = first_value(applied, {"committed_state"})
+    if not all(
+        isinstance(value, str) and value
+        for value in (effect_id, input_digest, committed_state)
+    ):
+        raise JourneyError("move receipt omitted the identities rollback consumes")
+
+    def cleanup(response: dict[str, Any]) -> str:
+        if not has_true(response, "success") or not has_true(response, "reconciled"):
+            raise JourneyError("journaled rollback omitted its reconciled success receipt")
+        rollback_effect = first_value(response, {"effect_id"})
+        if not isinstance(rollback_effect, str) or not rollback_effect or rollback_effect == effect_id:
+            raise JourneyError("journaled rollback did not mint its own durable effect identity")
+        _require_snapshot(fixture, original, "source-edit journaled rollback")
+        return "move producer/journaled inverse/preimage restoration verified"
+
+    return PreparedJourney(
+        {
+            "effect_id": effect_id,
+            "original_idempotency_key": apply["idempotency_key"],
+            "idempotency_key": f"tool-sweep-source-edit-rollback-{time.monotonic_ns()}",
+            "original_input_digest": input_digest,
+            "expected_state": committed_state,
+            "confirm": True,
+            "format": "json",
+        },
+        cleanup,
+    )
+
+
 def _api_plan(response: dict[str, Any]) -> dict[str, Any] | None:
     for value in objects(response):
         digest = value.get("plan_digest")
@@ -597,4 +649,6 @@ def prepare(
                 raise JourneyError("session rollback did not verify baseline absence")
             return "session baseline rollback verified"
         return PreparedJourney({"format": "json"}, cleanup)
+    if name == "tracedecay_source_edit_rollback":
+        return _journaled_rollback(fixture, call, deadline)
     return _source_edit(name, fixture, call, deadline)

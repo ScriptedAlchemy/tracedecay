@@ -609,6 +609,57 @@ class MutationJourneyTests(unittest.TestCase):
         )
         self.assertIn("terminal", note)
 
+    def test_journaled_rollback_consumes_the_move_receipt_and_restores_preimages(self) -> None:
+        """source_edit_rollback's journey mints identities from a real move receipt."""
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "src").mkdir()
+            source = root / "src/lib.rs"
+            moved = "pub fn sweep_anchor() -> SweepType { SweepType { value: 7 } }\n"
+            source.write_text(moved)
+            relocated = root / "src/relocated.rs"
+            relocated.write_text("pub fn relocation_marker() -> i32 { 0 }\n")
+            original = {"src/lib.rs": source.read_text(), "src/relocated.rs": relocated.read_text()}
+            fixture = {
+                "root": str(root),
+                "file": "src/lib.rs",
+                "qualified_name": "src/lib.rs::sweep_anchor",
+            }
+            digest = "sha256:" + "b" * 64
+
+            def call(tool, arguments, _deadline_ms):
+                self.assertEqual(tool, "tracedecay_move_symbol")
+                if arguments.get("dry_run") is True:
+                    return self.response(f'{{"expected_state":"{digest}"}}')
+                source.write_text("")
+                relocated.write_text(original["src/relocated.rs"] + moved)
+                return self.response(
+                    '{"success":true,"effect_id":"effect.move",'
+                    f'"input_digest":"{digest}","committed_state":"{digest}"}}'
+                )
+
+            prepared = runner.prepare_journey(
+                "tracedecay_source_edit_rollback", object(), fixture, lambda _tool: 1_000, call
+            )
+            self.assertIsNotNone(prepared)
+            self.assertEqual(prepared.arguments["effect_id"], "effect.move")
+            self.assertEqual(prepared.arguments["original_input_digest"], digest)
+            self.assertEqual(prepared.arguments["expected_state"], digest)
+            self.assertIs(prepared.arguments["confirm"], True)
+
+            rollback_receipt = self.response(
+                '{"success":true,"reconciled":true,"effect_id":"effect.rollback"}'
+            )
+            with self.assertRaises(Exception):
+                # The workspace still holds the moved bytes: rollback must not
+                # claim preimage restoration.
+                prepared.cleanup(rollback_receipt)
+            source.write_text(original["src/lib.rs"])
+            relocated.write_text(original["src/relocated.rs"])
+            note = prepared.cleanup(rollback_receipt)
+            self.assertIn("preimage restoration verified", note)
+
     def test_source_edit_journey_replays_receipt_and_restores_exact_source(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as raw:
@@ -749,9 +800,9 @@ class MountRetryTests(unittest.TestCase):
     def test_expected_denials_are_terminal_and_never_retried(self) -> None:
         """An expected hermetic denial is the terminal contract; no retry burns time on it."""
         runner = load_runner()
-        name = "tracedecay_sessions_for"
+        name = "tracedecay_test_results"
         kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
-        denial = self.text_response(f'{{"status":"{kind}","problem_code":"{code}","results":[],"count":0}}')
+        denial = self.text_response(f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}', is_error=True)
         client = self.scripted_client({name: [denial]})
 
         row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
@@ -759,6 +810,86 @@ class MountRetryTests(unittest.TestCase):
         self.assertEqual(row["verdict"], "PASS")
         self.assertTrue(row["expected_denial"])
         self.assertEqual(len(client.calls), 1)
+
+    def test_expected_denial_is_reached_through_its_mounting_window(self) -> None:
+        """Foreign retryable unavailability retries into the exact cataloged denial."""
+        runner = load_runner()
+        runner.MOUNT_RETRY_DELAY_S = 0.001
+        name = "tracedecay_branch_search"
+        kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
+        self.assertEqual((kind, code), ("unavailable", "search_failed"))
+        mounting = self.text_response(
+            '{"status":"unavailable","reason":"search_capacity_unavailable","retryable":true}',
+            is_error=True,
+        )
+        terminal = self.text_response(
+            '{"status":"unavailable","reason":"search_failed","retryable":false}',
+            is_error=True,
+        )
+        client = self.scripted_client({name: [mounting, terminal]})
+
+        row = runner._read_tool_row(client, self.definition(name), self.policy(runner, name), fixture={})
+
+        self.assertEqual(row["verdict"], "PASS")
+        self.assertTrue(row["expected_denial"])
+        self.assertEqual(row["problem_code"], code)
+        self.assertEqual(len(client.calls), 2)
+
+    def test_branch_diff_alone_carries_the_extended_mount_budget(self) -> None:
+        """The slow code-index branch authority gets a bounded per-tool budget."""
+        runner = load_runner()
+        self.assertEqual(
+            runner.MOUNT_RETRY_BUDGET_OVERRIDES_S,
+            {"tracedecay_branch_diff": 180},
+        )
+        self.assertGreater(
+            runner.MOUNT_RETRY_BUDGET_OVERRIDES_S["tracedecay_branch_diff"],
+            runner.MOUNT_RETRY_BUDGET_S,
+        )
+
+    def test_multi_root_probes_reach_the_exact_daemon_denial(self) -> None:
+        """Materialized multi-root bodies parse, so the typed owner denial is exact."""
+        runner = load_runner()
+        for name in (
+            "tracedecay_multi_root_scope_set_read",
+            "tracedecay_multi_root_scope_set_compare_and_swap",
+            "tracedecay_multi_root_execute",
+        ):
+            kind, code = runner.EXPECTED_HERMETIC_DENIALS[name]
+            self.assertEqual((kind, code), ("unavailable", "multi_root.daemon_unavailable"))
+            denial = self.text_response(
+                f'{{"problem":{{"kind":"{kind}","code":"{code}"}}}}', is_error=True
+            )
+            client = self.scripted_client({name: [denial]})
+            row = runner._read_tool_row(
+                client, self.definition(name), self.policy(runner, name), fixture={}
+            )
+            self.assertEqual(row["verdict"], "PASS", name)
+            self.assertTrue(row["expected_denial"], name)
+            self.assertEqual(len(client.calls), 1, name)
+            arguments = client.calls[0][1]
+            self.assertEqual(arguments["scope_set_id"], "tool-sweep-scope-set.v1", name)
+
+    def test_branch_diff_diffs_the_real_fixture_branch(self) -> None:
+        """The runtime-required base/head come from the fixture's real branch."""
+        runner = load_runner()
+        arguments = runner.materialize_tool_arguments(
+            self.definition("tracedecay_branch_diff"), {"branch": "main"}
+        )
+        self.assertEqual(
+            arguments, {"base": "main", "head": "main", "format": "json"}
+        )
+
+    def test_status_reason_payloads_parse_as_typed_problems(self) -> None:
+        """Branch surfaces render status+reason; the parser returns them typed."""
+        runner = load_runner()
+        kind, code = runner.response_problem_code(
+            self.text_response(
+                '{"status":"unavailable","reason":"search_capacity_unavailable","retryable":true}',
+                is_error=True,
+            )
+        )
+        self.assertEqual((kind, code), ("unavailable", "search_capacity_unavailable"))
 
     def test_expired_preview_is_reminted_from_the_live_producer(self) -> None:
         """An expired stage-preview cursor re-mints through git_hunks, never a blind replay."""

@@ -660,10 +660,19 @@ CODE_QUERY_NODE_CONSUMERS = frozenset(
 # - test_results reads daemon-retained managed test results that only a
 #   covered run_affected_tests execution retains; the fixture has no covered
 #   tests, and its zero-coverage journey verifies nothing is retained.
-# - sessions_for reads the Git-evidence graph projection, whose verified head
-#   is published only by the background git-evidence convergence pass; a
-#   fresh hermetic project never converges (probed: stays unavailable >120s),
-#   so the typed unavailable is the complete hermetic contract.
+# - branch_search's branch-scoped graph lane never activates hermetically:
+#   the persistent code-graph query owners stay uninstalled ("code graph
+#   projection has not completed activation") even after the code index
+#   publishes a complete generation and branch_diff serves real diffs from
+#   it (bounded 300s probe evidence). This is a documented product defect in
+#   the branch serving path, not a designed denial; the entry exists so the
+#   moment the branch runtime rework lands a hermetic success, this row FAILs
+#   with expected_denial_superseded and the entry must be deleted.
+# - multi_root_* tools are daemon-owned and fail closed on every direct MCP
+#   transport: the multi-root invocation owner is only composed into
+#   daemon-internal project servers, so the hermetic stdio server has no
+#   executor and the typed daemon_unavailable denial is the complete
+#   hermetic contract (45-attempt/90s mount probe evidence).
 # An entry is falsifiable in both directions: a different problem stays FAIL,
 # and a hermetic success FAILs with expected_denial_superseded until the entry
 # is removed.
@@ -684,7 +693,10 @@ EXPECTED_HERMETIC_DENIALS: dict[str, tuple[str, str]] = {
     "tracedecay_automation_run_artifact_view": ("failed", "not_found"),
     "tracedecay_skill_view": ("failed", "not_found"),
     "tracedecay_test_results": ("unavailable", "application.retrieval.unavailable"),
-    "tracedecay_sessions_for": ("unavailable", "sessions.git-evidence.unavailable"),
+    "tracedecay_branch_search": ("unavailable", "search_failed"),
+    "tracedecay_multi_root_scope_set_read": ("unavailable", "multi_root.daemon_unavailable"),
+    "tracedecay_multi_root_scope_set_compare_and_swap": ("unavailable", "multi_root.daemon_unavailable"),
+    "tracedecay_multi_root_execute": ("unavailable", "multi_root.daemon_unavailable"),
 }
 
 # Opaque probe inputs are permitted ONLY for tools carrying an expected
@@ -711,6 +723,25 @@ _SCOUT_CONTROL_PROBE = {
     "expected_revision": "tool-sweep-unknown-revision.v1",
     "idempotency_key": "tool-sweep-denial-probe.v1",
 }
+# Structurally valid multi-root requests: every typed field deserializes so
+# the probe reaches the daemon-availability gate instead of parse-failing.
+# The identities are sweep-minted; the daemon owner (absent hermetically)
+# is the only authority that could resolve them.
+_MULTI_ROOT_SCOPE_SET_ID = "tool-sweep-scope-set.v1"
+_MULTI_ROOT_READ_PROBE = {"scope_set_id": _MULTI_ROOT_SCOPE_SET_ID}
+_MULTI_ROOT_CAS_PROBE = {
+    "scope_set_id": _MULTI_ROOT_SCOPE_SET_ID,
+    "expected_revision": None,
+    "roots": [{"project_id": "tool-sweep-project", "root": "/tool-sweep/root"}],
+}
+_MULTI_ROOT_EXECUTE_PROBE = {
+    "scope_set_id": _MULTI_ROOT_SCOPE_SET_ID,
+    "scope_set_revision": 1,
+    "scope_set_digest": "sha256:" + "0" * 64,
+    "operation": {"kind": "query", "request": {}},
+    "page": 0,
+    "continuation": None,
+}
 HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_affected_tests": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_feedback_diagnostics": _UNKNOWN_REQUEST_HANDLE_PROBE,
@@ -720,6 +751,12 @@ HERMETIC_DENIAL_PROBE_ARGUMENTS: dict[str, dict[str, Any]] = {
     "tracedecay_feedback_list": _UNKNOWN_REQUEST_HANDLE_PROBE,
     "tracedecay_context_scout_pause": _SCOUT_CONTROL_PROBE,
     "tracedecay_context_scout_resume": _SCOUT_CONTROL_PROBE,
+    # The real fixture branch and query: this probe would succeed the moment
+    # the branch serving path activates, flipping the expected denial.
+    "tracedecay_branch_search": {"query": "sweep_anchor", "branch": "main", "format": "json"},
+    "tracedecay_multi_root_scope_set_read": _MULTI_ROOT_READ_PROBE,
+    "tracedecay_multi_root_scope_set_compare_and_swap": _MULTI_ROOT_CAS_PROBE,
+    "tracedecay_multi_root_execute": _MULTI_ROOT_EXECUTE_PROBE,
 }
 
 
@@ -744,6 +781,11 @@ def materialize_tool_arguments(definition: dict[str, Any], fixture: dict[str, st
         return api_migration_plan_arguments(fixture)
     if name == "tracedecay_git_preview":
         return git_preview_arguments(fixture)
+    if name == "tracedecay_branch_diff":
+        # The runtime requires `base` even though the negotiated schema marks
+        # it optional (schema gap logged to the binding owner). Diff the real
+        # fixture branch against itself through the live code-index executor.
+        return {"base": fixture["branch"], "head": fixture["branch"], "format": "json"}
     probe = HERMETIC_DENIAL_PROBE_ARGUMENTS.get(name) if isinstance(name, str) else None
     if probe is not None:
         if name not in EXPECTED_HERMETIC_DENIALS:
@@ -1130,6 +1172,11 @@ def _unavailable_tool_row(client: McpClient, policy: ToolPolicy) -> dict[str, An
 # falsifiable and is not a blanket skip.
 MOUNT_RETRY_BUDGET_S = 60
 MOUNT_RETRY_DELAY_S = 0.5
+# The code-index branch-diff authority is the last to activate after project
+# open (~120s observed on a cold hermetic fixture, returning a typed
+# `authority_unavailable` until then), so its row alone carries a larger —
+# still bounded and falsifiable — mount budget.
+MOUNT_RETRY_BUDGET_OVERRIDES_S = {"tracedecay_branch_diff": 180}
 
 
 def _read_tool_row(
@@ -1148,10 +1195,17 @@ def _read_tool_row(
     except Exception as error:
         return _call_failure_row("tool", policy.name, policy.deadline_ms, error)
     row = response_row("tool", policy.name, response, elapsed_ms, policy.deadline_ms)
-    if row["verdict"] == "FAIL" and policy.name not in EXPECTED_HERMETIC_DENIALS:
-        ends_at = time.monotonic() + MOUNT_RETRY_BUDGET_S
+    expected = EXPECTED_HERMETIC_DENIALS.get(policy.name)
+    if row["verdict"] == "FAIL":
+        ends_at = time.monotonic() + MOUNT_RETRY_BUDGET_OVERRIDES_S.get(
+            policy.name, MOUNT_RETRY_BUDGET_S
+        )
         while row["verdict"] == "FAIL" and time.monotonic() < ends_at:
             kind, code = response_problem_code(response)
+            if expected is not None and (kind, code) == expected:
+                # The exact cataloged denial is terminal; retrying it would
+                # hide a fixed surface behind the stale expectation.
+                break
             if code == "git_index.expired_preview" and policy.name == "tracedecay_git_preview":
                 # The stage preview input carries a short product TTL; re-mint
                 # it from its live producer instead of consuming a dead cursor.
