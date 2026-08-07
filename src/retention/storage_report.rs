@@ -1,7 +1,7 @@
 //! Read-only, cheap-to-query storage observability (plan 38 §7): per-store
 //! size and free-page ratio for every registered profile-sharded store under
 //! a profile root, plus an unregistered-directory backlog summary —
-//! reachable from `tracedecay migrate storage-report` without a live daemon
+//! reachable from `tracedecay storage storage-report` without a live daemon
 //! or any [`crate::global_db::RegisteredGlobalDb`] writer authority.
 //!
 //! # Why this does not snapshot stores in place
@@ -30,7 +30,6 @@ use tracedecay_domain::CodeGenerationId;
 use tracedecay_runtime_core::sqlite_read_snapshot::{
     BOUNDED_PROBE_BUSY_TIMEOUT, open_read_only_probe, pragma_u64,
 };
-
 
 use super::code_index_generations::{
     CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
