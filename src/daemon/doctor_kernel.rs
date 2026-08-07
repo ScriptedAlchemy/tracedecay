@@ -164,6 +164,40 @@ pub fn runtime_health_read(signal: &DaemonRuntimeHealthSignalV1) -> RuntimeHealt
     }
 }
 
+/// Run the exhaustive observation-authority invariant pass over an already
+/// acquired read snapshot of the registered profile authority.
+///
+/// This is the same pass the `tracedecay_runtime` producers run
+/// ([`crate::global_db::schema_stages::validate_observation_authority_connection`]):
+/// read-only, so Doctor observes the invariant without owning any repair of it.
+/// `true` means the audit ran and every invariant held; `false` means it ran and
+/// an invariant failed. "Could not run" is not representable here — the caller
+/// owns that distinction.
+async fn observation_authority_audit_passed(
+    snapshot: &impl crate::db::engine::QueryExecutor,
+) -> bool {
+    crate::global_db::schema_stages::validate_observation_authority_connection(snapshot)
+        .await
+        .is_ok()
+}
+
+/// Observe the storage authority audit signal the daemon-side Doctor reader
+/// reports as [`DaemonRuntimeHealthSignalV1::authority_audit_ok`].
+///
+/// Tri-state, matching the vocabulary the `tracedecay_runtime` producers already
+/// publish: `Some(true)` only when the audit ran and passed, `Some(false)` when
+/// it ran and an invariant failed, and `None` when it could not run at all
+/// because the registered authority would not yield a read snapshot. A not-run
+/// audit weakens runtime coverage to partial rather than claiming health.
+async fn observation_authority_audit_ok(
+    registry: &crate::global_db::RegisteredGlobalDb,
+) -> Option<bool> {
+    match registry.read_snapshot().await {
+        Ok(snapshot) => Some(observation_authority_audit_passed(&snapshot).await),
+        Err(_) => None,
+    }
+}
+
 /// Adapter over the daemon/runtime health snapshot (`StorageRuntime` family).
 pub struct RuntimeHealthDoctorAdapterV1 {
     read: RuntimeHealthReadV1,
@@ -1333,6 +1367,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 configuration_runtime.semantic_configuration_inventory_authority();
             let (
                 quick_check,
+                authority_audit_ok,
                 temporal,
                 (registered_census, unregistered),
                 store_telemetry,
@@ -1346,6 +1381,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 code_index,
             ) = tokio::join!(
                 graph.quick_check_report(),
+                observation_authority_audit_ok(registry.as_ref()),
                 project_sessions.session_temporal_doctor_health(),
                 profile_storage_reads,
                 collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
@@ -1412,16 +1448,14 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     serving: true,
                     startup_converged: graph_authority_current && registered_authority_current,
                     quick_check_ok,
-                    // The observation-authority audit is the exhaustive invariant
-                    // pass (`validate_observation_authority_connection`) that the
-                    // CLI and core Doctor routes run only when a caller asks for
-                    // it. This reader does not run it, so the signal is not-run —
-                    // `None` — rather than a boolean re-derived from schema and
-                    // write-scope currency, which is a different question and is
-                    // already reported through `startup_converged`. A not-run
-                    // signal drops runtime coverage to partial, exactly as the
-                    // coverage split intends.
-                    authority_audit_ok: None,
+                    // The exhaustive invariant pass
+                    // (`validate_observation_authority_connection`) observed just
+                    // above, never a boolean re-derived from schema and write-scope
+                    // currency — that is a different question and is already
+                    // reported through `startup_converged`. `None` here means the
+                    // audit genuinely could not run and drops runtime coverage to
+                    // partial, exactly as the coverage split intends.
+                    authority_audit_ok,
                     temporal_ok,
                 }),
                 operational_audit: OperationalAuditReadV1 {

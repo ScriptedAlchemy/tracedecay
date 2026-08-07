@@ -123,16 +123,52 @@ fn runtime_healthy_requires_all_signals_observed_for_complete_coverage() {
     );
     // A serving, converged daemon with an unobserved signal is healthy so far
     // as observed but never healthy-complete.
-    let partial = DaemonRuntimeHealthSignalV1 {
-        temporal_ok: None,
-        ..healthy
-    };
-    assert_eq!(
-        runtime_health_read(&partial),
-        RuntimeHealthReadV1::Observed {
-            liveness: RuntimeLivenessV1::Healthy,
-            coverage: DoctorCoverageCompletenessV1::Partial,
-        }
+    for partial in [
+        DaemonRuntimeHealthSignalV1 {
+            temporal_ok: None,
+            ..healthy
+        },
+        // A not-run storage authority audit is the same weakened coverage: the
+        // reader must observe the audit, not omit it.
+        DaemonRuntimeHealthSignalV1 {
+            authority_audit_ok: None,
+            ..healthy
+        },
+    ] {
+        assert_eq!(
+            runtime_health_read(&partial),
+            RuntimeHealthReadV1::Observed {
+                liveness: RuntimeLivenessV1::Healthy,
+                coverage: DoctorCoverageCompletenessV1::Partial,
+            }
+        );
+    }
+}
+
+/// The daemon-side Doctor reader must observe the exhaustive
+/// observation-authority invariant pass itself. Without a producer the signal
+/// is permanently not-run, which downgrades every `StorageRuntime` finding to
+/// partial coverage and makes Doctor report unavailable audit data for a
+/// perfectly healthy store.
+#[tokio::test]
+async fn observation_authority_audit_observes_the_real_invariant_pass() {
+    let directory = tempfile::TempDir::new().expect("authority audit fixture root");
+    let database_path = directory.path().join("registry.db");
+    let connection = crate::db::engine::TestConnection::open(&database_path);
+
+    assert!(
+        !observation_authority_audit_passed(&connection).await,
+        "a store without the registered authority schema must fail the audit it ran"
+    );
+
+    crate::global_db::schema_stages::ensure_registered_schema(&connection)
+        .await
+        .expect("install the registered authority schema");
+
+    assert!(
+        observation_authority_audit_passed(&connection).await,
+        "a converged registered authority must report a passing audit rather than \
+         unavailable audit data"
     );
 }
 
