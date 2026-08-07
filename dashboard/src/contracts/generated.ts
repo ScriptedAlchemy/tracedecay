@@ -57,17 +57,24 @@ export type AnalyticsAgentUsageV1 = z.infer<typeof AnalyticsAgentUsageV1Schema>;
 export const AnalyticsDiagnosticsPayloadV1Schema = z.object({
   available: z.boolean(),
   by_event_kind: z.array(z.lazy(() => AnalyticsEventKindCountV1Schema)),
+  by_hook: z.array(z.lazy(() => AnalyticsHookNameCountV1Schema)),
   by_mcp_tool: z.array(z.lazy(() => AnalyticsToolCountV1Schema)),
   by_outcome: z.array(z.lazy(() => AnalyticsOutcomeCountV1Schema)),
+  by_prompt_category: z.array(z.lazy(() => AnalyticsPromptCategoryCountV1Schema)),
   by_tool: z.array(z.lazy(() => AnalyticsToolCountV1Schema)),
+  by_tool_category: z.array(z.lazy(() => AnalyticsToolCategoryCountV1Schema)),
   event_count: z.number().int(),
   events_per_hour: z.number().nullable(),
+  hint_efficacy: z.lazy(() => AnalyticsHintEfficacyV1Schema),
   hook_call_count: z.number().int(),
+  hook_readiness: z.unknown(),
+  hook_sources: z.array(z.unknown()),
   hook_window: z.lazy(() => AnalyticsHookWindowV1Schema),
   mcp_tool_call_count: z.number().int(),
   message_count: z.number().int(),
   ratios: z.lazy(() => AnalyticsDiagnosticsRatiosV1Schema),
   recent_events: z.array(z.lazy(() => AnalyticsRecentEventV1Schema)),
+  recent_hooks: z.array(z.lazy(() => AnalyticsRecentHookV1Schema)),
   source: z.string(),
   tool_call_count: z.number().int(),
   tracedecay_call_count: z.number().int(),
@@ -97,6 +104,31 @@ export const AnalyticsHintCategoryV1Schema = z.object({
 });
 export type AnalyticsHintCategoryV1 = z.infer<typeof AnalyticsHintCategoryV1Schema>;
 
+export const AnalyticsHintEfficacyCategoryV1Schema = z.object({
+  acted: z.number().int(),
+  category: z.string(),
+  emitted: z.number().int(),
+  ignored: z.number().int(),
+  unresolved: z.number().int(),
+});
+export type AnalyticsHintEfficacyCategoryV1 = z.infer<typeof AnalyticsHintEfficacyCategoryV1Schema>;
+
+export const AnalyticsHintEfficacyTotalsV1Schema = z.object({
+  acted: z.number().int(),
+  emitted: z.number().int(),
+  ignored: z.number().int(),
+  unresolved: z.number().int(),
+});
+export type AnalyticsHintEfficacyTotalsV1 = z.infer<typeof AnalyticsHintEfficacyTotalsV1Schema>;
+
+export const AnalyticsHintEfficacyV1Schema = z.object({
+  available: z.boolean(),
+  by_category: z.array(z.lazy(() => AnalyticsHintEfficacyCategoryV1Schema)),
+  source: z.string(),
+  totals: z.lazy(() => AnalyticsHintEfficacyTotalsV1Schema),
+});
+export type AnalyticsHintEfficacyV1 = z.infer<typeof AnalyticsHintEfficacyV1Schema>;
+
 export const AnalyticsHintsPayloadV1Schema = z.object({
   available: z.boolean(),
   by_category: z.array(z.lazy(() => AnalyticsHintCategoryV1Schema)),
@@ -104,6 +136,12 @@ export const AnalyticsHintsPayloadV1Schema = z.object({
   source: z.string(),
 });
 export type AnalyticsHintsPayloadV1 = z.infer<typeof AnalyticsHintsPayloadV1Schema>;
+
+export const AnalyticsHookNameCountV1Schema = z.object({
+  count: z.number().int(),
+  hook_name: z.string(),
+});
+export type AnalyticsHookNameCountV1 = z.infer<typeof AnalyticsHookNameCountV1Schema>;
 
 export const AnalyticsHookWindowV1Schema = z.object({
   newest_ts_unix_ms: z.number().int().nullable(),
@@ -135,6 +173,12 @@ export const AnalyticsOverviewPayloadV1Schema = z.object({
 });
 export type AnalyticsOverviewPayloadV1 = z.infer<typeof AnalyticsOverviewPayloadV1Schema>;
 
+export const AnalyticsPromptCategoryCountV1Schema = z.object({
+  count: z.number().int(),
+  prompt_category: z.string(),
+});
+export type AnalyticsPromptCategoryCountV1 = z.infer<typeof AnalyticsPromptCategoryCountV1Schema>;
+
 export const AnalyticsRecentEventV1Schema = z.object({
   event_kind: z.string(),
   hook_name: z.string(),
@@ -143,6 +187,22 @@ export const AnalyticsRecentEventV1Schema = z.object({
   tool_name: z.string(),
 });
 export type AnalyticsRecentEventV1 = z.infer<typeof AnalyticsRecentEventV1Schema>;
+
+export const AnalyticsRecentHookV1Schema = z.object({
+  agent: z.string(),
+  hook_name: z.string(),
+  prompt_category: z.string(),
+  session_id: z.string(),
+  tool_name: z.string(),
+  ts_unix_ms: z.number().int().nullable(),
+});
+export type AnalyticsRecentHookV1 = z.infer<typeof AnalyticsRecentHookV1Schema>;
+
+export const AnalyticsToolCategoryCountV1Schema = z.object({
+  count: z.number().int(),
+  tool_category: z.string(),
+});
+export type AnalyticsToolCategoryCountV1 = z.infer<typeof AnalyticsToolCategoryCountV1Schema>;
 
 export const AnalyticsToolCountV1Schema = z.object({
   count: z.number().int(),

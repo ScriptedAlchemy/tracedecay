@@ -117,6 +117,12 @@
           },
           "type": "array"
         },
+        "by_hook": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsHookNameCountV1"
+          },
+          "type": "array"
+        },
         "by_mcp_tool": {
           "items": {
             "$ref": "#/$defs/AnalyticsToolCountV1"
@@ -129,9 +135,21 @@
           },
           "type": "array"
         },
+        "by_prompt_category": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsPromptCategoryCountV1"
+          },
+          "type": "array"
+        },
         "by_tool": {
           "items": {
             "$ref": "#/$defs/AnalyticsToolCountV1"
+          },
+          "type": "array"
+        },
+        "by_tool_category": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsToolCategoryCountV1"
           },
           "type": "array"
         },
@@ -147,9 +165,20 @@
             "null"
           ]
         },
+        "hint_efficacy": {
+          "$ref": "#/$defs/AnalyticsHintEfficacyV1"
+        },
         "hook_call_count": {
           "format": "int64",
           "type": "integer"
+        },
+        "hook_readiness": {
+          "description": "Daemon-owned hook readiness projection. The projection stamps its own\n`schema_version`; the diagnostics read carries it verbatim."
+        },
+        "hook_sources": {
+          "description": "Provenance rows for the hook-analytics source files backing the\nhook rollups. Free-form provenance, not a versioned sub-contract.",
+          "items": true,
+          "type": "array"
         },
         "hook_window": {
           "$ref": "#/$defs/AnalyticsHookWindowV1"
@@ -168,6 +197,12 @@
         "recent_events": {
           "items": {
             "$ref": "#/$defs/AnalyticsRecentEventV1"
+          },
+          "type": "array"
+        },
+        "recent_hooks": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsRecentHookV1"
           },
           "type": "array"
         },
@@ -192,14 +227,21 @@
         "mcp_tool_call_count",
         "tracedecay_call_count",
         "hook_call_count",
+        "hook_sources",
+        "hook_readiness",
         "events_per_hour",
         "ratios",
         "by_event_kind",
         "by_tool",
         "by_mcp_tool",
+        "by_tool_category",
         "by_outcome",
+        "by_hook",
+        "by_prompt_category",
+        "hint_efficacy",
         "hook_window",
-        "recent_events"
+        "recent_events",
+        "recent_hooks"
       ],
       "type": "object"
     },
@@ -277,6 +319,90 @@
       ],
       "type": "object"
     },
+    "AnalyticsHintEfficacyCategoryV1": {
+      "properties": {
+        "acted": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "category": {
+          "type": "string"
+        },
+        "emitted": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ignored": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "unresolved": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "category",
+        "emitted",
+        "acted",
+        "ignored",
+        "unresolved"
+      ],
+      "type": "object"
+    },
+    "AnalyticsHintEfficacyTotalsV1": {
+      "properties": {
+        "acted": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "emitted": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ignored": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "unresolved": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "emitted",
+        "acted",
+        "ignored",
+        "unresolved"
+      ],
+      "type": "object"
+    },
+    "AnalyticsHintEfficacyV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "by_category": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsHintEfficacyCategoryV1"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        },
+        "totals": {
+          "$ref": "#/$defs/AnalyticsHintEfficacyTotalsV1"
+        }
+      },
+      "required": [
+        "available",
+        "source",
+        "totals",
+        "by_category"
+      ],
+      "type": "object"
+    },
     "AnalyticsHintsPayloadV1": {
       "properties": {
         "available": {
@@ -304,6 +430,22 @@
         "source",
         "error",
         "by_category"
+      ],
+      "type": "object"
+    },
+    "AnalyticsHookNameCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "hook_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "hook_name",
+        "count"
       ],
       "type": "object"
     },
@@ -422,6 +564,22 @@
       ],
       "type": "object"
     },
+    "AnalyticsPromptCategoryCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "prompt_category": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt_category",
+        "count"
+      ],
+      "type": "object"
+    },
     "AnalyticsRecentEventV1": {
       "properties": {
         "event_kind": {
@@ -450,6 +608,57 @@
         "hook_name",
         "tool_name",
         "outcome"
+      ],
+      "type": "object"
+    },
+    "AnalyticsRecentHookV1": {
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "hook_name": {
+          "type": "string"
+        },
+        "prompt_category": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "ts_unix_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ts_unix_ms",
+        "agent",
+        "hook_name",
+        "session_id",
+        "tool_name",
+        "prompt_category"
+      ],
+      "type": "object"
+    },
+    "AnalyticsToolCategoryCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tool_category": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_category",
+        "count"
       ],
       "type": "object"
     },

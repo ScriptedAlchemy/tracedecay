@@ -3317,5 +3317,27 @@ function analyticsDiagnosticsPayload(): Record<string, unknown> {
       timestamp: AGENT_TAPE_ANCHOR - ago,
       tool_name,
     })),
+    hook_sources: [],
+    hook_readiness: {
+      schema_version: 1,
+      source_event: 'hook_completed',
+      collection_status: 'unavailable',
+      input_rows_received: 0,
+      input_rows_processed: 0,
+      input_rows_dropped_at_cap: 0,
+      events_considered: 0,
+      events_skipped_non_completed: 0,
+      unavailable_metrics: [],
+    },
+    by_tool_category: [{ tool_category: 'mcp', count: toolCalls }],
+    by_hook: [],
+    by_prompt_category: [],
+    hint_efficacy: {
+      available: false,
+      source: 'analytics_events',
+      totals: { emitted: 0, acted: 0, ignored: 0, unresolved: 0 },
+      by_category: [],
+    },
+    recent_hooks: [],
   };
 }

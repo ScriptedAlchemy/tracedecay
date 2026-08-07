@@ -154,6 +154,59 @@ pub struct AnalyticsRecentEventV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsToolCategoryCountV1 {
+    pub tool_category: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsHookNameCountV1 {
+    pub hook_name: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsPromptCategoryCountV1 {
+    pub prompt_category: String,
+    pub count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsRecentHookV1 {
+    pub ts_unix_ms: Option<i64>,
+    pub agent: String,
+    pub hook_name: String,
+    pub session_id: String,
+    pub tool_name: String,
+    pub prompt_category: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsHintEfficacyTotalsV1 {
+    pub emitted: i64,
+    pub acted: i64,
+    pub ignored: i64,
+    pub unresolved: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsHintEfficacyCategoryV1 {
+    pub category: String,
+    pub emitted: i64,
+    pub acted: i64,
+    pub ignored: i64,
+    pub unresolved: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct AnalyticsHintEfficacyV1 {
+    pub available: bool,
+    pub source: String,
+    pub totals: AnalyticsHintEfficacyTotalsV1,
+    pub by_category: Vec<AnalyticsHintEfficacyCategoryV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct AnalyticsDiagnosticsPayloadV1 {
     pub available: bool,
     pub source: String,
@@ -163,15 +216,26 @@ pub struct AnalyticsDiagnosticsPayloadV1 {
     pub mcp_tool_call_count: i64,
     pub tracedecay_call_count: i64,
     pub hook_call_count: i64,
+    /// Provenance rows for the hook-analytics source files backing the
+    /// hook rollups. Free-form provenance, not a versioned sub-contract.
+    pub hook_sources: Vec<Value>,
+    /// Daemon-owned hook readiness projection. The projection stamps its own
+    /// `schema_version`; the diagnostics read carries it verbatim.
+    pub hook_readiness: Value,
     #[serde(default)]
     pub events_per_hour: Option<f64>,
     pub ratios: AnalyticsDiagnosticsRatiosV1,
     pub by_event_kind: Vec<AnalyticsEventKindCountV1>,
     pub by_tool: Vec<AnalyticsToolCountV1>,
     pub by_mcp_tool: Vec<AnalyticsToolCountV1>,
+    pub by_tool_category: Vec<AnalyticsToolCategoryCountV1>,
     pub by_outcome: Vec<AnalyticsOutcomeCountV1>,
+    pub by_hook: Vec<AnalyticsHookNameCountV1>,
+    pub by_prompt_category: Vec<AnalyticsPromptCategoryCountV1>,
+    pub hint_efficacy: AnalyticsHintEfficacyV1,
     pub hook_window: AnalyticsHookWindowV1,
     pub recent_events: Vec<AnalyticsRecentEventV1>,
+    pub recent_hooks: Vec<AnalyticsRecentHookV1>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]

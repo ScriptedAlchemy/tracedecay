@@ -516,6 +516,9 @@ fn analytics_api_advertises_and_aggregates_session_usage() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_eq!(overview["schema_revision"], 1);
+        assert_eq!(overview["domain_state"], "ready");
+        let overview = &overview["payload"];
         assert!(overview["db"].as_str().is_some_and(|path| !path.is_empty()));
         assert_eq!(overview["hints"]["available"], false);
         assert_eq!(overview["hints"]["by_category"][0]["emitted"], 0);
@@ -566,6 +569,9 @@ fn analytics_api_prefers_durable_events_when_available() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_eq!(overview["schema_revision"], 1);
+        assert_eq!(overview["domain_state"], "ready");
+        let overview = &overview["payload"];
         assert_eq!(overview["hints"]["source"], "analytics_events");
         assert_eq!(overview["usage"]["source"], "analytics_events");
 
@@ -594,6 +600,8 @@ fn analytics_diagnostics_reports_tool_hook_and_prompt_rollups() {
             &format!("{}/api/plugins/analytics/diagnostics", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_eq!(diagnostics["schema_revision"], 1);
+        let diagnostics = &diagnostics["payload"];
         assert_eq!(diagnostics["source"], "analytics_events");
         assert_eq!(diagnostics["message_count"], 4);
         assert_eq!(diagnostics["event_count"], 3);
@@ -642,6 +650,9 @@ fn analytics_api_filters_fallback_events_to_current_project() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_eq!(overview["schema_revision"], 1);
+        assert_eq!(overview["domain_state"], "ready");
+        let overview = &overview["payload"];
         assert_eq!(overview["hints"]["source"], "analytics_events");
         assert_eq!(overview["usage"]["source"], "analytics_events");
 
@@ -673,6 +684,9 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
             &format!("{}/api/plugins/analytics/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_eq!(overview["schema_revision"], 1);
+        assert_eq!(overview["domain_state"], "ready");
+        let overview = &overview["payload"];
         assert_eq!(overview["usage"]["source"], "analytics_events");
         assert_eq!(overview["usage"]["event_count"], 10_000);
 
