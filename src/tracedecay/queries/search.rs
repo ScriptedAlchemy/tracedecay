@@ -61,10 +61,12 @@ impl TraceDecay {
             })
             .collect();
         // Sort by kind tier first (definitions > references), then score
-        // descending. Tier-first avoids any chance that a `use` re-export
-        // (kind tier = `Use`) outscores a real definition because BM25
+        // descending, then stable node identity. Tier-first avoids any chance
+        // that a `use` re-export (kind tier = `Use`) outscores a real
+        // definition because BM25
         // happened to weight the short re-export row highly. Score is the
-        // secondary key so within a tier we still respect BM25.
+        // secondary key so within a tier we still respect BM25; the identity
+        // tie-break keeps bounded candidate membership deterministic.
         ranked.sort_by(|a, b| {
             kind_tier(&a.node.kind)
                 .cmp(&kind_tier(&b.node.kind))
@@ -73,6 +75,7 @@ impl TraceDecay {
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
+                .then_with(|| a.node.id.cmp(&b.node.id))
         });
         ranked.truncate(limit);
         Ok(ranked)

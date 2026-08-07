@@ -80,6 +80,7 @@ impl Database {
                     node_select_columns!(),
                     " FROM nodes
                      WHERE name LIKE ?1 OR qualified_name LIKE ?1 OR docstring LIKE ?1 OR signature LIKE ?1
+                     ORDER BY id ASC
                      LIMIT ?2"
                 ),
                 params![like_pattern.as_str(), limit as i64],
@@ -120,7 +121,7 @@ impl Database {
                  FROM nodes_fts
                  JOIN nodes n ON nodes_fts.rowid = n.rowid
                  WHERE nodes_fts MATCH ?1
-                 ORDER BY bm25(nodes_fts, 10.0, 5.0, 1.0, 2.0)
+                 ORDER BY bm25(nodes_fts, 10.0, 5.0, 1.0, 2.0), n.id ASC
                  LIMIT ?2",
                 params![fts_query, limit as i64],
             )
@@ -198,6 +199,7 @@ impl Database {
             "SELECT {NODE_SELECT_COLUMNS}
              FROM nodes
              WHERE LOWER(name) IN ({placeholders})
+             ORDER BY id ASC
              LIMIT ?",
         );
         let mut param_values: Vec<Value> = names
