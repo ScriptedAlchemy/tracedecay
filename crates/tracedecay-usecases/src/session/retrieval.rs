@@ -724,7 +724,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             | ContextError::InvalidBundle(_)
             | ContextError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
         },
-        TemporalKernelError::Ranking(_) => SessionRetrievalOutcome::Unavailable,
+        TemporalKernelError::Ranking(_) | TemporalKernelError::CandidateExportContract(_) => {
+            SessionRetrievalOutcome::Unavailable
+        }
     }
 }
 
