@@ -242,6 +242,10 @@ pub struct CodeIndexSearchDisplayV1 {
     pub name: String,
     pub qualified_name: String,
     pub kind: String,
+    /// Repository-relative logical path of the declaring file within the
+    /// generation that answered. Savings accounting reads it: the raw-file
+    /// counterfactual needs the referenced files on every serving route.
+    pub path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

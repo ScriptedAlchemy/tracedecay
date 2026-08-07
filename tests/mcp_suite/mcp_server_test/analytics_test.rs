@@ -164,7 +164,7 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
         }),
     )
     .await;
-    assert!(resp["error"].is_null(), "context should not error");
+    assert!(resp["error"].is_null(), "context should not error: {resp}");
     assert!(
         resp["result"].get("_tracedecay_analytics").is_none(),
         "internal analytics metadata must not leak to clients"

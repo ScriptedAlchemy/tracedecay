@@ -160,8 +160,45 @@ where
     }
 }
 
+/// Generation-pinned map from file identity digest to logical path, built
+/// once per search request so per-candidate display binding can name the
+/// declaring file without re-deriving identities for every candidate. The
+/// paths feed the response's referenced-file set, which savings accounting
+/// uses as the raw-read counterfactual on the executor-served route.
+pub(super) struct CodeIndexDisplayPathIndexV1 {
+    by_identity: HashMap<String, String>,
+}
+
+impl CodeIndexDisplayPathIndexV1 {
+    pub(super) fn for_generation(
+        generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    ) -> std::result::Result<Self, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1> {
+        use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
+
+        let snapshot = generation.snapshot();
+        let mut by_identity = HashMap::with_capacity(snapshot.files.len());
+        for file in &snapshot.files {
+            if file.disposition != tracedecay_domain::SnapshotFileDispositionV1::Present {
+                continue;
+            }
+            let identity = crate::code_index::chunks::code_file_identity(
+                snapshot.repository.as_str(),
+                &file.logical_path,
+            )
+            .map_err(|_| HydrationUnavailableV1::Internal)?;
+            by_identity.insert(identity.as_str().to_owned(), file.logical_path.clone());
+        }
+        Ok(Self { by_identity })
+    }
+
+    fn logical_path(&self, identity: &str) -> Option<&str> {
+        self.by_identity.get(identity).map(String::as_str)
+    }
+}
+
 pub(super) fn code_index_search_display_binding(
     generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    display_paths: &CodeIndexDisplayPathIndexV1,
     request: &tracedecay_domain::RetrievalRequest,
     candidate: &tracedecay_domain::RankedCandidate,
 ) -> std::result::Result<
@@ -193,7 +230,10 @@ pub(super) fn code_index_search_display_binding(
                 .iter()
                 .find(|symbol| symbol.occurrence.as_str() == occurrence)
                 .ok_or(HydrationUnavailableV1::Invalid)?;
-            (code_index_symbol_display(symbol), None)
+            (
+                code_index_symbol_display(symbol, display_paths)?,
+                None,
+            )
         } else if let Some(chunk_id) = anchor.strip_prefix("code-chunk:") {
             let chunk_id = tracedecay_domain::CodeSearchChunkId::new(chunk_id.to_owned())
                 .map_err(|_| HydrationUnavailableV1::Invalid)?;
@@ -212,7 +252,7 @@ pub(super) fn code_index_search_display_binding(
                         .iter()
                         .find(|symbol| symbol.occurrence == *occurrence)
                         .ok_or(HydrationUnavailableV1::Invalid)?;
-                    code_index_symbol_display(symbol)
+                    code_index_symbol_display(symbol, display_paths)?
                 }
                 None => {
                     let file = generation
@@ -234,6 +274,7 @@ pub(super) fn code_index_search_display_binding(
                             .to_owned(),
                         qualified_name: file.logical_path.clone(),
                         kind: "file".to_owned(),
+                        path: file.logical_path.clone(),
                     }
                 }
             };
@@ -262,8 +303,18 @@ pub(super) fn code_index_search_display_binding(
 
 fn code_index_symbol_display(
     symbol: &crate::code_index::lineage::LineageSymbolRecordV1,
-) -> code_search::CodeIndexSearchDisplayV1 {
-    code_search::CodeIndexSearchDisplayV1 {
+    display_paths: &CodeIndexDisplayPathIndexV1,
+) -> std::result::Result<
+    code_search::CodeIndexSearchDisplayV1,
+    tracedecay_query::retrieval::hydrate::HydrationUnavailableV1,
+> {
+    // A published symbol whose declaring file is absent from its own
+    // generation snapshot is corrupt lineage, not a display-time default.
+    let path = display_paths
+        .logical_path(symbol.file_identity.as_str())
+        .ok_or(tracedecay_query::retrieval::hydrate::HydrationUnavailableV1::Invalid)?
+        .to_owned();
+    Ok(code_search::CodeIndexSearchDisplayV1 {
         name: symbol
             .qualified_name
             .rsplit("::")
@@ -272,7 +323,8 @@ fn code_index_symbol_display(
             .to_owned(),
         qualified_name: symbol.qualified_name.clone(),
         kind: symbol.kind.clone(),
-    }
+        path,
+    })
 }
 
 fn code_index_search_display_bytes(
@@ -282,6 +334,7 @@ fn code_index_search_display_bytes(
         display.name.as_str(),
         display.qualified_name.as_str(),
         display.kind.as_str(),
+        display.path.as_str(),
     ))
     .ok()
     .and_then(|bytes| u64::try_from(bytes.len()).ok())
@@ -745,6 +798,18 @@ pub(super) fn code_index_search_executor(
                 Ok(latest) => latest,
                 Err(outcome) => return outcome,
             };
+            let display_paths = match CodeIndexDisplayPathIndexV1::for_generation(
+                latest.generation(),
+            ) {
+                Ok(display_paths) => display_paths,
+                Err(_) => {
+                    return code_index_search_unavailable_for_generation(
+                        Some(executed.query.generation.as_str().to_owned()),
+                        code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                        "display_path_index_unavailable",
+                    );
+                }
+            };
             let mut hydration_request = executed.query.sanitized.request().clone();
             let hydration_budget = code_index_search_hydration_budget(
                 accepted_semantic_budget,
@@ -829,6 +894,7 @@ pub(super) fn code_index_search_executor(
 
                     match code_index_search_display_binding(
                         latest.generation(),
+                        &display_paths,
                         request,
                         candidate,
                     )
@@ -848,6 +914,7 @@ pub(super) fn code_index_search_executor(
 
                     let (display, provenance) = match code_index_search_display_binding(
                         latest.generation(),
+                        &display_paths,
                         request,
                         candidate,
                     ) {

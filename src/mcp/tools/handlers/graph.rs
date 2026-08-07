@@ -256,6 +256,18 @@ pub(super) async fn handle_search(
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
             let mut results = Vec::with_capacity(complete.ordered_candidates.len());
+            // The generation-bound display metadata names each result's
+            // declaring file; that set is the raw-read counterfactual the
+            // savings accounting charges this response against.
+            let touched_files = unique_file_paths(
+                complete
+                    .ordered_candidates
+                    .iter()
+                    .filter_map(|ranked| {
+                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
+                    })
+                    .map(|display| display.path.as_str()),
+            );
             for ranked in &complete.ordered_candidates {
                 let mut result = json!(ranked);
                 if let Some(display) = complete.display_by_anchor.get(&ranked.candidate.anchor_id) {
@@ -263,6 +275,7 @@ pub(super) async fn handle_search(
                         "name": display.name,
                         "qualified_name": display.qualified_name,
                         "kind": display.kind,
+                        "path": display.path,
                     });
                     if include_graph_node_ids
                         && let Some(node_id) =
@@ -303,7 +316,7 @@ pub(super) async fn handle_search(
                 output["ignored_dependency_hint"] = hint;
             }
             let output = output;
-            Ok(rendered_tool_result(cg, &args, &output, Vec::new(), || {
+            Ok(rendered_tool_result(cg, &args, &output, touched_files, || {
                 render_search_md(&output)
             }))
         }

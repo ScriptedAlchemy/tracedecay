@@ -717,13 +717,7 @@ impl DeterministicCodeChunker {
     }
 
     fn file_identity(&self, logical_path: &str) -> Result<FileIdentityDigest, ChunkingFailureV1> {
-        canonical_digest(
-            FILE_IDENTITY_SEPARATOR,
-            &(self.repository.as_str(), logical_path),
-        )
-        .map(|digest| {
-            FileIdentityDigest::new(digest).expect("canonical digest is a valid identity digest")
-        })
+        code_file_identity(self.repository.as_str(), logical_path)
     }
 
     fn chunk_id(
@@ -745,6 +739,20 @@ impl DeterministicCodeChunker {
         CodeSearchChunkId::new(format!("chunk.v1.{digest}"))
             .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))
     }
+}
+
+/// The one authority for the `(repository, logical path)` → file identity
+/// digest binding. Chunk planning mints identities through it, and readers
+/// that must map a stored [`FileIdentityDigest`] back to a snapshot file
+/// (e.g. generation-bound search display metadata) recompute it here so the
+/// recipe cannot fork.
+pub fn code_file_identity(
+    repository: &str,
+    logical_path: &str,
+) -> Result<FileIdentityDigest, ChunkingFailureV1> {
+    canonical_digest(FILE_IDENTITY_SEPARATOR, &(repository, logical_path)).map(|digest| {
+        FileIdentityDigest::new(digest).expect("canonical digest is a valid identity digest")
+    })
 }
 
 /// Canonical, domain-separated SHA-256 of a serializable payload, returned as

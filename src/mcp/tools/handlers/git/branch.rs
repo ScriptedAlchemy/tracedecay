@@ -361,6 +361,7 @@ pub(crate) async fn handle_branch_search(
                         "name": display.map(|value| value.name.as_str()),
                         "qualified_name": display.map(|value| value.qualified_name.as_str()),
                         "kind": display.map(|value| value.kind.as_str()),
+                        "path": display.map(|value| value.path.as_str()),
                         "branch": branch,
                         "source_reference": format!("refs/heads/{branch}"),
                         "source_revision": revision.commit.as_str(),

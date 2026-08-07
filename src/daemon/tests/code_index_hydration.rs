@@ -109,6 +109,7 @@ fn display() -> CodeIndexSearchDisplayV1 {
         name: "hydrate".to_owned(),
         qualified_name: "fixture::hydrate".to_owned(),
         kind: "function".to_owned(),
+        path: "src/hydrate.rs".to_owned(),
     }
 }
 
@@ -399,8 +400,12 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
         },
     };
 
-    let (display, provenance) = code_index_search_display_binding(generation, &request, &candidate)
-        .expect("frozen semantic chunk hydration");
+    let display_paths =
+        super::super::code_index_executor::CodeIndexDisplayPathIndexV1::for_generation(generation)
+            .expect("display path index for the sealed generation");
+    let (display, provenance) =
+        code_index_search_display_binding(generation, &display_paths, &request, &candidate)
+            .expect("frozen semantic chunk hydration");
     let symbol_occurrence = chunk
         .anchor
         .symbol_occurrence_id
@@ -414,6 +419,16 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
         .expect("indexed symbol");
     assert_eq!(display.qualified_name, symbol.qualified_name);
     assert_eq!(display.kind, symbol.kind);
+    let declaring_file = generation
+        .snapshot()
+        .files
+        .iter()
+        .find(|file| file.logical_path == display.path)
+        .expect("display path names a snapshot file");
+    assert_eq!(
+        declaring_file.disposition,
+        tracedecay_domain::SnapshotFileDispositionV1::Present
+    );
     assert_eq!(provenance.source_occurrence_id, source_occurrence);
     assert_eq!(
         candidate.candidate.occurrences[0].freshness,
