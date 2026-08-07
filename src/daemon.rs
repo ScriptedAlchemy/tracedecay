@@ -194,6 +194,7 @@ pub use core_hooks::*;
 pub(crate) use core_lifecycle::*;
 pub use core_logging::*;
 pub use core_proxy::*;
+mod git_health_projection;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;

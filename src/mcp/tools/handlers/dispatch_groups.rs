@@ -509,7 +509,15 @@ pub(super) async fn dispatch_health_tools(
             .await
         }
         "tracedecay_dsm" => health::handle_dsm(cg, args, scope_prefix).await,
-        "tracedecay_test_risk" => health::handle_test_risk(cg, args, scope_prefix).await,
+        "tracedecay_test_risk" => {
+            health::handle_test_risk(
+                cg,
+                args,
+                scope_prefix,
+                options.git_health_projection_reader.as_ref(),
+            )
+            .await
+        }
         _ => Err(unknown_tool_error(tool_name)),
     }
 }

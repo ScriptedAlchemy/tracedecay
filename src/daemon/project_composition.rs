@@ -290,7 +290,7 @@ pub(super) async fn production_project_server(
         canonical_project_path.to_path_buf(),
     ));
     let route_registered = Arc::new(AtomicBool::new(true));
-    let database_owner_reconciler = runtime.database_owner_reconciler(
+    let base_database_owner_reconciler = runtime.database_owner_reconciler(
         store_administration,
         Arc::clone(&current_key),
         Arc::clone(&current_project_path),
@@ -329,6 +329,54 @@ pub(super) async fn production_project_server(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project search scope is invalid: {error:?}"),
             })?;
+    let registered_store = registered_profile_db
+        .resolve_project_store_by_alias(canonical_project_path)
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "Git health projection requires the registered project store identity"
+                .to_owned(),
+        })?;
+    let git_health_binding = tracedecay_application::GitHealthProjectionBindingV1::new(
+        code_search_scope.clone(),
+        profile_identity.profile_id().clone(),
+        tracedecay_domain::SourceStoreId::new(registered_store.store.store_id).map_err(
+            |error| TraceDecayError::Config {
+                message: format!("Git health projection store identity is invalid: {error}"),
+            },
+        )?,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("Git health projection binding is invalid: {error}"),
+    })?;
+    let git_health_lease = invocation
+        .git_health_projections
+        .mount_candidate(
+            canonical_project_path,
+            cg.store_layout().data_root.join("project-graph.grafeo"),
+            git_health_binding.clone(),
+            cancellation,
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("Git health projection could not be mounted: {error}"),
+        })?;
+    let git_health_port: Arc<dyn tracedecay_application::GitHealthProjectionReadPortV1> =
+        Arc::new(git_health_lease);
+    let git_health_projection_reader =
+        tracedecay_application::GitHealthProjectionReadServiceV1::new(
+            git_health_binding.clone(),
+            git_health_port,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("Git health projection reader is invalid: {error}"),
+        })?;
+    let database_owner_reconciler = git_health_projection::reconciling_database_owner(
+        base_database_owner_reconciler,
+        invocation.git_health_projections.clone(),
+        git_health_projection_reader.clone(),
+        git_health_binding,
+        Arc::clone(&route_registered),
+    );
     let code_search_admission = query_mcp_admission::admit_query_mcp_read(
         Some(&profile_identity),
         &code_search_project_id,
@@ -602,6 +650,7 @@ pub(super) async fn production_project_server(
         },
     )
     .with_dashboard_code_index_freshness_reader(Arc::clone(&dashboard_code_index_freshness_reader))
+    .with_git_health_projection_reader(git_health_projection_reader.clone())
     .with_dashboard_feedback_status_reader(Arc::clone(&dashboard_feedback_status_reader))
     .with_diagnostics_lsp(Arc::clone(&diagnostic_broker))
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
@@ -914,6 +963,7 @@ pub(super) async fn production_project_server(
             )
             .with_dashboard_doctor_report_reader(doctor_report_reader)
             .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
+            .with_git_health_projection_reader(git_health_projection_reader)
             .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
             .with_diagnostics_lsp(diagnostic_broker)
             .with_code_index_hook_sink(code_index_hook_sink)

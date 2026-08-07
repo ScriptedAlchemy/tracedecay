@@ -1126,6 +1126,22 @@ async fn test_test_risk() {
         "summary should label the calibrated coverage signal honestly"
     );
     assert!(parsed.get("risks").is_some(), "risks array should exist");
+    assert_eq!(
+        parsed["git_history"]["status"].as_str(),
+        Some("unavailable"),
+        "a direct MCP server must report the absent daemon projection"
+    );
+    assert_eq!(
+        parsed["git_history"]["reason"].as_str(),
+        Some("not_mounted"),
+        "missing projection authority must remain typed"
+    );
+    assert!(
+        parsed["risks"]
+            .as_array()
+            .is_some_and(|risks| risks.iter().all(|risk| risk["churn"].is_null())),
+        "unavailable Git history must not become fabricated zero churn"
+    );
 }
 
 #[tokio::test]

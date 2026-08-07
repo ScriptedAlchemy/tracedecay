@@ -58,6 +58,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub(crate) git_health_projection_reader:
+        Option<tracedecay_application::GitHealthProjectionReadServiceV1>,
     pub(crate) dashboard_feedback_status_reader:
         Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
@@ -161,6 +163,7 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            git_health_projection_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: direct_hook_branch_writer(),
@@ -240,6 +243,7 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            git_health_projection_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
@@ -297,6 +301,7 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
+            git_health_projection_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
@@ -403,6 +408,14 @@ impl McpServerConstructionContext {
         reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
+        self
+    }
+
+    pub(crate) fn with_git_health_projection_reader(
+        mut self,
+        reader: tracedecay_application::GitHealthProjectionReadServiceV1,
+    ) -> Self {
+        self.git_health_projection_reader = Some(reader);
         self
     }
 
