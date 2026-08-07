@@ -32,6 +32,9 @@ use super::types::RegisteredWorkRuntime;
 use super::work::work_background_context;
 use super::{Arc, ManifestDigest, RequestContext, current_micros};
 
+#[cfg(test)]
+mod tests;
+
 /// How long an acknowledged cancellation may run before escalation to
 /// forced termination.
 const CANCELLATION_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
