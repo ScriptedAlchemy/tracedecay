@@ -19,8 +19,8 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
 use crate::runtime::git_correlation::MAX_SESSIONS_FOR_LIMIT;
+pub use crate::{WorkflowAgent, WorkflowRun, WorkflowScopeFilter, WorkflowStatus};
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot as RegisteredReadSnapshot, Row, Value, params,
 };
@@ -99,8 +99,8 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
 
 /// Ensures the workflow-index tables exist in the session store. Version-gated
 /// through the shared `session_schema_migrations` table exactly like
-/// [`crate::runtime::git_correlation::ensure_git_correlation_schema`], so both
-/// stores register under their own migration name in one table.
+/// [`crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction`],
+/// so both stores register under their own migration name in one table.
 pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), WorkflowIndexError> {
     if schema_version(conn)
         .await
