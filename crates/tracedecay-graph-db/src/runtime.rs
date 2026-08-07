@@ -342,6 +342,31 @@ impl GraphDb {
         )
     }
 
+    /// Bulk kind-filtered incoming fan-out: the counterpart of
+    /// [`Self::outgoing_relation_ids`], with identical budget and
+    /// cancellation semantics.
+    pub fn incoming_relation_ids(
+        &self,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        let guard = self.read_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
+        traversal::incoming_relation_ids(
+            database,
+            namespace,
+            starts,
+            relation_kinds,
+            max_relations,
+            cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
+        )
+    }
+
     pub fn outgoing_relations(
         &self,
         namespace: &GraphNamespace,

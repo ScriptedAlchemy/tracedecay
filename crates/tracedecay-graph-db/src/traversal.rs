@@ -120,7 +120,7 @@ pub(crate) fn outgoing_relation_ids(
         &GraphProjectionId,
     ) -> Result<(), GraphDbError>,
 ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
-    Ok(outgoing_relations(
+    Ok(relation_identities(outgoing_relations(
         database,
         namespace,
         starts,
@@ -128,15 +128,50 @@ pub(crate) fn outgoing_relation_ids(
         max_relations,
         cancellation,
         ensure_projection_readable,
-    )?
-    .into_iter()
-    .map(|relations| {
-        relations
-            .into_iter()
-            .map(|relation| relation.identity)
-            .collect()
-    })
-    .collect())
+    )?))
+}
+
+/// Bulk kind-filtered incoming fan-out: the exact counterpart of
+/// [`outgoing_relation_ids`], carrying the same batch, cancellation, dedupe,
+/// and `max_relations` budget semantics.
+///
+/// Plan 39 G7b needs this so an interactive caller/impact read can resolve
+/// reverse adjacency through the graph store instead of a SQL `edges` join.
+/// Only the traversal direction differs from the outgoing form, so both
+/// delegate to [`directed_relations`].
+pub(crate) fn incoming_relation_ids(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    starts: &[GraphEntityId],
+    relation_kinds: &BTreeSet<GraphRelationKind>,
+    max_relations: usize,
+    cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+    Ok(relation_identities(incoming_relations(
+        database,
+        namespace,
+        starts,
+        relation_kinds,
+        max_relations,
+        cancellation,
+        ensure_projection_readable,
+    )?))
+}
+
+fn relation_identities(batches: Vec<Vec<GraphRelation>>) -> Vec<Vec<GraphRelationId>> {
+    batches
+        .into_iter()
+        .map(|relations| {
+            relations
+                .into_iter()
+                .map(|relation| relation.identity)
+                .collect()
+        })
+        .collect()
 }
 
 pub(crate) fn outgoing_relations(
@@ -145,6 +180,65 @@ pub(crate) fn outgoing_relations(
     starts: &[GraphEntityId],
     relation_kinds: &BTreeSet<GraphRelationKind>,
     max_relations: usize,
+    cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+    directed_relations(
+        database,
+        namespace,
+        starts,
+        relation_kinds,
+        max_relations,
+        Direction::Outgoing,
+        cancellation,
+        ensure_projection_readable,
+    )
+}
+
+/// Bulk kind-filtered incoming fan-out. See [`incoming_relation_ids`].
+pub(crate) fn incoming_relations(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    starts: &[GraphEntityId],
+    relation_kinds: &BTreeSet<GraphRelationKind>,
+    max_relations: usize,
+    cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
+) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
+    directed_relations(
+        database,
+        namespace,
+        starts,
+        relation_kinds,
+        max_relations,
+        Direction::Incoming,
+        cancellation,
+        ensure_projection_readable,
+    )
+}
+
+/// Shared bulk fan-out over one edge direction.
+///
+/// A start with no projected entity yields an empty batch rather than an
+/// error, matching the existing outgoing contract. The `max_relations` budget
+/// is charged across the whole batch — not per start — so a caller cannot
+/// exceed it by widening `starts`, and an over-budget read fails with
+/// [`GraphDbError::BudgetExhausted`] rather than returning a truncated batch
+/// that could be mistaken for a complete fan-out.
+#[allow(clippy::too_many_arguments)]
+fn directed_relations(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    starts: &[GraphEntityId],
+    relation_kinds: &BTreeSet<GraphRelationKind>,
+    max_relations: usize,
+    direction: Direction,
     cancellation: &dyn GraphCancellation,
     ensure_projection_readable: &dyn Fn(
         &GraphNamespace,
@@ -165,7 +259,7 @@ pub(crate) fn outgoing_relations(
             continue;
         };
         let mut relations = Vec::new();
-        for (_, edge) in projected.edges_from(node, Direction::Outgoing) {
+        for (_, edge) in projected.edges_from(node, direction) {
             if cancellation.is_cancelled() {
                 return Err(GraphDbError::Cancelled);
             }

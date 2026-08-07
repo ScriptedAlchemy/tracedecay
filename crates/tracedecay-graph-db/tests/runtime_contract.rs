@@ -644,6 +644,69 @@ fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
     );
 }
 
+/// Plan 39 G7b: reverse adjacency must be readable in bulk through the graph
+/// store, with the same kind filter, batch shape, budget, and cancellation
+/// contract as the outgoing form — and it must actually read the opposite
+/// direction, not silently mirror the outgoing result.
+#[test]
+fn batch_incoming_reads_are_filtered_ordered_and_budgeted() {
+    let db = memory_db();
+    db.apply_unverified(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
+            GraphMutation::UpsertRelation(relation("cb", "c", "b", "owns")),
+        ],
+    ))
+    .unwrap();
+    let starts = ["b", "missing", "a"].map(entity_id);
+    let kinds = BTreeSet::from([GraphRelationKind::new("calls").unwrap()]);
+
+    // `b` is the *target* of `ab`, so only the incoming read reaches it. `a`
+    // has no inbound `calls` edge, which is what distinguishes this from the
+    // outgoing result over the same fixture.
+    assert_eq!(
+        db.incoming_relation_ids(&namespace(), &starts, &kinds, 1, live())
+            .unwrap()
+            .iter()
+            .map(|relations| relations
+                .iter()
+                .map(|relation| relation.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![vec!["ab"], Vec::<&str>::new(), Vec::<&str>::new()]
+    );
+    assert_eq!(
+        db.outgoing_relation_ids(&namespace(), &starts, &kinds, 1, live())
+            .unwrap()
+            .iter()
+            .map(|relations| relations
+                .iter()
+                .map(|relation| relation.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![Vec::<&str>::new(), Vec::<&str>::new(), vec!["ab"]],
+        "outgoing must stay the mirror image of incoming over the same fixture"
+    );
+
+    // An over-budget read fails rather than returning a truncated fan-out.
+    assert_eq!(
+        db.incoming_relation_ids(&namespace(), &starts, &kinds, 0, live())
+            .unwrap_err(),
+        GraphDbError::BudgetExhausted
+    );
+    assert_eq!(
+        db.incoming_relation_ids(&namespace(), &starts, &kinds, 1, Arc::new(Cancelled))
+            .unwrap_err(),
+        GraphDbError::Cancelled
+    );
+}
+
 #[test]
 fn multi_source_reachability_uses_overlay_and_global_budget() {
     let db = memory_db();

@@ -349,6 +349,31 @@ impl VerifiedGraphSnapshot {
         })
     }
 
+    /// Bulk kind-filtered incoming fan-out over this verified snapshot.
+    ///
+    /// Plan 39 G7b: `VerifiedGraphSnapshot` is the sole production read
+    /// boundary, and reverse adjacency (callers, impact, reverse
+    /// reachability) previously had no bulk form here — only
+    /// [`Self::outgoing_relation_ids`]. Exposing it lets those reads leave
+    /// SQL `edges` joins without dropping their budgets.
+    pub fn incoming_relation_ids(
+        &self,
+        starts: &[GraphEntityId],
+        relation_kinds: &BTreeSet<crate::GraphRelationKind>,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
+        self.with_operation(|| {
+            self.database.incoming_relation_ids(
+                &self.head.locator.physical_namespace()?,
+                starts,
+                relation_kinds,
+                max_relations,
+                cancellation,
+            )
+        })
+    }
+
     pub(crate) fn lease_for_projection(
         &self,
         projection: &GraphProjectionIdentity,
