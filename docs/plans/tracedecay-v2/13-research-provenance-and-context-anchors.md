@@ -50,6 +50,72 @@ production path mints these anchors yet. The targets exist so those owners bind
 to one anchor contract instead of inventing a parallel reference family; their
 own absence must not be refiled as a Plan 13 gap or as a dashboard gap.
 
+**Pending-producer inventory (2026-08-07).** The 2026-07-26 caveat above was
+written as if only the two GitHub-stack targets lacked a producer. A producer
+census over the whole target family found that **no `GitTopologyAnchorTargetV1`
+variant has a production producer**: the only construction sites in the
+repository are in `crates/tracedecay-domain/tests/git_topology_anchor_contract.rs`,
+and no code outside `crates/tracedecay-domain` constructs
+`RetrievalAnchorTargetV2::GitTopology` / `RetrievalAnchorTargetV3::GitTopology`.
+This is SANCTIONED-PENDING contract breadth, not drift: Required behavior 11-21
+mandate each target, and every producer is owned by another plan. Do not refile
+any row below as a Plan 13 gap, and do not delete it as unused breadth — the
+owning plan binds to this contract rather than minting a parallel reference
+family.
+
+| `GitTopologyAnchorTargetV1` variant | Required behavior | Owning plan(s) for the producer |
+| --- | --- | --- |
+| `RepositoryCapture` | 11, 17, 18 | Plan 36 (native repository capture) |
+| `WorktreeCapture` | 11, 17 | Plan 36 (native linked-worktree capture), Plan 16 (`WorktreeId`) |
+| `RefSnapshot` | 11, 17 | Plan 36 (ref capture and movement rekeying) |
+| `NativeObject` | 12, 18 | Plan 36 (native commit/tree/blob capture) |
+| `PullRequestSnapshot` | 13, 19 | Plan 36 (`PullRequestSnapshot` identity), Plan 27 (provider decoding) |
+| `ReviewSnapshot` | 13 | Plan 36 (`ReviewThreadAnchor`/`CommentAnchor`), Plan 27 (provider decoding) |
+| `CheckSnapshot` | 14, 19 | Plan 27 (decode), Plan 03 (canonicalize), Plan 37 (consume) |
+| `GitHubStackCapability` | 19 | Plan 27 (stacked-PR capability probing) |
+| `GitHubStackSnapshot` | 19 | Plan 37 (multi-root read-only stack adapter) |
+| `ConflictEvidence` | 17, 20 | Plan 36 (conflict/unmerged-stage observation) |
+| `PreflightPreview` | 17, 20 | Plan 36 (preflight computation) |
+| `ApplyReceipt` | 17, 21 | Plan 36 (admitted Git-operation receipts), Plan 32 (terminal runtime receipts) |
+| `IntegrationReceipt` | 17, 21 | Plan 24 (owning decision), Plan 32/36 (terminal receipts) |
+
+**How to measure this contract (2026-08-07).** A name-based sweep for references
+outside `crates/tracedecay-domain` reports roughly forty `research/*` public types
+as zero-consumer. That measurement is an artifact of granularity, not evidence of
+dead code. Consumption here is *structural*: a caller writes
+`RetrievalAnchorTargetV3::GitTopology(Box::new(target))` and never names
+`RepositoryCaptureAnchorRefV1`, `OrderedGitTopologySourceV1`, or
+`GitTopologySourceRoleV1`, yet depends on all three. The same holds for
+`CoverageReportV1`, whose `RemoteCoverageV1` / `RemoteShardCoverageV1` /
+`VerifiedCacheGrantSnapshotV1` / `ReadConsistencyV1` / `BrainNodeRoleV1` /
+`BoundedVec` / `EvidenceRetentionWatermark` members are reached only through the
+report. A transitive-reachability audit on 2026-08-07 found **no orphaned type**
+in `research/{git_topology,subjects,retrieval,manifest,coverage,evidence}.rs`:
+every public type is either externally consumed or a field/variant payload of one
+that is. Judge this contract by reachability from a consumed root, never by a
+by-name reference count.
+
+**Open item (2026-08-07): plan-disowned research-bundle family.** One family in
+this module is reachable only from tests that this plan does not cite as
+acceptance coverage. `ResearchBundleEnvelopeV1`, `ResearchBundleManifestV1`,
+`ResearchContributionV1`/`ContributionRoleV1`, `PrivateCorpusManifestRef`,
+`AttributionGap`/`AttributionGapReasonV1`, `GitTruthManifest`, `RedactionReport`,
+`ResearchAnchorTombstoneV1`/`AnchorTombstoneReasonV1`, together with
+`RetrievalAnchorCatalogV1`, `RetrievalRecipeV1`, `ResearchContextAnchorV1`, the
+`RetrievalAnchorCompatibilityRecordV1`/`RetrievalAnchorCompatibilityTargetV1` pair,
+and the `ResearchAnchorSubjectV1` research-subject variants, have no production
+consumer; their only callers are `tests/v2_corpus_suite/{anchor_retargeting,
+research_anchors}.rs` and `tests/v2_corpus_suite/research_anchors/support.rs`.
+"Does not own" already disclaims this subject matter — research manifests,
+research ledgers, private corpus registries, and subagent rosters — and Acceptance
+requires that repository search find no research-ledger requirement in this
+contract. This family is therefore a candidate for delete-with-last-caller, but it
+is **not** covered by the pending-producer sanction above and was deliberately
+left in place: removing it also removes live test targets and touches
+`EntityRef`/`EntityKind`/`LogSafeText` reachability, so it needs its own scoped
+lane rather than a drive-by deletion. Nothing in it is evidence that the anchor
+core is unimplemented.
+
 ## Outcome
 
 Any authorized result can lead back to the exact retained observation or entity that
