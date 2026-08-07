@@ -3,10 +3,14 @@
 //! The endpoint composes existing authorities; it does not collect new data.
 //! `sessions`/`session_messages` provide thread bounds and
 //! `sessions.metadata_json` provides provider-native edited-file rollups. Git
-//! correlation belongs to the registered graph read authority and is reported
-//! unavailable until that typed projection is supplied to this route.
+//! correlation is read through [`DashboardGitCorrelationReadPortV1`], the
+//! daemon-owned typed read over the verified session-git-evidence graph
+//! projection; a state composed without that authority reports the git
+//! sources unavailable instead of inferring relationships from session rows.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 
 use axum::Json;
 use axum::extract::State;
@@ -24,6 +28,7 @@ use super::read_model::{
 };
 use super::util::{JsonQuery, query_rows};
 use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, params};
+use tracedecay_sessions::runtime::git_correlation::{CommitSessionRecord, SessionGitSpan};
 
 const DEFAULT_LIMIT: i64 = 200;
 const MAX_LIMIT: i64 = 500;
@@ -35,6 +40,43 @@ duplicate them";
 const GIT_CORRELATION_AUTHORITY: &str = "typed Git correlation graph read port";
 const GIT_CORRELATION_REASON: &str = "Git correlation is owned by the registered graph runtime; \
 the retained session snapshot cannot query or infer commit, branch, or worktree relationships";
+const GIT_CORRELATION_PROJECTION: &str = "verified session-git-evidence graph projection";
+
+/// Verified git-correlation evidence recovered for one dashboard read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DashboardGitCorrelationReadV1 {
+    /// The projection has never published a verified head — the typed empty
+    /// start of a project without any recorded Git evidence.
+    Unpublished,
+    /// The recovered verified projection: every recorded span and commit
+    /// attribution, bound to the generation that verified them.
+    Published {
+        generation: String,
+        spans: Vec<SessionGitSpan>,
+        commits: Vec<CommitSessionRecord>,
+    },
+}
+
+/// Typed failure of the git-correlation read authority. The route reports it
+/// as the source's error state; it is never collapsed into an empty result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DashboardGitCorrelationReadErrorV1 {
+    pub detail: String,
+}
+
+pub type DashboardGitCorrelationReadFutureV1<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<DashboardGitCorrelationReadV1, DashboardGitCorrelationReadErrorV1>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Daemon-owned read over the verified session-git-evidence projection.
+/// HTTP adapters receive complete typed rows and never a graph store handle.
+pub trait DashboardGitCorrelationReadPortV1: Send + Sync {
+    fn read<'a>(&'a self) -> DashboardGitCorrelationReadFutureV1<'a>;
+}
 
 const PAGE_CTE: &str = "
     WITH page AS (
@@ -192,7 +234,14 @@ pub async fn temporal(
         Ok(snapshot) => snapshot,
         Err(error) => return query_error(format!("open Loom session snapshot: {error}")),
     };
-    let read = match read_temporal(&snapshot, limit, offset).await {
+    let git_correlation = match state.git_correlation_read_authority.as_ref() {
+        None => GitCorrelationSourceReadV1::Absent,
+        Some(authority) => match authority.read().await {
+            Ok(read) => GitCorrelationSourceReadV1::Read(read),
+            Err(error) => GitCorrelationSourceReadV1::Failed(error.detail),
+        },
+    };
+    let read = match read_temporal(&snapshot, limit, offset, git_correlation).await {
         Ok(read) => read,
         Err(error) => return query_error(error),
     };
@@ -224,10 +273,19 @@ pub async fn temporal(
     Json(envelope).into_response()
 }
 
+/// One resolved git-correlation read for this request: the composed
+/// authority's outcome, or the typed absent/failed states.
+enum GitCorrelationSourceReadV1 {
+    Absent,
+    Failed(String),
+    Read(DashboardGitCorrelationReadV1),
+}
+
 async fn read_temporal(
     conn: &(impl QueryExecutor + ?Sized),
     limit: i64,
     offset: i64,
+    git_correlation: GitCorrelationSourceReadV1,
 ) -> Result<LoomReadV1, String> {
     let total = query_count(conn, "SELECT COUNT(*) AS total FROM sessions", (), "total").await?;
     let session_sql = "
@@ -332,27 +390,17 @@ async fn read_temporal(
         .get("latest_activated_at")
         .and_then(Value::as_i64);
 
+    let mut page_keys: BTreeSet<(String, String)> = BTreeSet::new();
+    for session in &sessions {
+        page_keys.insert((
+            required_str(session, "provider")?.to_string(),
+            required_str(session, "session_id")?.to_string(),
+        ));
+    }
+    let git = resolve_git_sources(git_correlation, &page_keys, examined_sessions)?;
+
     let statuses = vec![
-        LoomSourceStatusV1 {
-            id: "session_commit",
-            label: "Session ↔ commit",
-            state: DashboardDomainStateV1::Unknown,
-            authority: None,
-            granularity: "commit attribution",
-            providers: Vec::new(),
-            item_count: None,
-            reason: Some(GIT_CORRELATION_REASON.to_string()),
-            required_authority: Some(GIT_CORRELATION_AUTHORITY),
-            coverage: LoomSourceCoverageV1 {
-                completeness: "unknown",
-                eligible: None,
-                examined: None,
-                matched: None,
-                omitted: None,
-                unit: None,
-                reason: GIT_CORRELATION_REASON.to_string(),
-            },
-        },
+        git.session_commit,
         source_status(SourceStatusInput {
             id: "session_file",
             label: "Session → edited file",
@@ -377,26 +425,7 @@ async fn read_temporal(
                     .to_string(),
             },
         }),
-        LoomSourceStatusV1 {
-            id: "branch_worktree",
-            label: "Branch & worktree spans",
-            state: DashboardDomainStateV1::Unknown,
-            authority: None,
-            granularity: "coalesced activity span",
-            providers: Vec::new(),
-            item_count: None,
-            reason: Some(GIT_CORRELATION_REASON.to_string()),
-            required_authority: Some(GIT_CORRELATION_AUTHORITY),
-            coverage: LoomSourceCoverageV1 {
-                completeness: "unknown",
-                eligible: None,
-                examined: None,
-                matched: None,
-                omitted: None,
-                unit: None,
-                reason: GIT_CORRELATION_REASON.to_string(),
-            },
-        },
+        git.branch_worktree,
         LoomSourceStatusV1 {
             id: "delivery_outcomes",
             label: "Pull request, review, CI & release outcomes",
@@ -432,9 +461,9 @@ async fn read_temporal(
             total,
             sessions: decode_rows(sessions, "Loom sessions")?,
             source_statuses: statuses,
-            commits: Vec::new(),
+            commits: git.commits,
             edited_files: decode_rows(edited_files, "Loom edited files")?,
-            branch_spans: Vec::new(),
+            branch_spans: git.branch_spans,
             temporal_refresh: LoomTemporalRefreshV1 {
                 state: refresh_state,
                 active_generations,
@@ -445,6 +474,280 @@ async fn read_temporal(
         examined_sessions,
         latest_activated_at,
     })
+}
+
+struct LoomGitSourcesV1 {
+    session_commit: LoomSourceStatusV1,
+    branch_worktree: LoomSourceStatusV1,
+    commits: Vec<LoomCommitV1>,
+    branch_spans: Vec<LoomBranchSpanV1>,
+}
+
+fn resolve_git_sources(
+    read: GitCorrelationSourceReadV1,
+    page_keys: &BTreeSet<(String, String)>,
+    examined_sessions: u64,
+) -> Result<LoomGitSourcesV1, String> {
+    match read {
+        GitCorrelationSourceReadV1::Absent => Ok(LoomGitSourcesV1 {
+            session_commit: unavailable_git_status(
+                "session_commit",
+                "Session ↔ commit",
+                "commit attribution",
+                DashboardDomainStateV1::Unknown,
+                None,
+                GIT_CORRELATION_REASON.to_string(),
+                Some(GIT_CORRELATION_AUTHORITY),
+            ),
+            branch_worktree: unavailable_git_status(
+                "branch_worktree",
+                "Branch & worktree spans",
+                "coalesced activity span",
+                DashboardDomainStateV1::Unknown,
+                None,
+                GIT_CORRELATION_REASON.to_string(),
+                Some(GIT_CORRELATION_AUTHORITY),
+            ),
+            commits: Vec::new(),
+            branch_spans: Vec::new(),
+        }),
+        GitCorrelationSourceReadV1::Failed(detail) => {
+            let reason = format!("the verified Git evidence read failed: {detail}");
+            Ok(LoomGitSourcesV1 {
+                session_commit: unavailable_git_status(
+                    "session_commit",
+                    "Session ↔ commit",
+                    "commit attribution",
+                    DashboardDomainStateV1::Error,
+                    Some(GIT_CORRELATION_PROJECTION),
+                    reason.clone(),
+                    None,
+                ),
+                branch_worktree: unavailable_git_status(
+                    "branch_worktree",
+                    "Branch & worktree spans",
+                    "coalesced activity span",
+                    DashboardDomainStateV1::Error,
+                    Some(GIT_CORRELATION_PROJECTION),
+                    reason,
+                    None,
+                ),
+                commits: Vec::new(),
+                branch_spans: Vec::new(),
+            })
+        }
+        GitCorrelationSourceReadV1::Read(DashboardGitCorrelationReadV1::Unpublished) => {
+            let reason = "the verified Git evidence projection has never published a head; \
+                          no recorded span or commit correlates yet"
+                .to_string();
+            Ok(LoomGitSourcesV1 {
+                session_commit: ready_git_status(
+                    "session_commit",
+                    "Session ↔ commit",
+                    "commit attribution",
+                    Vec::new(),
+                    0,
+                    0,
+                    examined_sessions,
+                    reason.clone(),
+                ),
+                branch_worktree: ready_git_status(
+                    "branch_worktree",
+                    "Branch & worktree spans",
+                    "coalesced activity span",
+                    Vec::new(),
+                    0,
+                    0,
+                    examined_sessions,
+                    reason,
+                ),
+                commits: Vec::new(),
+                branch_spans: Vec::new(),
+            })
+        }
+        GitCorrelationSourceReadV1::Read(DashboardGitCorrelationReadV1::Published {
+            generation,
+            spans,
+            commits,
+        }) => {
+            let page_spans: Vec<&SessionGitSpan> = spans
+                .iter()
+                .filter(|span| {
+                    page_keys.contains(&(span.provider.clone(), span.session_id.clone()))
+                })
+                .collect();
+            let page_commits: Vec<&CommitSessionRecord> = commits
+                .iter()
+                .filter(|record| {
+                    page_keys.contains(&(record.provider.clone(), record.session_id.clone()))
+                })
+                .collect();
+            let branch_spans = page_spans
+                .iter()
+                .map(|span| loom_branch_span(span))
+                .collect::<Result<Vec<_>, _>>()?;
+            let commit_rows = page_commits
+                .iter()
+                .map(|record| loom_commit(record))
+                .collect::<Result<Vec<_>, _>>()?;
+            let reason = format!(
+                "recovered from the verified Git evidence generation {generation}"
+            );
+            let span_providers = distinct_strings(page_spans.iter().map(|span| &span.provider));
+            let commit_providers =
+                distinct_strings(page_commits.iter().map(|record| &record.provider));
+            let span_matched = page_spans
+                .iter()
+                .map(|span| (&span.provider, &span.session_id))
+                .collect::<BTreeSet<_>>()
+                .len() as u64;
+            let commit_matched = page_commits
+                .iter()
+                .map(|record| (&record.provider, &record.session_id))
+                .collect::<BTreeSet<_>>()
+                .len() as u64;
+            Ok(LoomGitSourcesV1 {
+                session_commit: ready_git_status(
+                    "session_commit",
+                    "Session ↔ commit",
+                    "commit attribution",
+                    commit_providers,
+                    commit_matched,
+                    commit_rows.len() as u64,
+                    examined_sessions,
+                    reason.clone(),
+                ),
+                branch_worktree: ready_git_status(
+                    "branch_worktree",
+                    "Branch & worktree spans",
+                    "coalesced activity span",
+                    span_providers,
+                    span_matched,
+                    branch_spans.len() as u64,
+                    examined_sessions,
+                    reason,
+                ),
+                commits: commit_rows,
+                branch_spans,
+            })
+        }
+    }
+}
+
+fn unavailable_git_status(
+    id: &'static str,
+    label: &'static str,
+    granularity: &'static str,
+    state: DashboardDomainStateV1,
+    authority: Option<&'static str>,
+    reason: String,
+    required_authority: Option<&'static str>,
+) -> LoomSourceStatusV1 {
+    LoomSourceStatusV1 {
+        id,
+        label,
+        state,
+        authority,
+        granularity,
+        providers: Vec::new(),
+        item_count: None,
+        reason: Some(reason.clone()),
+        required_authority,
+        coverage: LoomSourceCoverageV1 {
+            completeness: "unknown",
+            eligible: None,
+            examined: None,
+            matched: None,
+            omitted: None,
+            unit: None,
+            reason,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ready_git_status(
+    id: &'static str,
+    label: &'static str,
+    granularity: &'static str,
+    providers: Vec<String>,
+    matched_sessions: u64,
+    item_count: u64,
+    examined_sessions: u64,
+    reason: String,
+) -> LoomSourceStatusV1 {
+    LoomSourceStatusV1 {
+        id,
+        label,
+        state: DashboardDomainStateV1::Ready,
+        authority: Some(GIT_CORRELATION_PROJECTION),
+        granularity,
+        providers,
+        item_count: Some(item_count),
+        reason: Some(reason.clone()),
+        required_authority: None,
+        coverage: LoomSourceCoverageV1 {
+            completeness: "complete",
+            eligible: Some(examined_sessions),
+            examined: Some(examined_sessions),
+            matched: Some(matched_sessions),
+            omitted: Some(0),
+            unit: Some("displayed sessions"),
+            reason,
+        },
+    }
+}
+
+fn distinct_strings<'a>(values: impl Iterator<Item = &'a String>) -> Vec<String> {
+    values
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn loom_branch_span(span: &SessionGitSpan) -> Result<LoomBranchSpanV1, String> {
+    Ok(LoomBranchSpanV1 {
+        provider: span.provider.clone(),
+        session_id: span.session_id.clone(),
+        branch: span.branch.clone(),
+        worktree: span.worktree.clone(),
+        first_at: span.first_ts,
+        last_at: span.last_ts,
+        event_count: span.event_count,
+        source: serde_token(&span.source, "Git span source")?,
+    })
+}
+
+fn loom_commit(record: &CommitSessionRecord) -> Result<LoomCommitV1, String> {
+    Ok(LoomCommitV1 {
+        provider: record.provider.clone(),
+        session_id: record.session_id.clone(),
+        commit_sha: record.commit_sha.clone(),
+        committed_at: record.committed_at,
+        branch: record.branch.clone(),
+        worktree: record.worktree.clone(),
+        relation: serde_token(&record.relation, "Git commit relation")?,
+        evidence: serde_token(&record.evidence, "Git commit evidence")?,
+        confidence: record.confidence as f64,
+        span_overlap_kind: Some(serde_token(
+            &record.span_overlap_kind,
+            "Git commit span overlap",
+        )?),
+    })
+}
+
+/// Canonical snake_case token of a unit enum, taken from its own serde
+/// contract instead of a hand-written duplicate mapping.
+fn serde_token<T: Serialize>(value: &T, label: &str) -> Result<String, String> {
+    match serde_json::to_value(value) {
+        Ok(Value::String(token)) => Ok(token),
+        Ok(other) => Err(format!(
+            "{label} did not serialize to its canonical token: {other}"
+        )),
+        Err(error) => Err(format!("{label} failed to serialize: {error}")),
+    }
 }
 
 pub async fn sessions_for_edited_file(
@@ -695,5 +998,119 @@ mod tests {
             assert_eq!(source.required_authority, Some(GIT_CORRELATION_AUTHORITY));
             assert_eq!(source.state, DashboardDomainStateV1::Unknown);
         }
+    }
+
+    fn page(keys: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+        keys.iter()
+            .map(|(provider, session_id)| ((*provider).to_owned(), (*session_id).to_owned()))
+            .collect()
+    }
+
+    fn span(provider: &str, session_id: &str) -> SessionGitSpan {
+        SessionGitSpan {
+            span_id: format!("transcript:{provider}:{session_id}"),
+            provider: provider.to_owned(),
+            session_id: session_id.to_owned(),
+            thread_id: None,
+            branch: Some("main".to_owned()),
+            worktree: "/work/tree".to_owned(),
+            first_ts: 1_700_001_000,
+            last_ts: 1_700_001_020,
+            event_count: 2,
+            source: tracedecay_sessions::runtime::git_correlation::SpanSource::Ingest,
+        }
+    }
+
+    #[test]
+    fn absent_git_authority_stays_the_typed_unavailable_state() {
+        let sources = resolve_git_sources(
+            GitCorrelationSourceReadV1::Absent,
+            &page(&[("cursor", "sess-1")]),
+            1,
+        )
+        .expect("absent sources");
+
+        for status in [&sources.session_commit, &sources.branch_worktree] {
+            assert_eq!(status.state, DashboardDomainStateV1::Unknown);
+            assert_eq!(status.required_authority, Some(GIT_CORRELATION_AUTHORITY));
+            assert_eq!(status.item_count, None, "absence must not claim a count");
+        }
+        assert!(sources.commits.is_empty());
+        assert!(sources.branch_spans.is_empty());
+    }
+
+    #[test]
+    fn failed_git_read_is_an_error_state_never_an_empty_result() {
+        let sources = resolve_git_sources(
+            GitCorrelationSourceReadV1::Failed("graph runtime is not mounted".to_owned()),
+            &page(&[("cursor", "sess-1")]),
+            1,
+        )
+        .expect("failed sources");
+
+        for status in [&sources.session_commit, &sources.branch_worktree] {
+            assert_eq!(status.state, DashboardDomainStateV1::Error);
+            assert_eq!(status.item_count, None);
+            assert!(
+                status
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("graph runtime is not mounted")),
+                "the failure detail must be preserved: {status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unpublished_projection_is_a_ready_typed_empty_start() {
+        let sources = resolve_git_sources(
+            GitCorrelationSourceReadV1::Read(DashboardGitCorrelationReadV1::Unpublished),
+            &page(&[("cursor", "sess-1")]),
+            1,
+        )
+        .expect("unpublished sources");
+
+        for status in [&sources.session_commit, &sources.branch_worktree] {
+            assert_eq!(status.state, DashboardDomainStateV1::Ready);
+            assert_eq!(status.item_count, Some(0));
+            assert_eq!(status.coverage.completeness, "complete");
+        }
+        assert!(sources.commits.is_empty());
+        assert!(sources.branch_spans.is_empty());
+    }
+
+    #[test]
+    fn published_projection_serves_page_rows_and_conceals_foreign_sessions() {
+        let sources = resolve_git_sources(
+            GitCorrelationSourceReadV1::Read(DashboardGitCorrelationReadV1::Published {
+                generation: "session-git-evidence:test".to_owned(),
+                spans: vec![span("cursor", "sess-1"), span("cursor", "sess-foreign")],
+                commits: Vec::new(),
+            }),
+            &page(&[("cursor", "sess-1")]),
+            1,
+        )
+        .expect("published sources");
+
+        assert_eq!(sources.branch_worktree.state, DashboardDomainStateV1::Ready);
+        assert_eq!(sources.branch_worktree.item_count, Some(1));
+        assert_eq!(sources.session_commit.state, DashboardDomainStateV1::Ready);
+        assert_eq!(sources.session_commit.item_count, Some(0));
+        assert_eq!(sources.branch_spans.len(), 1);
+        let span = &sources.branch_spans[0];
+        assert_eq!(span.session_id, "sess-1");
+        assert_eq!(span.branch.as_deref(), Some("main"));
+        assert_eq!(span.first_at, 1_700_001_000);
+        assert_eq!(span.last_at, 1_700_001_020);
+        assert_eq!(span.source, "ingest");
+        assert!(
+            sources
+                .branch_worktree
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("session-git-evidence:test")),
+            "the serving generation must be named: {:?}",
+            sources.branch_worktree.reason
+        );
     }
 }

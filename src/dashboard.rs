@@ -14,6 +14,11 @@ pub use tracedecay_dashboard_api::*;
 
 pub(crate) mod assets;
 
+/// Canonical observation-capture seeding for dashboard integration fixtures.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub mod observation_seed;
+
 /// Installs root-owned values consumed by the extracted dashboard crate.
 pub(crate) fn register_runtime_ports() {
     tracedecay_dashboard_api::install_build_version(crate::version::build_version);
@@ -231,6 +236,21 @@ pub async fn dashboard_lcm_read_authority_for_test(
             project_id,
         ),
     ))
+}
+
+/// Composes the daemon-owned git-correlation read authority over the
+/// fixture's registered project-sessions store — the same
+/// `DashboardGitCorrelationReadAdapter` the MCP dashboard composition mounts
+/// in production. Without it Loom's session↔commit and branch/worktree
+/// sources answer their typed unavailable states.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub fn dashboard_git_correlation_read_authority_for_test(
+    project_database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+) -> std::sync::Arc<dyn DashboardGitCorrelationReadPortV1> {
+    std::sync::Arc::new(
+        crate::mcp::tools::handlers::DashboardGitCorrelationReadAdapter::new(project_database),
+    )
 }
 
 /// Records one git span through a registered ProjectSessions authority.

@@ -90,6 +90,10 @@ pub use lcm_api::{
     DashboardLcmReadStateV1, DashboardLcmTimelineBucketV1,
 };
 mod loom_api;
+pub use loom_api::{
+    DashboardGitCorrelationReadErrorV1, DashboardGitCorrelationReadFutureV1,
+    DashboardGitCorrelationReadPortV1, DashboardGitCorrelationReadV1,
+};
 mod memory_analysis;
 mod memory_api;
 pub mod memory_curate;
@@ -221,6 +225,9 @@ pub struct DashboardStateCompositionV1 {
     pub graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
     pub registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
+    /// Daemon-owned typed read over the verified session-git-evidence graph
+    /// projection. Loom's git sources report unavailable without it.
+    pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
@@ -305,6 +312,9 @@ pub struct DashboardState {
     /// Daemon-owned canonical session retrieval authority used by LCM browse
     /// routes. Those routes never retain or open a session database.
     pub lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
+    /// Daemon-owned typed read over the verified session-git-evidence graph
+    /// projection, serving Loom's session↔commit and branch/worktree sources.
+    pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
     /// Global accounting DB for the savings ledger and lifetime counters used
     /// by the Savings & Cost tab. Provider usage lives in the retained project
     /// session store exposed separately through `lcm_db`.
@@ -361,6 +371,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     project_sessions: Arc<RegisteredGlobalDb>,
     profile_database: Arc<RegisteredGlobalDb>,
     lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
+    graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
+    git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
 }
 
 impl DashboardHostAdmissionTestAuthorityV1 {
@@ -377,6 +389,8 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             project_sessions,
             profile_database,
             lcm_read_authority: None,
+            graph_read_authority: None,
+            git_correlation_read_authority: None,
         }
     }
 
@@ -388,6 +402,28 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         lcm_read_authority: Arc<dyn DashboardLcmReadPortV1>,
     ) -> Self {
         self.lcm_read_authority = Some(lcm_read_authority);
+        self
+    }
+
+    /// Attaches the daemon-owned verified graph read authority so the test
+    /// transport serves the same graph/explorer code reads production mounts.
+    #[must_use]
+    pub fn with_graph_read_authority(
+        mut self,
+        graph_read_authority: Arc<dyn tracedecay_application::DashboardGraphReadPortV1>,
+    ) -> Self {
+        self.graph_read_authority = Some(graph_read_authority);
+        self
+    }
+
+    /// Attaches the daemon-owned git-correlation read authority so the test
+    /// transport serves the same Loom git-evidence reads production mounts.
+    #[must_use]
+    pub fn with_git_correlation_read_authority(
+        mut self,
+        git_correlation_read_authority: Arc<dyn DashboardGitCorrelationReadPortV1>,
+    ) -> Self {
+        self.git_correlation_read_authority = Some(git_correlation_read_authority);
         self
     }
 }
@@ -520,6 +556,7 @@ async fn build_state_inner(
         graph_read_authority,
         registered_project_session_db,
         lcm_read_authority,
+        git_correlation_read_authority,
         registered_savings_db,
         automation_scheduler_reconciler,
         automation_writer,
@@ -569,6 +606,7 @@ async fn build_state_inner(
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
         lcm_read_authority,
+        git_correlation_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
@@ -610,6 +648,7 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
             graph_read_authority: None,
             registered_project_session_db: None,
             lcm_read_authority: None,
+            git_correlation_read_authority: None,
             registered_savings_db: None,
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
@@ -646,6 +685,7 @@ pub async fn build_selected_project_state(
             graph_read_authority: active.graph_read_authority.clone(),
             registered_project_session_db: None,
             lcm_read_authority: None,
+            git_correlation_read_authority: None,
             registered_savings_db: active.savings_db.clone(),
             automation_scheduler_reconciler: None,
             automation_writer: Arc::clone(&active.automation_writer),
@@ -826,11 +866,14 @@ where
         options.warm_token_counts,
         DashboardStateCompositionV1 {
             project_graph_resolver: test_project_graph_resolver,
-            graph_read_authority: None,
+            graph_read_authority: test_authority
+                .and_then(|authority| authority.graph_read_authority.clone()),
             registered_project_session_db: test_authority
                 .map(|authority| Arc::clone(&authority.project_sessions)),
             lcm_read_authority: test_authority
                 .and_then(|authority| authority.lcm_read_authority.clone()),
+            git_correlation_read_authority: test_authority
+                .and_then(|authority| authority.git_correlation_read_authority.clone()),
             registered_savings_db: test_authority
                 .map(|authority| Arc::clone(&authority.profile_database)),
             automation_scheduler_reconciler: None,
@@ -1807,6 +1850,7 @@ mod authority_tests {
                 lcm_db_path: layout.sessions_db_path.display().to_string(),
                 lcm_scope: "unavailable".to_owned(),
                 lcm_read_authority: None,
+                git_correlation_read_authority: None,
                 savings_db: None,
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),

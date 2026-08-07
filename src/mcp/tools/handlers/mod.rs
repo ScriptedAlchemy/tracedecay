@@ -16,6 +16,12 @@ mod analytics;
 mod application_surface;
 pub mod ast_grep_search;
 pub mod dashboard;
+mod dashboard_git_correlation;
+// Only reached by the test-transport dashboard git-correlation fixture
+// (`dashboard::dashboard_git_correlation_read_authority_for_test`); gate it
+// so the default production build does not carry it as an unused re-export.
+#[cfg(feature = "test-transport")]
+pub(crate) use dashboard_git_correlation::DashboardGitCorrelationReadAdapter;
 mod dashboard_lcm;
 pub(crate) use dashboard_lcm::DashboardLcmReadAdapter;
 mod dependency_hints;

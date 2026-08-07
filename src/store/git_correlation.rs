@@ -213,7 +213,7 @@ where
 
     /// `Ok(None)` means the projection has never published a verified head:
     /// the project has no recorded Git evidence yet.
-    fn git_evidence_projection(
+    pub(crate) fn git_evidence_projection(
         &self,
     ) -> Result<Option<GitEvidenceProjectionStore>, GitCorrelationError> {
         let identity =

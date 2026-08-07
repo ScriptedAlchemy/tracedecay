@@ -418,6 +418,17 @@ pub(super) async fn handle_dashboard(
                     Arc::new(DashboardLcmReadAdapter::new(retrieval, project_id))
                         as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
                 });
+            // Loom's git sources read the verified session-git-evidence
+            // projection through the same registered store; a state composed
+            // without it reports those sources unavailable.
+            let git_correlation_read_authority =
+                registered_project_session_db.as_ref().map(|database| {
+                    Arc::new(
+                        super::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
+                            Arc::clone(database),
+                        ),
+                    ) as Arc<dyn crate::dashboard::DashboardGitCorrelationReadPortV1>
+                });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
@@ -426,6 +437,7 @@ pub(super) async fn handle_dashboard(
                     graph_read_authority: None,
                     registered_project_session_db,
                     lcm_read_authority,
+                    git_correlation_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,
                     automation_writer,
