@@ -383,8 +383,6 @@ impl CodeIndexSchedulerRegistryV1 {
     where
         C: SemanticExecutionControl + Send + Sync + 'static,
     {
-<<<<<<< ours
-<<<<<<< ours
         let query = self
             .execute_controlled_query(scope, input, control.clone())
             .await?;
@@ -396,32 +394,6 @@ impl CodeIndexSchedulerRegistryV1 {
             )
             .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
             return Ok(ExecutedQuerySemanticSearchV1 { query, semantic });
-=======
-=======
->>>>>>> theirs
-        let query = self.execute_query_search(scope, input).await?;
-        let latest = match self.generation_for(scope, &query.generation).await {
-            Ok(Some(latest)) => latest,
-            Ok(None) => {
-                let semantic = semantic_abstention(
-                    mode,
-                    SemanticAbstentionV1::IndexStale,
-                    Arc::clone(&query.authorized.fallback),
-                )
-                .map_err(|error| bind_semantic_execution_error(&query.generation, error))?;
-                return Ok(ExecutedQuerySemanticSearchV1 { query, semantic });
-            }
-            Err(reason) => {
-                return Err(QuerySemanticSearchExecutionErrorV1::Query(
-                    super::query_runtime::QuerySearchExecutionErrorV1::ExactGenerationUnavailable(
-                        reason,
-                    ),
-                ));
-            }
-<<<<<<< ours
->>>>>>> theirs
-=======
->>>>>>> theirs
         };
         let semantic = self
             .execute_semantic_after_query(

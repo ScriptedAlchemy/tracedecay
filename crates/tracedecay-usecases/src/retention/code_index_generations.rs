@@ -4,10 +4,8 @@
 //! the active code pointer or a readable vector inventory names it. Collection
 //! therefore uses conservative mark-and-sweep rather than refcounts: a missed
 //! mark costs disk space, while a miscount could silently remove readable code
-//! evidence. The mark set is every generation addressable through the durable
-//! publication pointer and every vector-readable source. Callers may request a
-//! rollback floor explicitly, but the production default adds no unbounded
-//! evidence beyond the pointer's byte-, time-, and count-bounded history.
+//! evidence. The mark set is the active generation, every vector-readable source,
+//! and a small newest-superseded rollback floor.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
@@ -41,15 +39,7 @@ pub use locking::{
 use generation_scan::read_generation_metadata;
 use locking::acquire_scope_retention_lock;
 
-<<<<<<< ours
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
-pub const MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1: usize = 256;
-=======
-pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 0;
-pub const MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1: usize = 32;
-pub const MAX_DURABLE_GENERATION_INDEX_BYTES_V1: u64 = 8 * 1024 * 1024 * 1024;
-pub const MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1: i64 = 7 * 24 * 60 * 60 * 1_000_000;
->>>>>>> theirs
 
 /// How long a code-index scope root must have been untouched before it can be
 /// classified as stranded and collected. A worktree can be unmounted, moved, or
@@ -104,81 +94,6 @@ struct SealedGenerationSealMetadataV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct DurableGenerationIndexEntryV1 {
-    pub generation_id: String,
-    pub snapshot_content_identity: String,
-    pub sealed_at_micros: i64,
-<<<<<<< ours
-    pub generation_file: String,
-    pub state_digest: String,
-=======
-    pub size_bytes: u64,
-    pub generation_file: String,
-    pub state_digest: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_reference: Option<String>,
->>>>>>> theirs
-    pub source_revision: Option<String>,
-    pub source_tree: Option<String>,
-}
-
-<<<<<<< ours
-=======
-/// Apply the durable exact-generation history bounds in canonical oldest-first
-/// order. The active generation is never evicted; every other generation,
-/// including dirty snapshots without Git evidence, is subject to the same TTL,
-/// byte, and count limits.
-pub fn retain_bounded_generation_index(
-    entries: &mut Vec<DurableGenerationIndexEntryV1>,
-    active_generation_id: &str,
-) -> usize {
-    entries.sort_by(|left, right| {
-        (left.sealed_at_micros, left.generation_id.as_str())
-            .cmp(&(right.sealed_at_micros, right.generation_id.as_str()))
-    });
-    let original_len = entries.len();
-    let active_sealed_at = entries
-        .iter()
-        .find(|entry| entry.generation_id == active_generation_id)
-        .map_or(i64::MIN, |entry| entry.sealed_at_micros);
-    let oldest_retained =
-        active_sealed_at.saturating_sub(MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1);
-    entries.retain(|entry| {
-        entry.generation_id == active_generation_id || entry.sealed_at_micros >= oldest_retained
-    });
-
-    loop {
-        let total_bytes = entries
-            .iter()
-            .fold(0_u64, |total, entry| total.saturating_add(entry.size_bytes));
-        if entries.len() <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1
-            && total_bytes <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
-        {
-            break;
-        }
-        let Some(index) = entries
-            .iter()
-            .position(|entry| entry.generation_id != active_generation_id)
-        else {
-            break;
-        };
-        entries.remove(index);
-    }
-    original_len.saturating_sub(entries.len())
-}
-
-pub fn durable_generation_index_digest(
-    entries: &[DurableGenerationIndexEntryV1],
-    truncated: bool,
-) -> Result<String, CodeGenerationRetentionErrorV1> {
-    canonical_sha256(&(entries, truncated))
-        .map(|digest| digest.as_str().to_owned())
-        .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))
-}
-
->>>>>>> theirs
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct DurablePublicationPointerV1 {
     pub generation_id: String,
     pub snapshot_content_identity: String,
@@ -186,12 +101,6 @@ pub struct DurablePublicationPointerV1 {
     pub sealed_at_micros: i64,
     pub generation_file: String,
     pub state_digest: String,
-    #[serde(default)]
-    pub generation_index: Vec<DurableGenerationIndexEntryV1>,
-    #[serde(default)]
-    pub generation_index_truncated: bool,
-    #[serde(default)]
-    pub generation_index_digest: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -428,7 +337,6 @@ fn plan_code_generation_retention_with_verification_cancellable(
     validate_generation_file(&active_pointer.generation_file)?;
     let active_generation_id = CodeGenerationId::new(active_pointer.generation_id.clone())
         .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-    validate_durable_generation_index(&active_pointer)?;
     let generations_root = store_root.join(GENERATIONS_DIRECTORY);
     let entries = std::fs::read_dir(&generations_root).map_err(storage)?;
     let mut generations = BTreeMap::new();
@@ -494,38 +402,6 @@ fn plan_code_generation_retention_with_verification_cancellable(
             "active generation file is missing or does not match the pointer digest".to_owned(),
         ));
     }
-    let pointer_generations = active_pointer
-        .generation_index
-        .iter()
-        .map(|entry| {
-            CodeGenerationId::new(entry.generation_id.clone())
-                .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    let missing_pointer_generations = pointer_generations
-        .iter()
-        .filter(|generation| !generations.contains_key(*generation))
-        .map(CodeGenerationId::as_str)
-        .collect::<Vec<_>>();
-    if !missing_pointer_generations.is_empty() {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-            "publication-pointer generations are missing: {}",
-            missing_pointer_generations.join(", ")
-        )));
-    }
-    for entry in &active_pointer.generation_index {
-        let generation_id = CodeGenerationId::new(entry.generation_id.clone())
-            .map_err(|error| CodeGenerationRetentionErrorV1::UnsafeState(error.to_string()))?;
-        let Some(generation) = generations.get(&generation_id) else {
-            continue;
-        };
-        if generation.size_bytes != entry.size_bytes {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(format!(
-                "publication-pointer generation '{}' has a mismatched byte size",
-                generation_id.as_str()
-            )));
-        }
-    }
     let missing_sources = vector_readable_sources
         .iter()
         .filter(|source| !generations.contains_key(*source))
@@ -552,11 +428,9 @@ fn plan_code_generation_retention_with_verification_cancellable(
 
     // Mark before sweeping. An omitted mark retains a derived file and costs
     // space; unlike refcounting, no accounting drift can silently delete a live
-    // generation. Pointer-addressable and vector-readable marks are exact
-    // liveness, while the newest superseded floor is the bounded rollback
-    // reserve.
-    let mut marked = pointer_generations;
-    marked.extend(vector_readable_sources.iter().cloned());
+    // generation. Active and vector-readable marks are exact liveness, while
+    // the newest superseded floor is the bounded rollback reserve.
+    let mut marked = vector_readable_sources.clone();
     marked.insert(active_generation_id.clone());
     marked.extend(
         superseded_generations
@@ -1125,59 +999,6 @@ fn read_active_pointer(
             path.display()
         ))
     })
-}
-
-fn validate_durable_generation_index(
-    pointer: &DurablePublicationPointerV1,
-) -> Result<(), CodeGenerationRetentionErrorV1> {
-    let expected_digest = durable_generation_index_digest(
-        &pointer.generation_index,
-        pointer.generation_index_truncated,
-    )?;
-    if pointer.generation_index_digest.as_deref() != Some(expected_digest.as_str()) {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "publication-pointer generation index digest does not match its entries".to_owned(),
-        ));
-    }
-    let mut generation_ids = BTreeSet::new();
-    for entry in &pointer.generation_index {
-        validate_generation_file(&entry.generation_file)?;
-        if entry.size_bytes == 0 || !generation_ids.insert(entry.generation_id.as_str()) {
-            return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-                "publication-pointer generation index contains an invalid or duplicate entry"
-                    .to_owned(),
-            ));
-        }
-    }
-    let Some(active_entry) = pointer
-        .generation_index
-        .iter()
-        .find(|entry| entry.generation_id == pointer.generation_id)
-    else {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "publication-pointer generation index does not contain its active generation"
-                .to_owned(),
-        ));
-    };
-    if active_entry.snapshot_content_identity != pointer.snapshot_content_identity
-        || active_entry.sealed_at_micros != pointer.sealed_at_micros
-        || active_entry.generation_file != pointer.generation_file
-        || active_entry.state_digest != pointer.state_digest
-    {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "publication-pointer active generation index entry does not match its pointer"
-                .to_owned(),
-        ));
-    }
-    let mut bounded = pointer.generation_index.clone();
-    if retain_bounded_generation_index(&mut bounded, &pointer.generation_id) > 0
-        || bounded != pointer.generation_index
-    {
-        return Err(CodeGenerationRetentionErrorV1::UnsafeState(
-            "publication-pointer generation index exceeds its retention bounds".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 fn generation_file_name(path: &Path) -> Option<String> {
@@ -2651,78 +2472,13 @@ fn scope_directory_exists(path: &Path) -> Result<bool, CodeGenerationRetentionEr
 mod tests {
     use super::*;
 
-<<<<<<< ours
     mod graph_replay_release_tests;
-=======
-    const TEST_ROLLBACK_FLOOR: usize = 3;
-
-    fn indexed_generation(
-        sequence: usize,
-        sealed_at_micros: i64,
-        size_bytes: u64,
-        exact: bool,
-    ) -> DurableGenerationIndexEntryV1 {
-        DurableGenerationIndexEntryV1 {
-            generation_id: format!("generation.v1.retention.{sequence:08}"),
-            snapshot_content_identity: format!("sha256:{sequence:064x}"),
-            sealed_at_micros,
-            size_bytes,
-            generation_file: format!("generation-{sequence:064x}.json"),
-            state_digest: format!("sha256:{sequence:064x}"),
-            source_reference: exact.then(|| format!("refs/heads/branch-{sequence}")),
-            source_revision: exact.then(|| format!("{sequence:040x}")),
-            source_tree: exact.then(|| format!("{:040x}", sequence + 1)),
-        }
-    }
-
-    #[test]
-    fn durable_index_bounds_clean_and_dirty_history_by_ttl_bytes_and_count() {
-        let now = MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 * 2;
-        let active = indexed_generation(99, now, 32, true);
-        let mut entries = vec![
-            indexed_generation(
-                0,
-                now - MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1 - 1,
-                1,
-                false,
-            ),
-            indexed_generation(1, now - 3, MAX_DURABLE_GENERATION_INDEX_BYTES_V1, true),
-            indexed_generation(2, now - 2, 32, false),
-            active.clone(),
-        ];
-        entries.extend(
-            (3..=MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1 + 2)
-                .map(|sequence| indexed_generation(sequence, now - 1, 1, sequence % 2 == 0)),
-        );
-
-        let removed = retain_bounded_generation_index(&mut entries, &active.generation_id);
-
-        assert!(
-            removed >= 3,
-            "TTL, byte, and count pressure must evict history"
-        );
-        assert!(entries.iter().any(|entry| entry == &active));
-        assert!(entries.len() <= MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1);
-        assert!(
-            entries.iter().map(|entry| entry.size_bytes).sum::<u64>()
-                <= MAX_DURABLE_GENERATION_INDEX_BYTES_V1
-        );
-        assert!(
-            entries.iter().all(|entry| {
-                entry.generation_id == active.generation_id
-                    || entry.sealed_at_micros >= now - MAX_DURABLE_GENERATION_INDEX_TTL_MICROS_V1
-            }),
-            "dirty generations are not exempt from the TTL"
-        );
-    }
->>>>>>> theirs
 
     #[derive(Clone)]
     struct FixtureGeneration {
         id: CodeGenerationId,
         file: String,
         state_digest: String,
-        size_bytes: u64,
     }
 
     fn fixture_store(count: usize) -> (tempfile::TempDir, Vec<FixtureGeneration>) {
@@ -2750,31 +2506,15 @@ mod tests {
                 "generation-{}.json",
                 state_digest.strip_prefix("sha256:").expect("digest prefix")
             );
-            let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
             std::fs::write(generations_root.join(&file), bytes).expect("write generation fixture");
             generations.push(FixtureGeneration {
                 id: generation_id,
                 file,
                 state_digest,
-                size_bytes,
             });
         }
 
         let active = generations.last().expect("at least one generation");
-        let active_entry = DurableGenerationIndexEntryV1 {
-            generation_id: active.id.as_str().to_owned(),
-            snapshot_content_identity: "snapshot.fixture".to_owned(),
-            sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
-            size_bytes: active.size_bytes,
-            generation_file: active.file.clone(),
-            state_digest: active.state_digest.clone(),
-            source_reference: None,
-            source_revision: None,
-            source_tree: None,
-        };
-        let generation_index = vec![active_entry];
-        let generation_index_digest =
-            durable_generation_index_digest(&generation_index, true).expect("index digest");
         let pointer = DurablePublicationPointerV1 {
             generation_id: active.id.as_str().to_owned(),
             snapshot_content_identity: "snapshot.fixture".to_owned(),
@@ -2782,15 +2522,6 @@ mod tests {
             sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
             generation_file: active.file.clone(),
             state_digest: active.state_digest.clone(),
-<<<<<<< ours
-            generation_index: Vec::new(),
-            generation_index_truncated: false,
-            generation_index_digest: None,
-=======
-            generation_index,
-            generation_index_truncated: true,
-            generation_index_digest: Some(generation_index_digest),
->>>>>>> theirs
         };
         std::fs::write(
             store.path().join(ACTIVE_POINTER_FILE),
@@ -2902,9 +2633,12 @@ mod tests {
     #[test]
     fn apply_preserves_collectable_generations_when_receipt_commit_fails() {
         let (store, _generations) = fixture_store(5);
-        let plan =
-            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-                .expect("plan retention");
+        let plan = plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("plan retention");
         assert_eq!(plan.collectable_generations.len(), 1);
         let collectable = plan.collectable_generations[0].clone();
         let active_file = plan.active_generation_file().to_owned();
@@ -2952,7 +2686,7 @@ mod tests {
         let plan = plan_code_generation_retention(
             store.path(),
             &vector_readable_sources,
-            TEST_ROLLBACK_FLOOR,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         )
         .expect("plan retention");
         let collectable = plan.collectable_generations[0].clone();
@@ -2991,7 +2725,7 @@ mod tests {
         let plan = plan_code_generation_retention(
             store.path(),
             &vector_readable_sources,
-            TEST_ROLLBACK_FLOOR,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         )
         .expect("plan retention");
 
@@ -3412,13 +3146,16 @@ mod tests {
     fn metadata_only_census_matches_full_verification() {
         let (store, _generations) = fixture_store(5);
 
-        let full =
-            plan_code_generation_retention(store.path(), &BTreeSet::new(), TEST_ROLLBACK_FLOOR)
-                .expect("full census");
+        let full = plan_code_generation_retention(
+            store.path(),
+            &BTreeSet::new(),
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+        .expect("full census");
         let metadata_only = plan_code_generation_retention_with_verification(
             store.path(),
             &BTreeSet::new(),
-            TEST_ROLLBACK_FLOOR,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             GenerationDigestVerificationV1::MetadataOnly,
         )
         .expect("metadata-only census");
@@ -3439,7 +3176,7 @@ mod tests {
         let plan = plan_code_generation_retention_with_verification(
             store.path(),
             &BTreeSet::new(),
-            TEST_ROLLBACK_FLOOR,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
             GenerationDigestVerificationV1::MetadataOnly,
         )
         .expect("metadata-only census");
