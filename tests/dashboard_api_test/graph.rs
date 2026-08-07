@@ -372,17 +372,17 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             &format!("{}/api/plugins/graph/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["totals"]["nodes"], 4);
-        assert_eq!(overview["totals"]["edges"], 3);
-        assert_eq!(overview["totals"]["files"], 2);
+        assert_eq!(overview["payload"]["totals"]["nodes"], 4);
+        assert_eq!(overview["payload"]["totals"]["edges"], 3);
+        assert_eq!(overview["payload"]["totals"]["files"], 2);
         assert!(
-            overview["nodes_by_kind"].as_array().is_some_and(|rows| rows
+            overview["payload"]["nodes_by_kind"].as_array().is_some_and(|rows| rows
                 .iter()
                 .any(|row| row["kind"] == "function" && row["count"] == 3)),
             "overview should include node counts by kind"
         );
         assert!(
-            overview["files_by_language"]
+            overview["payload"]["files_by_language"]
                 .as_array()
                 .is_some_and(|rows| rows
                     .iter()
@@ -398,9 +398,9 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["query"], "dashboard");
+        assert_eq!(search["payload"]["query"], "dashboard");
         assert!(
-            search["results"]
+            search["payload"]["results"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-dashboard")),
             "search should include the exact dashboard symbol"
@@ -412,11 +412,11 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         );
         assert_eq!(status, 200);
         assert_eq!(
-            node["node"]["qualified_name"],
+            node["payload"]["node"]["qualified_name"],
             "crate::dashboard::route_graph"
         );
-        assert_eq!(node["node"]["span"]["start_line"], 8);
-        assert_eq!(node["node"]["doc"], "Fixture documentation for route_graph");
+        assert_eq!(node["payload"]["node"]["span"]["start_line"], 8);
+        assert_eq!(node["payload"]["node"]["doc"], "Fixture documentation for route_graph");
 
         let (status, neighbors) = get_json(
             &agent,
@@ -426,21 +426,21 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(neighbors["node_id"], "n-route");
+        assert_eq!(neighbors["payload"]["node_id"], "n-route");
         assert!(
-            neighbors["callers"]
+            neighbors["payload"]["callers"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-dashboard")),
             "neighbors should include callers"
         );
         assert!(
-            neighbors["callees"]
+            neighbors["payload"]["callees"]
                 .as_array()
                 .is_some_and(|rows| rows.iter().any(|row| row["id"] == "n-render")),
             "neighbors should include callees"
         );
         assert!(
-            neighbors["edges_by_kind"]
+            neighbors["payload"]["edges_by_kind"]
                 .as_array()
                 .is_some_and(|rows| rows
                     .iter()
@@ -456,13 +456,13 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(subgraph["seed_id"], "n-route");
-        assert_eq!(subgraph["mode"], "seeded");
-        assert_eq!(subgraph["capped"]["nodes"], true);
-        let nodes = subgraph["nodes"]
+        assert_eq!(subgraph["payload"]["seed_id"], "n-route");
+        assert_eq!(subgraph["payload"]["mode"], "seeded");
+        assert_eq!(subgraph["payload"]["capped"]["nodes"], true);
+        let nodes = subgraph["payload"]["nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected subgraph nodes array"));
-        let edges = subgraph["edges"]
+        let edges = subgraph["payload"]["edges"]
             .as_array()
             .unwrap_or_else(|| panic!("expected subgraph edges array"));
         assert_eq!(nodes.len(), 3);
@@ -477,9 +477,9 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(capped["capped"]["edges"], true);
+        assert_eq!(capped["payload"]["capped"]["edges"], true);
         assert_eq!(
-            capped["edges"].as_array().map_or(0, |rows| rows.len()),
+            capped["payload"]["edges"].as_array().map_or(0, |rows| rows.len()),
             1,
             "edge list should be truncated to the cap"
         );
@@ -509,12 +509,12 @@ fn graph_api_caller_and_callee_traversal_are_behaviorally_symmetric() {
             ),
         );
         assert_eq!(status, 200, "{neighbors}");
-        assert_eq!(neighbors["limit"], 2);
+        assert_eq!(neighbors["payload"]["limit"], 2);
 
-        let callers = neighbors["callers"]
+        let callers = neighbors["payload"]["callers"]
             .as_array()
             .unwrap_or_else(|| panic!("expected caller rows: {neighbors}"));
-        let callees = neighbors["callees"]
+        let callees = neighbors["payload"]["callees"]
             .as_array()
             .unwrap_or_else(|| panic!("expected callee rows: {neighbors}"));
         assert_eq!(callers, callees, "direction must preserve row mapping");
@@ -560,17 +560,17 @@ fn graph_api_finds_shortest_path_and_analytics() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(path["found"], true);
+        assert_eq!(path["payload"]["found"], true);
         assert_eq!(
-            path["path"],
+            path["payload"]["path"],
             serde_json::json!(["n-dashboard", "n-route", "n-render"])
         );
-        let path_edges = path["edges"]
+        let path_edges = path["payload"]["edges"]
             .as_array()
             .unwrap_or_else(|| panic!("expected path edges array"));
         assert_eq!(path_edges.len(), 2);
         assert!(
-            path["nodes"].as_array().is_some_and(|rows| rows.len() == 3),
+            path["payload"]["nodes"].as_array().is_some_and(|rows| rows.len() == 3),
             "path payload should hydrate full node rows"
         );
 
@@ -583,7 +583,7 @@ fn graph_api_finds_shortest_path_and_analytics() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(no_path["found"], false);
+        assert_eq!(no_path["payload"]["found"], false);
 
         // Landing analytics: most-connected symbols + largest files.
         let (status, overview) = get_json(
@@ -591,7 +591,7 @@ fn graph_api_finds_shortest_path_and_analytics() {
             &format!("{}/api/plugins/graph/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
-        let top = overview["top_connected"]
+        let top = overview["payload"]["top_connected"]
             .as_array()
             .unwrap_or_else(|| panic!("expected top_connected array"));
         assert!(
@@ -599,7 +599,7 @@ fn graph_api_finds_shortest_path_and_analytics() {
                 .any(|row| row["id"] == "n-route" && row["degree"] == 3),
             "top_connected should rank n-route with degree 3"
         );
-        let largest = overview["largest_files"]
+        let largest = overview["payload"]["largest_files"]
             .as_array()
             .unwrap_or_else(|| panic!("expected largest_files array"));
         assert!(
@@ -630,9 +630,9 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             &format!("{}/api/plugins/graph/subgraph", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(default_slice["mode"], "default");
-        assert_eq!(default_slice["seed_id"], Value::Null);
-        let nodes = default_slice["nodes"]
+        assert_eq!(default_slice["payload"]["mode"], "default");
+        assert_eq!(default_slice["payload"]["seed_id"], Value::Null);
+        let nodes = default_slice["payload"]["nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected default subgraph nodes array"));
         assert_eq!(nodes.len(), 5);
@@ -649,14 +649,14 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             "isolated nodes should fill leftover capacity"
         );
         assert_eq!(
-            default_slice["edges"]
+            default_slice["payload"]["edges"]
                 .as_array()
                 .map_or(0, |rows| rows.len()),
             3,
             "default slice should include every edge among the selected nodes"
         );
-        assert_eq!(default_slice["capped"]["nodes"], false);
-        assert_eq!(default_slice["capped"]["edges"], false);
+        assert_eq!(default_slice["payload"]["capped"]["nodes"], false);
+        assert_eq!(default_slice["payload"]["capped"]["edges"], false);
 
         // With only 4 slots, the connected nodes win and the orphan is pruned.
         let (status, pruned) = get_json(
@@ -667,7 +667,7 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             ),
         );
         assert_eq!(status, 200);
-        let pruned_nodes = pruned["nodes"]
+        let pruned_nodes = pruned["payload"]["nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected pruned subgraph nodes array"));
         assert_eq!(pruned_nodes.len(), 4);
@@ -675,7 +675,7 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             pruned_nodes.iter().all(|node| node["id"] != "n-orphan"),
             "connected hubs should win the node budget over isolated nodes"
         );
-        assert_eq!(pruned["capped"]["nodes"], true);
+        assert_eq!(pruned["payload"]["capped"]["nodes"], true);
 
         // Tight budget: top-degree hub plus its best-connected peer, and only
         // the edges among the selected nodes.
@@ -687,7 +687,7 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             ),
         );
         assert_eq!(status, 200);
-        let tight_nodes = tight["nodes"]
+        let tight_nodes = tight["payload"]["nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected tight subgraph nodes array"));
         assert_eq!(tight_nodes.len(), 2);
@@ -695,7 +695,7 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             tight_nodes.iter().any(|node| node["id"] == "n-route"),
             "the top hub should always survive a tight node budget"
         );
-        let tight_edges = tight["edges"]
+        let tight_edges = tight["payload"]["edges"]
             .as_array()
             .unwrap_or_else(|| panic!("expected tight subgraph edges array"));
         assert!(
@@ -716,9 +716,9 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(no_hit["seed_id"], Value::Null);
-        assert_eq!(no_hit["nodes"].as_array().map_or(1, |rows| rows.len()), 0);
-        assert_eq!(no_hit["edges"].as_array().map_or(1, |rows| rows.len()), 0);
+        assert_eq!(no_hit["payload"]["seed_id"], Value::Null);
+        assert_eq!(no_hit["payload"]["nodes"].as_array().map_or(1, |rows| rows.len()), 0);
+        assert_eq!(no_hit["payload"]["edges"].as_array().map_or(1, |rows| rows.len()), 0);
     });
 }
 

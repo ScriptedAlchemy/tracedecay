@@ -606,24 +606,24 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["exists"], true);
+        assert_eq!(overview["payload"]["exists"], true);
         assert_eq!(
-            overview["storage_scope"], "profile_sharded",
+            overview["payload"]["storage_scope"], "profile_sharded",
             "LCM serves the resolved project session store even when TRACEDECAY_GLOBAL_DB is set for accounting"
         );
-        assert_eq!(overview["overview"]["messages_total"], 3);
-        assert_eq!(overview["overview"]["sessions_total"], 1);
-        assert_eq!(overview["overview"]["summary_nodes_total"], 1);
+        assert_eq!(overview["payload"]["overview"]["messages_total"], 3);
+        assert_eq!(overview["payload"]["overview"]["sessions_total"], 1);
+        assert_eq!(overview["payload"]["overview"]["summary_nodes_total"], 1);
         assert_eq!(
-            overview["overview"]["compression"]["source_token_count"],
+            overview["payload"]["overview"]["compression"]["source_token_count"],
             180
         );
-        assert_eq!(overview["overview"]["compression"]["token_count"], 72);
-        let latest_sessions = overview["latest_sessions"]
+        assert_eq!(overview["payload"]["overview"]["compression"]["token_count"], 72);
+        let latest_sessions = overview["payload"]["latest_sessions"]
             .as_array()
             .unwrap_or_else(|| panic!("expected latest_sessions array"));
         assert_eq!(latest_sessions.len(), 1);
-        let matches_messages = overview["matches"]["messages"]
+        let matches_messages = overview["payload"]["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected overview.matches.messages array"));
         assert!(
@@ -639,11 +639,11 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["engine"], "fts");
-        let search_messages = search["matches"]["messages"]
+        assert_eq!(search["payload"]["engine"], "fts");
+        let search_messages = search["payload"]["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.messages array"));
-        let search_nodes = search["matches"]["summary_nodes"]
+        let search_nodes = search["payload"]["matches"]["summary_nodes"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.summary_nodes array"));
         assert!(
@@ -663,7 +663,7 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(like_search["engine"], "like");
+        assert_eq!(like_search["payload"]["engine"], "like");
     });
 }
 
@@ -685,16 +685,16 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["exists"], true);
-        assert_eq!(overview["overview"]["messages_total"], 0);
-        assert_eq!(overview["overview"]["summary_nodes_total"], 0);
+        assert_eq!(overview["payload"]["exists"], true);
+        assert_eq!(overview["payload"]["overview"]["messages_total"], 0);
+        assert_eq!(overview["payload"]["overview"]["summary_nodes_total"], 0);
         assert_eq!(
-            overview["latest_sessions"],
+            overview["payload"]["latest_sessions"],
             Value::Array(Vec::new()),
             "empty LCM store should have no latest sessions"
         );
         assert_eq!(
-            overview["latest_summary_nodes"],
+            overview["payload"]["latest_summary_nodes"],
             Value::Array(Vec::new()),
             "empty LCM store should have no summary nodes"
         );
@@ -707,14 +707,14 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["engine"], "fts");
+        assert_eq!(search["payload"]["engine"], "fts");
         assert_eq!(
-            search["matches"]["messages"],
+            search["payload"]["matches"]["messages"],
             Value::Array(Vec::new()),
             "empty LCM store search should have zero message matches"
         );
         assert_eq!(
-            search["matches"]["summary_nodes"],
+            search["payload"]["matches"]["summary_nodes"],
             Value::Array(Vec::new()),
             "empty LCM store search should have zero summary-node matches"
         );
@@ -771,13 +771,13 @@ fn lcm_serves_project_session_store_without_global_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["storage_scope"], "profile_sharded");
-        assert_eq!(overview["exists"], true);
-        assert_eq!(overview["overview"]["messages_total"], 3);
-        assert_eq!(overview["overview"]["sessions_total"], 1);
-        assert_eq!(overview["overview"]["summary_nodes_total"], 1);
+        assert_eq!(overview["payload"]["storage_scope"], "profile_sharded");
+        assert_eq!(overview["payload"]["exists"], true);
+        assert_eq!(overview["payload"]["overview"]["messages_total"], 3);
+        assert_eq!(overview["payload"]["overview"]["sessions_total"], 1);
+        assert_eq!(overview["payload"]["overview"]["summary_nodes_total"], 1);
         assert!(
-            overview["path"]
+            overview["payload"]["path"]
                 .as_str()
                 .is_some_and(|path| !path.is_empty())
         );
@@ -787,8 +787,8 @@ fn lcm_serves_project_session_store_without_global_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/search?q=vector&limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["storage_scope"], "profile_sharded");
-        let search_messages = search["matches"]["messages"]
+        assert_eq!(search["payload"]["storage_scope"], "profile_sharded");
+        let search_messages = search["payload"]["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.messages array"));
         assert!(
@@ -844,14 +844,14 @@ fn lcm_project_store_wins_over_global_accounting_override() {
             &format!("{base_url}/api/plugins/hermes-lcm/overview?limit=20"),
         );
         assert_eq!(status, 200);
-        assert_eq!(overview["storage_scope"], "profile_sharded");
-        assert_eq!(overview["exists"], true);
+        assert_eq!(overview["payload"]["storage_scope"], "profile_sharded");
+        assert_eq!(overview["payload"]["exists"], true);
         assert_eq!(
-            overview["overview"]["messages_total"], 3,
+            overview["payload"]["overview"]["messages_total"], 3,
             "LCM must serve the project store, not the empty accounting DB"
         );
         assert!(
-            overview["path"]
+            overview["payload"]["path"]
                 .as_str()
                 .is_some_and(|path| !path.is_empty())
         );
