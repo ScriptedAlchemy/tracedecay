@@ -59,6 +59,7 @@ use crate::advisory::{
     ConcreteProximityRuntimeOwnerV1, ProximityRuntimeOutcomeV1, ProximityThresholdPinV1,
     SharedCanonicalProximityEvidenceAuthorityV1, open_proximity_runtime,
 };
+use crate::config::analyzer::{configured_language_selection, resolved_analyzer_settings};
 use crate::configuration::ConfigurationCurrentStateV1;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
@@ -366,6 +367,17 @@ pub async fn resolve_production_feedback_cycle_parts(
         .effective_behavior_digest
         .clone();
     let access_configuration_revision = input.access_configuration.revision_id.clone();
+    // `analyzer.settings.v1` is the operator authority over analyzer selection.
+    // It is read exactly once, out of this pinned snapshot, before the snapshot
+    // moves into the policy context, so every candidate below is admitted
+    // against the same configuration revision the rest of the open is bound to.
+    // A missing, mistyped, or invalid stored value fails the open; it never
+    // degrades to an empty selection set.
+    let configured_analyzers = resolved_analyzer_settings(&input.access_configuration.snapshot)
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open analyzer settings",
+        })?
+        .clone();
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
         &access_configuration_digest,
@@ -411,6 +423,7 @@ pub async fn resolve_production_feedback_cycle_parts(
             &policy_digest,
             evaluated_at,
             &provider_seed,
+            &configured_analyzers,
         )?]
     } else {
         input
@@ -425,6 +438,7 @@ pub async fn resolve_production_feedback_cycle_parts(
                     &policy_digest,
                     evaluated_at,
                     &provider_seed,
+                    &configured_analyzers,
                 )
             })
             .collect::<Result<Vec<_>, _>>()?
@@ -536,6 +550,7 @@ fn managed_lsp_candidate(
     policy_digest: &ManifestDigest,
     evaluated_at: UtcMicros,
     document: &ProductionFeedbackDocumentIdentityV1,
+    configured: &AnalyzerSettingsV1,
 ) -> Result<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1), ApplicationContractError> {
     let language = LanguageId::new(provider.language.clone()).map_err(|_| {
         ApplicationContractError::Inconsistent {
@@ -630,27 +645,36 @@ fn managed_lsp_candidate(
         },
         policy: policy.clone(),
     })?;
+    // The operator-published selection for this language wins verbatim when
+    // `analyzer.settings.v1` carries one: enablement, executable reference,
+    // privacy class, and resource limits are configuration's to decide, not
+    // this builder's. Only when the resolved settings carry no row for the
+    // language does the mounted provider stand in for itself.
+    let mounted_selection = AnalyzerLanguageSelectionV1 {
+        language_id: analyzer_language.clone(),
+        enabled: true,
+        executable: AnalyzerExecutableReferenceV1::BuiltIn {
+            executable_id: executable.clone(),
+        },
+        arguments: Vec::new(),
+        initialization_options: BTreeMap::new(),
+        settings: BTreeMap::new(),
+        environment_allowlist: BTreeSet::new(),
+        privacy_class: AnalyzerPrivacyClassV1::NonSensitive,
+        resource_limits: AnalyzerResourceLimitsV1 {
+            maximum_memory_mib: 256,
+            startup_timeout_millis: 5_000,
+            request_timeout_millis: 5_000,
+        },
+        restart_policy: AnalyzerRestartPolicyV1::RestartOnConfigurationChange,
+    };
+    let selection = configured_language_selection(configured, &analyzer_language)
+        .cloned()
+        .unwrap_or(mounted_selection);
     let admission_input = AnalyzerAdmissionInputV1 {
         settings: AnalyzerSettingsV1 {
             schema_version: AnalyzerSettingsV1::SCHEMA_VERSION,
-            selections: vec![AnalyzerLanguageSelectionV1 {
-                language_id: analyzer_language.clone(),
-                enabled: true,
-                executable: AnalyzerExecutableReferenceV1::BuiltIn {
-                    executable_id: executable.clone(),
-                },
-                arguments: Vec::new(),
-                initialization_options: BTreeMap::new(),
-                settings: BTreeMap::new(),
-                environment_allowlist: BTreeSet::new(),
-                privacy_class: AnalyzerPrivacyClassV1::NonSensitive,
-                resource_limits: AnalyzerResourceLimitsV1 {
-                    maximum_memory_mib: 256,
-                    startup_timeout_millis: 5_000,
-                    request_timeout_millis: 5_000,
-                },
-                restart_policy: AnalyzerRestartPolicyV1::RestartOnConfigurationChange,
-            }],
+            selections: vec![selection],
         },
         language_id: analyzer_language,
         requested_capability: domain_capability.clone(),
@@ -687,6 +711,7 @@ fn unavailable_lsp_candidate(
     policy_digest: &ManifestDigest,
     evaluated_at: UtcMicros,
     document: &ProductionFeedbackDocumentIdentityV1,
+    configured: &AnalyzerSettingsV1,
 ) -> Result<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1), ApplicationContractError> {
     managed_lsp_candidate(
         &MountedLspProvider {
@@ -699,6 +724,7 @@ fn unavailable_lsp_candidate(
         policy_digest,
         evaluated_at,
         document,
+        configured,
     )
 }
 
@@ -1222,6 +1248,7 @@ mod tests {
             &policy_digest,
             UtcMicros(1),
             &document_identity(),
+            &AnalyzerSettingsV1::empty(),
         )
         .expect("provider");
         assert_eq!(identity.producer.language.as_str(), "python");
@@ -1249,6 +1276,7 @@ mod tests {
             &policy,
             UtcMicros(1),
             &document,
+            &AnalyzerSettingsV1::empty(),
         )
         .expect("provider");
         let configuration_revision =
@@ -1297,6 +1325,7 @@ mod tests {
             &policy,
             UtcMicros(1),
             &document,
+            &AnalyzerSettingsV1::empty(),
         )
         .expect("provider");
         let request = || FeedbackCycleRequest {
@@ -1358,6 +1387,7 @@ mod tests {
             &policy,
             UtcMicros(1),
             &document,
+            &AnalyzerSettingsV1::empty(),
         )
         .expect("provider");
         let (authorization, _) = authorization(
@@ -1459,6 +1489,7 @@ mod tests {
             &policy,
             UtcMicros(1),
             &document,
+            &AnalyzerSettingsV1::empty(),
         )
         .expect("provider");
         let configuration_revision =
@@ -1507,6 +1538,7 @@ mod tests {
             &policy,
             UtcMicros(1),
             &document,
+            &AnalyzerSettingsV1::empty(),
         )
         .expect("provider");
         let configuration_revision =
@@ -1617,6 +1649,7 @@ mod tests {
             &policy,
             UtcMicros(1),
             &document_identity(),
+            &AnalyzerSettingsV1::empty(),
         )
         .expect("unavailable provider");
         let context = project_open_policy_context(

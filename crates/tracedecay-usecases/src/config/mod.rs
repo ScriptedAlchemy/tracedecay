@@ -8,6 +8,7 @@
 //! `tracedecay-domain` already own, kept under the historical `crate::config::…`
 //! spelling so the moved call sites did not have to churn.
 
+pub mod analyzer;
 pub mod retrieval;
 pub mod scope_control;
 
