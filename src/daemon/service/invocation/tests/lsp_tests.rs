@@ -28,6 +28,7 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
                 "file:///bridge-backpressure",
             ))),
             None,
+            None,
             DaemonInvocationRequest::lsp_open(
                 "request.bridge.open",
                 "client.bridge",
@@ -54,6 +55,7 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
         let response = service
             .invoke(
                 &registry,
+                None,
                 None,
                 None,
                 None,
@@ -93,6 +95,7 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
                 None,
                 None,
                 None,
+                None,
                 DaemonInvocationRequest::lsp_poll(
                     format!("request.bridge.poll.{sequence}"),
                     session.clone(),
@@ -124,6 +127,7 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
                 None,
                 None,
                 None,
+                None,
                 DaemonInvocationRequest::lsp_acknowledge(
                     format!("request.bridge.ack.{sequence}"),
                     session.clone(),
@@ -148,6 +152,7 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
             None,
             None,
             None,
+            None,
             DaemonInvocationRequest::lsp_frame(
                 "request.bridge.retry",
                 session.clone(),
@@ -167,6 +172,7 @@ async fn production_lsp_bridge_retries_only_an_unconsumed_full_queue_frame() {
     let delivered = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,

@@ -207,6 +207,21 @@ pub(super) async fn git_service_for_project_path(
         .flatten()
 }
 
+pub(super) async fn native_integration_service_for_project_path(
+    store_administration: &StoreAdministration,
+    project_path: Option<&Path>,
+) -> Option<native_integration::DaemonNativeIntegrationOwner> {
+    let project_path = project_path?;
+    let repository_root = crate::worktree::git_worktree_root(project_path)
+        .unwrap_or_else(|| project_path.to_path_buf());
+    store_administration
+        .native_integration_services()
+        .for_repository_root(&repository_root)
+        .await
+        .ok()
+        .flatten()
+}
+
 #[cfg(unix)]
 pub(super) async fn write_tool_list_changed_notification(
     transport: &mut impl McpTransport,

@@ -327,6 +327,7 @@ pub(super) async fn evaluate_native_profile(
             Some(project),
             None,
             None,
+            None,
             crate::daemon_contract::DaemonInvocationRequest::semantic_evaluate_and_publish(
                 format!(
                     "semantic-native-evaluation-{}",

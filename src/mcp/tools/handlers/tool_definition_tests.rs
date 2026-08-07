@@ -253,6 +253,7 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_source_edit_reconcile",
         "tracedecay_source_edit_rollback",
         "tracedecay_git_apply",
+        "tracedecay_approve_native_integration",
         "tracedecay_apply_native_integration",
         "tracedecay_cancel_native_integration",
         "tracedecay_run_affected_tests",

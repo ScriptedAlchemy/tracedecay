@@ -149,6 +149,7 @@ use crate::daemon::git_transactions::{
     DaemonGitAuthorityStateV1, DaemonGitInvocationOwner, DaemonProjectGitIndexTransactionService,
     capture_exact_snapshot,
 };
+use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
 // Re-exported so the long tail of daemon-internal call sites can keep naming the
 // contract through `service::invocation::` while the split settles.
 #[cfg(test)]

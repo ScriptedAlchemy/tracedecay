@@ -1,11 +1,14 @@
 //! Public native-integration surface: `stack_snapshot`,
-//! `preflight_native_integration`, `apply_native_integration`,
-//! `native_integration_status`, and `cancel_native_integration`.
+//! `preflight_native_integration`, `approve_native_integration`,
+//! `apply_native_integration`, `native_integration_status`, and
+//! `cancel_native_integration`.
 //!
 //! Plan 36 slice 1 extends "the shipped application and CLI/MCP surfaces with
 //! `stack_snapshot` and `preflight_native_integration`", slice 3 adds
 //! `apply_native_integration`, `native_integration_status`, and
-//! `cancel_native_integration`, and slice 4 requires the whole journey to be
+//! `cancel_native_integration`, `approve_native_integration` is the
+//! owner-decided (2026-08-07) sixth operation that issues the one-use
+//! apply approval, and slice 4 requires the whole journey to be
 //! exposed consistently through CLI and MCP over one application result. That
 //! is a different family from the Plan 08 Git *index-transaction* bindings,
 //! which stay limited to `git_preview`/`git_apply`; this module never exposes
@@ -20,12 +23,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    ManifestDigest, MechanicalIntegrationModeV1, NativeIntegrationApprovalId,
-    NativeIntegrationPhaseV1, NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
-    NativeIntegrationPreviewV1, NativeIntegrationReceiptV1, NativeIntegrationSelectionV1,
-    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, ProjectId, RefId, RepositoryId, UtcMicros,
-    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    ActorId, CapabilityId as DomainCapabilityId, ManifestDigest, MechanicalIntegrationModeV1,
+    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
+    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
+    NativeIntegrationReceiptV1, NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
+    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
+    RepositoryId, UtcMicros, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
@@ -54,6 +57,7 @@ use crate::{CancellationSignal, ResolvedScope};
 /// Canonical wire operation names for the native-integration journey.
 pub const NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION: &str = "stack_snapshot";
 pub const NATIVE_INTEGRATION_PREFLIGHT_OPERATION: &str = "preflight_native_integration";
+pub const NATIVE_INTEGRATION_APPROVE_OPERATION: &str = "approve_native_integration";
 pub const NATIVE_INTEGRATION_APPLY_OPERATION: &str = "apply_native_integration";
 pub const NATIVE_INTEGRATION_STATUS_OPERATION: &str = "native_integration_status";
 pub const NATIVE_INTEGRATION_CANCEL_OPERATION: &str = "cancel_native_integration";
@@ -178,6 +182,20 @@ pub struct NativeIntegrationPreflightSurfaceRequest {
     pub evidence: NativeIntegrationEvidenceRevisionsWireV1,
     #[serde(default)]
     pub preferred_mode: Option<MechanicalIntegrationModeV1>,
+}
+
+/// Exact approval-issuance request (the owner-decided sixth operation).
+///
+/// The caller names one unexpired preview by exact identity *and* digest;
+/// approving an identity without its content digest is unrepresentable. The
+/// daemon mints the one-use approval bound to the requesting principal, the
+/// apply capability, the current grant lineage, and a bounded expiry — none
+/// of which the caller can choose.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationApproveSurfaceRequest {
+    pub preview_id: NativeIntegrationPreviewId,
+    pub preview_digest: ManifestDigest,
 }
 
 /// Exact one-use apply request.
@@ -329,6 +347,39 @@ impl NativeIntegrationPreviewProjectionV1 {
     }
 }
 
+/// Bounded projection of one issued one-use approval.
+///
+/// The approval digest is the caller's proof-of-issuance handle for apply;
+/// the preview binding and expiry are audit metadata. No preview body,
+/// candidate tree, or commit content crosses this boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationApprovalProjectionV1 {
+    pub approval_id: NativeIntegrationApprovalId,
+    pub preview_id: NativeIntegrationPreviewId,
+    pub preview_digest: ManifestDigest,
+    pub principal: ActorId,
+    pub capability: DomainCapabilityId,
+    pub issued_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub approval_digest: ManifestDigest,
+}
+
+impl NativeIntegrationApprovalProjectionV1 {
+    pub fn project(approval: &NativeIntegrationApprovalV1) -> Self {
+        Self {
+            approval_id: approval.approval_id.clone(),
+            preview_id: approval.preview_id.clone(),
+            preview_digest: approval.preview_digest.clone(),
+            principal: approval.principal.clone(),
+            capability: approval.capability.clone(),
+            issued_at: approval.issued_at,
+            expires_at: approval.expires_at,
+            approval_digest: approval.approval_digest.clone(),
+        }
+    }
+}
+
 /// Bounded projection of one durable transaction status.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -413,6 +464,7 @@ pub enum NativeIntegrationCancellationProjectionV1 {
 pub enum NativeIntegrationSurfaceResultV1 {
     StackSnapshot(NativeIntegrationSnapshotProjectionV1),
     Preview(NativeIntegrationPreviewProjectionV1),
+    Approval(NativeIntegrationApprovalProjectionV1),
     Receipt(NativeIntegrationReceiptProjectionV1),
     Status(NativeIntegrationStatusProjectionV1),
     Cancellation(NativeIntegrationCancellationProjectionV1),
@@ -530,7 +582,7 @@ struct NativeIntegrationSurfaceSpec {
 /// authoritative native mutation and there is no transport fallback path.
 const NATIVE_INTEGRATION_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
 
-const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 5] = [
+const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 6] = [
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION,
         capability: "capability.application.native-integration.stack-snapshot",
@@ -554,6 +606,19 @@ const NATIVE_INTEGRATION_SPECS: [NativeIntegrationSurfaceSpec; 5] = [
         description: "Compute one immutable preview in a private daemon-owned environment \
                       without touching real refs, indexes, or worktrees.",
         example: "Preflight the frozen branch-stack edge",
+    },
+    NativeIntegrationSurfaceSpec {
+        operation: NATIVE_INTEGRATION_APPROVE_OPERATION,
+        capability: "capability.application.native-integration.approve",
+        use_case: "use-case.application.native-integration.approve",
+        request_schema: "schema.application.native-integration.approve.request",
+        result_schema: "schema.application.native-integration.approve.result",
+        effect: EffectClass::Administrative,
+        summary: "Issue a one-use approval for one exact preview",
+        description: "Mint and durably record one one-use content-bound approval naming the \
+                      requesting principal, the apply capability, and the exact preview digest. \
+                      Approving an identity without its content digest is unrepresentable.",
+        example: "Approve this native-integration preview for apply",
     },
     NativeIntegrationSurfaceSpec {
         operation: NATIVE_INTEGRATION_APPLY_OPERATION,
@@ -672,6 +737,10 @@ fn native_integration_executable_schemas(
     add!(
         NATIVE_INTEGRATION_PREFLIGHT_OPERATION,
         NativeIntegrationPreflightSurfaceRequest
+    );
+    add!(
+        NATIVE_INTEGRATION_APPROVE_OPERATION,
+        NativeIntegrationApproveSurfaceRequest
     );
     add!(
         NATIVE_INTEGRATION_APPLY_OPERATION,
@@ -869,6 +938,7 @@ mod tests {
         for operation in [
             NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION,
             NATIVE_INTEGRATION_PREFLIGHT_OPERATION,
+            NATIVE_INTEGRATION_APPROVE_OPERATION,
             NATIVE_INTEGRATION_APPLY_OPERATION,
             NATIVE_INTEGRATION_STATUS_OPERATION,
             NATIVE_INTEGRATION_CANCEL_OPERATION,
@@ -904,7 +974,7 @@ mod tests {
     #[test]
     fn every_capability_is_schema_backed_and_separately_authorized() {
         let contribution = native_integration_surface_catalog_contribution().expect("contribution");
-        assert_eq!(contribution.capabilities().len(), 5);
+        assert_eq!(contribution.capabilities().len(), 6);
         for manifest in contribution.capabilities() {
             assert!(
                 contribution

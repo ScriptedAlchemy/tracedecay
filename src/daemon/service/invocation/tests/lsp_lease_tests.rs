@@ -24,6 +24,7 @@ async fn open_session(
                 "file:///authoritative",
             ))),
             None,
+            None,
             DaemonInvocationRequest::lsp_open(
                 request_id.to_owned(),
                 env!("CARGO_PKG_VERSION"),
@@ -153,6 +154,7 @@ async fn explicit_detach_reports_actor_failure_after_closing_session_state() {
             None,
             None,
             None,
+            None,
             DaemonInvocationRequest::lsp_detach(
                 "request.detach-failure",
                 session,
@@ -199,6 +201,7 @@ async fn explicit_detach_accepts_an_actor_that_already_exited_gracefully() {
     let response = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,
@@ -256,6 +259,7 @@ async fn explicit_detach_racing_disconnect_leaves_no_unowned_lease_task() {
         let response = service
             .invoke(
                 &registry,
+                None,
                 None,
                 None,
                 None,
@@ -385,6 +389,7 @@ async fn abnormal_reconnect_cancels_and_joins_the_registered_lease() {
     let response = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,

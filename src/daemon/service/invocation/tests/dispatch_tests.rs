@@ -60,7 +60,7 @@ async fn lsp_gateway_control_terminates_before_owner_lookup() {
     ];
 
     for (request, expected) in requests {
-        let response = service.invoke(&registry, None, None, None, request).await;
+        let response = service.invoke(&registry, None, None, None, None, request).await;
         assert!(matches!(
             response.outcome,
             DaemonInvocationOutcome::ApplicationProblem { problem }
@@ -404,6 +404,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
                 "file:///authoritative",
             ))),
             None,
+            None,
             DaemonInvocationRequest::lsp_open(
                 "request.1",
                 "client.1",
@@ -425,6 +426,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             None,
             None,
             None,
+            None,
             DaemonInvocationRequest::lsp_frame(
                 "request.2",
                 session.clone(),
@@ -442,6 +444,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
     let response = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,
@@ -473,6 +476,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
             None,
             None,
             None,
+            None,
             DaemonInvocationRequest::lsp_acknowledge(
                 "request.4",
                 session.clone(),
@@ -490,6 +494,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
     let response = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,
@@ -513,6 +518,7 @@ async fn lsp_session_rejects_a_client_root_that_differs_from_the_admitted_root()
     let response = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,
@@ -617,7 +623,7 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
     // per-project dispatch means the request was mis-routed.
     for request in requests {
         let response = service
-            .invoke(&registry, Some(&project_root), None, None, request)
+            .invoke(&registry, Some(&project_root), None, None, None, request)
             .await;
         assert!(matches!(
             response.outcome,
@@ -649,6 +655,7 @@ async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
                 "file:///authoritative",
             ))),
+            None,
             None,
             DaemonInvocationRequest::lsp_open(
                 "request.revision",
@@ -686,6 +693,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
                 "file:///authoritative",
             ))),
             None,
+            None,
             DaemonInvocationRequest::lsp_open(
                 request_id,
                 env!("CARGO_PKG_VERSION"),
@@ -704,6 +712,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     let detached = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,
@@ -738,6 +747,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             None,
             None,
             None,
+            None,
             DaemonInvocationRequest::lsp_reconnect(
                 "request.reconnect",
                 session.clone(),
@@ -755,6 +765,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     let takeover = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,
@@ -791,6 +802,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
             None,
             None,
             None,
+            None,
             DaemonInvocationRequest::lsp_poll(
                 "request.stale",
                 session,
@@ -810,6 +822,7 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     let detached = service
         .invoke(
             &registry,
+            None,
             None,
             None,
             None,
@@ -840,6 +853,7 @@ async fn feedback_handles_fail_closed_without_an_owner() {
             Some(AuthorizedLspWorkspace::single(AdmittedRoot::new(
                 "file:///authoritative",
             ))),
+            None,
             None,
             DaemonInvocationRequest {
                 protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),

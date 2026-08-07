@@ -26,6 +26,7 @@ impl DaemonInvocationService {
         project_root: Option<&Path>,
         lsp_workspace: Option<AuthorizedLspWorkspace>,
         git_service: Option<DaemonGitInvocationOwner>,
+        native_integration_service: Option<DaemonNativeIntegrationOwner>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
         let request_id = request.request_id.clone();
@@ -163,6 +164,7 @@ impl DaemonInvocationService {
                 Box::pin(execute_native_integration(
                     request_id,
                     configuration_runtime.clone(),
+                    native_integration_service,
                     surface_operation,
                     request,
                     observed_at,

@@ -880,6 +880,16 @@ impl DaemonInvocationState {
         } else {
             None
         };
+        let native_integration_service =
+            if invocation_is_native_integration_operation(request.operation()) {
+                native_integration_service_for_project_path(
+                    store_administration,
+                    request_project_path,
+                )
+                .await
+            } else {
+                None
+            };
         let lsp_frame_session = match &request.payload {
             service::invocation::DaemonInvocationPayload::LspFrame { session, .. } => {
                 Some(session.clone())
@@ -893,6 +903,7 @@ impl DaemonInvocationState {
                 request_project_path,
                 lsp_workspace,
                 git_service,
+                native_integration_service,
                 request,
             )
             .await;

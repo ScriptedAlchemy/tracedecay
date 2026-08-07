@@ -751,6 +751,21 @@ impl StoreAdministration {
                     },
                 )
             })?;
+        self.native_integration_services
+            .retire_project_database(&typed_project_id, &project_sessions_path)
+            .await
+            .map_err(|error| {
+                cleanup_error(
+                    RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                    RemoteDeletionPhase::CancelRuntimeOwners,
+                    true,
+                    TraceDecayError::Config {
+                        message: format!(
+                            "could not retire remote-deleted project native integration actors: {error}"
+                        ),
+                    },
+                )
+            })?;
         let runtime_registry = self.session_runtime_registry().await.map_err(|error| {
             cleanup_error(
                 RemoteDeletionFailureCode::RuntimeRetirementIncomplete,

@@ -156,6 +156,7 @@ pub(crate) enum DaemonInvocationOperation {
     GitApply,
     NativeIntegrationStackSnapshot,
     NativeIntegrationPreflight,
+    NativeIntegrationApprove,
     NativeIntegrationApply,
     NativeIntegrationStatus,
     NativeIntegrationCancel,
@@ -209,6 +210,7 @@ impl DaemonInvocationOperation {
             Self::GitApply => "git_apply",
             Self::NativeIntegrationStackSnapshot => "stack_snapshot",
             Self::NativeIntegrationPreflight => "preflight_native_integration",
+            Self::NativeIntegrationApprove => "approve_native_integration",
             Self::NativeIntegrationApply => "apply_native_integration",
             Self::NativeIntegrationStatus => "native_integration_status",
             Self::NativeIntegrationCancel => "cancel_native_integration",
@@ -835,6 +837,7 @@ impl DaemonInvocationRequest {
             }
             crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationPreflight
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApprove
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel => {
@@ -1478,6 +1481,9 @@ impl DaemonInvocationRequest {
                 crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationPreflight => {
                     DaemonInvocationOperation::NativeIntegrationPreflight
                 }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApprove => {
+                    DaemonInvocationOperation::NativeIntegrationApprove
+                }
                 crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply => {
                     DaemonInvocationOperation::NativeIntegrationApply
                 }
@@ -1610,6 +1616,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::GitApply
                 | DaemonInvocationOperation::NativeIntegrationStackSnapshot
                 | DaemonInvocationOperation::NativeIntegrationPreflight
+                | DaemonInvocationOperation::NativeIntegrationApprove
                 | DaemonInvocationOperation::NativeIntegrationApply
                 | DaemonInvocationOperation::NativeIntegrationStatus
                 | DaemonInvocationOperation::NativeIntegrationCancel

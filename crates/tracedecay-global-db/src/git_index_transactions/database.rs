@@ -6,13 +6,13 @@ use tracedecay_runtime_core::db::engine::{
 };
 
 #[derive(Clone, Copy)]
-pub(super) enum GitMutationDatabase<'db> {
+pub(crate) enum GitMutationDatabase<'db> {
     Registered(&'db RegisteredGlobalDb),
     #[cfg(any(test, feature = "test-helpers"))]
     Engine(&'db Connection),
 }
 
-pub(super) enum GitMutationWriteTransaction<'db> {
+pub(crate) enum GitMutationWriteTransaction<'db> {
     Registered(RegisteredGlobalDbWriteTransaction<'db>),
     #[cfg(any(test, feature = "test-helpers"))]
     Engine(Transaction),
@@ -61,7 +61,7 @@ impl Executor for GitMutationWriteTransaction<'_> {
 }
 
 impl GitMutationDatabase<'_> {
-    pub(super) async fn begin_write(
+    pub(crate) async fn begin_write(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<GitMutationWriteTransaction<'_>> {
         match self {
@@ -78,7 +78,7 @@ impl GitMutationDatabase<'_> {
         }
     }
 
-    pub(super) async fn read_snapshot(
+    pub(crate) async fn read_snapshot(
         &self,
     ) -> tracedecay_runtime_core::db::engine::Result<ReadSnapshot> {
         match self {
@@ -90,7 +90,7 @@ impl GitMutationDatabase<'_> {
 }
 
 impl GitMutationWriteTransaction<'_> {
-    pub(super) async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
+    pub(crate) async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.commit().await,
             #[cfg(any(test, feature = "test-helpers"))]
@@ -98,7 +98,7 @@ impl GitMutationWriteTransaction<'_> {
         }
     }
 
-    pub(super) async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
+    pub(crate) async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
         match self {
             Self::Registered(transaction) => transaction.rollback().await,
             #[cfg(any(test, feature = "test-helpers"))]

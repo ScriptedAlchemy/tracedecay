@@ -13,6 +13,7 @@ mod api_types;
 pub mod configuration;
 mod discovery_queue;
 mod git_index_transactions;
+mod native_integration;
 pub mod observation;
 mod observation_adapter;
 mod observation_projection;
@@ -66,6 +67,7 @@ pub use git_index_transactions::{
     GitIndexPreviewInputGcResult, GitIndexReadExecutor, GlobalDbGitIndexTransactionStore,
     ensure_git_index_transaction_schema,
 };
+pub use native_integration::{GlobalDbNativeIntegrationStore, ensure_native_integration_schema};
 pub use observation_store::{ProjectObservationStoreError, ProjectObservationStoreResolution};
 use project_registry::project_path_alias_key;
 /// Registry reap contract, moved down beside `plan_registry_reap` — its only

@@ -86,6 +86,7 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::GitApply
         | DaemonInvocationOperation::NativeIntegrationStackSnapshot
         | DaemonInvocationOperation::NativeIntegrationPreflight
+        | DaemonInvocationOperation::NativeIntegrationApprove
         | DaemonInvocationOperation::NativeIntegrationApply
         | DaemonInvocationOperation::NativeIntegrationStatus
         | DaemonInvocationOperation::NativeIntegrationCancel => FeedbackOperationV1::FeedbackCycle,

@@ -380,6 +380,7 @@ pub async fn ensure_registered_schema_for_admission(
         validate_registry_schema_contract(&transaction).await?;
 
         git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
+        crate::native_integration::ensure_native_integration_schema(&transaction).await?;
 
         transaction
             .execute_batch(TRANSCRIPT_SCHEMA)

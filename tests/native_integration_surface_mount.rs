@@ -34,7 +34,7 @@ use tracedecay_tool_catalog::BindingSurface;
 
 /// The journey, restated here as the reverse authority. Deriving it from the
 /// module under test would let a dropped operation pass vacuously.
-const JOURNEY: [(ApplicationSurfaceOperation, &str); 5] = [
+const JOURNEY: [(ApplicationSurfaceOperation, &str); 6] = [
     (
         ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
         "stack_snapshot",
@@ -42,6 +42,10 @@ const JOURNEY: [(ApplicationSurfaceOperation, &str); 5] = [
     (
         ApplicationSurfaceOperation::NativeIntegrationPreflight,
         "preflight_native_integration",
+    ),
+    (
+        ApplicationSurfaceOperation::NativeIntegrationApprove,
+        "approve_native_integration",
     ),
     (
         ApplicationSurfaceOperation::NativeIntegrationApply,
@@ -202,6 +206,25 @@ fn a_journey_request_cannot_be_submitted_under_another_operation() {
         )
         .is_err(),
         "apply must not accept a snapshot body"
+    );
+    // Approval issuance accepts only the exact preview identity/digest pair;
+    // a snapshot body or an approval body without the content digest must be
+    // rejected rather than partially decoded.
+    assert!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::NativeIntegrationApprove,
+            stack_snapshot_body(),
+        )
+        .is_err(),
+        "approve must not accept a snapshot body"
+    );
+    assert!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::NativeIntegrationApprove,
+            json!({"preview_id": "preview.native-integration.example"}),
+        )
+        .is_err(),
+        "approve must not accept a preview identity without its content digest"
     );
 }
 

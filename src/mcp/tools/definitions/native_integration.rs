@@ -2,8 +2,9 @@
 //!
 //! These live in their own module rather than in `application.rs` so the
 //! journey's schemas evolve without touching the shared Git/feedback
-//! definitions. The five tools mirror the application catalog exactly:
-//! `stack_snapshot`, `preflight_native_integration`, `apply_native_integration`,
+//! definitions. The six tools mirror the application catalog exactly:
+//! `stack_snapshot`, `preflight_native_integration`,
+//! `approve_native_integration`, `apply_native_integration`,
 //! `native_integration_status`, and `cancel_native_integration`.
 //!
 //! Every input is exact typed identity. There is no property that accepts a
@@ -103,6 +104,24 @@ pub(super) fn def_preflight_native_integration() -> ToolDefinition {
                 }
             }),
             &["snapshot", "evidence"],
+        ),
+    )
+}
+
+pub(super) fn def_approve_native_integration() -> ToolDefinition {
+    def_rw(
+        "tracedecay_approve_native_integration",
+        "Approve a native-integration preview",
+        "Issue one one-use content-bound approval for exactly one unexpired, mechanically \
+         eligible native-integration preview. The daemon binds the approval to the requesting \
+         principal, the apply capability, the current grant lineage, and the preview's expiry; \
+         approving an identity without its exact content digest is unrepresentable.",
+        required_object_schema(
+            json!({
+                "preview_id": string_property("Opaque preview identity returned by preflight_native_integration."),
+                "preview_digest": digest_property("Exact immutable preview digest returned by preflight_native_integration.")
+            }),
+            &["preview_id", "preview_digest"],
         ),
     )
 }

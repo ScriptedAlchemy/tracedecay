@@ -105,6 +105,7 @@ pub enum HttpApplicationOperation {
     GitApply,
     NativeIntegrationStackSnapshot,
     NativeIntegrationPreflight,
+    NativeIntegrationApprove,
     NativeIntegrationApply,
     NativeIntegrationStatus,
     NativeIntegrationCancel,
@@ -182,7 +183,7 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 71] = [
+    pub const ALL: [Self; 72] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -192,6 +193,7 @@ impl HttpApplicationOperation {
         Self::GitApply,
         Self::NativeIntegrationStackSnapshot,
         Self::NativeIntegrationPreflight,
+        Self::NativeIntegrationApprove,
         Self::NativeIntegrationApply,
         Self::NativeIntegrationStatus,
         Self::NativeIntegrationCancel,
@@ -281,6 +283,7 @@ impl HttpApplicationOperation {
             Self::GitApply => "git_apply",
             Self::NativeIntegrationStackSnapshot => "stack_snapshot",
             Self::NativeIntegrationPreflight => "preflight_native_integration",
+            Self::NativeIntegrationApprove => "approve_native_integration",
             Self::NativeIntegrationApply => "apply_native_integration",
             Self::NativeIntegrationStatus => "native_integration_status",
             Self::NativeIntegrationCancel => "cancel_native_integration",
@@ -357,6 +360,7 @@ impl HttpApplicationOperation {
             | Self::GitApply => HttpApplicationOwnerKind::Git,
             Self::NativeIntegrationStackSnapshot
             | Self::NativeIntegrationPreflight
+            | Self::NativeIntegrationApprove
             | Self::NativeIntegrationApply
             | Self::NativeIntegrationStatus
             | Self::NativeIntegrationCancel => HttpApplicationOwnerKind::NativeIntegration,
@@ -459,6 +463,7 @@ impl HttpApplicationOperation {
                 | Self::GitApply
                 | Self::NativeIntegrationStackSnapshot
                 | Self::NativeIntegrationPreflight
+                | Self::NativeIntegrationApprove
                 | Self::NativeIntegrationApply
                 | Self::NativeIntegrationStatus
                 | Self::NativeIntegrationCancel

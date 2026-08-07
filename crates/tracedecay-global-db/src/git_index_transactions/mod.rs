@@ -4,7 +4,7 @@
 //! contract remain in `tracedecay-store`; daemon code bridges that contract to
 //! this async adapter through its bounded mutation actor.
 
-mod database;
+pub(crate) mod database;
 mod read;
 mod schema;
 mod store;

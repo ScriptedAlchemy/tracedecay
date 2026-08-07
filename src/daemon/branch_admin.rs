@@ -472,6 +472,8 @@ pub(super) struct StoreAdministration {
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, MemoryRepairSchedulerHandle>>>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
+    native_integration_services:
+        Arc<crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry>,
     #[cfg(unix)]
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
 }
@@ -510,6 +512,10 @@ impl Default for StoreAdministration {
             ),
             git_index_transaction_services: Arc::new(
                 DaemonGitIndexTransactionServiceRegistry::default(),
+            ),
+            native_integration_services: Arc::new(
+                crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry::default(
+                ),
             ),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
@@ -976,6 +982,12 @@ impl StoreAdministration {
         &self,
     ) -> &Arc<DaemonGitIndexTransactionServiceRegistry> {
         &self.git_index_transaction_services
+    }
+
+    pub(super) fn native_integration_services(
+        &self,
+    ) -> &Arc<crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry> {
+        &self.native_integration_services
     }
 
     #[cfg(unix)]

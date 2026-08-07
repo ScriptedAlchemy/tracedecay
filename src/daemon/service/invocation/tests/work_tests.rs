@@ -92,6 +92,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             Some(other_project.path()),
             None,
             None,
+            None,
             DaemonInvocationRequest::work_application(
                 "request.work.other-project",
                 WorkApplicationInvocationV1::Snapshot(WorkProjectionSnapshotRequestV1 {
@@ -120,6 +121,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
                 .invoke(
                     &registry,
                     Some(project.path()),
+                    None,
                     None,
                     None,
                     DaemonInvocationRequest::work_application(
@@ -395,6 +397,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
                 .invoke(
                     &registry,
                     Some(project.path()),
+                    None,
                     None,
                     None,
                     DaemonInvocationRequest::work_application(

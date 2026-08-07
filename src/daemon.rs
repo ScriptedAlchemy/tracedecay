@@ -201,6 +201,7 @@ pub(crate) use shutdown_coordination::ShutdownStatus;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;
+mod native_integration;
 mod github_credential_lifecycle;
 mod graph_resolution;
 use graph_resolution::retained_project_graph_resolver;
@@ -220,13 +221,14 @@ use invocation_dispatch::execute_portable_daemon_invocation;
 use invocation_dispatch::{execute_daemon_invocation, write_tool_list_changed_notification};
 use invocation_dispatch::{
     git_service_for_project_path, invalid_multi_root_invocation_response,
-    resolve_multi_root_projects,
+    native_integration_service_for_project_path, resolve_multi_root_projects,
 };
 mod invocation_executor;
 use invocation_executor::{
     FederatedSurfaceRequestV1, InProcessDaemonInvocationExecutor, PrecomputedMultiRootQueryPort,
     denied_root_generation, explicit_git_state, extract_work_application_payload,
-    frozen_root_generation, invocation_is_git_operation, multi_root_family_allows,
+    frozen_root_generation, invocation_is_git_operation,
+    invocation_is_native_integration_operation, multi_root_family_allows,
     unavailable_root_generation,
 };
 mod external_acquisition;

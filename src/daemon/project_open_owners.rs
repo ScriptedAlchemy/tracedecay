@@ -102,6 +102,7 @@ use crate::application::primitives::{
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::context_scout_lifecycle::AuthorityRegistrationV1;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
+use crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry;
 use crate::daemon::service::invocation::{
     daemon_operation_event_authority, observe_accepted_feedback_cycle_terminal,
 };
@@ -945,6 +946,7 @@ pub(crate) struct ProjectOpenDependentOwnerState {
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
     git_transactions: &DaemonGitIndexTransactionServiceRegistry,
+    native_integration: &DaemonNativeIntegrationServiceRegistry,
     project_root: &Path,
     project_id: &str,
     server: &McpServer,
@@ -1089,6 +1091,28 @@ pub(super) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
+    // Mount the native-integration authority under the same pinned policy
+    // digest the configuration runtime just registered, so the coordinator's
+    // stale/denied predicates and the handler's minted grants agree on one
+    // policy identity. Non-Git projects advertise no native mutation
+    // authority; the handler keeps answering the typed unavailable result.
+    if let Some(repository_root) = crate::worktree::git_worktree_root(project_root) {
+        native_integration
+            .ensure(
+                Arc::clone(&session_db),
+                repository_root,
+                scope.project_id.clone(),
+                scope.repository_id.clone(),
+                configuration_policy_digest.clone(),
+                now_micros(),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "project-open native integration authority registration failed: {error}"
+                ),
+            })?;
+    }
     let work_grant = project_open_work_grant(&access, now_micros()).map_err(|error| {
         TraceDecayError::Config {
             message: format!("project-open Work grant is invalid: {error}"),

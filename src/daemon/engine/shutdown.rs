@@ -145,8 +145,32 @@ impl DaemonEngine {
                 }],
             },
         };
+        let native_integration = match self
+            .store_administration
+            .native_integration_services()
+            .shutdown()
+            .await
+        {
+            Ok(store_actors_joined) => {
+                log_daemon_event(
+                    "daemon_shutdown",
+                    &[
+                        ("outcome", "native_integration_joined".to_string()),
+                        ("store_actors_joined", store_actors_joined.to_string()),
+                    ],
+                );
+                ShutdownTaskReceipt::default()
+            }
+            Err(error) => ShutdownTaskReceipt {
+                outcomes: vec![ShutdownTaskOutcome {
+                    owner: "native_integration_transactions".to_owned(),
+                    status: ShutdownStatus::Failed(format!("{error:?}")),
+                }],
+            },
+        };
         let mut receipt = shutdown_project_servers(deadline, &self.store_administration).await;
         receipt.extend(git_transactions);
+        receipt.extend(native_integration);
         receipt
     }
 
