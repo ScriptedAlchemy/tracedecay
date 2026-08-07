@@ -370,7 +370,10 @@ pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
         || tool_dispatches_source_edit_effect(tool_name)
         || matches!(
             tool_name,
-            "tracedecay_admin_cli" | "tracedecay_search" | "tracedecay_run_affected_tests"
+            "tracedecay_admin_cli"
+                | "tracedecay_search"
+                | "tracedecay_run_affected_tests"
+                | "tracedecay_pr_context"
         )
 }
 

@@ -9,7 +9,14 @@
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
-use tracedecay_code_index::grep_search::{GrepSearchHit, GrepSearchQuery, search_tree_with_cancel};
+use tracedecay_application::{
+    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, Omission,
+    OmissionReason,
+};
+use tracedecay_code_index::grep_search::{
+    GrepScanOmissionsV1, GrepSearchHit, GrepSearchQuery, MAX_INTERACTIVE_SOURCE_BYTES,
+    MAX_LINE_BYTES, search_tree_with_cancel,
+};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -155,7 +162,59 @@ pub(super) async fn handle_grep(
     ))
 }
 
-fn build_output_value(hits: &[GrepHit], truncated: bool, files_scanned: usize) -> Value {
+fn grep_metadata(
+    lines_examined: usize,
+    returned: usize,
+    truncated: bool,
+    omission_counts: GrepScanOmissionsV1,
+) -> (EvidenceCoverage, Vec<Omission>) {
+    let completeness = if truncated || omission_counts.any() {
+        CoverageCompleteness::Partial
+    } else {
+        CoverageCompleteness::Complete
+    };
+    let visited = lines_examined as u64;
+    let returned = returned as u64;
+    let coverage = EvidenceCoverage {
+        requested_domains: vec![EvidenceDomain::Source],
+        // Coverage counts use matching lines as the eligible/returned grain.
+        // `visited` is every bounded text line actually tested by the matcher;
+        // any omission makes the total eligible matches unknown.
+        visited: Some(visited),
+        eligible: (completeness == CoverageCompleteness::Complete).then_some(returned),
+        returned,
+        completeness,
+        domains: vec![CoverageDomainState {
+            domain: EvidenceDomain::Source,
+            completeness,
+        }],
+    };
+    let mut omissions = Vec::with_capacity(2);
+    let budget_omissions = omission_counts.budget();
+    if budget_omissions > 0 {
+        omissions.push(Omission {
+            domain: EvidenceDomain::Source,
+            count: budget_omissions as u64,
+            reason: OmissionReason::Budget,
+        });
+    }
+    if omission_counts.unavailable_sources > 0 {
+        omissions.push(Omission {
+            domain: EvidenceDomain::Source,
+            count: omission_counts.unavailable_sources as u64,
+            reason: OmissionReason::Unavailable,
+        });
+    }
+    (coverage, omissions)
+}
+
+fn build_output_value(
+    hits: &[GrepHit],
+    truncated: bool,
+    files_scanned: usize,
+    lines_examined: usize,
+    omission_counts: GrepScanOmissionsV1,
+) -> Value {
     let items: Vec<Value> = hits
         .iter()
         .map(|hit| {
@@ -199,7 +258,7 @@ fn render_grep_md(
     hits: &[GrepHit],
     truncated: bool,
     files_scanned: usize,
-    omission_counts: ScanOmissionCounts,
+    omission_counts: GrepScanOmissionsV1,
 ) -> String {
     let mut md = Md::new();
     md.heading(2, "Grep Results");
@@ -245,7 +304,7 @@ fn render_grep_md(
     md.render()
 }
 
-fn append_partial_coverage_md(md: &mut Md, omissions: ScanOmissionCounts) {
+fn append_partial_coverage_md(md: &mut Md, omissions: GrepScanOmissionsV1) {
     if omissions.oversized_files > 0 {
         let noun = if omissions.oversized_files == 1 {
             "file"
@@ -254,7 +313,7 @@ fn append_partial_coverage_md(md: &mut Md, omissions: ScanOmissionCounts) {
         };
         md.line(&format!(
             "_Coverage is partial: skipped {} {noun} larger than the \
-             {MAX_FILE_BYTES}-byte scan limit; matching lines may be omitted._",
+             {MAX_INTERACTIVE_SOURCE_BYTES}-byte scan limit; matching lines may be omitted._",
             omissions.oversized_files
         ));
     }
@@ -286,7 +345,33 @@ fn append_partial_coverage_md(md: &mut Md, omissions: ScanOmissionCounts) {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use tracedecay_code_index::grep_search::GrepSearchResult;
+
     use super::*;
+
+    fn scan(
+        project: &Path,
+        pattern: &str,
+        path_glob: Option<&str>,
+        max_results: usize,
+        is_cancelled: impl Fn() -> bool,
+    ) -> GrepSearchResult {
+        search_tree_with_cancel(
+            project,
+            &GrepSearchQuery {
+                pattern: pattern.to_owned(),
+                fixed_strings: false,
+                case_sensitive: true,
+                path_glob: path_glob.map(str::to_owned),
+                context_lines: 0,
+                max_results,
+            },
+            is_cancelled,
+        )
+        .expect("bounded scan")
+    }
 
     #[test]
     fn scan_tree_prunes_generated_dependency_directories_without_gitignore() {
@@ -317,8 +402,13 @@ mod tests {
         )
         .expect("metadata fixture");
 
-        let matcher = Regex::new("UNIQUE_GENERATED_DIR_TOKEN").expect("matcher");
-        let scan = scan_tree(project.path(), &matcher, None, None, 0, 10, || false);
+        let scan = scan(
+            project.path(),
+            "UNIQUE_GENERATED_DIR_TOKEN",
+            None,
+            10,
+            || false,
+        );
         let files = scan
             .hits
             .iter()
@@ -350,19 +440,11 @@ mod tests {
         )
         .expect("source fixture");
 
-        let overrides = |root: &Path| {
-            let mut builder = OverrideBuilder::new(root);
-            builder.add("src/**").expect("path glob");
-            builder.build().expect("overrides")
-        };
-        let matcher = Regex::new("NORMAL_PATH_GLOB_TOKEN").expect("matcher");
         let baseline_checks = std::sync::atomic::AtomicUsize::new(0);
-        let baseline = scan_tree(
+        let baseline = scan(
             project.path(),
-            &matcher,
-            Some(overrides(project.path())),
+            "NORMAL_PATH_GLOB_TOKEN",
             Some("src/**"),
-            0,
             10,
             || {
                 baseline_checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -379,12 +461,10 @@ mod tests {
         .expect("generated fixture");
 
         let checks = std::sync::atomic::AtomicUsize::new(0);
-        let scan = scan_tree(
+        let scan = scan(
             project.path(),
-            &matcher,
-            Some(overrides(project.path())),
+            "NORMAL_PATH_GLOB_TOKEN",
             Some("src/**"),
-            0,
             10,
             || {
                 checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -410,16 +490,10 @@ mod tests {
         )
         .expect("generated fixture");
 
-        let mut builder = OverrideBuilder::new(project.path());
-        builder.add("*.js").expect("path glob");
-        let overrides = builder.build().expect("overrides");
-        let matcher = Regex::new("SLASHLESS_GENERATED_GLOB_TOKEN").expect("matcher");
-        let scan = scan_tree(
+        let scan = scan(
             project.path(),
-            &matcher,
-            Some(overrides),
+            "SLASHLESS_GENERATED_GLOB_TOKEN",
             Some("*.js"),
-            0,
             10,
             || false,
         );
@@ -435,29 +509,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn scan_tree_stops_when_cancelled_during_line_matching() {
-        let project = tempfile::tempdir().expect("temp project");
-        let source = "CANCELLATION_TOKEN\n".repeat(100);
-        std::fs::write(project.path().join("fixture.txt"), source).expect("fixture");
-
-        let matcher = Regex::new("CANCELLATION_TOKEN").expect("matcher");
-        let checks = std::sync::atomic::AtomicUsize::new(0);
-        let scan = scan_tree(project.path(), &matcher, None, None, 0, 200, || {
-            checks.fetch_add(1, Ordering::Relaxed) >= 10
-        });
-
-        assert!(
-            scan.hits.len() < MAX_HITS_PER_FILE,
-            "cancelled scan should stop before the per-file cap: {}",
-            scan.hits.len()
-        );
-        assert!(checks.load(Ordering::Relaxed) > 10);
-    }
-
     fn write_oversized_match(path: &Path, pattern: &str) {
         let mut source = format!("{pattern}\n").into_bytes();
-        source.resize((MAX_FILE_BYTES as usize) + 1, b'x');
+        source.resize((MAX_INTERACTIVE_SOURCE_BYTES as usize) + 1, b'x');
         std::fs::write(path, source).expect("oversized fixture");
     }
 
@@ -470,11 +524,16 @@ mod tests {
         assert_eq!(output["omissions"], omissions);
     }
 
-    fn scan_output(project: &Path, pattern: &str) -> (ScanResult, Value) {
-        let matcher = Regex::new(pattern).expect("matcher");
-        let scan = scan_tree(project, &matcher, None, None, 0, 10, || false);
+    fn scan_output(project: &Path, pattern: &str) -> (GrepSearchResult, Value) {
+        let scan = scan(project, pattern, None, 10, || false);
+        let hits = scan
+            .hits
+            .iter()
+            .cloned()
+            .map(GrepHit::from)
+            .collect::<Vec<_>>();
         let output = build_output_value(
-            &scan.hits,
+            &hits,
             scan.truncated,
             scan.files_scanned,
             scan.lines_examined,
@@ -483,13 +542,14 @@ mod tests {
         (scan, output)
     }
 
-    fn rendered_scan(scan: &ScanResult) -> String {
-        render_grep_md(
-            &scan.hits,
-            scan.truncated,
-            scan.files_scanned,
-            scan.omissions,
-        )
+    fn rendered_scan(scan: &GrepSearchResult) -> String {
+        let hits = scan
+            .hits
+            .iter()
+            .cloned()
+            .map(GrepHit::from)
+            .collect::<Vec<_>>();
+        render_grep_md(&hits, scan.truncated, scan.files_scanned, scan.omissions)
     }
 
     fn one_budget_omission() -> Value {
@@ -514,7 +574,9 @@ mod tests {
         let markdown = rendered_scan(&scan);
         assert!(markdown.contains("No matching lines."), "{markdown}");
         assert!(
-            markdown.contains("skipped 1 file larger than the 2000000-byte scan limit"),
+            markdown.contains(&format!(
+                "skipped 1 file larger than the {MAX_INTERACTIVE_SOURCE_BYTES}-byte scan limit"
+            )),
             "{markdown}"
         );
     }
@@ -566,17 +628,19 @@ mod tests {
 
         let markdown = rendered_scan(&scan);
         assert!(
-            markdown.contains("skipped 1 line longer than the 4096-byte scan limit"),
+            markdown.contains(&format!(
+                "skipped 1 line longer than the {MAX_LINE_BYTES}-byte scan limit"
+            )),
             "{markdown}"
         );
     }
 
     #[test]
     fn unavailable_source_candidates_are_typed_and_ordered_after_budget_omissions() {
-        let omission_counts = ScanOmissionCounts {
+        let omission_counts = GrepScanOmissionsV1 {
             oversized_lines: 1,
             unavailable_sources: 2,
-            ..ScanOmissionCounts::default()
+            ..GrepScanOmissionsV1::default()
         };
         let output = build_output_value(&[], false, 0, 0, omission_counts);
 
@@ -600,7 +664,9 @@ mod tests {
 
         let markdown = render_grep_md(&[], false, 0, omission_counts);
         assert!(
-            markdown.contains("skipped 1 line longer than the 4096-byte scan limit"),
+            markdown.contains(&format!(
+                "skipped 1 line longer than the {MAX_LINE_BYTES}-byte scan limit"
+            )),
             "{markdown}"
         );
         assert!(

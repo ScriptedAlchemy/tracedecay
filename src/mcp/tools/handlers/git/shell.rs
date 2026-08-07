@@ -2,14 +2,116 @@
 
 use super::*;
 
+const PR_CONTEXT_MAX_ANCESTRY_COMMITS: usize = 100_000;
+const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
+
 /// Diff two git refs and return changed file paths with coarse status.
 pub(super) fn git_diff_file_changes(
     project_root: &std::path::Path,
     from_ref: &str,
     to_ref: &str,
 ) -> std::result::Result<Vec<GitFileChange>, String> {
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    git_diff_file_changes_controlled(project_root, from_ref, to_ref, &|| false)
+}
 
+/// Resolve PR refs to their common ancestor and compare only changes reachable
+/// from the head. This matches `git diff base...head`; comparing the two tip
+/// trees directly would incorrectly report unrelated files added to an
+/// advanced default branch as deletions in the PR.
+#[cfg(test)]
+pub(super) fn git_pr_comparison(
+    project_root: &std::path::Path,
+    base_ref: &str,
+    head_ref: &str,
+) -> std::result::Result<GitPrComparison, String> {
+    git_pr_comparison_controlled(project_root, base_ref, head_ref, &|| false)
+}
+
+pub(super) fn git_pr_comparison_controlled(
+    project_root: &std::path::Path,
+    base_ref: &str,
+    head_ref: &str,
+    cancelled: &(impl Fn() -> bool + ?Sized),
+) -> std::result::Result<GitPrComparison, String> {
+    check_git_pr_cancelled(cancelled)?;
+    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
+    check_git_pr_cancelled(cancelled)?;
+    let base_commit = repo
+        .rev_parse_single(base_ref)
+        .map_err(|e| format!("cannot resolve '{base_ref}': {e}"))?
+        .object()
+        .map_err(|e| format!("cannot read object for '{base_ref}': {e}"))?
+        .peel_to_commit()
+        .map_err(|e| format!("cannot peel '{base_ref}' to commit: {e}"))?;
+    check_git_pr_cancelled(cancelled)?;
+    let head_commit = repo
+        .rev_parse_single(head_ref)
+        .map_err(|e| format!("cannot resolve '{head_ref}': {e}"))?
+        .object()
+        .map_err(|e| format!("cannot read object for '{head_ref}': {e}"))?
+        .peel_to_commit()
+        .map_err(|e| format!("cannot peel '{head_ref}' to commit: {e}"))?;
+    let base_oid = base_commit.id.to_string();
+    let head_oid = head_commit.id.to_string();
+    check_git_pr_cancelled(cancelled)?;
+    ensure_pr_ancestry_bounded(&repo, base_commit.id, head_commit.id, cancelled)?;
+    let merge_base = repo
+        .merge_base(base_commit.id, head_commit.id)
+        .map_err(|e| format!("cannot find merge base for '{base_ref}' and '{head_ref}': {e}"))?;
+    let merge_base = merge_base.to_string();
+    check_git_pr_cancelled(cancelled)?;
+
+    Ok(GitPrComparison {
+        changes: git_diff_file_changes_controlled(project_root, &merge_base, &head_oid, cancelled)?,
+        commits: git_commit_log_controlled(project_root, &merge_base, &head_oid, cancelled)?,
+        base_oid,
+        head_oid,
+        merge_base,
+    })
+}
+
+fn ensure_pr_ancestry_bounded(
+    repo: &gix::Repository,
+    base: gix::ObjectId,
+    head: gix::ObjectId,
+    cancelled: &(impl Fn() -> bool + ?Sized),
+) -> std::result::Result<(), String> {
+    for (label, tip) in [("base", base), ("head", head)] {
+        let walk = repo
+            .rev_walk([tip])
+            .all()
+            .map_err(|error| format!("cannot walk {label} ancestry: {error}"))?;
+        for (index, info) in walk.enumerate() {
+            check_git_pr_cancelled(cancelled)?;
+            info.map_err(|error| format!("cannot walk {label} ancestry: {error}"))?;
+            if index >= PR_CONTEXT_MAX_ANCESTRY_COMMITS {
+                return Err(format!(
+                    "git PR comparison {label} ancestry exceeds the {PR_CONTEXT_MAX_ANCESTRY_COMMITS}-commit limit"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_git_pr_cancelled(
+    cancelled: &(impl Fn() -> bool + ?Sized),
+) -> std::result::Result<(), String> {
+    if cancelled() {
+        Err("git PR comparison cancelled".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn git_diff_file_changes_controlled(
+    project_root: &std::path::Path,
+    from_ref: &str,
+    to_ref: &str,
+    cancelled: &(impl Fn() -> bool + ?Sized),
+) -> std::result::Result<Vec<GitFileChange>, String> {
+    check_git_pr_cancelled(cancelled)?;
+    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
     let from_tree = repo
         .rev_parse_single(from_ref)
         .map_err(|e| format!("cannot resolve '{from_ref}': {e}"))?
@@ -17,7 +119,7 @@ pub(super) fn git_diff_file_changes(
         .map_err(|e| format!("cannot read object for '{from_ref}': {e}"))?
         .peel_to_tree()
         .map_err(|e| format!("cannot peel '{from_ref}' to tree: {e}"))?;
-
+    check_git_pr_cancelled(cancelled)?;
     let to_tree = repo
         .rev_parse_single(to_ref)
         .map_err(|e| format!("cannot resolve '{to_ref}': {e}"))?
@@ -27,17 +129,19 @@ pub(super) fn git_diff_file_changes(
         .map_err(|e| format!("cannot peel '{to_ref}' to tree: {e}"))?;
 
     let mut changed = Vec::new();
+    let mut reached_limit = false;
     from_tree
         .changes()
         .map_err(|e| format!("diff init failed: {e}"))?
         .for_each_to_obtain_tree(&to_tree, |change| {
             use gix::object::tree::diff::Change;
-            // `for_each_to_obtain_tree` walks one level at a time — if an
-            // entire subtree was added, deleted, or moved, the entry's
-            // `entry_mode` is a tree, not a blob. We only want file paths
-            // downstream, so skip tree entries before pushing. The earlier
-            // `is_dir()` fallback after-the-fact missed deletions, where the
-            // path no longer exists on disk.
+            if cancelled() {
+                return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
+            }
+            if changed.len() >= PR_CONTEXT_MAX_CHANGED_FILES {
+                reached_limit = true;
+                return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
+            }
             match &change {
                 Change::Addition {
                     location,
@@ -99,49 +203,13 @@ pub(super) fn git_diff_file_changes(
             Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))
         })
         .map_err(|e| format!("tree diff failed: {e}"))?;
-
-    // Belt-and-suspenders: even with the entry_mode check above, drop any
-    // path that resolves to a directory on disk for additions/modifications.
-    // Pure deletions can't be checked this way (the path is gone), which is
-    // exactly why entry_mode.is_tree() above is the load-bearing filter.
-    changed.retain(|change| !project_root.join(&change.path).is_dir());
+    check_git_pr_cancelled(cancelled)?;
+    if reached_limit {
+        return Err(format!(
+            "git PR comparison exceeds the {PR_CONTEXT_MAX_CHANGED_FILES}-file diff limit"
+        ));
+    }
     Ok(changed)
-}
-
-/// Resolve PR refs to their common ancestor and compare only changes reachable
-/// from the head. This matches `git diff base...head`; comparing the two tip
-/// trees directly would incorrectly report unrelated files added to an
-/// advanced default branch as deletions in the PR.
-pub(super) fn git_pr_comparison(
-    project_root: &std::path::Path,
-    base_ref: &str,
-    head_ref: &str,
-) -> std::result::Result<GitPrComparison, String> {
-    let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
-    let base_commit = repo
-        .rev_parse_single(base_ref)
-        .map_err(|e| format!("cannot resolve '{base_ref}': {e}"))?
-        .object()
-        .map_err(|e| format!("cannot read object for '{base_ref}': {e}"))?
-        .peel_to_commit()
-        .map_err(|e| format!("cannot peel '{base_ref}' to commit: {e}"))?;
-    let head_commit = repo
-        .rev_parse_single(head_ref)
-        .map_err(|e| format!("cannot resolve '{head_ref}': {e}"))?
-        .object()
-        .map_err(|e| format!("cannot read object for '{head_ref}': {e}"))?
-        .peel_to_commit()
-        .map_err(|e| format!("cannot peel '{head_ref}' to commit: {e}"))?;
-    let merge_base = repo
-        .merge_base(base_commit.id, head_commit.id)
-        .map_err(|e| format!("cannot find merge base for '{base_ref}' and '{head_ref}': {e}"))?;
-    let merge_base = merge_base.to_string();
-
-    Ok(GitPrComparison {
-        changes: git_diff_file_changes(project_root, &merge_base, head_ref)?,
-        commits: git_commit_log(project_root, &merge_base, head_ref)?,
-        merge_base,
-    })
 }
 
 pub(super) fn default_pr_base_ref(project_root: &std::path::Path) -> String {
@@ -271,11 +339,13 @@ pub(super) fn git_recent_commits(
 }
 
 /// Returns commit subjects between two refs.
-fn git_commit_log(
+fn git_commit_log_controlled(
     project_root: &std::path::Path,
     base_ref: &str,
     head_ref: &str,
+    cancelled: &(impl Fn() -> bool + ?Sized),
 ) -> std::result::Result<Vec<Value>, String> {
+    check_git_pr_cancelled(cancelled)?;
     let repo = gix::open(project_root).map_err(|e| format!("failed to open git repo: {e}"))?;
 
     let base_id = repo
@@ -306,6 +376,7 @@ fn git_commit_log(
     // Include commits reachable from head but not base, including merge-shaped
     // histories where the merge base is not on the first-parent chain.
     for info in walk.take(100) {
+        check_git_pr_cancelled(cancelled)?;
         let info = info.map_err(|e| format!("cannot walk commit: {e}"))?;
         let commit = repo
             .find_object(info.id)
@@ -325,6 +396,7 @@ fn git_commit_log(
         commits.push(json!({"hash": short_id, "subject": subject}));
     }
 
+    check_git_pr_cancelled(cancelled)?;
     Ok(commits)
 }
 
@@ -411,6 +483,35 @@ mod tests {
         assert_eq!(paths, ["feature.txt"]);
         assert_eq!(comparison.commits.len(), 1);
         assert_eq!(comparison.commits[0]["subject"], "feature");
+    }
+
+    #[test]
+    fn pr_comparison_stops_from_inside_the_tree_diff_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let temp = tempfile::tempdir().expect("temp repo");
+        let root = temp.path();
+        test_git(root, &["init", "-b", "main"]);
+        std::fs::write(root.join("base.txt"), "base\n").expect("write base");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "base"]);
+        test_git(root, &["switch", "-c", "feature"]);
+        std::fs::write(root.join("feature.txt"), "feature\n").expect("write feature");
+        test_git(root, &["add", "."]);
+        test_git(root, &["commit", "-m", "feature"]);
+
+        let checkpoints = AtomicUsize::new(0);
+        let result = git_pr_comparison_controlled(root, "main", "feature", &|| {
+            checkpoints.fetch_add(1, Ordering::Relaxed) >= 7
+        });
+        let Err(error) = result else {
+            panic!("tree diff cancellation must stop the comparison");
+        };
+        assert_eq!(error, "git PR comparison cancelled");
+        assert!(
+            checkpoints.load(Ordering::Relaxed) >= 8,
+            "cancellation must be observed after entering the diff callback",
+        );
     }
 
     #[test]

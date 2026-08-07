@@ -48,6 +48,39 @@ impl TraceDecay {
         traverser.get_impact_radius_multi(seed_ids, max_depth).await
     }
 
+    /// [`TraceDecay::get_impact_radius_multi`] with cooperative batch
+    /// checkpoints.
+    pub async fn get_impact_radius_multi_controlled<F>(
+        &self,
+        seed_ids: &[String],
+        max_depth: usize,
+        checkpoint: &mut F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        let traverser = GraphTraverser::new(&self.db);
+        traverser
+            .get_impact_radius_multi_controlled(seed_ids, max_depth, checkpoint)
+            .await
+    }
+
+    /// Multi-source impact traversal reusing an already-read seed snapshot.
+    pub async fn get_impact_radius_multi_from_nodes_controlled<F>(
+        &self,
+        seed_nodes: &[Node],
+        max_depth: usize,
+        checkpoint: &mut F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        let traverser = GraphTraverser::new(&self.db);
+        traverser
+            .get_impact_radius_multi_from_nodes_controlled(seed_nodes, max_depth, checkpoint)
+            .await
+    }
+
     /// Finds the shortest directed call chain from `from_id` to `to_id`,
     /// following only outgoing `Calls` edges. Returns `None` if no chain
     /// exists within `max_depth` hops.
@@ -100,6 +133,23 @@ impl TraceDecay {
         self.db.get_nodes_by_file(file_path).await
     }
 
+    /// Returns one stable, bounded symbol page across requested files.
+    pub async fn get_nodes_by_files_page_controlled<F>(
+        &self,
+        file_paths: &[String],
+        config_paths: &[String],
+        after: Option<&crate::db::NodesByFilesPageKey>,
+        limit: usize,
+        checkpoint: F,
+    ) -> Result<crate::db::NodesByFilesPage>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        self.db
+            .get_nodes_by_files_page_controlled(file_paths, config_paths, after, limit, checkpoint)
+            .await
+    }
+
     /// Returns every node in the database.
     pub async fn get_all_nodes(&self) -> Result<Vec<Node>> {
         self.db.get_all_nodes().await
@@ -150,6 +200,22 @@ impl TraceDecay {
         kinds: &[EdgeKind],
     ) -> Result<Vec<Edge>> {
         self.db.get_incoming_edges_bulk(target_ids, kinds).await
+    }
+
+    /// [`TraceDecay::get_incoming_edges_bulk`] with cooperative page
+    /// checkpoints.
+    pub async fn get_incoming_edges_bulk_controlled<F>(
+        &self,
+        target_ids: &[String],
+        kinds: &[EdgeKind],
+        checkpoint: F,
+    ) -> Result<Vec<Edge>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        self.db
+            .get_incoming_edges_bulk_controlled(target_ids, kinds, checkpoint)
+            .await
     }
 
     /// Returns outgoing edges for many source nodes in one round-trip.

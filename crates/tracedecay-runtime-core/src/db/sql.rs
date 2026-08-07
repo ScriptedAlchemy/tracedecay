@@ -129,9 +129,37 @@ pub async fn collect_rowid_pages_with<T, C>(
 where
     C: crate::db::engine::QueryExecutor + ?Sized,
 {
+    collect_rowid_pages_with_controlled(
+        conn,
+        page_sql,
+        leading_params,
+        cursor_index,
+        map_fn,
+        operation,
+        || Ok(()),
+    )
+    .await
+}
+
+/// [`collect_rowid_pages_with`] with one cooperative checkpoint around every
+/// bounded query page.
+pub async fn collect_rowid_pages_with_controlled<T, C, F>(
+    conn: &C,
+    page_sql: &str,
+    leading_params: &[Value],
+    cursor_index: i32,
+    map_fn: fn(&Row) -> std::result::Result<T, Error>,
+    operation: &str,
+    mut checkpoint: F,
+) -> Result<Vec<T>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+    F: FnMut() -> Result<()>,
+{
     let mut items = Vec::new();
     let mut after_rowid = i64::MIN;
     loop {
+        checkpoint()?;
         let mut page_params: Vec<Value> = Vec::with_capacity(leading_params.len() + 2);
         page_params.extend_from_slice(leading_params);
         page_params.push(Value::Integer(after_rowid));
@@ -167,6 +195,7 @@ where
                 operation: operation.to_string(),
             })?);
         }
+        checkpoint()?;
         if page_rows < FULL_SCAN_PAGE_ROWS {
             return Ok(items);
         }

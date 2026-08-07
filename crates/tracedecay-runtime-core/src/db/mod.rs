@@ -46,16 +46,18 @@ pub use access::{
 pub use analytics::HealthFileAggregate;
 pub use connection::Database;
 pub use connection::{
-    DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,
-    DatabaseWriteTransaction,
+    DatabaseAccessMode, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
+    DatabaseMemoryTransaction, DatabaseWriteTransaction,
 };
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
+pub use edges::EdgesByEndpointPage;
 pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
+pub use nodes::{NodesByFilesPage, NodesByFilesPageEntry, NodesByFilesPageKey};
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,

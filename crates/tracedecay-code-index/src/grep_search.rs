@@ -6,7 +6,7 @@ use crate::source_walk::source_walk;
 
 const MAX_HITS_PER_FILE: usize = 20;
 const BINARY_SNIFF_BYTES: usize = 8_192;
-const MAX_LINE_BYTES: usize = 4_096;
+pub const MAX_LINE_BYTES: usize = 4_096;
 pub const MAX_INTERACTIVE_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -32,8 +32,33 @@ pub struct GrepSearchHit {
 pub struct GrepSearchResult {
     pub hits: Vec<GrepSearchHit>,
     pub files_scanned: usize,
+    pub lines_examined: usize,
+    pub omissions: GrepScanOmissionsV1,
     pub truncated: bool,
     pub cancelled: bool,
+}
+
+/// Sources the bounded scan deliberately skipped, so callers can report
+/// partial coverage instead of implying a complete answer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GrepScanOmissionsV1 {
+    pub oversized_files: usize,
+    pub oversized_lines: usize,
+    pub unavailable_sources: usize,
+}
+
+impl GrepScanOmissionsV1 {
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.oversized_files > 0 || self.oversized_lines > 0 || self.unavailable_sources > 0
+    }
+
+    /// Omissions caused by the scan's own byte budgets (as opposed to sources
+    /// that could not be read at all).
+    #[must_use]
+    pub fn budget(self) -> usize {
+        self.oversized_files + self.oversized_lines
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,9 +111,11 @@ pub fn search_tree_with_cancel(
             continue;
         };
         let Ok(metadata) = entry.metadata() else {
+            result.omissions.unavailable_sources += 1;
             continue;
         };
         if metadata.len() > MAX_INTERACTIVE_SOURCE_BYTES {
+            result.omissions.oversized_files += 1;
             continue;
         }
         if is_cancelled() {
@@ -96,12 +123,14 @@ pub fn search_tree_with_cancel(
             break;
         }
         let Ok(bytes) = std::fs::read(path) else {
+            result.omissions.unavailable_sources += 1;
             continue;
         };
         if looks_binary(&bytes) {
             continue;
         }
         let Ok(content) = String::from_utf8(bytes) else {
+            result.omissions.unavailable_sources += 1;
             continue;
         };
         result.files_scanned += 1;
@@ -112,7 +141,12 @@ pub fn search_tree_with_cancel(
                 result.cancelled = true;
                 return Ok(result);
             }
-            if line.len() > MAX_LINE_BYTES || !matcher.is_match(line) {
+            if line.len() > MAX_LINE_BYTES {
+                result.omissions.oversized_lines += 1;
+                continue;
+            }
+            result.lines_examined += 1;
+            if !matcher.is_match(line) {
                 continue;
             }
             if file_hits >= MAX_HITS_PER_FILE {

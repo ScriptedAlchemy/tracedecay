@@ -3,11 +3,57 @@ use std::collections::HashMap;
 
 use crate::db::engine::params;
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseEngineReadSnapshot};
 use super::engine::QueryExecutor;
 use super::sql::collect_rowid_pages;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+impl DatabaseEngineReadSnapshot {
+    /// Returns the indexing generation bound to this read snapshot.
+    ///
+    /// The generation advances in the same durable transaction as graph writes.
+    /// Reading it through this capability binds every later graph query to the
+    /// same SQLite snapshot without relying on second-resolution timestamps.
+    pub async fn graph_generation_identity(&self) -> Result<String> {
+        let mut rows = self
+            .query(
+                "SELECT COALESCE(
+                    (SELECT value FROM metadata
+                     WHERE key = 'graph_transaction_generation'),
+                    '0'
+                 )",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query graph generation: {error}"),
+                operation: "graph_generation_identity".to_owned(),
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read graph generation: {error}"),
+                operation: "graph_generation_identity".to_owned(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "graph generation query returned no row".to_owned(),
+                operation: "graph_generation_identity".to_owned(),
+            })?;
+        let generation: String = row.get(0).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read graph transaction generation: {error}"),
+            operation: "graph_generation_identity".to_owned(),
+        })?;
+        generation
+            .parse::<u64>()
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid graph transaction generation '{generation}': {error}"),
+                operation: "graph_generation_identity".to_owned(),
+            })?;
+        Ok(generation)
+    }
+}
 
 impl Database {
     /// Returns aggregate statistics about the code graph.

@@ -489,16 +489,57 @@ impl<'a> GraphTraverser<'a> {
         seed_ids: &[String],
         max_depth: usize,
     ) -> Result<Vec<Node>> {
+        self.get_impact_radius_multi_controlled(seed_ids, max_depth, &mut || Ok(()))
+            .await
+    }
+
+    /// [`GraphTraverser::get_impact_radius_multi`] with one cooperative
+    /// checkpoint around every bounded graph query.
+    pub async fn get_impact_radius_multi_controlled<F>(
+        &self,
+        seed_ids: &[String],
+        max_depth: usize,
+        checkpoint: &mut F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
         require_positive_depth(max_depth as u64, "get_impact_radius_multi", "max_depth")?;
         if seed_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut visited: HashSet<String> = seed_ids.iter().cloned().collect();
-        let seed_nodes = self.db.get_nodes_by_ids(seed_ids).await?;
-        let mut result_nodes: Vec<Node> = seed_nodes;
+        let seed_nodes = self
+            .db
+            .get_nodes_by_ids_controlled(seed_ids, &mut *checkpoint)
+            .await?;
+        self.get_impact_radius_multi_from_nodes_controlled(&seed_nodes, max_depth, checkpoint)
+            .await
+    }
+
+    /// Multi-source impact traversal using an already-read seed snapshot.
+    pub async fn get_impact_radius_multi_from_nodes_controlled<F>(
+        &self,
+        seed_nodes: &[Node],
+        max_depth: usize,
+        checkpoint: &mut F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        require_positive_depth(
+            max_depth as u64,
+            "get_impact_radius_multi_from_nodes",
+            "max_depth",
+        )?;
+        if seed_nodes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut visited: HashSet<String> = seed_nodes.iter().map(|node| node.id.clone()).collect();
+        let mut result_nodes: Vec<Node> = seed_nodes.to_vec();
         let mut queue: VecDeque<(String, usize)> =
-            seed_ids.iter().map(|id| (id.clone(), 0usize)).collect();
+            seed_nodes.iter().map(|node| (node.id.clone(), 0)).collect();
 
         // Level-batched: one `get_incoming_edges_bulk` + one `get_nodes_by_ids`
         // per depth for the whole frontier. The reachable node set is
@@ -513,7 +554,9 @@ impl<'a> GraphTraverser<'a> {
 
             let level_ids: Vec<String> = level.iter().map(|(id, _)| id.clone()).collect();
             let edges_by_target = Self::group_by(
-                self.db.get_incoming_edges_bulk(&level_ids, &[]).await?,
+                self.db
+                    .get_incoming_edges_bulk_controlled(&level_ids, &[], &mut *checkpoint)
+                    .await?,
                 |e| e.target.clone(),
             );
 
@@ -531,7 +574,11 @@ impl<'a> GraphTraverser<'a> {
                 continue;
             }
             let child_depth = depth + 1;
-            for node in self.db.get_nodes_by_ids(&new_ids).await? {
+            for node in self
+                .db
+                .get_nodes_by_ids_controlled(&new_ids, &mut *checkpoint)
+                .await?
+            {
                 queue.push_back((node.id.clone(), child_depth));
                 result_nodes.push(node);
             }

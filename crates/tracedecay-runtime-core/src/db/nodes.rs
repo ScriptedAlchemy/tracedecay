@@ -1,20 +1,52 @@
 // Rust guideline compliant 2025-10-17
+use std::collections::HashSet;
+
 use crate::db::engine::{Value, params, params_from_iter};
 
-use super::connection::{Database, DatabaseWriteTransaction};
-use super::rows::{NODE_COLUMNS, NODE_SELECT_COLUMNS, node_select_columns, row_to_node};
+use super::connection::{Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction};
+use super::rows::{NODE_COLUMNS, node_select_columns, row_to_node};
 use super::sql::{
-    build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with, collect_rows, opt_str,
-    push_int, push_opt_quoted, push_quoted,
+    build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with,
+    collect_rowid_pages_with_controlled, collect_rows, opt_str, push_int, push_opt_quoted,
+    push_quoted,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+const CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS: usize = 64;
 
 /// One `rowid` keyset page of the nodes declared by a single file.
 pub(super) const NODES_BY_FILE_PAGE_SQL: &str = concat!(
     "SELECT ",
     node_select_columns!(),
     ", rowid FROM nodes WHERE file_path = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3"
+);
+
+/// One stable, bounded symbol page across a set of files.
+///
+/// The keyset predicate is applied before `LIMIT`, so every continuation
+/// reads at most the caller's page budget plus one lookahead row.
+pub(super) const NODES_BY_FILES_SYMBOL_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    node_select_columns!(),
+    ", n.rowid \
+     FROM nodes AS n INDEXED BY idx_nodes_file_path_start_line \
+     WHERE n.file_path IN (SELECT value FROM json_each(?1)) \
+       AND (?2 IS NULL \
+            OR n.file_path > ?2 \
+            OR (n.file_path = ?2 AND n.start_line > ?3) \
+            OR (n.file_path = ?2 AND n.start_line = ?3 AND n.rowid > ?4)) \
+     ORDER BY n.file_path, n.start_line, n.rowid \
+     LIMIT ?5"
+);
+
+/// One page of nodes selected by an arbitrary-size JSON-array id bind.
+pub(super) const NODES_BY_IDS_PAGE_SQL: &str = concat!(
+    "SELECT ",
+    node_select_columns!(),
+    ", rowid FROM nodes \
+     WHERE id IN (SELECT value FROM json_each(?1)) \
+       AND rowid > ?2 ORDER BY rowid LIMIT ?3"
 );
 
 /// [`NODES_BY_FILE_PAGE_SQL`] narrowed to just the node ids.
@@ -33,6 +65,240 @@ const ALL_NODES_PAGE_SQL: &str = concat!(
     node_select_columns!(),
     ", rowid FROM nodes WHERE rowid > ?1 ORDER BY rowid LIMIT ?2"
 );
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodesByFilesPageKey {
+    pub file_path: String,
+    pub start_line: u32,
+    pub rowid: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct NodesByFilesPageEntry {
+    pub node: Option<Node>,
+    pub file_path: String,
+    pub start_line: u32,
+    pub rowid: i64,
+    pub is_config_summary: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct NodesByFilesPage {
+    pub entries: Vec<NodesByFilesPageEntry>,
+    pub has_more: bool,
+    pub rows_read: usize,
+}
+
+pub(super) async fn read_nodes_by_files_page_controlled<C, F>(
+    conn: &C,
+    file_paths: &[String],
+    config_paths: &[String],
+    after: Option<&NodesByFilesPageKey>,
+    limit: usize,
+    mut checkpoint: F,
+) -> Result<NodesByFilesPage>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+    F: FnMut() -> Result<()>,
+{
+    if file_paths.is_empty() {
+        return Ok(NodesByFilesPage {
+            entries: Vec::new(),
+            has_more: false,
+            rows_read: 0,
+        });
+    }
+    let encode = |values: &[String], field: &'static str| {
+        serde_json::to_string(values).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to encode {field}: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })
+    };
+    let admitted_limit = limit;
+    let query_limit = limit
+        .checked_add(1)
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "node page limit overflowed".to_owned(),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?;
+    let query_limit_i64 = i64::try_from(query_limit)
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "node page limit must be positive".to_owned(),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?;
+    let config_path_set: HashSet<&str> = config_paths.iter().map(String::as_str).collect();
+    let source_paths: Vec<String> = file_paths
+        .iter()
+        .filter(|path| !config_path_set.contains(path.as_str()))
+        .cloned()
+        .collect();
+    let is_after = |file_path: &str, start_line: u32, rowid: i64| {
+        after.is_none_or(|key| {
+            (file_path, start_line, rowid) > (key.file_path.as_str(), key.start_line, key.rowid)
+        })
+    };
+    let mut sorted_config_paths = config_paths.to_vec();
+    sorted_config_paths.sort();
+    sorted_config_paths.dedup();
+    let mut entries: Vec<NodesByFilesPageEntry> = sorted_config_paths
+        .into_iter()
+        .filter(|path| is_after(path, 0, 0))
+        .take(query_limit)
+        .map(|path| NodesByFilesPageEntry {
+            node: None,
+            file_path: path,
+            start_line: 0,
+            rowid: 0,
+            is_config_summary: true,
+        })
+        .collect();
+    if source_paths.is_empty() {
+        let rows_read = entries.len();
+        let has_more = rows_read > admitted_limit;
+        entries.truncate(admitted_limit);
+        return Ok(NodesByFilesPage {
+            entries,
+            has_more,
+            rows_read,
+        });
+    }
+    let (after_path, after_line, after_rowid) =
+        after.map_or((Value::Null, Value::Null, Value::Null), |key| {
+            (
+                Value::Text(key.file_path.clone()),
+                Value::Integer(i64::from(key.start_line)),
+                Value::Integer(key.rowid),
+            )
+        });
+    checkpoint()?;
+    let mut rows = conn
+        .query(
+            NODES_BY_FILES_SYMBOL_PAGE_SQL,
+            params_from_iter([
+                Value::Text(encode(&source_paths, "file paths")?),
+                after_path,
+                after_line,
+                after_rowid,
+                Value::Integer(query_limit_i64),
+            ]),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to query bounded nodes by files: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read bounded node page: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?
+    {
+        if !entries.is_empty() && entries.len() % CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS == 0 {
+            checkpoint()?;
+        }
+        let node = row_to_node(&row).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to map bounded node page: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?;
+        let rowid = row
+            .get::<i64>(23)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read bounded node cursor: {error}"),
+                operation: "get_nodes_by_files_page".to_owned(),
+            })?;
+        entries.push(NodesByFilesPageEntry {
+            file_path: node.file_path.clone(),
+            start_line: node.start_line,
+            node: Some(node),
+            rowid,
+            is_config_summary: false,
+        });
+    }
+    checkpoint()?;
+    entries.sort_by(|left, right| {
+        (&left.file_path, left.start_line, left.rowid).cmp(&(
+            &right.file_path,
+            right.start_line,
+            right.rowid,
+        ))
+    });
+    entries.truncate(query_limit);
+    let rows_read = entries.len();
+    let has_more = rows_read > admitted_limit;
+    entries.truncate(admitted_limit);
+    Ok(NodesByFilesPage {
+        entries,
+        has_more,
+        rows_read,
+    })
+}
+
+async fn read_nodes_by_ids_controlled<C, F>(
+    conn: &C,
+    ids: &[String],
+    checkpoint: F,
+) -> Result<Vec<Node>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+    F: FnMut() -> Result<()>,
+{
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = serde_json::to_string(ids).map_err(|error| TraceDecayError::Database {
+        message: format!("failed to encode node ids: {error}"),
+        operation: "get_nodes_by_ids".to_string(),
+    })?;
+    collect_rowid_pages_with_controlled(
+        conn,
+        NODES_BY_IDS_PAGE_SQL,
+        &[Value::Text(encoded)],
+        NODE_COLUMNS,
+        row_to_node,
+        "get_nodes_by_ids",
+        checkpoint,
+    )
+    .await
+}
+
+impl DatabaseEngineReadSnapshot {
+    pub async fn get_nodes_by_files_page_controlled<F>(
+        &self,
+        file_paths: &[String],
+        config_paths: &[String],
+        after: Option<&NodesByFilesPageKey>,
+        limit: usize,
+        checkpoint: F,
+    ) -> Result<NodesByFilesPage>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_nodes_by_files_page_controlled(
+            self,
+            file_paths,
+            config_paths,
+            after,
+            limit,
+            checkpoint,
+        )
+        .await
+    }
+
+    pub async fn get_nodes_by_ids_controlled<F>(
+        &self,
+        ids: &[String],
+        checkpoint: F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_nodes_by_ids_controlled(self, ids, checkpoint).await
+    }
+}
 
 impl Database {
     /// Inserts or replaces a single node.
@@ -404,24 +670,19 @@ impl Database {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        // Build `?, ?, ?, …` in one allocation instead of `Vec<String>` of
-        // `?1`/`?2`/`?N`. SQLite binds anonymous `?` parameters in order, so
-        // dropping the numbered form changes nothing for the driver. Large
-        // BFS frontiers (`traverse_bfs` calls this once per level) hit this
-        // path often enough that the per-id `format!` allocations showed up
-        // on profiles.
-        let placeholders = build_qmark_placeholders(ids.len());
-        let sql = format!("SELECT {NODE_SELECT_COLUMNS} FROM nodes WHERE id IN ({placeholders})");
-        let param_values: Vec<Value> = ids.iter().map(|id| Value::Text(id.clone())).collect();
-        let mut rows = self
-            .engine_conn()
-            .query(&sql, params_from_iter(param_values))
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to batch query nodes: {e}"),
-                operation: "get_nodes_by_ids".to_string(),
-            })?;
-        collect_rows(&mut rows, row_to_node, "get_nodes_by_ids").await
+        self.get_nodes_by_ids_controlled(ids, || Ok(())).await
+    }
+
+    /// [`Database::get_nodes_by_ids`] with cooperative page checkpoints.
+    pub async fn get_nodes_by_ids_controlled<F>(
+        &self,
+        ids: &[String],
+        checkpoint: F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_nodes_by_ids_controlled(&self.engine_conn(), ids, checkpoint).await
     }
 
     /// Returns all nodes for a given file, ordered by start line.
@@ -443,6 +704,29 @@ impl Database {
         .await?;
         nodes.sort_by_key(|node| node.start_line);
         Ok(nodes)
+    }
+
+    /// Returns one stable, bounded symbol page across `file_paths`.
+    pub async fn get_nodes_by_files_page_controlled<F>(
+        &self,
+        file_paths: &[String],
+        config_paths: &[String],
+        after: Option<&NodesByFilesPageKey>,
+        limit: usize,
+        checkpoint: F,
+    ) -> Result<NodesByFilesPage>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_nodes_by_files_page_controlled(
+            &self.engine_conn(),
+            file_paths,
+            config_paths,
+            after,
+            limit,
+            checkpoint,
+        )
+        .await
     }
 
     /// Returns every node whose `parent_id` matches `parent_id`. Replaces

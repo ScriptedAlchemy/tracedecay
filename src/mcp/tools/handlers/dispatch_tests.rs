@@ -1079,26 +1079,85 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "base commit"]);
     run_git_in(&project, &["switch", "-c", "feature"]);
-    fs::write(project.join("src/feature.rs"), "pub fn feature_fn() {}\n").unwrap();
+    fs::write(
+        project.join("src/feature.rs"),
+        "pub fn feature_fn() {}\npub fn second_feature_fn() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"added-config\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "feature commit"]);
 
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         &project,
         "project.mcp-git-pr-context-ok",
     )
     .await
     .unwrap();
+    let cursor_db = runtime
+        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Project)
+        .expect("registered project cursor authority");
+    let missing_key_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: Some(cursor_db.clone()),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("a read must not mint a missing cursor key");
+    assert!(
+        missing_key_error
+            .to_string()
+            .contains("pre-provisioned PR context cursor key is unavailable"),
+        "unexpected pre-provisioned cursor-key failure: {missing_key_error}",
+    );
+    let key_snapshot = cursor_db.read_snapshot().await.unwrap();
+    let mut key_rows = key_snapshot
+        .query("SELECT COUNT(*) FROM session_query_cursor_keys", ())
+        .await
+        .unwrap();
+    assert_eq!(
+        key_rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        0,
+        "PR context read must leave the cursor-key table unchanged",
+    );
+    drop(key_rows);
+    drop(key_snapshot);
+    cursor_db
+        .ensure_active_session_cursor_key_result()
+        .await
+        .expect("pre-provision PR context cursor key");
     cg.index_all().await.unwrap();
 
     let options = ToolCallRegistryOptions {
         application_deadline: Some(deadline_from_now(30_000_000)),
+        registered_project_session_db: runtime.registered_database_arc(
+            crate::application::host_admission::HostAdmissionScope::Project,
+        ),
         ..ToolCallRegistryOptions::default()
     };
     let result = dispatch_git_tools(
         "tracedecay_pr_context",
         &cg,
-        json!({ "base_ref": "main", "head_ref": "HEAD" }),
+        json!({ "base_ref": "main", "head_ref": "HEAD", "format": "json" }),
         options,
     )
     .await
@@ -1117,6 +1176,204 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     assert!(
         rendered.contains("files_changed"),
         "the payload must carry the PR-context summary: {rendered}",
+    );
+    let normal: serde_json::Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("JSON tool text"),
+    )
+    .expect("JSON PR context");
+    assert!(
+        normal["added"].as_array().is_some_and(|symbols| {
+            symbols
+                .iter()
+                .any(|symbol| symbol["file"] == "Cargo.toml" && symbol["kind"] == "config_summary")
+        }),
+        "an added config file must remain in the added lane",
+    );
+    assert_eq!(normal["symbols_modified"], 0);
+    assert!(
+        result
+            .internal_analytics()
+            .and_then(|analytics| analytics.get("stage_timings_us"))
+            .and_then(|timings| timings.get("total"))
+            .and_then(serde_json::Value::as_u64)
+            .is_some(),
+        "the handler must emit stage timing telemetry",
+    );
+
+    let first = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "format": "json",
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect("the first bounded symbol page succeeds");
+    let first: serde_json::Value = serde_json::from_str(
+        first.value["content"][0]["text"]
+            .as_str()
+            .expect("JSON tool text"),
+    )
+    .expect("JSON PR context");
+    assert_eq!(first["symbol_page"]["returned"], 1);
+    assert_eq!(first["symbol_page"]["rows_read"], 2);
+    assert_eq!(first["symbol_page"]["has_more"], true);
+    assert_eq!(first["symbol_page"]["complete"], false);
+    assert_eq!(first["symbol_page"]["continuation_available"], true);
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("authenticated continuation");
+    let second = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "cursor": cursor,
+            "format": "json",
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect("authenticated continuation succeeds");
+    let second: serde_json::Value = serde_json::from_str(
+        second.value["content"][0]["text"]
+            .as_str()
+            .expect("JSON tool text"),
+    )
+    .expect("second JSON PR context");
+    assert_eq!(second["symbol_page"]["returned"], 1);
+    assert_ne!(second["added"], first["added"]);
+
+    let mut tampered = cursor.as_bytes().to_vec();
+    let last = tampered.last_mut().expect("non-empty cursor");
+    *last = if *last == b'0' { b'1' } else { b'0' };
+    let tampered = String::from_utf8(tampered).expect("ASCII cursor");
+    let tampered_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "cursor": tampered,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("tampered cursor must fail authentication");
+    assert!(
+        tampered_error
+            .to_string()
+            .contains("invalid or stale PR context cursor")
+    );
+
+    let original_head = first["head_oid"]
+        .as_str()
+        .expect("resolved head OID")
+        .to_owned();
+    fs::write(project.join("after-cursor.txt"), "advance head\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "advance after cursor"]);
+    let oid_stale_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "cursor": cursor,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("cursor must become stale when the resolved head OID advances");
+    assert!(
+        oid_stale_error
+            .to_string()
+            .contains("invalid or stale PR context cursor")
+    );
+
+    cg.db()
+        .set_metadata("last_sync_at", "stale-cursor-generation")
+        .await
+        .expect("advance graph generation");
+    let stale_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+                "base_ref": "main",
+                "head_ref": original_head,
+            "maximum_symbols": 1,
+            "cursor": cursor,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("cursor must become stale after graph generation advances");
+    assert!(
+        stale_error
+            .to_string()
+            .contains("invalid or stale PR context cursor")
+    );
+
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancel.pr-context-fixture").unwrap();
+    cancellation.cancel(tracedecay_domain::UtcMicros(1));
+    let started = std::time::Instant::now();
+    let error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({ "base_ref": "main", "head_ref": "HEAD" }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            application_cancellation: Some(cancellation),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("a pre-cancelled PR context must not start graph work");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(
+        error.project_route_context().map(|context| context.0),
+        Some("pr_context_cancelled"),
     );
 
     cg.close();

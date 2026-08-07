@@ -25,13 +25,37 @@ use super::analytics::{
     CALL_EDGE_PREFIXED_PAGE_SQL, nodes_by_dir_page_sql,
 };
 use super::coverage::{
-    SKIP_TEST_COVERAGE_PAGE_SQL, TEST_ANNOTATION_FILE_PAGE_SQL, TEST_MARKER_PAGE_SQL,
+    SKIP_TEST_COVERAGE_PAGE_SQL, TEST_ANNOTATION_CANDIDATE_FILE_PAGE_SQL,
+    TEST_ANNOTATION_FILE_PAGE_SQL, TEST_MARKER_PAGE_SQL,
 };
-use super::edges::edges_by_endpoint_page_sql;
-use super::engine::{TestConnection, Value};
+use super::edges::{
+    bulk_edges_by_endpoint_page_sql, read_edges_by_endpoint_controlled,
+    read_edges_by_endpoint_page_controlled, single_edges_by_endpoint_page_sql,
+};
+use super::engine::{
+    IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, Value,
+};
 use super::files::FILE_PATH_PAGE_SQL;
-use super::nodes::NODES_BY_KIND_PAGE_SQL;
+use super::nodes::{
+    NODES_BY_KIND_PAGE_SQL, NodesByFilesPageKey, read_nodes_by_files_page_controlled,
+};
 use super::sql::{collect_rowid_pages, collect_rowid_pages_with};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct CountingConnection<'a> {
+    inner: &'a TestConnection,
+    queries: AtomicUsize,
+}
+
+impl QueryExecutor for CountingConnection<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> EngineResult<Rows>
+    where
+        P: IntoParams,
+    {
+        self.queries.fetch_add(1, Ordering::Relaxed);
+        QueryExecutor::query(self.inner, sql, params).await
+    }
+}
 
 /// The `SQLite` runtime refuses a single query that materializes more than this
 /// many rows.
@@ -106,7 +130,8 @@ async fn seed_oversized_graph(directory: &TempDir) -> TestConnection {
          CREATE INDEX idx_edges_source ON edges(source);
          CREATE INDEX idx_edges_target ON edges(target);
          CREATE INDEX idx_nodes_kind ON nodes(kind);
-         CREATE INDEX idx_nodes_file_path ON nodes(file_path);",
+         CREATE INDEX idx_nodes_file_path ON nodes(file_path);
+         CREATE INDEX idx_nodes_file_path_start_line ON nodes(file_path, start_line);",
     )
     .await
     .expect("create oversized graph schema");
@@ -322,6 +347,33 @@ async fn test_annotation_files_page_past_the_runtime_query_limit() {
     assert_eq!(unique.len(), paths.len());
 }
 
+#[tokio::test]
+async fn test_annotation_files_page_is_restricted_to_candidate_paths() {
+    let directory = TempDir::new().expect("candidate annotation tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let candidates = serde_json::to_string(&[
+        format!("{FUNCTION_DIR}m00007.rs"),
+        format!("{FUNCTION_DIR}m01234.rs"),
+    ])
+    .expect("candidate paths");
+    let paths = paged_ids(
+        &conn,
+        TEST_ANNOTATION_CANDIDATE_FILE_PAGE_SQL,
+        &[Value::Text(candidates)],
+        1,
+        "get_files_with_test_annotations_for_paths",
+    )
+    .await;
+
+    assert_eq!(
+        paths,
+        [
+            format!("{FUNCTION_DIR}m00007.rs"),
+            format!("{FUNCTION_DIR}m01234.rs"),
+        ]
+    );
+}
+
 /// `get_nodes_by_kind` issued one unbounded read of a whole node partition.
 #[tokio::test]
 async fn nodes_by_kind_page_past_the_runtime_query_limit() {
@@ -454,7 +506,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
     let hub = Value::Text(HUB_ID.to_string());
     let unfiltered = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("target", 1, 0),
+        &single_edges_by_endpoint_page_sql("target", 0),
         std::slice::from_ref(&hub),
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges",
@@ -464,7 +516,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
 
     let filtered = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("target", 1, 1),
+        &single_edges_by_endpoint_page_sql("target", 1),
         &[hub.clone(), Value::Text("calls".to_string())],
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges",
@@ -476,7 +528,7 @@ async fn hub_endpoint_edges_page_past_the_runtime_query_limit() {
     // `source` rather than silently reading the same endpoint.
     let outgoing = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("source", 1, 0),
+        &single_edges_by_endpoint_page_sql("source", 0),
         std::slice::from_ref(&hub),
         super::edges::EDGE_COLUMNS,
         "get_outgoing_edges",
@@ -506,16 +558,197 @@ async fn bulk_endpoint_edges_page_past_the_runtime_query_limit() {
 
     let edges = paged_ids(
         &conn,
-        &edges_by_endpoint_page_sql("target", 2, 0),
-        &[
-            Value::Text(HUB_ID.to_string()),
-            Value::Text("fn::00000".to_string()),
-        ],
+        &bulk_edges_by_endpoint_page_sql("target", 0),
+        &[Value::Text(
+            serde_json::to_string(&[HUB_ID, "fn::00000"]).expect("endpoint JSON"),
+        )],
         super::edges::EDGE_COLUMNS,
         "get_incoming_edges_bulk",
     )
     .await;
     assert_eq!(i64::try_from(edges.len()).expect("edge count"), ROWS + 1);
+}
+
+#[tokio::test]
+async fn high_fan_in_impact_page_reads_only_limit_plus_one_rows() {
+    let directory = TempDir::new().expect("bounded fan-in tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let counted = CountingConnection {
+        inner: &conn,
+        queries: AtomicUsize::new(0),
+    };
+    let page = read_edges_by_endpoint_page_controlled(
+        &counted,
+        "target",
+        &[HUB_ID.to_owned()],
+        &[],
+        100,
+        || Ok(()),
+    )
+    .await
+    .expect("bounded fan-in page");
+    assert_eq!(page.edges.len(), 100);
+    assert!(page.has_more);
+    assert_eq!(page.rows_read, 101);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
+}
+
+/// A repository-scale matching set still performs one bounded query per stable
+/// page and materializes only that page.
+#[tokio::test]
+async fn nodes_by_files_page_cost_is_bounded_for_thousands_of_matching_files() {
+    let directory = TempDir::new().expect("bulk node query-count tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let counted = CountingConnection {
+        inner: &conn,
+        queries: AtomicUsize::new(0),
+    };
+    let mut paths: Vec<String> = (0..3_815)
+        .map(|index| format!("{FUNCTION_DIR}m{index:05}.rs"))
+        .collect();
+    paths.push("src/hub.rs".to_owned());
+    let first = read_nodes_by_files_page_controlled(&counted, &paths, &[], None, 100, || Ok(()))
+        .await
+        .expect("first bounded node page");
+    assert_eq!(first.entries.len(), 100);
+    assert!(first.has_more);
+    assert_eq!(first.rows_read, 101);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
+
+    let last = &first.entries[99];
+    let after = NodesByFilesPageKey {
+        file_path: last.file_path.clone(),
+        start_line: last.start_line,
+        rowid: last.rowid,
+    };
+    let second =
+        read_nodes_by_files_page_controlled(&counted, &paths, &[], Some(&after), 100, || Ok(()))
+            .await
+            .expect("second bounded node page");
+    assert_eq!(second.entries.len(), 100);
+    assert!(second.has_more);
+    assert_eq!(second.rows_read, 101);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 2);
+    let first_ids: std::collections::HashSet<&str> = first
+        .entries
+        .iter()
+        .map(|entry| entry.node.as_ref().expect("source node").id.as_str())
+        .collect();
+    assert!(
+        second.entries.iter().all(|entry| {
+            !first_ids.contains(entry.node.as_ref().expect("source node").id.as_str())
+        }),
+        "stable keyset pages must not repeat symbols",
+    );
+}
+
+#[tokio::test]
+async fn nodes_by_files_page_includes_changed_config_without_indexed_nodes() {
+    let directory = TempDir::new().expect("config manifest tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let counted = CountingConnection {
+        inner: &conn,
+        queries: AtomicUsize::new(0),
+    };
+    let paths = vec!["Cargo.toml".to_owned()];
+    let page = read_nodes_by_files_page_controlled(&counted, &paths, &paths, None, 10, || Ok(()))
+        .await
+        .expect("config manifest page");
+
+    assert_eq!(page.entries.len(), 1);
+    assert!(!page.has_more);
+    assert_eq!(page.rows_read, 1);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 0);
+    assert_eq!(page.entries[0].file_path, "Cargo.toml");
+    assert!(page.entries[0].node.is_none());
+    assert!(page.entries[0].is_config_summary);
+}
+
+#[tokio::test]
+async fn nodes_by_files_page_cancellation_stops_mid_page() {
+    let directory = TempDir::new().expect("bulk node cancellation tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let paths = vec!["src/hub.rs".to_owned()];
+    let checkpoints = AtomicUsize::new(0);
+    let error = read_nodes_by_files_page_controlled(&conn, &paths, &[], None, 500, || {
+        let observed = checkpoints.fetch_add(1, Ordering::Relaxed);
+        if observed == 1 {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "cancelled mid-page".to_owned(),
+            })
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    .expect_err("the second checkpoint cancels during row collection");
+    assert!(error.to_string().contains("cancelled mid-page"));
+    assert_eq!(checkpoints.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write() {
+    let directory = TempDir::new().expect("PR context snapshot tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let paths = vec![format!("{FUNCTION_DIR}m00000.rs")];
+    let snapshot = conn.read_snapshot().await.expect("begin graph snapshot");
+    let before = read_nodes_by_files_page_controlled(&snapshot, &paths, &[], None, 10, || Ok(()))
+        .await
+        .expect("read snapshot symbol page");
+    assert_eq!(before.entries.len(), 1);
+    assert!(!before.has_more);
+
+    conn.execute(
+        "INSERT INTO nodes (
+             id, kind, name, qualified_name, file_path,
+             start_line, end_line, start_column, end_column,
+             visibility, is_async, branches, loops, returns, max_nesting,
+             unsafe_blocks, unchecked_calls, assertions, updated_at,
+             attrs_start_line
+         ) VALUES (
+             'concurrent::caller', 'function', 'concurrent_caller',
+             'concurrent::caller', ?1,
+             2, 2, 0, 1, 'private', 0, 0, 0, 0, 0, 0, 0, 0, 2, 2
+         )",
+        [paths[0].as_str()],
+    )
+    .await
+    .expect("publish concurrent node");
+    conn.execute(
+        "INSERT INTO edges (source, target, kind, line)
+         VALUES ('concurrent::caller', ?1, 'calls', 2)",
+        [HUB_ID],
+    )
+    .await
+    .expect("publish concurrent edge");
+
+    let stable = read_nodes_by_files_page_controlled(&snapshot, &paths, &[], None, 10, || Ok(()))
+        .await
+        .expect("repeat snapshot symbol page");
+    assert_eq!(stable.entries.len(), 1);
+    assert!(!stable.has_more);
+    let stable_edges = read_edges_by_endpoint_controlled(
+        &snapshot,
+        "target",
+        &[HUB_ID.to_owned()],
+        &[],
+        "snapshot incoming edges",
+        || Ok(()),
+    )
+    .await
+    .expect("snapshot edge expansion");
+    assert!(
+        stable_edges
+            .iter()
+            .all(|edge| edge.source != "concurrent::caller"),
+    );
+
+    let current = conn.read_snapshot().await.expect("begin current snapshot");
+    let current_page =
+        read_nodes_by_files_page_controlled(&current, &paths, &[], None, 10, || Ok(()))
+            .await
+            .expect("read current symbol page");
+    assert_eq!(current_page.entries.len(), 2);
 }
 
 /// `get_nodes_by_file` and the id gather in `delete_nodes_by_file` read one

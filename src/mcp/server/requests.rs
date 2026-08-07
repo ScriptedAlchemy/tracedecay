@@ -1790,6 +1790,7 @@ mod git_read_control_tests {
             "tracedecay_run_affected_tests"
         ));
         assert!(tool_supports_live_cancellation("tracedecay_admin_cli"));
+        assert!(tool_supports_live_cancellation("tracedecay_pr_context"));
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
             "tracedecay_git_status",

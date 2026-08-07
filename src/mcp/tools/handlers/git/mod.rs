@@ -8,6 +8,7 @@
 mod affected;
 mod branch;
 mod context;
+mod pr_context_cursor;
 mod shell;
 
 pub(crate) use affected::collect_affected_test_files;
@@ -28,13 +29,15 @@ use super::support::{generic_tool_result, require_object_args, unique_file_paths
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 struct GitFileChange {
     path: String,
     status: &'static str,
 }
 
 struct GitPrComparison {
+    base_oid: String,
+    head_oid: String,
     merge_base: String,
     changes: Vec<GitFileChange>,
     commits: Vec<Value>,

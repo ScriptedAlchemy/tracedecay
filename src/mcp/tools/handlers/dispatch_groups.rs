@@ -393,7 +393,16 @@ pub(super) async fn dispatch_git_tools(
             "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
             "tracedecay_changelog" => git::handle_changelog(cg, args).await,
             "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
-            "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
+            "tracedecay_pr_context" => {
+                git::handle_pr_context(
+                    cg,
+                    args,
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                    options.registered_project_session_db.clone(),
+                )
+                .await
+            }
             "tracedecay_branch_search" => {
                 git::handle_branch_search(
                     cg,

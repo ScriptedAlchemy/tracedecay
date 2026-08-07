@@ -109,6 +109,16 @@ pub(super) fn def_pr_context() -> ToolDefinition {
                 "head_ref": {
                     "type": "string",
                     "description": "Head branch or ref (default: 'HEAD')"
+                },
+                "maximum_symbols": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "description": "Maximum symbols returned on this page (default: 200)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated continuation cursor returned by a previous page"
                 }
             }
         }),
