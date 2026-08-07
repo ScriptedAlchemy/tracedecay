@@ -16,8 +16,8 @@ use tracedecay_domain::{
 };
 
 use super::fusion::{
-    CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageError,
-    FusionStageInput, QueryDigestAuthenticationError, RetrievalCursorKeyringV1,
+    CompositionKernel, CompositionLaneInput, CompositionOutputV1, CompositionPageV1,
+    FusionStageError, FusionStageInput, QueryDigestAuthenticationError, RetrievalCursorKeyringV1,
 };
 
 /// Immutable comparator/ranking revision shared by the query evaluator,
@@ -43,6 +43,21 @@ pub struct AuthorizedQueryFallbackV1 {
     pub request_cursor: Option<RetrievalCursor>,
 }
 
+/// Complete authenticated composition for every canonical retrieval lane.
+///
+/// Unlike [`AuthorizedQueryFallbackV1`], this result has no fallback
+/// projection. The immutable composition and page retain typed lane outcomes,
+/// checkpoints, score contributions, and comparator provenance for later
+/// authoritative hydration and explanation rendering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizedFederatedRetrievalV1 {
+    pub query_digest: QueryDigest,
+    pub composition: CompositionOutputV1,
+    pub page: CompositionPageV1,
+    pub page_size: usize,
+    pub request_cursor: Option<RetrievalCursor>,
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryAuthorityErrorV1 {
     #[error("query authority is unavailable for the admitted scope")]
@@ -51,7 +66,9 @@ pub enum QueryAuthorityErrorV1 {
     InvalidAuthority(String),
     #[error("query does not match the accepted profile or budget")]
     RequestProfileMismatch,
-    #[error("query composition requires exact, lexical, and graph exactly once")]
+    #[error("query authority method does not match the mounted authority mode")]
+    AuthorityModeMismatch,
+    #[error("query composition does not contain its required lanes exactly once")]
     LaneSetMismatch,
     #[error(transparent)]
     QueryAuthentication(#[from] QueryDigestAuthenticationError),
@@ -69,10 +86,17 @@ pub enum QueryAuthorityErrorV1 {
 /// policy or an accepted evaluation. The durable provider owns key lifecycle;
 /// only an authenticated [`QueryDigest`] and signed cursor leave this owner.
 pub struct QueryAuthorityV1 {
+    mode: QueryAuthorityModeV1,
     profile: FusionProfile,
     diversity: DiversityPolicy,
     kernel: CompositionKernel,
     keyring: RetrievalCursorKeyringV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryAuthorityModeV1 {
+    Fallback,
+    Federated,
 }
 
 impl QueryAuthorityV1 {
@@ -82,8 +106,47 @@ impl QueryAuthorityV1 {
         ranking_revision: ComponentRevision,
         keyring: RetrievalCursorKeyringV1,
     ) -> Result<Self, QueryAuthorityErrorV1> {
+        Self::new_with_mode(
+            profile,
+            diversity,
+            ranking_revision,
+            keyring,
+            QueryAuthorityModeV1::Fallback,
+        )
+    }
+
+    /// Mount the same canonical composition authority for all retrieval lanes.
+    ///
+    /// The caller must provide an already evaluated profile covering every
+    /// canonical lane. This constructor never manufactures calibrations or
+    /// weights.
+    pub fn new_federated(
+        profile: FusionProfile,
+        diversity: DiversityPolicy,
+        ranking_revision: ComponentRevision,
+        keyring: RetrievalCursorKeyringV1,
+    ) -> Result<Self, QueryAuthorityErrorV1> {
+        Self::new_with_mode(
+            profile,
+            diversity,
+            ranking_revision,
+            keyring,
+            QueryAuthorityModeV1::Federated,
+        )
+    }
+
+    fn new_with_mode(
+        profile: FusionProfile,
+        diversity: DiversityPolicy,
+        ranking_revision: ComponentRevision,
+        keyring: RetrievalCursorKeyringV1,
+        mode: QueryAuthorityModeV1,
+    ) -> Result<Self, QueryAuthorityErrorV1> {
         profile.retrieval_budget.validate()?;
-        let expected_lanes = BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES);
+        let expected_lanes = match mode {
+            QueryAuthorityModeV1::Fallback => BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES),
+            QueryAuthorityModeV1::Federated => BTreeSet::from(RetrieverKind::ALL_LANES),
+        };
         let calibration_lanes = profile
             .calibrations
             .keys()
@@ -99,7 +162,7 @@ impl QueryAuthorityV1 {
             || profile.rerank_policy_id.is_some()
         {
             return Err(QueryAuthorityErrorV1::InvalidAuthority(
-                "profile is not an exact query fallback profile".to_owned(),
+                "profile lane set does not match the mounted query authority".to_owned(),
             ));
         }
         if diversity.policy_id != profile.diversity_policy_id
@@ -111,6 +174,7 @@ impl QueryAuthorityV1 {
             ));
         }
         Ok(Self {
+            mode,
             profile,
             diversity,
             kernel: CompositionKernel::new(ranking_revision),
@@ -185,8 +249,11 @@ impl QueryAuthorityV1 {
         page_size: usize,
         cursor: Option<&RetrievalCursor>,
     ) -> Result<AuthorizedQueryFallbackV1, QueryAuthorityErrorV1> {
+        if self.mode != QueryAuthorityModeV1::Fallback {
+            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
+        }
         self.validate_request(request)?;
-        validate_lane_set(&lanes)?;
+        validate_lane_set(&lanes, &RetrieverKind::QUERY_FALLBACK_LANES)?;
         let query_digest = self.keyring.digest_active_query(request, query_view)?;
         let fallback_lanes = lanes.clone();
         let composition = self.kernel.compose(
@@ -222,6 +289,48 @@ impl QueryAuthorityV1 {
             fallback: Arc::new(fallback),
             composition,
             fallback_lanes,
+            page_size,
+            request_cursor: cursor.cloned(),
+        })
+    }
+
+    /// Compose and page every canonical retrieval lane under the accepted
+    /// immutable profile. Candidate payloads remain unhydrated; the returned
+    /// page is an authenticated slice of the frozen compact candidate set.
+    pub fn compose_federated(
+        &self,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        lanes: Vec<CompositionLaneInput>,
+        page_size: usize,
+        cursor: Option<&RetrievalCursor>,
+    ) -> Result<AuthorizedFederatedRetrievalV1, QueryAuthorityErrorV1> {
+        if self.mode != QueryAuthorityModeV1::Federated {
+            return Err(QueryAuthorityErrorV1::AuthorityModeMismatch);
+        }
+        self.validate_request(request)?;
+        validate_lane_set(&lanes, &RetrieverKind::ALL_LANES)?;
+        let query_digest = self.keyring.digest_active_query(request, query_view)?;
+        let composition = self.kernel.compose(
+            &FusionStageInput {
+                profile: self.profile.clone(),
+                lanes,
+            },
+            &self.diversity,
+        )?;
+        let page = self.kernel.paginate_at(
+            request,
+            query_view,
+            &self.keyring,
+            &composition,
+            page_size,
+            cursor,
+            request.snapshot.captured_at,
+        )?;
+        Ok(AuthorizedFederatedRetrievalV1 {
+            query_digest,
+            composition,
+            page,
             page_size,
             request_cursor: cursor.cloned(),
         })
@@ -266,9 +375,12 @@ impl QueryAuthorityV1 {
     }
 }
 
-fn validate_lane_set(lanes: &[CompositionLaneInput]) -> Result<(), QueryAuthorityErrorV1> {
+fn validate_lane_set(
+    lanes: &[CompositionLaneInput],
+    required_lanes: &[RetrieverKind],
+) -> Result<(), QueryAuthorityErrorV1> {
     let actual = lanes.iter().map(|lane| lane.lane).collect::<BTreeSet<_>>();
-    let expected = BTreeSet::from(RetrieverKind::QUERY_FALLBACK_LANES);
+    let expected = required_lanes.iter().copied().collect::<BTreeSet<_>>();
     if lanes.len() != expected.len() || actual != expected {
         return Err(QueryAuthorityErrorV1::LaneSetMismatch);
     }
