@@ -360,6 +360,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     _runtime: Arc<dyn Send + Sync>,
     project_sessions: Arc<RegisteredGlobalDb>,
     profile_database: Arc<RegisteredGlobalDb>,
+    lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
 }
 
 impl DashboardHostAdmissionTestAuthorityV1 {
@@ -375,7 +376,19 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             _runtime: runtime,
             project_sessions,
             profile_database,
+            lcm_read_authority: None,
         }
+    }
+
+    /// Attaches the daemon-owned LCM read authority so the test transport
+    /// serves the same `hermes-lcm`/explorer session reads production mounts.
+    #[must_use]
+    pub fn with_lcm_read_authority(
+        mut self,
+        lcm_read_authority: Arc<dyn DashboardLcmReadPortV1>,
+    ) -> Self {
+        self.lcm_read_authority = Some(lcm_read_authority);
+        self
     }
 }
 
@@ -816,7 +829,8 @@ where
             graph_read_authority: None,
             registered_project_session_db: test_authority
                 .map(|authority| Arc::clone(&authority.project_sessions)),
-            lcm_read_authority: None,
+            lcm_read_authority: test_authority
+                .and_then(|authority| authority.lcm_read_authority.clone()),
             registered_savings_db: test_authority
                 .map(|authority| Arc::clone(&authority.profile_database)),
             automation_scheduler_reconciler: None,
