@@ -185,11 +185,14 @@ impl WorkflowRunStoragePort for MemoryRunStorage {
     }
 }
 
+type RecordedStepRequests =
+    Arc<Mutex<Vec<(WorkflowStepExecutionRequest, Vec<WorkflowHydratedInput>)>>>;
+
 #[derive(Clone)]
 struct RecordingExecutor {
     prepared: WorkflowArtifactPayload,
     report: WorkflowArtifactPayload,
-    requests: Arc<Mutex<Vec<(WorkflowStepExecutionRequest, Vec<WorkflowHydratedInput>)>>>,
+    requests: RecordedStepRequests,
 }
 
 struct MalformedExecutor;
@@ -458,7 +461,11 @@ fn review_step_refuses_before_start_when_input_payload_is_missing() {
         WorkflowStepExecutionServiceError::InputArtifacts(WorkflowArtifactStoreError::Missing)
     );
     let after = WorkflowRunStoragePort::projection(&storage, &run_id).unwrap();
-    assert_eq!(after.sequence(), sequence, "refusal must not journal events");
+    assert_eq!(
+        after.sequence(),
+        sequence,
+        "refusal must not journal events"
+    );
     assert_eq!(after.status(), WorkflowRunStatus::Running);
 }
 
@@ -664,18 +671,18 @@ fn malformed_provider_outputs_restart_as_failed_not_running() {
         MalformedExecutor,
         MemoryArtifactStore::default(),
     )
-        .execute_ready_step(
-            &run_id,
-            admitted.sequence(),
-            &id::<WorkflowStepId>("prepare"),
-            placement(&run_id, "prepare"),
-            WorkflowStepEventContexts {
-                started: context("command.workflow.malformed.start", '2', 2),
-                completed: context("command.workflow.malformed.complete", '3', 3),
-                failed: context("command.workflow.malformed.fail", '4', 3),
-            },
-        )
-        .unwrap();
+    .execute_ready_step(
+        &run_id,
+        admitted.sequence(),
+        &id::<WorkflowStepId>("prepare"),
+        placement(&run_id, "prepare"),
+        WorkflowStepEventContexts {
+            started: context("command.workflow.malformed.start", '2', 2),
+            completed: context("command.workflow.malformed.complete", '3', 3),
+            failed: context("command.workflow.malformed.fail", '4', 3),
+        },
+    )
+    .unwrap();
     assert!(matches!(outcome, WorkflowStepExecutionOutcome::Failed(_)));
 
     let restarted = WorkflowRunStoragePort::projection(&storage, &run_id).unwrap();
