@@ -1,6 +1,8 @@
 #![cfg(unix)]
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Command;
 
 use tempfile::TempDir;
@@ -72,96 +74,169 @@ async fn committed_fixture(
     (temp, database_scope, engine, handshake)
 }
 
+// Each surface check constructs its future inside its own function and returns
+// it boxed: the daemon invocation state machines are large in debug builds, and
+// materializing all four inline in one async fn produced a ~663 KB resident
+// poll frame that, stacked on the production dispatch frames, overflowed the
+// default 2 MiB test-thread stack. Boxing inside the constructor pops the
+// construction temporaries before the deep poll chain runs.
+fn assert_configuration_routes_mounted<'a>(
+    engine: &'a DaemonEngine,
+    handshake: &'a DaemonHandshake,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let configuration = execute_daemon_invocation(
+            engine,
+            handshake,
+            DaemonInvocationRequest::configuration(
+                "request.project-open.configuration",
+                ApplicationSurfaceOperation::ConfigurationList,
+                ConfigurationSurfaceRequest::List(ConfigurationListSurfaceRequest::default()),
+                observed_at,
+                deadline,
+                cancellation,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(
+                configuration.outcome,
+                DaemonInvocationOutcome::Configuration { .. }
+            ),
+            "project-open must route configuration through the mounted daemon owner: {configuration:?}"
+        );
+    })
+}
+
+fn assert_primitive_routes_mounted<'a>(
+    engine: &'a DaemonEngine,
+    handshake: &'a DaemonHandshake,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let primitive = execute_daemon_invocation(
+            engine,
+            handshake,
+            DaemonInvocationRequest::primitive(
+                "request.project-open.primitive",
+                ApplicationSurfaceOperation::StorageStatus,
+                PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
+                    include_details: false,
+                }),
+                observed_at,
+                deadline,
+                cancellation,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(primitive.outcome, DaemonInvocationOutcome::Primitive { .. }),
+            "project-open must route primitives through the mounted daemon owner: {primitive:?}"
+        );
+    })
+}
+
+fn assert_work_routes_mounted<'a>(
+    engine: &'a DaemonEngine,
+    handshake: &'a DaemonHandshake,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let work = execute_daemon_invocation(
+            engine,
+            handshake,
+            DaemonInvocationRequest::work_application(
+                "request.project-open.work",
+                WorkApplicationInvocationV1::Snapshot(WorkProjectionSnapshotRequestV1 {
+                    page_size: 100,
+                }),
+                observed_at,
+                deadline,
+                cancellation,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(
+                work.outcome,
+                DaemonInvocationOutcome::WorkApplication { .. }
+            ),
+            "project-open must route Work through the mounted daemon owner: {work:?}"
+        );
+    })
+}
+
+fn assert_feedback_conceals_unknown_handle<'a>(
+    engine: &'a DaemonEngine,
+    handshake: &'a DaemonHandshake,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+    Box::pin(async move {
+        let feedback = execute_daemon_invocation(
+            engine,
+            handshake,
+            DaemonInvocationRequest::feedback(
+                "request.project-open.feedback",
+                ApplicationSurfaceOperation::FeedbackList,
+                "feedback-handle.unknown".to_owned(),
+                observed_at,
+                deadline,
+                cancellation,
+            ),
+        )
+        .await;
+        assert!(
+            matches!(
+                feedback.outcome,
+                DaemonInvocationOutcome::ApplicationProblem { ref problem }
+                    if problem.kind() == ApplicationProblemKind::NotFoundOrNotAuthorized
+            ),
+            "mounted feedback must conceal an unknown handle instead of reporting owner unavailable: {feedback:?}"
+        );
+    })
+}
+
 async fn assert_mounted_invocations(engine: &DaemonEngine, handshake: &DaemonHandshake) {
     let observed_at = tracedecay_application::clock::now_micros();
     let deadline = Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000)))
         .expect("daemon invocation deadline");
     let cancellation = CancellationContext::active("cancel.project-open-invocations")
         .expect("daemon invocation cancellation");
-    let configuration = execute_daemon_invocation(
+    assert_configuration_routes_mounted(
         engine,
         handshake,
-        DaemonInvocationRequest::configuration(
-            "request.project-open.configuration",
-            ApplicationSurfaceOperation::ConfigurationList,
-            ConfigurationSurfaceRequest::List(ConfigurationListSurfaceRequest::default()),
-            observed_at,
-            deadline.clone(),
-            cancellation.clone(),
-        ),
+        observed_at,
+        deadline.clone(),
+        cancellation.clone(),
     )
     .await;
-    assert!(
-        matches!(
-            configuration.outcome,
-            DaemonInvocationOutcome::Configuration { .. }
-        ),
-        "project-open must route configuration through the mounted daemon owner: {configuration:?}"
-    );
-
-    let primitive = execute_daemon_invocation(
+    assert_primitive_routes_mounted(
         engine,
         handshake,
-        DaemonInvocationRequest::primitive(
-            "request.project-open.primitive",
-            ApplicationSurfaceOperation::StorageStatus,
-            PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
-                include_details: false,
-            }),
-            observed_at,
-            deadline.clone(),
-            cancellation.clone(),
-        ),
+        observed_at,
+        deadline.clone(),
+        cancellation.clone(),
     )
     .await;
-    assert!(
-        matches!(primitive.outcome, DaemonInvocationOutcome::Primitive { .. }),
-        "project-open must route primitives through the mounted daemon owner: {primitive:?}"
-    );
-
-    let work = execute_daemon_invocation(
+    assert_work_routes_mounted(
         engine,
         handshake,
-        DaemonInvocationRequest::work_application(
-            "request.project-open.work",
-            WorkApplicationInvocationV1::Snapshot(WorkProjectionSnapshotRequestV1 {
-                page_size: 100,
-            }),
-            observed_at,
-            deadline.clone(),
-            cancellation.clone(),
-        ),
+        observed_at,
+        deadline.clone(),
+        cancellation.clone(),
     )
     .await;
-    assert!(
-        matches!(
-            work.outcome,
-            DaemonInvocationOutcome::WorkApplication { .. }
-        ),
-        "project-open must route Work through the mounted daemon owner: {work:?}"
-    );
-
-    let feedback = execute_daemon_invocation(
-        engine,
-        handshake,
-        DaemonInvocationRequest::feedback(
-            "request.project-open.feedback",
-            ApplicationSurfaceOperation::FeedbackList,
-            "feedback-handle.unknown".to_owned(),
-            observed_at,
-            deadline,
-            cancellation,
-        ),
-    )
-    .await;
-    assert!(
-        matches!(
-            feedback.outcome,
-            DaemonInvocationOutcome::ApplicationProblem { ref problem }
-                if problem.kind() == ApplicationProblemKind::NotFoundOrNotAuthorized
-        ),
-        "mounted feedback must conceal an unknown handle instead of reporting owner unavailable: {feedback:?}"
-    );
+    assert_feedback_conceals_unknown_handle(engine, handshake, observed_at, deadline, cancellation)
+        .await;
 }
 
 #[tokio::test]
