@@ -11,9 +11,9 @@ pub mod clock;
 pub mod configuration;
 pub mod context;
 pub mod context_scout;
+pub mod dashboard_graph;
 pub mod diagnostics;
 pub mod doctor;
-pub mod dashboard_graph;
 pub mod external_source;
 pub mod feedback;
 /// Compatibility re-export: the framed-log primitives moved down into
@@ -42,6 +42,7 @@ pub mod sdk_catalog;
 pub mod session_sync;
 pub mod settings_preview;
 pub mod source_edit;
+mod source_edit_rollback;
 pub mod storage;
 pub mod wire;
 pub mod work;
@@ -90,6 +91,17 @@ pub use context_scout::{
     context_scout_surface_catalog_contribution, context_scout_surface_handler_descriptors,
     context_scout_surface_operation,
 };
+pub use dashboard_graph::{
+    DashboardGraphCallChainStepV1, DashboardGraphCallChainV1, DashboardGraphEdgeV1,
+    DashboardGraphKindCountV1, DashboardGraphLanguageCountV1, DashboardGraphLargestFileV1,
+    DashboardGraphNeighborsV1, DashboardGraphNodeV1, DashboardGraphOverviewV1,
+    DashboardGraphPathV1, DashboardGraphReadErrorV1, DashboardGraphReadFutureV1,
+    DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1, DashboardGraphReadPortV1,
+    DashboardGraphReadRequestV1, DashboardGraphReadV1, DashboardGraphSearchV1,
+    DashboardGraphSpanV1, DashboardGraphStrataClusterV1, DashboardGraphStrataFileV1,
+    DashboardGraphStrataV1, DashboardGraphSubgraphV1, DashboardGraphTestMapV1,
+    DashboardGraphTestV1, DashboardGraphTotalsV1, VerifiedDashboardGraphGenerationV1,
+};
 pub use diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,
     DiagnosticProviderFuture, DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
@@ -116,17 +128,6 @@ pub use doctor::{
     advisory_feedback_findings, code_index_finding, configuration_finding,
     doctor_finding_family_label, host_integration_finding, language_server_finding,
     observability_finding, operational_audit_findings, runtime_health_finding,
-};
-pub use dashboard_graph::{
-    DashboardGraphCallChainStepV1, DashboardGraphCallChainV1, DashboardGraphEdgeV1,
-    DashboardGraphKindCountV1, DashboardGraphLargestFileV1, DashboardGraphLanguageCountV1,
-    DashboardGraphNeighborsV1, DashboardGraphNodeV1, DashboardGraphOverviewV1,
-    DashboardGraphPathV1, DashboardGraphReadErrorV1, DashboardGraphReadFutureV1,
-    DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1, DashboardGraphReadPortV1,
-    DashboardGraphReadRequestV1, DashboardGraphReadV1, DashboardGraphSearchV1,
-    DashboardGraphSpanV1, DashboardGraphStrataClusterV1, DashboardGraphStrataFileV1,
-    DashboardGraphStrataV1, DashboardGraphSubgraphV1, DashboardGraphTestMapV1,
-    DashboardGraphTestV1, DashboardGraphTotalsV1, VerifiedDashboardGraphGenerationV1,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
@@ -253,6 +254,7 @@ pub use source_edit::{
     SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
     source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
+pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
 pub use storage::{
     CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1, FreePageRatioV1,
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1, OrphanStoreRecordV1,
