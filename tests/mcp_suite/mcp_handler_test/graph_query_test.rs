@@ -4,6 +4,8 @@ use std::fs;
 #[cfg(feature = "test-transport")]
 use std::process::Command;
 #[cfg(feature = "test-transport")]
+use std::time::Duration;
+#[cfg(feature = "test-transport")]
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
@@ -52,13 +54,25 @@ async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
         .harness
         .server(&fixture.project_root)
         .expect("production project server");
-    let result = handle_real_server_tool_call(
-        &server,
-        "tracedecay_search",
-        json!({ "query": "helper", "limit": 200 }),
-    )
-    .await;
-    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
+    // Cold activation of the code-index query authority is deferred to
+    // bounded background work, so a freshly opened project may serve the
+    // typed `authority_unavailable` transition state. Poll through only that
+    // state — any other failure (notably `search_failed`) must surface
+    // immediately.
+    let mut payload = Value::Null;
+    for _ in 0..60 {
+        let result = handle_real_server_tool_call(
+            &server,
+            "tracedecay_search",
+            json!({ "query": "helper", "limit": 200 }),
+        )
+        .await;
+        payload = serde_json::from_str(extract_real_server_text(&result)).unwrap();
+        if payload["reason"].as_str() != Some("authority_unavailable") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     assert!(
         payload["status"].is_null(),
         "high-limit search must not fail closed: {payload}"
