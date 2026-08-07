@@ -31,12 +31,11 @@ impl DashboardGitCorrelationReadAdapter {
     fn read_inner(
         &self,
     ) -> Result<DashboardGitCorrelationReadV1, DashboardGitCorrelationReadErrorV1> {
-        let Some(projection) =
-            self.store
-                .git_evidence_projection()
-                .map_err(|error| DashboardGitCorrelationReadErrorV1 {
-                    detail: error.to_string(),
-                })?
+        let Some(projection) = self.store.git_evidence_projection().map_err(|error| {
+            DashboardGitCorrelationReadErrorV1 {
+                detail: error.to_string(),
+            }
+        })?
         else {
             return Ok(DashboardGitCorrelationReadV1::Unpublished);
         };

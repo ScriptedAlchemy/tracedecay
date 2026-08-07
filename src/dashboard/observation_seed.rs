@@ -16,8 +16,8 @@ use tracedecay_domain::{
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceCursorV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RetentionClass,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
@@ -165,9 +165,11 @@ pub async fn seed_session_message_observation_for_test(
         .map_err(|error| fixture_error("observation write", error))?;
     let projection = ProjectionGenerationId::new("projection.dashboard-fixture.v1")
         .map_err(|error| fixture_error("projection generation", error))?;
-    let authorization =
-        build_observation_resolution_authorization_v1(write.observation(), "observation-capture.v1")
-            .map_err(|error| fixture_error("resolution authorization", error))?;
+    let authorization = build_observation_resolution_authorization_v1(
+        write.observation(),
+        "observation-capture.v1",
+    )
+    .map_err(|error| fixture_error("resolution authorization", error))?;
     let anchor = build_observation_retrieval_anchor_v2(
         write.observation(),
         projection.clone(),
