@@ -13,6 +13,8 @@ use tracedecay_lsp::{
 
 #[path = "analyzer_runtime/broker_refresh.rs"]
 mod broker_refresh;
+#[path = "analyzer_runtime/one_analyzer_journey.rs"]
+mod one_analyzer_journey;
 
 const FAKE_LANGUAGE: &str = "fake";
 const FAKE_PATH: &str = "src/lib.fake";
