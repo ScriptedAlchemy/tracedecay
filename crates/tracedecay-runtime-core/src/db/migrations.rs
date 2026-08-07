@@ -11,7 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 
 /// The one schema shape this binary creates and accepts. It is an identity
 /// stamp, not a ladder rung: a store at any other version is refused.
-pub const SCHEMA_VERSION: u32 = 28;
+pub const SCHEMA_VERSION: u32 = 29;
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
@@ -165,14 +165,6 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
             col INTEGER NOT NULL,
             file_path TEXT NOT NULL,
             FOREIGN KEY (from_node_id) REFERENCES nodes(id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS vectors (
-            node_id TEXT PRIMARY KEY,
-            embedding BLOB NOT NULL,
-            model TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS metadata (

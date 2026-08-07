@@ -168,11 +168,6 @@ Unique constraint: `(source, target, kind, COALESCE(line, -1))`. Indexes on `sou
 - `line`, `col` INTEGER
 - `file_path` TEXT
 
-### `vectors` — optional embeddings (semantic search backend)
-- `node_id` PRIMARY KEY FK → `nodes.id`
-- `embedding` BLOB
-- `model` TEXT, `created_at` INTEGER
-
 ### `metadata` — key/value store
 Common keys: `tokens_saved`, schema-version markers.
 

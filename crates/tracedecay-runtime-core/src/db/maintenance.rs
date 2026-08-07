@@ -45,8 +45,7 @@ impl Database {
     pub async fn clear_unguarded(&self, transaction: &DatabaseWriteTransaction<'_>) -> Result<()> {
         transaction
             .execute_batch(
-                "DELETE FROM vectors;
-                 DELETE FROM unresolved_refs;
+                "DELETE FROM unresolved_refs;
                  DELETE FROM edges;
                  DELETE FROM nodes;
                  DELETE FROM files;",

@@ -946,17 +946,6 @@ impl Database {
                     message: format!("failed to delete unresolved refs: {e}"),
                     operation: "delete_nodes_by_file".to_string(),
                 })?;
-
-            transaction
-                .execute_engine(
-                    "DELETE FROM vectors WHERE node_id = ?1",
-                    params![id.as_str()],
-                )
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to delete vectors: {e}"),
-                    operation: "delete_nodes_by_file".to_string(),
-                })?;
         }
 
         transaction
