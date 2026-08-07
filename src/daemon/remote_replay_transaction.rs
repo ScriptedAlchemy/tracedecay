@@ -38,7 +38,7 @@ struct ReplayTargetV1 {
 enum ReplayCommandV1 {
     Replay {
         frame: Box<RemoteReplayFrameV1>,
-        current_writer: RemoteWriterAuthorityV1,
+        current_writer: Box<RemoteWriterAuthorityV1>,
         reply: mpsc::SyncSender<
             Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>,
         >,
@@ -310,7 +310,7 @@ impl RemoteReplayTransactionPortV1 for DaemonRemoteReplayTransactionAuthorityV1 
         self.sender
             .try_send(ReplayCommandV1::Replay {
                 frame: Box::new(frame.clone()),
-                current_writer: current_writer.clone(),
+                current_writer: Box::new(current_writer.clone()),
                 reply,
             })
             .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;

@@ -111,6 +111,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    #[allow(clippy::expect_used)]
     pub async fn lcm_load_raw_message_for_test(
         &self,
         provider: &str,
