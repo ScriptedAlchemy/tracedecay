@@ -107,7 +107,7 @@ main() {
 
     echo "== stock opencode debug config (host-owned strict loader)"
     (cd "$project" && HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \
-        timeout 180 "$OPENCODE_BIN" debug config) > "$STAGE/resolved-config.json"
+        timeout 180 "$opencode_bin" debug config) > "$STAGE/resolved-config.json"
     python3 - "$STAGE/resolved-config.json" <<'EOF'
 import json
 import sys
