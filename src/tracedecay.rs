@@ -31,7 +31,6 @@ mod queries;
 mod scan;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
-pub(crate) use indexing::BRANCH_QUERY_GRAPH_SOURCE_KEY;
 pub use indexing::{GraphRebuildAvailabilityV1, GraphRebuildStatusV1};
 pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 

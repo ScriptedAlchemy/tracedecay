@@ -11,7 +11,6 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Instant;
 
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_domain::{CodeGenerationId, ProjectId};

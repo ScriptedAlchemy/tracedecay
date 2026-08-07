@@ -16,11 +16,10 @@ use tracedecay_application::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
     ApplicationInvocationFuture, ApplicationProblem, ApplicationProblemKind, ApplicationRequest,
     ApplicationResponse, CancellationContext, CancellationSignal, CancellationStage, Deadline,
-    InvocationError, InvocationTarget, LegalAction, OpaqueCursor, PageRequest, RequestId,
-    RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
+    InvocationError, InvocationTarget, OpaqueCursor, PageRequest, RequestId, RetryDirective,
+    SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
-use tracedecay_lsp::{FramePoll, FrameSend};
 use tracedecay_tool_catalog::{
     BindingId, BindingSurface, CatalogSnapshotV1, FeatureId, ProfileId, SchemaRef,
     SurfaceOperationName,

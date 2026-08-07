@@ -21,9 +21,8 @@ use super::code_index_scheduler::query_runtime::{
 use crate::application::semantic_runtime::{
     CommittedRetrievalProfileStateV1, RetrievalProfileActivationObserverErrorV1,
     RetrievalProfileActivationObserverV1, SemanticRuntimeFuture,
-    prepare_project_semantic_redundancy_authority, project_committed_semantic_pins,
-    project_semantic_production_runtime, project_semantic_retained_code_generation,
-    project_semantic_retained_vector_generations,
+    prepare_project_semantic_redundancy_authority, project_semantic_production_runtime,
+    project_semantic_retained_code_generation,
 };
 use crate::config::retrieval::{
     AcceptedRetrievalProfileV1, RetrievalProfileAuditOperationV1, RetrievalProfileStateV1,

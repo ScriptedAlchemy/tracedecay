@@ -25,9 +25,9 @@ use tracedecay_store::{
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
     RuntimeRequestProbeV1, SemanticVectorStageBatchReceipt, SemanticVectorStageCancelOutcome,
     SemanticVectorStageKey, SemanticVectorStagePlan, SemanticVectorStagePublicationPrepareOutcome,
-    SemanticVectorStagePublicationPrepareRequest, SemanticVectorStagePublishOutcome,
-    SemanticVectorStagePublishSettlement, SemanticVectorStageRecord,
-    SemanticVectorStageResumeOutcome, SemanticVectorStagingStore, StoreShardIdV1,
+    SemanticVectorStagePublishOutcome, SemanticVectorStagePublishSettlement,
+    SemanticVectorStageRecord, SemanticVectorStageResumeOutcome, SemanticVectorStagingStore,
+    StoreShardIdV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};

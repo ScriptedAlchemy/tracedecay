@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
