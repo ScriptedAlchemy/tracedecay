@@ -210,6 +210,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
     let record = db
         .get_code_project(&project_id)
         .await
+        .expect("registry read should not fault")
         .expect("project should be registered");
     assert_eq!(
         record.canonical_root,
@@ -271,6 +272,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         let stale = db
             .get_code_project(&project_id)
             .await
+            .expect("registry read should not fault")
             .expect("stale row should exist");
         assert_eq!(
             stale.canonical_root,
@@ -293,6 +295,7 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
     let healed = db
         .get_code_project(&project_id)
         .await
+        .expect("registry read should not fault")
         .expect("project should still be registered");
     assert_eq!(
         healed.canonical_root,

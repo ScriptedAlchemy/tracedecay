@@ -326,7 +326,12 @@ async fn delete_code_projects_cascades_registry_rows_without_touching_legacy_pro
         .await;
 
     assert_eq!(deleted, 1);
-    assert!(db.get_code_project("proj_registry").await.is_none());
+    assert!(
+        db.get_code_project("proj_registry")
+            .await
+            .expect("registry read for a deleted project should not fault")
+            .is_none()
+    );
     assert!(
         db.project_registry_context_by_id("proj_registry")
             .await
@@ -1001,9 +1006,17 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
     let db = HostAdmissionTestRuntimeV1::profile(profile.path())
         .await
         .unwrap();
-    assert!(db.get_code_project("proj_orphan").await.is_none());
     assert!(
-        db.get_code_project("proj_retained").await.is_some(),
+        db.get_code_project("proj_orphan")
+            .await
+            .expect("registry read for a reaped orphan should not fault")
+            .is_none()
+    );
+    assert!(
+        db.get_code_project("proj_retained")
+            .await
+            .expect("registry read for a retained project should not fault")
+            .is_some(),
         "a missing root must not discard authority for a retained store"
     );
     assert!(

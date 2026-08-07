@@ -275,7 +275,12 @@ async fn common_dir_aliases_mint_one_project_and_one_store_authority() {
         .unwrap();
 
     assert_eq!(linked.project_id, "proj_primary");
-    assert!(db.get_code_project("proj_linked").await.is_none());
+    assert!(
+        db.get_code_project("proj_linked")
+            .await
+            .expect("registry read for the merged-away linked id should not fault")
+            .is_none()
+    );
     assert!(
         db.upsert_store_instance(StoreInstanceUpsert {
             store_id: "store:proj_linked:profile_sharded".to_string(),
@@ -318,7 +323,12 @@ async fn common_dir_aliases_mint_one_project_and_one_store_authority() {
             .await
             .unwrap();
         assert_eq!(aliased.project_id, "proj_primary");
-        assert!(db.get_code_project("proj_symlink_alias").await.is_none());
+        assert!(
+            db.get_code_project("proj_symlink_alias")
+                .await
+                .expect("registry read for the merged-away symlink alias id should not fault")
+                .is_none()
+        );
     }
 }
 
@@ -358,11 +368,17 @@ async fn registry_entries_for_deleted_paths_are_reapable() {
     let removed = db.apply_registry_reap(&plan).await.unwrap();
     assert!(removed > 0, "reaping must remove the dead rows it planned");
     assert!(
-        db.get_code_project("proj_deleted").await.is_none(),
+        db.get_code_project("proj_deleted")
+            .await
+            .expect("registry read for the reaped project should not fault")
+            .is_none(),
         "the dead authority must be gone from the registry"
     );
     assert!(
-        db.get_code_project("proj_live").await.is_some(),
+        db.get_code_project("proj_live")
+            .await
+            .expect("registry read for the live project should not fault")
+            .is_some(),
         "reaping must never touch a live project"
     );
     assert!(
@@ -412,7 +428,10 @@ async fn a_dead_path_with_a_surviving_store_is_retained_not_reaped() {
     db.apply_registry_reap(&plan).await.unwrap();
     assert!(evidence.is_file(), "reaping must never delete store data");
     assert!(
-        db.get_code_project("proj_with_store").await.is_some(),
+        db.get_code_project("proj_with_store")
+            .await
+            .expect("registry read for the retained project should not fault")
+            .is_some(),
         "the retained authority must survive the reap"
     );
 }

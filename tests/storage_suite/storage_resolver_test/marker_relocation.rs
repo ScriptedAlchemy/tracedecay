@@ -267,6 +267,7 @@ async fn resolve_project_store_by_identity_propagates_marker_conflict() {
     assert!(
         db.get_code_project(&default_profile_project_id(&copy))
             .await
+            .expect("registry read for the unminted copy should not fault")
             .is_none(),
         "a swallowed conflict must not have minted a new project row"
     );
