@@ -271,11 +271,11 @@ const availabilityClient = sdk.createClient({
 if (!("workflow_list_definitions" in availabilityClient.operations) ||
     !("workflow_get_definition" in availabilityClient.operations) ||
     !("workflow_register_definition" in availabilityClient.operations) ||
-    "work_snapshot" in availabilityClient.operations ||
-    "test_results" in availabilityClient.operations ||
+    !("work_snapshot" in availabilityClient.operations) ||
+    "application_test_results" in availabilityClient.operations ||
     "invoke" in availabilityClient ||
     "requestOperation" in availabilityClient) {
-  throw new Error("only schema-authorized Workflow operations may be callable");
+  throw new Error("only schema-authorized operations may be callable");
 }
 
 const baseUrl = process.env.TRACEDECAY_SDK_BASE_URL;
