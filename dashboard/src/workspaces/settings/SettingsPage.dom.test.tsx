@@ -852,3 +852,46 @@ function jsonResponse(body: unknown, status = 200): Response {
     headers: { 'content-type': 'application/json' },
   });
 }
+
+describe('Settings header identity stamps', () => {
+  /**
+   * The live regression: the project and user groups of a real payload carry
+   * the SAME snapshot and revision ids, and the header strip rendered the
+   * SNAPSHOT/REVISION pair once per group — a doubled header row and duplicate
+   * `label:value` React keys under it. One identity is one stamp, and React
+   * must have nothing to warn about while the strip renders.
+   */
+  it('renders a shared snapshot identity exactly once, with unique keys', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const envelope = settings();
+        const body = settingsBody(envelope);
+        const project = body['project'] as Record<string, unknown>;
+        const user = body['user'] as Record<string, unknown>;
+        user['configuration_snapshot_id'] = project['configuration_snapshot_id'];
+        user['configuration_revision_id'] = project['configuration_revision_id'];
+        return jsonResponse(envelope);
+      }),
+    );
+    renderSettings();
+    await screen.findAllByText('snap-42');
+
+    // One SNAPSHOT cell and one REVISION cell in the header strip, however
+    // many groups pin them. Scoped to the header: the body legitimately
+    // renders each group's configuration_snapshot_id row as a setting.
+    const header = document.querySelector<HTMLElement>('[data-workspace-header]');
+    expect(header).not.toBeNull();
+    expect(within(header as HTMLElement).getAllByText('snap-42')).toHaveLength(1);
+    expect(within(header as HTMLElement).getAllByText('rev-42')).toHaveLength(1);
+    expect(within(header as HTMLElement).getAllByText('snapshot')).toHaveLength(1);
+    expect(within(header as HTMLElement).getAllByText('revision')).toHaveLength(1);
+
+    const duplicateKeyWarnings = consoleError.mock.calls.filter((call) =>
+      String(call[0]).includes('two children with the same key'),
+    );
+    expect(duplicateKeyWarnings).toEqual([]);
+    consoleError.mockRestore();
+  });
+});

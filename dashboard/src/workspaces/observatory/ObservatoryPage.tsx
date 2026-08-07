@@ -168,7 +168,11 @@ function FindingsReadModel({
         <OverviewGrid>
           {envelope.payload.entries.map((entry, index) => (
             <StorageFindingCard
-              key={`${entry.storage_kind ?? 'unclassified'}:${entry.finding.evidence[0]?.reference ?? index}`}
+              // The index is part of the key, not a fallback: a live report can
+              // legally carry two findings of one kind whose first evidence
+              // names the same reference (observed: repeated retention_backlog
+              // rows for one store), and `kind:reference` alone collided.
+              key={`${entry.storage_kind ?? 'unclassified'}:${entry.finding.evidence[0]?.reference ?? 'no-evidence'}:${index}`}
               entry={entry}
             />
           ))}
@@ -452,9 +456,11 @@ function StorageFindingCard({ entry }: { entry: DoctorReportEntryV1 }) {
         />
         <p className="text-xs text-text-secondary">{finding.coverage.statement}</p>
         <ul className="space-y-1" aria-label="Storage finding evidence">
-          {finding.evidence.map((evidence) => (
+          {finding.evidence.map((evidence, index) => (
             <li
-              key={`${evidence.family}:${evidence.reference}`}
+              // Indexed like the finding cards above: references are
+              // server-authored rows, not unique identities.
+              key={`${evidence.family}:${evidence.reference}:${index}`}
               className="break-all font-mono text-2xs text-text-muted"
             >
               {evidence.reference}

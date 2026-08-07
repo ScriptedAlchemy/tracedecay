@@ -177,6 +177,37 @@ describe('Settings read model', () => {
     );
   });
 
+  /** A live payload's project and user groups routinely pin the SAME snapshot
+   * and revision ids. One identity is one stamp — repeating it rendered the
+   * header strip twice and collided its `label:value` React keys — while two
+   * groups pinned to DIFFERENT snapshots still both appear, because that
+   * disagreement is a reading. */
+  it('states a snapshot identity shared by several groups exactly once', () => {
+    const model = buildSettingsModel({
+      project: {
+        configuration_snapshot_id: 'snap-shared',
+        configuration_revision_id: 'rev-shared',
+      },
+      user: {
+        configuration_snapshot_id: 'snap-shared',
+        configuration_revision_id: 'rev-shared',
+      },
+    });
+    expect(model.stamps).toEqual([
+      { label: 'snapshot', value: 'snap-shared' },
+      { label: 'revision', value: 'rev-shared' },
+    ]);
+
+    const disagreeing = buildSettingsModel({
+      project: { configuration_snapshot_id: 'snap-a' },
+      user: { configuration_snapshot_id: 'snap-b' },
+    });
+    expect(disagreeing.stamps).toEqual([
+      { label: 'snapshot', value: 'snap-a' },
+      { label: 'snapshot', value: 'snap-b' },
+    ]);
+  });
+
   it('returns an empty model for a payload that is not an object', () => {
     for (const bad of [null, undefined, 42, 'nope', []]) {
       const model = buildSettingsModel(bad);

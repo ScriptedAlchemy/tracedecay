@@ -699,11 +699,20 @@ function readNotes(value: unknown): string[] {
   return notes;
 }
 
-/** Identity of the displayed snapshot, if the payload carries one. */
+/** Identity of the displayed snapshot, if the payload carries one.
+ *
+ * One stamp per distinct (label, value): the project and user groups of a live
+ * payload routinely carry the SAME snapshot and revision ids, and repeating an
+ * identity does not say more about it — it rendered the header strip twice and
+ * collided the strip's `label:value` React keys. Distinct values under one
+ * label (two groups pinned to different snapshots) still both appear, because
+ * that disagreement is a reading. */
 function readStamps(payload: Record<string, unknown>): ConfigStamp[] {
   const stamps: ConfigStamp[] = [];
   const push = (label: string, value: unknown) => {
-    if (typeof value === 'string' && value.length > 0) stamps.push({ label, value });
+    if (typeof value !== 'string' || value.length === 0) return;
+    if (stamps.some((stamp) => stamp.label === label && stamp.value === value)) return;
+    stamps.push({ label, value });
   };
   for (const group of Object.values(payload)) {
     if (!isRecord(group)) continue;

@@ -244,9 +244,11 @@ function FindingEvidence({ entry }: { entry: DoctorReportEntryV1 }) {
         Evidence
       </p>
       <ul className="mt-1 space-y-1">
-        {entry.finding.evidence.map((evidence) => (
+        {entry.finding.evidence.map((evidence, index) => (
           <li
-            key={`${evidence.family}:${evidence.reference}`}
+            // Indexed like the entry cards above: references are
+            // server-authored rows, not unique identities.
+            key={`${evidence.family}:${evidence.reference}:${index}`}
             className="flex items-start gap-1.5 text-2xs text-text-secondary"
           >
             <FileSearch aria-hidden size={11} className="mt-0.5 shrink-0 text-text-muted" />

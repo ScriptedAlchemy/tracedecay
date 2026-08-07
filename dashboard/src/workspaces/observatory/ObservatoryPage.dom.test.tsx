@@ -796,3 +796,54 @@ function envelope<T>(payload: T) {
     payload,
   };
 }
+
+describe('ObservatoryPage duplicate finding identities', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The live regression: a real report can carry two findings of one kind
+   * whose first evidence names the same reference (observed live: repeated
+   * retention_backlog rows for one store). Both must render as cards, under
+   * unique React keys — the old `kind:reference` key collided and React
+   * warned about two children with the same key.
+   */
+  it('renders same-kind same-reference findings as distinct cards with unique keys', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const repeated = (statement: string) => ({
+      finding: {
+        family: 'storage',
+        state: 'stale',
+        evidence: [
+          { family: 'storage', reference: 'storage.retention_backlog.sessions.db.no-backlog' },
+          // The same reference twice inside one finding, which the evidence
+          // list must also key uniquely.
+          { family: 'storage', reference: 'storage.retention_backlog.sessions.db.no-backlog' },
+        ],
+        coverage: { completeness: 'complete', statement },
+      },
+      storage_kind: 'retention_backlog',
+    });
+    stubTelemetry(telemetryPayload(), {
+      ...emptyStorageFindingsPayload(),
+      entries: [repeated('first reading'), repeated('second reading')],
+      note: 'storage retention and size authorities were consulted',
+    });
+    renderObservatory();
+
+    // One card per entry, told apart by their coverage statements — the label
+    // text alone also appears in the source-status strip.
+    expect(await screen.findByText('first reading')).toBeTruthy();
+    expect(await screen.findByText('second reading')).toBeTruthy();
+    expect(document.querySelectorAll('[data-storage-finding-kind="retention_backlog"]')).toHaveLength(
+      2,
+    );
+
+    const duplicateKeyWarnings = consoleError.mock.calls.filter((call) =>
+      String(call[0]).includes('two children with the same key'),
+    );
+    expect(duplicateKeyWarnings).toEqual([]);
+    consoleError.mockRestore();
+  });
+});
