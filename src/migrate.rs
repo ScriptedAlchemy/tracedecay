@@ -1,7 +1,7 @@
-//! Compatibility shim for the migration subsystem.
+//! Root-owned seam onto the residual `tracedecay-migrate` modules.
 //!
-//! The whole subsystem now lives in `tracedecay-migrate`. This module re-exports
-//! it so every existing `crate::migrate::*` and `tracedecay::migrate::*` caller
-//! path keeps resolving after the one-shot crate split.
+//! Only the final-V2 schema stamp and the profile backup remain; both are
+//! re-exported here so their `crate::migrate::*` and `tracedecay::migrate::*`
+//! caller paths keep resolving until each finds its final owner.
 
-pub use tracedecay_migrate::{durability, final_v2, inventory, profile_backup};
+pub use tracedecay_migrate::{final_v2, profile_backup};

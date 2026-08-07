@@ -64,13 +64,6 @@ enum AdminCliAction {
         prefix: Option<String>,
         apply: bool,
     },
-    MigrationInventory {
-        roots: Vec<PathBuf>,
-        follow_symlinks: bool,
-        include_all_registered: bool,
-        #[serde(default)]
-        verify_integrity: bool,
-    },
     StorageReport {
         project_id: Option<String>,
         project_root: Option<PathBuf>,
@@ -362,28 +355,6 @@ async fn dispatch_admin_cli(
             };
             serde_json::to_value(report)?
         }
-        AdminCliAction::MigrationInventory {
-            roots,
-            follow_symlinks,
-            include_all_registered,
-            verify_integrity,
-        } => serde_json::to_value(
-            crate::migrate::inventory::build_inventory_for_daemon(
-                crate::migrate::inventory::MigrationInventoryOptions {
-                    roots,
-                    global_db_path: None,
-                    follow_symlinks,
-                    include_all_registered,
-                    integrity: if verify_integrity {
-                        crate::migrate::inventory::InventoryIntegrityMode::Full
-                    } else {
-                        crate::migrate::inventory::InventoryIntegrityMode::MetadataOnly
-                    },
-                },
-                global_db,
-            )
-            .await?,
-        )?,
         AdminCliAction::StorageReport {
             project_id,
             project_root,

@@ -36,7 +36,7 @@
 //! pages to the filesystem and never touches live rows, so this pass has no
 //! dry-run mode to gate -- there is no state it can destroy. It deliberately
 //! does not consult
-//! [`crate::migrate::durability`]: branch databases are project graph stores
+//! [`tracedecay_runtime_core::durability`]: branch databases are project graph stores
 //! (durable `memory_*` tables and all), and compaction is safe on them
 //! precisely because it preserves every row.
 
@@ -329,6 +329,7 @@ mod tests {
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
                 gc_protected: false,
+                graph_source: None,
             },
         );
         branches.insert(
@@ -339,6 +340,7 @@ mod tests {
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
                 gc_protected: false,
+                graph_source: None,
             },
         );
         let meta = crate::branch_meta::BranchMeta {
@@ -518,6 +520,7 @@ mod tests {
                 created_at: "0".to_string(),
                 last_synced_at: "0".to_string(),
                 gc_protected: false,
+                graph_source: None,
             },
         );
         let meta = crate::branch_meta::BranchMeta {
