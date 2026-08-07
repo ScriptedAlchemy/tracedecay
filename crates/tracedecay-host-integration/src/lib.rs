@@ -690,6 +690,8 @@ pub enum HostBundleError {
     UnsupportedCapability,
     #[error("host-native plugin cache update is required before this lifecycle can complete")]
     NativeUpdateRequired,
+    #[error("host-native plugin removal is required before this lifecycle can complete")]
+    NativeRemovalRequired,
     #[error("bundle manifest schema version is unsupported")]
     UnsupportedManifestVersion,
     #[error("bundle manifest is structurally invalid")]
