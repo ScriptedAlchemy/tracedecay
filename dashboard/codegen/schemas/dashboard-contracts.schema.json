@@ -5062,6 +5062,17 @@
       ],
       "type": "object"
     },
+    "FeedbackCoverageV1": {
+      "enum": [
+        "known",
+        "partial",
+        "stale",
+        "unknown",
+        "sampled",
+        "capped"
+      ],
+      "type": "string"
+    },
     "FeedbackObservationDenominatorsV1": {
       "additionalProperties": false,
       "properties": {
@@ -5116,7 +5127,7 @@
       "additionalProperties": false,
       "properties": {
         "coverage": {
-          "$ref": "#/$defs/Plan26CoverageV1"
+          "$ref": "#/$defs/FeedbackCoverageV1"
         },
         "denominators": {
           "$ref": "#/$defs/FeedbackObservationDenominatorsV1"
@@ -5271,7 +5282,7 @@
       "additionalProperties": false,
       "properties": {
         "coverage": {
-          "$ref": "#/$defs/Plan26CoverageV1"
+          "$ref": "#/$defs/FeedbackCoverageV1"
         },
         "denominator": {
           "format": "uint64",
@@ -8873,17 +8884,6 @@
         "metrics"
       ],
       "type": "object"
-    },
-    "Plan26CoverageV1": {
-      "enum": [
-        "known",
-        "partial",
-        "stale",
-        "unknown",
-        "sampled",
-        "capped"
-      ],
-      "type": "string"
     },
     "PolicyIdentifierV1": {
       "description": "A bounded, canonical identifier owned by the policy input schema.\n\nIt represents immutable references only; it is never a path, display\nlabel, provider account, branch name, or native object identifier.",
