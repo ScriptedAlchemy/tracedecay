@@ -118102,6 +118102,2206 @@ typed_operation!(
     1
 );
 #[allow(clippy::all)]
+pub mod workflow_cancel_run {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Requests cooperative cancellation as a durable typed transition; the run
+        settles to `Cancelled` when the runtime reconciles in-flight steps.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunCancelRequest",
+        ///  "description": "Requests cooperative cancellation as a durable typed transition; the run\nsettles to `Cancelled` when the runtime reconciles in-flight steps.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_sequence",
+        ///    "run_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "expected_sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunCancelRequest {
+            pub command_id: WorkCommandId,
+            pub expected_sequence: u64,
+            pub run_id: RunId,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `AttemptId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `AttemptId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct AttemptId(pub ::std::string::String);
+        impl ::std::ops::Deref for AttemptId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<AttemptId> for ::std::string::String {
+            fn from(value: AttemptId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for AttemptId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for AttemptId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for AttemptId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProviderId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProviderId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProviderId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProviderId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProviderId> for ::std::string::String {
+            fn from(value: ProviderId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProviderId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProviderId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProviderId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkArtifactId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkArtifactId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkArtifactId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkArtifactId> for ::std::string::String {
+            fn from(value: WorkArtifactId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkArtifactId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkArtifactId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkArtifactId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkArtifactRefV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact_id",
+        ///    "byte_length",
+        ///    "digest"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact_id": {
+        ///      "$ref": "#/definitions/WorkArtifactId"
+        ///    },
+        ///    "byte_length": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkArtifactRefV1 {
+            pub artifact_id: WorkArtifactId,
+            pub byte_length: u64,
+            pub digest: ManifestDigest,
+        }
+        ///`WorkAttemptIdentityV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "attempt_id",
+        ///    "run_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "attempt_id": {
+        ///      "$ref": "#/definitions/AttemptId"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAttemptIdentityV1 {
+            pub attempt_id: AttemptId,
+            pub run_id: RunId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Provider protocol selected by the pinned Work configuration snapshot.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Provider protocol selected by the pinned Work configuration snapshot.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "claude_code_cli",
+        ///    "codex_app_server",
+        ///    "codex_cli"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProviderBackendV1 {
+            #[serde(rename = "claude_code_cli")]
+            ClaudeCodeCli,
+            #[serde(rename = "codex_app_server")]
+            CodexAppServer,
+            #[serde(rename = "codex_cli")]
+            CodexCli,
+        }
+        impl ::std::fmt::Display for WorkProviderBackendV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ClaudeCodeCli => f.write_str("claude_code_cli"),
+                    Self::CodexAppServer => f.write_str("codex_app_server"),
+                    Self::CodexCli => f.write_str("codex_cli"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderBackendV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "claude_code_cli" => Ok(Self::ClaudeCodeCli),
+                    "codex_app_server" => Ok(Self::CodexAppServer),
+                    "codex_cli" => Ok(Self::CodexCli),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `WorkProviderRouteId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkProviderRouteId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkProviderRouteId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProviderRouteId> for ::std::string::String {
+            fn from(value: WorkProviderRouteId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkProviderRouteId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderRouteId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkProviderRouteId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProviderRouteV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "provider_id",
+        ///    "route_id"
+        ///  ],
+        ///  "properties": {
+        ///    "provider_id": {
+        ///      "$ref": "#/definitions/ProviderId"
+        ///    },
+        ///    "route_id": {
+        ///      "$ref": "#/definitions/WorkProviderRouteId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProviderRouteV1 {
+            pub provider_id: ProviderId,
+            pub route_id: WorkProviderRouteId,
+        }
+        ///`WorkflowDefinition`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "pinned_catalog_digest",
+        ///    "pinned_configuration_digest",
+        ///    "pinned_policy_digest",
+        ///    "project_id",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "pinned_catalog_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "steps": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStep"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: u64,
+            pub pinned_catalog_digest: ManifestDigest,
+            pub pinned_configuration_digest: ManifestDigest,
+            pub pinned_policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub steps: ::std::vec::Vec<WorkflowStep>,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowFanOut`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "max_width"
+        ///  ],
+        ///  "properties": {
+        ///    "max_width": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowFanOut {
+            pub max_width: u32,
+        }
+        ///Strongly typed canonical identity: `WorkflowOperationRef`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOperationRef(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOperationRef {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOperationRef> for ::std::string::String {
+            fn from(value: WorkflowOperationRef) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOperationRef {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOperationRef {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOperationRef {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputArtifact`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact",
+        ///    "attempt_identity"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact": {
+        ///      "$ref": "#/definitions/WorkArtifactRefV1"
+        ///    },
+        ///    "attempt_identity": {
+        ///      "$ref": "#/definitions/WorkAttemptIdentityV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputArtifact {
+            pub artifact: WorkArtifactRefV1,
+            pub attempt_identity: WorkAttemptIdentityV1,
+        }
+        ///Strongly typed canonical identity: `WorkflowOutputName`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOutputName`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOutputName(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOutputName {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOutputName> for ::std::string::String {
+            fn from(value: WorkflowOutputName) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOutputName {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOutputName {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOutputName {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputReference`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "output_name",
+        ///    "producer_step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    },
+        ///    "producer_step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputReference {
+            pub output_name: WorkflowOutputName,
+            pub producer_step_id: WorkflowStepId,
+        }
+        ///`WorkflowPlacementReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "backend",
+        ///    "configuration_digest",
+        ///    "model",
+        ///    "placement_digest",
+        ///    "provider_registry_digest",
+        ///    "route",
+        ///    "run_id",
+        ///    "step_id",
+        ///    "topology_digest",
+        ///    "worktree_placement"
+        ///  ],
+        ///  "properties": {
+        ///    "backend": {
+        ///      "$ref": "#/definitions/WorkProviderBackendV1"
+        ///    },
+        ///    "configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "model": {
+        ///      "type": "string"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "route": {
+        ///      "$ref": "#/definitions/WorkProviderRouteV1"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    },
+        ///    "topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_placement": {
+        ///      "$ref": "#/definitions/WorktreePlacementModeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowPlacementReceipt {
+            pub backend: WorkProviderBackendV1,
+            pub configuration_digest: ManifestDigest,
+            pub model: ::std::string::String,
+            pub placement_digest: ManifestDigest,
+            pub provider_registry_digest: ManifestDigest,
+            pub route: WorkProviderRouteV1,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+            pub topology_digest: ManifestDigest,
+            pub worktree_placement: WorktreePlacementModeV1,
+        }
+        ///`WorkflowRunEvent`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "event",
+        ///    "input_digest",
+        ///    "occurred_at",
+        ///    "run_id",
+        ///    "sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "event": {
+        ///      "$ref": "#/definitions/WorkflowRunEventKind"
+        ///    },
+        ///    "input_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunEvent {
+            pub command_id: WorkCommandId,
+            pub event: WorkflowRunEventKind,
+            pub input_digest: ManifestDigest,
+            pub occurred_at: UtcMicros,
+            pub run_id: RunId,
+            pub sequence: u64,
+        }
+        ///`WorkflowRunEventKind`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "definition",
+        ///        "pinned_provider_registry_digest",
+        ///        "pinned_topology_digest",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "definition": {
+        ///          "$ref": "#/definitions/WorkflowDefinition"
+        ///        },
+        ///        "pinned_provider_registry_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "pinned_topology_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "admitted"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "placement",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "placement": {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_started"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_completed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_failed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "paused"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "resumed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancellation_requested"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancelled"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "type")]
+        pub enum WorkflowRunEventKind {
+            #[serde(rename = "admitted")]
+            Admitted {
+                definition: WorkflowDefinition,
+                pinned_provider_registry_digest: ManifestDigest,
+                pinned_topology_digest: ManifestDigest,
+            },
+            #[serde(rename = "step_started")]
+            StepStarted {
+                placement: WorkflowPlacementReceipt,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_completed")]
+            StepCompleted {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_failed")]
+            StepFailed {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "resumed")]
+            Resumed,
+            #[serde(rename = "cancellation_requested")]
+            CancellationRequested,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        ///`WorkflowRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition",
+        ///    "history",
+        ///    "pinned_provider_registry_digest",
+        ///    "pinned_topology_digest",
+        ///    "run_id",
+        ///    "sequence",
+        ///    "status",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition": {
+        ///      "$ref": "#/definitions/WorkflowDefinition"
+        ///    },
+        ///    "history": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowRunEvent"
+        ///      }
+        ///    },
+        ///    "pinned_provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowRunStatus"
+        ///    },
+        ///    "steps": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepRunProjection"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunProjection {
+            pub definition: WorkflowDefinition,
+            pub history: ::std::vec::Vec<WorkflowRunEvent>,
+            pub pinned_provider_registry_digest: ManifestDigest,
+            pub pinned_topology_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub sequence: u64,
+            pub status: WorkflowRunStatus,
+            pub steps:
+                ::std::collections::HashMap<::std::string::String, WorkflowStepRunProjection>,
+        }
+        ///`WorkflowRunStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "running",
+        ///    "paused",
+        ///    "cancelling",
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowRunStatus {
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "cancelling")]
+            Cancelling,
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowRunStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Running => f.write_str("running"),
+                    Self::Paused => f.write_str("paused"),
+                    Self::Cancelling => f.write_str("cancelling"),
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowRunStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "running" => Ok(Self::Running),
+                    "paused" => Ok(Self::Paused),
+                    "cancelling" => Ok(Self::Cancelling),
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStep`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "inputs",
+        ///    "operation",
+        ///    "outputs",
+        ///    "predecessors",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "fan_out": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowFanOut"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "inputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputReference"
+        ///      }
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/WorkflowOperationRef"
+        ///    },
+        ///    "outputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputName"
+        ///      }
+        ///    },
+        ///    "predecessors": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStepId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStep {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub fan_out: ::std::option::Option<WorkflowFanOut>,
+            pub inputs: ::std::vec::Vec<WorkflowOutputReference>,
+            pub operation: WorkflowOperationRef,
+            pub outputs: ::std::vec::Vec<WorkflowOutputName>,
+            pub predecessors: Vec<WorkflowStepId>,
+            pub step_id: WorkflowStepId,
+        }
+        ///`WorkflowStepEffectOutcome`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled",
+        ///    "timed_out",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepEffectOutcome {
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "timed_out")]
+            TimedOut,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for WorkflowStepEffectOutcome {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::TimedOut => f.write_str("timed_out"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepEffectOutcome {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "timed_out" => Ok(Self::TimedOut),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStepEffectReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "effect_digest",
+        ///    "outcome",
+        ///    "output_set_digest",
+        ///    "placement_digest",
+        ///    "receipt_digest",
+        ///    "run_id",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/WorkflowStepEffectOutcome"
+        ///    },
+        ///    "output_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "receipt_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepEffectReceipt {
+            pub effect_digest: ManifestDigest,
+            pub outcome: WorkflowStepEffectOutcome,
+            pub output_set_digest: ManifestDigest,
+            pub placement_digest: ManifestDigest,
+            pub receipt_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+        }
+        ///Strongly typed canonical identity: `WorkflowStepId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowStepId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowStepId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowStepId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowStepId> for ::std::string::String {
+            fn from(value: WorkflowStepId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowStepId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowStepId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowStepOutput`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifacts",
+        ///    "output_name"
+        ///  ],
+        ///  "properties": {
+        ///    "artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputArtifact"
+        ///      }
+        ///    },
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepOutput {
+            pub artifacts: ::std::vec::Vec<WorkflowOutputArtifact>,
+            pub output_name: WorkflowOutputName,
+        }
+        ///`WorkflowStepRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outputs",
+        ///    "status"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "outputs": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepOutput"
+        ///      }
+        ///    },
+        ///    "placement_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowStepStatus"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepRunProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub effect_receipt: ::std::option::Option<WorkflowStepEffectReceipt>,
+            pub outputs: ::std::collections::HashMap<::std::string::String, WorkflowStepOutput>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub placement_receipt: ::std::option::Option<WorkflowPlacementReceipt>,
+            pub status: WorkflowStepStatus,
+        }
+        ///`WorkflowStepStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "blocked",
+        ///    "ready",
+        ///    "running",
+        ///    "succeeded",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepStatus {
+            #[serde(rename = "blocked")]
+            Blocked,
+            #[serde(rename = "ready")]
+            Ready,
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "succeeded")]
+            Succeeded,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowStepStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Blocked => f.write_str("blocked"),
+                    Self::Ready => f.write_str("ready"),
+                    Self::Running => f.write_str("running"),
+                    Self::Succeeded => f.write_str("succeeded"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "blocked" => Ok(Self::Blocked),
+                    "ready" => Ok(Self::Ready),
+                    "running" => Ok(Self::Running),
+                    "succeeded" => Ok(Self::Succeeded),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorktreePlacementModeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "existing_worktree_only"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "sibling_of_primary_checkout"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "repository_local_root"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "root_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "configured_root"
+        ///        },
+        ///        "root_id": {
+        ///          "type": "string"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "root_id")]
+        pub enum WorktreePlacementModeV1 {
+            #[serde(rename = "existing_worktree_only")]
+            ExistingWorktreeOnly,
+            #[serde(rename = "sibling_of_primary_checkout")]
+            SiblingOfPrimaryCheckout,
+            #[serde(rename = "repository_local_root")]
+            RepositoryLocalRoot,
+            #[serde(rename = "configured_root")]
+            ConfiguredRoot(::std::string::String),
+        }
+    }
+    pub type Request = request::WorkflowRunCancelRequest;
+    pub type Result = result::WorkflowRunProjection;
+}
+typed_operation!(
+    WorkflowCancelRun,
+    workflow_cancel_run,
+    "operation.workflow.cancel_run",
+    OperationTransport::Http {
+        route: "/application/workflow/cancel-run"
+    },
+    "binding.http.workflow.cancel_run",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.workflow.cancel_run.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod workflow_definition_history {
     pub mod request {
         /// Error types.
@@ -119795,6 +121995,2145 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.workflow.get_definition.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod workflow_get_run {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowRunGetRequest`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunGetRequest",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "run_id"
+        ///  ],
+        ///  "properties": {
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunGetRequest {
+            pub run_id: RunId,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `AttemptId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `AttemptId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct AttemptId(pub ::std::string::String);
+        impl ::std::ops::Deref for AttemptId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<AttemptId> for ::std::string::String {
+            fn from(value: AttemptId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for AttemptId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for AttemptId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for AttemptId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProviderId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProviderId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProviderId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProviderId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProviderId> for ::std::string::String {
+            fn from(value: ProviderId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProviderId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProviderId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProviderId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkArtifactId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkArtifactId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkArtifactId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkArtifactId> for ::std::string::String {
+            fn from(value: WorkArtifactId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkArtifactId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkArtifactId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkArtifactId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkArtifactRefV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact_id",
+        ///    "byte_length",
+        ///    "digest"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact_id": {
+        ///      "$ref": "#/definitions/WorkArtifactId"
+        ///    },
+        ///    "byte_length": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkArtifactRefV1 {
+            pub artifact_id: WorkArtifactId,
+            pub byte_length: u64,
+            pub digest: ManifestDigest,
+        }
+        ///`WorkAttemptIdentityV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "attempt_id",
+        ///    "run_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "attempt_id": {
+        ///      "$ref": "#/definitions/AttemptId"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAttemptIdentityV1 {
+            pub attempt_id: AttemptId,
+            pub run_id: RunId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Provider protocol selected by the pinned Work configuration snapshot.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Provider protocol selected by the pinned Work configuration snapshot.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "claude_code_cli",
+        ///    "codex_app_server",
+        ///    "codex_cli"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProviderBackendV1 {
+            #[serde(rename = "claude_code_cli")]
+            ClaudeCodeCli,
+            #[serde(rename = "codex_app_server")]
+            CodexAppServer,
+            #[serde(rename = "codex_cli")]
+            CodexCli,
+        }
+        impl ::std::fmt::Display for WorkProviderBackendV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ClaudeCodeCli => f.write_str("claude_code_cli"),
+                    Self::CodexAppServer => f.write_str("codex_app_server"),
+                    Self::CodexCli => f.write_str("codex_cli"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderBackendV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "claude_code_cli" => Ok(Self::ClaudeCodeCli),
+                    "codex_app_server" => Ok(Self::CodexAppServer),
+                    "codex_cli" => Ok(Self::CodexCli),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `WorkProviderRouteId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkProviderRouteId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkProviderRouteId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProviderRouteId> for ::std::string::String {
+            fn from(value: WorkProviderRouteId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkProviderRouteId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderRouteId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkProviderRouteId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProviderRouteV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "provider_id",
+        ///    "route_id"
+        ///  ],
+        ///  "properties": {
+        ///    "provider_id": {
+        ///      "$ref": "#/definitions/ProviderId"
+        ///    },
+        ///    "route_id": {
+        ///      "$ref": "#/definitions/WorkProviderRouteId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProviderRouteV1 {
+            pub provider_id: ProviderId,
+            pub route_id: WorkProviderRouteId,
+        }
+        ///`WorkflowDefinition`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "pinned_catalog_digest",
+        ///    "pinned_configuration_digest",
+        ///    "pinned_policy_digest",
+        ///    "project_id",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "pinned_catalog_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "steps": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStep"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: u64,
+            pub pinned_catalog_digest: ManifestDigest,
+            pub pinned_configuration_digest: ManifestDigest,
+            pub pinned_policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub steps: ::std::vec::Vec<WorkflowStep>,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowFanOut`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "max_width"
+        ///  ],
+        ///  "properties": {
+        ///    "max_width": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowFanOut {
+            pub max_width: u32,
+        }
+        ///Strongly typed canonical identity: `WorkflowOperationRef`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOperationRef(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOperationRef {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOperationRef> for ::std::string::String {
+            fn from(value: WorkflowOperationRef) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOperationRef {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOperationRef {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOperationRef {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputArtifact`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact",
+        ///    "attempt_identity"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact": {
+        ///      "$ref": "#/definitions/WorkArtifactRefV1"
+        ///    },
+        ///    "attempt_identity": {
+        ///      "$ref": "#/definitions/WorkAttemptIdentityV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputArtifact {
+            pub artifact: WorkArtifactRefV1,
+            pub attempt_identity: WorkAttemptIdentityV1,
+        }
+        ///Strongly typed canonical identity: `WorkflowOutputName`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOutputName`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOutputName(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOutputName {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOutputName> for ::std::string::String {
+            fn from(value: WorkflowOutputName) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOutputName {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOutputName {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOutputName {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputReference`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "output_name",
+        ///    "producer_step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    },
+        ///    "producer_step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputReference {
+            pub output_name: WorkflowOutputName,
+            pub producer_step_id: WorkflowStepId,
+        }
+        ///`WorkflowPlacementReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "backend",
+        ///    "configuration_digest",
+        ///    "model",
+        ///    "placement_digest",
+        ///    "provider_registry_digest",
+        ///    "route",
+        ///    "run_id",
+        ///    "step_id",
+        ///    "topology_digest",
+        ///    "worktree_placement"
+        ///  ],
+        ///  "properties": {
+        ///    "backend": {
+        ///      "$ref": "#/definitions/WorkProviderBackendV1"
+        ///    },
+        ///    "configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "model": {
+        ///      "type": "string"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "route": {
+        ///      "$ref": "#/definitions/WorkProviderRouteV1"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    },
+        ///    "topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_placement": {
+        ///      "$ref": "#/definitions/WorktreePlacementModeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowPlacementReceipt {
+            pub backend: WorkProviderBackendV1,
+            pub configuration_digest: ManifestDigest,
+            pub model: ::std::string::String,
+            pub placement_digest: ManifestDigest,
+            pub provider_registry_digest: ManifestDigest,
+            pub route: WorkProviderRouteV1,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+            pub topology_digest: ManifestDigest,
+            pub worktree_placement: WorktreePlacementModeV1,
+        }
+        ///`WorkflowRunEvent`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "event",
+        ///    "input_digest",
+        ///    "occurred_at",
+        ///    "run_id",
+        ///    "sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "event": {
+        ///      "$ref": "#/definitions/WorkflowRunEventKind"
+        ///    },
+        ///    "input_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunEvent {
+            pub command_id: WorkCommandId,
+            pub event: WorkflowRunEventKind,
+            pub input_digest: ManifestDigest,
+            pub occurred_at: UtcMicros,
+            pub run_id: RunId,
+            pub sequence: u64,
+        }
+        ///`WorkflowRunEventKind`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "definition",
+        ///        "pinned_provider_registry_digest",
+        ///        "pinned_topology_digest",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "definition": {
+        ///          "$ref": "#/definitions/WorkflowDefinition"
+        ///        },
+        ///        "pinned_provider_registry_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "pinned_topology_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "admitted"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "placement",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "placement": {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_started"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_completed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_failed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "paused"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "resumed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancellation_requested"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancelled"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "type")]
+        pub enum WorkflowRunEventKind {
+            #[serde(rename = "admitted")]
+            Admitted {
+                definition: WorkflowDefinition,
+                pinned_provider_registry_digest: ManifestDigest,
+                pinned_topology_digest: ManifestDigest,
+            },
+            #[serde(rename = "step_started")]
+            StepStarted {
+                placement: WorkflowPlacementReceipt,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_completed")]
+            StepCompleted {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_failed")]
+            StepFailed {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "resumed")]
+            Resumed,
+            #[serde(rename = "cancellation_requested")]
+            CancellationRequested,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        ///`WorkflowRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition",
+        ///    "history",
+        ///    "pinned_provider_registry_digest",
+        ///    "pinned_topology_digest",
+        ///    "run_id",
+        ///    "sequence",
+        ///    "status",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition": {
+        ///      "$ref": "#/definitions/WorkflowDefinition"
+        ///    },
+        ///    "history": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowRunEvent"
+        ///      }
+        ///    },
+        ///    "pinned_provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowRunStatus"
+        ///    },
+        ///    "steps": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepRunProjection"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunProjection {
+            pub definition: WorkflowDefinition,
+            pub history: ::std::vec::Vec<WorkflowRunEvent>,
+            pub pinned_provider_registry_digest: ManifestDigest,
+            pub pinned_topology_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub sequence: u64,
+            pub status: WorkflowRunStatus,
+            pub steps:
+                ::std::collections::HashMap<::std::string::String, WorkflowStepRunProjection>,
+        }
+        ///`WorkflowRunStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "running",
+        ///    "paused",
+        ///    "cancelling",
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowRunStatus {
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "cancelling")]
+            Cancelling,
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowRunStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Running => f.write_str("running"),
+                    Self::Paused => f.write_str("paused"),
+                    Self::Cancelling => f.write_str("cancelling"),
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowRunStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "running" => Ok(Self::Running),
+                    "paused" => Ok(Self::Paused),
+                    "cancelling" => Ok(Self::Cancelling),
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStep`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "inputs",
+        ///    "operation",
+        ///    "outputs",
+        ///    "predecessors",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "fan_out": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowFanOut"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "inputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputReference"
+        ///      }
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/WorkflowOperationRef"
+        ///    },
+        ///    "outputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputName"
+        ///      }
+        ///    },
+        ///    "predecessors": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStepId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStep {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub fan_out: ::std::option::Option<WorkflowFanOut>,
+            pub inputs: ::std::vec::Vec<WorkflowOutputReference>,
+            pub operation: WorkflowOperationRef,
+            pub outputs: ::std::vec::Vec<WorkflowOutputName>,
+            pub predecessors: Vec<WorkflowStepId>,
+            pub step_id: WorkflowStepId,
+        }
+        ///`WorkflowStepEffectOutcome`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled",
+        ///    "timed_out",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepEffectOutcome {
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "timed_out")]
+            TimedOut,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for WorkflowStepEffectOutcome {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::TimedOut => f.write_str("timed_out"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepEffectOutcome {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "timed_out" => Ok(Self::TimedOut),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStepEffectReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "effect_digest",
+        ///    "outcome",
+        ///    "output_set_digest",
+        ///    "placement_digest",
+        ///    "receipt_digest",
+        ///    "run_id",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/WorkflowStepEffectOutcome"
+        ///    },
+        ///    "output_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "receipt_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepEffectReceipt {
+            pub effect_digest: ManifestDigest,
+            pub outcome: WorkflowStepEffectOutcome,
+            pub output_set_digest: ManifestDigest,
+            pub placement_digest: ManifestDigest,
+            pub receipt_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+        }
+        ///Strongly typed canonical identity: `WorkflowStepId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowStepId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowStepId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowStepId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowStepId> for ::std::string::String {
+            fn from(value: WorkflowStepId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowStepId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowStepId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowStepOutput`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifacts",
+        ///    "output_name"
+        ///  ],
+        ///  "properties": {
+        ///    "artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputArtifact"
+        ///      }
+        ///    },
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepOutput {
+            pub artifacts: ::std::vec::Vec<WorkflowOutputArtifact>,
+            pub output_name: WorkflowOutputName,
+        }
+        ///`WorkflowStepRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outputs",
+        ///    "status"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "outputs": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepOutput"
+        ///      }
+        ///    },
+        ///    "placement_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowStepStatus"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepRunProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub effect_receipt: ::std::option::Option<WorkflowStepEffectReceipt>,
+            pub outputs: ::std::collections::HashMap<::std::string::String, WorkflowStepOutput>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub placement_receipt: ::std::option::Option<WorkflowPlacementReceipt>,
+            pub status: WorkflowStepStatus,
+        }
+        ///`WorkflowStepStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "blocked",
+        ///    "ready",
+        ///    "running",
+        ///    "succeeded",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepStatus {
+            #[serde(rename = "blocked")]
+            Blocked,
+            #[serde(rename = "ready")]
+            Ready,
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "succeeded")]
+            Succeeded,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowStepStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Blocked => f.write_str("blocked"),
+                    Self::Ready => f.write_str("ready"),
+                    Self::Running => f.write_str("running"),
+                    Self::Succeeded => f.write_str("succeeded"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "blocked" => Ok(Self::Blocked),
+                    "ready" => Ok(Self::Ready),
+                    "running" => Ok(Self::Running),
+                    "succeeded" => Ok(Self::Succeeded),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorktreePlacementModeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "existing_worktree_only"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "sibling_of_primary_checkout"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "repository_local_root"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "root_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "configured_root"
+        ///        },
+        ///        "root_id": {
+        ///          "type": "string"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "root_id")]
+        pub enum WorktreePlacementModeV1 {
+            #[serde(rename = "existing_worktree_only")]
+            ExistingWorktreeOnly,
+            #[serde(rename = "sibling_of_primary_checkout")]
+            SiblingOfPrimaryCheckout,
+            #[serde(rename = "repository_local_root")]
+            RepositoryLocalRoot,
+            #[serde(rename = "configured_root")]
+            ConfiguredRoot(::std::string::String),
+        }
+    }
+    pub type Request = request::WorkflowRunGetRequest;
+    pub type Result = result::WorkflowRunProjection;
+}
+typed_operation!(
+    WorkflowGetRun,
+    workflow_get_run,
+    "operation.workflow.get_run",
+    OperationTransport::Http {
+        route: "/application/workflow/get-run"
+    },
+    "binding.http.workflow.get_run",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.workflow.get_run.result",
     1
 );
 #[allow(clippy::all)]
@@ -122980,6 +127319,2204 @@ typed_operation!(
     1
 );
 #[allow(clippy::all)]
+pub mod workflow_pause_run {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowRunPauseRequest`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunPauseRequest",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_sequence",
+        ///    "run_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "expected_sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunPauseRequest {
+            pub command_id: WorkCommandId,
+            pub expected_sequence: u64,
+            pub run_id: RunId,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `AttemptId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `AttemptId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct AttemptId(pub ::std::string::String);
+        impl ::std::ops::Deref for AttemptId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<AttemptId> for ::std::string::String {
+            fn from(value: AttemptId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for AttemptId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for AttemptId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for AttemptId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProviderId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProviderId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProviderId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProviderId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProviderId> for ::std::string::String {
+            fn from(value: ProviderId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProviderId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProviderId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProviderId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkArtifactId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkArtifactId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkArtifactId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkArtifactId> for ::std::string::String {
+            fn from(value: WorkArtifactId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkArtifactId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkArtifactId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkArtifactId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkArtifactRefV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact_id",
+        ///    "byte_length",
+        ///    "digest"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact_id": {
+        ///      "$ref": "#/definitions/WorkArtifactId"
+        ///    },
+        ///    "byte_length": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkArtifactRefV1 {
+            pub artifact_id: WorkArtifactId,
+            pub byte_length: u64,
+            pub digest: ManifestDigest,
+        }
+        ///`WorkAttemptIdentityV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "attempt_id",
+        ///    "run_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "attempt_id": {
+        ///      "$ref": "#/definitions/AttemptId"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAttemptIdentityV1 {
+            pub attempt_id: AttemptId,
+            pub run_id: RunId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Provider protocol selected by the pinned Work configuration snapshot.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Provider protocol selected by the pinned Work configuration snapshot.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "claude_code_cli",
+        ///    "codex_app_server",
+        ///    "codex_cli"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProviderBackendV1 {
+            #[serde(rename = "claude_code_cli")]
+            ClaudeCodeCli,
+            #[serde(rename = "codex_app_server")]
+            CodexAppServer,
+            #[serde(rename = "codex_cli")]
+            CodexCli,
+        }
+        impl ::std::fmt::Display for WorkProviderBackendV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ClaudeCodeCli => f.write_str("claude_code_cli"),
+                    Self::CodexAppServer => f.write_str("codex_app_server"),
+                    Self::CodexCli => f.write_str("codex_cli"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderBackendV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "claude_code_cli" => Ok(Self::ClaudeCodeCli),
+                    "codex_app_server" => Ok(Self::CodexAppServer),
+                    "codex_cli" => Ok(Self::CodexCli),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `WorkProviderRouteId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkProviderRouteId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkProviderRouteId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProviderRouteId> for ::std::string::String {
+            fn from(value: WorkProviderRouteId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkProviderRouteId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderRouteId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkProviderRouteId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProviderRouteV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "provider_id",
+        ///    "route_id"
+        ///  ],
+        ///  "properties": {
+        ///    "provider_id": {
+        ///      "$ref": "#/definitions/ProviderId"
+        ///    },
+        ///    "route_id": {
+        ///      "$ref": "#/definitions/WorkProviderRouteId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProviderRouteV1 {
+            pub provider_id: ProviderId,
+            pub route_id: WorkProviderRouteId,
+        }
+        ///`WorkflowDefinition`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "pinned_catalog_digest",
+        ///    "pinned_configuration_digest",
+        ///    "pinned_policy_digest",
+        ///    "project_id",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "pinned_catalog_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "steps": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStep"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: u64,
+            pub pinned_catalog_digest: ManifestDigest,
+            pub pinned_configuration_digest: ManifestDigest,
+            pub pinned_policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub steps: ::std::vec::Vec<WorkflowStep>,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowFanOut`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "max_width"
+        ///  ],
+        ///  "properties": {
+        ///    "max_width": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowFanOut {
+            pub max_width: u32,
+        }
+        ///Strongly typed canonical identity: `WorkflowOperationRef`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOperationRef(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOperationRef {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOperationRef> for ::std::string::String {
+            fn from(value: WorkflowOperationRef) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOperationRef {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOperationRef {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOperationRef {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputArtifact`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact",
+        ///    "attempt_identity"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact": {
+        ///      "$ref": "#/definitions/WorkArtifactRefV1"
+        ///    },
+        ///    "attempt_identity": {
+        ///      "$ref": "#/definitions/WorkAttemptIdentityV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputArtifact {
+            pub artifact: WorkArtifactRefV1,
+            pub attempt_identity: WorkAttemptIdentityV1,
+        }
+        ///Strongly typed canonical identity: `WorkflowOutputName`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOutputName`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOutputName(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOutputName {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOutputName> for ::std::string::String {
+            fn from(value: WorkflowOutputName) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOutputName {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOutputName {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOutputName {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputReference`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "output_name",
+        ///    "producer_step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    },
+        ///    "producer_step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputReference {
+            pub output_name: WorkflowOutputName,
+            pub producer_step_id: WorkflowStepId,
+        }
+        ///`WorkflowPlacementReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "backend",
+        ///    "configuration_digest",
+        ///    "model",
+        ///    "placement_digest",
+        ///    "provider_registry_digest",
+        ///    "route",
+        ///    "run_id",
+        ///    "step_id",
+        ///    "topology_digest",
+        ///    "worktree_placement"
+        ///  ],
+        ///  "properties": {
+        ///    "backend": {
+        ///      "$ref": "#/definitions/WorkProviderBackendV1"
+        ///    },
+        ///    "configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "model": {
+        ///      "type": "string"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "route": {
+        ///      "$ref": "#/definitions/WorkProviderRouteV1"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    },
+        ///    "topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_placement": {
+        ///      "$ref": "#/definitions/WorktreePlacementModeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowPlacementReceipt {
+            pub backend: WorkProviderBackendV1,
+            pub configuration_digest: ManifestDigest,
+            pub model: ::std::string::String,
+            pub placement_digest: ManifestDigest,
+            pub provider_registry_digest: ManifestDigest,
+            pub route: WorkProviderRouteV1,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+            pub topology_digest: ManifestDigest,
+            pub worktree_placement: WorktreePlacementModeV1,
+        }
+        ///`WorkflowRunEvent`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "event",
+        ///    "input_digest",
+        ///    "occurred_at",
+        ///    "run_id",
+        ///    "sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "event": {
+        ///      "$ref": "#/definitions/WorkflowRunEventKind"
+        ///    },
+        ///    "input_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunEvent {
+            pub command_id: WorkCommandId,
+            pub event: WorkflowRunEventKind,
+            pub input_digest: ManifestDigest,
+            pub occurred_at: UtcMicros,
+            pub run_id: RunId,
+            pub sequence: u64,
+        }
+        ///`WorkflowRunEventKind`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "definition",
+        ///        "pinned_provider_registry_digest",
+        ///        "pinned_topology_digest",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "definition": {
+        ///          "$ref": "#/definitions/WorkflowDefinition"
+        ///        },
+        ///        "pinned_provider_registry_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "pinned_topology_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "admitted"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "placement",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "placement": {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_started"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_completed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_failed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "paused"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "resumed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancellation_requested"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancelled"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "type")]
+        pub enum WorkflowRunEventKind {
+            #[serde(rename = "admitted")]
+            Admitted {
+                definition: WorkflowDefinition,
+                pinned_provider_registry_digest: ManifestDigest,
+                pinned_topology_digest: ManifestDigest,
+            },
+            #[serde(rename = "step_started")]
+            StepStarted {
+                placement: WorkflowPlacementReceipt,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_completed")]
+            StepCompleted {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_failed")]
+            StepFailed {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "resumed")]
+            Resumed,
+            #[serde(rename = "cancellation_requested")]
+            CancellationRequested,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        ///`WorkflowRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition",
+        ///    "history",
+        ///    "pinned_provider_registry_digest",
+        ///    "pinned_topology_digest",
+        ///    "run_id",
+        ///    "sequence",
+        ///    "status",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition": {
+        ///      "$ref": "#/definitions/WorkflowDefinition"
+        ///    },
+        ///    "history": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowRunEvent"
+        ///      }
+        ///    },
+        ///    "pinned_provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowRunStatus"
+        ///    },
+        ///    "steps": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepRunProjection"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunProjection {
+            pub definition: WorkflowDefinition,
+            pub history: ::std::vec::Vec<WorkflowRunEvent>,
+            pub pinned_provider_registry_digest: ManifestDigest,
+            pub pinned_topology_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub sequence: u64,
+            pub status: WorkflowRunStatus,
+            pub steps:
+                ::std::collections::HashMap<::std::string::String, WorkflowStepRunProjection>,
+        }
+        ///`WorkflowRunStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "running",
+        ///    "paused",
+        ///    "cancelling",
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowRunStatus {
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "cancelling")]
+            Cancelling,
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowRunStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Running => f.write_str("running"),
+                    Self::Paused => f.write_str("paused"),
+                    Self::Cancelling => f.write_str("cancelling"),
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowRunStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "running" => Ok(Self::Running),
+                    "paused" => Ok(Self::Paused),
+                    "cancelling" => Ok(Self::Cancelling),
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStep`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "inputs",
+        ///    "operation",
+        ///    "outputs",
+        ///    "predecessors",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "fan_out": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowFanOut"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "inputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputReference"
+        ///      }
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/WorkflowOperationRef"
+        ///    },
+        ///    "outputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputName"
+        ///      }
+        ///    },
+        ///    "predecessors": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStepId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStep {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub fan_out: ::std::option::Option<WorkflowFanOut>,
+            pub inputs: ::std::vec::Vec<WorkflowOutputReference>,
+            pub operation: WorkflowOperationRef,
+            pub outputs: ::std::vec::Vec<WorkflowOutputName>,
+            pub predecessors: Vec<WorkflowStepId>,
+            pub step_id: WorkflowStepId,
+        }
+        ///`WorkflowStepEffectOutcome`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled",
+        ///    "timed_out",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepEffectOutcome {
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "timed_out")]
+            TimedOut,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for WorkflowStepEffectOutcome {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::TimedOut => f.write_str("timed_out"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepEffectOutcome {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "timed_out" => Ok(Self::TimedOut),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStepEffectReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "effect_digest",
+        ///    "outcome",
+        ///    "output_set_digest",
+        ///    "placement_digest",
+        ///    "receipt_digest",
+        ///    "run_id",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/WorkflowStepEffectOutcome"
+        ///    },
+        ///    "output_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "receipt_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepEffectReceipt {
+            pub effect_digest: ManifestDigest,
+            pub outcome: WorkflowStepEffectOutcome,
+            pub output_set_digest: ManifestDigest,
+            pub placement_digest: ManifestDigest,
+            pub receipt_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+        }
+        ///Strongly typed canonical identity: `WorkflowStepId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowStepId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowStepId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowStepId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowStepId> for ::std::string::String {
+            fn from(value: WorkflowStepId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowStepId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowStepId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowStepOutput`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifacts",
+        ///    "output_name"
+        ///  ],
+        ///  "properties": {
+        ///    "artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputArtifact"
+        ///      }
+        ///    },
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepOutput {
+            pub artifacts: ::std::vec::Vec<WorkflowOutputArtifact>,
+            pub output_name: WorkflowOutputName,
+        }
+        ///`WorkflowStepRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outputs",
+        ///    "status"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "outputs": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepOutput"
+        ///      }
+        ///    },
+        ///    "placement_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowStepStatus"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepRunProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub effect_receipt: ::std::option::Option<WorkflowStepEffectReceipt>,
+            pub outputs: ::std::collections::HashMap<::std::string::String, WorkflowStepOutput>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub placement_receipt: ::std::option::Option<WorkflowPlacementReceipt>,
+            pub status: WorkflowStepStatus,
+        }
+        ///`WorkflowStepStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "blocked",
+        ///    "ready",
+        ///    "running",
+        ///    "succeeded",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepStatus {
+            #[serde(rename = "blocked")]
+            Blocked,
+            #[serde(rename = "ready")]
+            Ready,
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "succeeded")]
+            Succeeded,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowStepStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Blocked => f.write_str("blocked"),
+                    Self::Ready => f.write_str("ready"),
+                    Self::Running => f.write_str("running"),
+                    Self::Succeeded => f.write_str("succeeded"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "blocked" => Ok(Self::Blocked),
+                    "ready" => Ok(Self::Ready),
+                    "running" => Ok(Self::Running),
+                    "succeeded" => Ok(Self::Succeeded),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorktreePlacementModeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "existing_worktree_only"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "sibling_of_primary_checkout"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "repository_local_root"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "root_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "configured_root"
+        ///        },
+        ///        "root_id": {
+        ///          "type": "string"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "root_id")]
+        pub enum WorktreePlacementModeV1 {
+            #[serde(rename = "existing_worktree_only")]
+            ExistingWorktreeOnly,
+            #[serde(rename = "sibling_of_primary_checkout")]
+            SiblingOfPrimaryCheckout,
+            #[serde(rename = "repository_local_root")]
+            RepositoryLocalRoot,
+            #[serde(rename = "configured_root")]
+            ConfiguredRoot(::std::string::String),
+        }
+    }
+    pub type Request = request::WorkflowRunPauseRequest;
+    pub type Result = result::WorkflowRunProjection;
+}
+typed_operation!(
+    WorkflowPauseRun,
+    workflow_pause_run,
+    "operation.workflow.pause_run",
+    OperationTransport::Http {
+        route: "/application/workflow/pause-run"
+    },
+    "binding.http.workflow.pause_run",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.workflow.pause_run.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod workflow_register_definition {
     pub mod request {
         /// Error types.
@@ -124494,6 +131031,2204 @@ typed_operation!(
     1
 );
 #[allow(clippy::all)]
+pub mod workflow_resume_run {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowRunResumeRequest`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunResumeRequest",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "expected_sequence",
+        ///    "run_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "expected_sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunResumeRequest {
+            pub command_id: WorkCommandId,
+            pub expected_sequence: u64,
+            pub run_id: RunId,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `AttemptId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `AttemptId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct AttemptId(pub ::std::string::String);
+        impl ::std::ops::Deref for AttemptId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<AttemptId> for ::std::string::String {
+            fn from(value: AttemptId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for AttemptId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for AttemptId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for AttemptId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProviderId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProviderId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProviderId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProviderId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProviderId> for ::std::string::String {
+            fn from(value: ProviderId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProviderId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProviderId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProviderId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkArtifactId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkArtifactId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkArtifactId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkArtifactId> for ::std::string::String {
+            fn from(value: WorkArtifactId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkArtifactId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkArtifactId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkArtifactId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkArtifactRefV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact_id",
+        ///    "byte_length",
+        ///    "digest"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact_id": {
+        ///      "$ref": "#/definitions/WorkArtifactId"
+        ///    },
+        ///    "byte_length": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkArtifactRefV1 {
+            pub artifact_id: WorkArtifactId,
+            pub byte_length: u64,
+            pub digest: ManifestDigest,
+        }
+        ///`WorkAttemptIdentityV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "attempt_id",
+        ///    "run_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "attempt_id": {
+        ///      "$ref": "#/definitions/AttemptId"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAttemptIdentityV1 {
+            pub attempt_id: AttemptId,
+            pub run_id: RunId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Provider protocol selected by the pinned Work configuration snapshot.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Provider protocol selected by the pinned Work configuration snapshot.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "claude_code_cli",
+        ///    "codex_app_server",
+        ///    "codex_cli"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProviderBackendV1 {
+            #[serde(rename = "claude_code_cli")]
+            ClaudeCodeCli,
+            #[serde(rename = "codex_app_server")]
+            CodexAppServer,
+            #[serde(rename = "codex_cli")]
+            CodexCli,
+        }
+        impl ::std::fmt::Display for WorkProviderBackendV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ClaudeCodeCli => f.write_str("claude_code_cli"),
+                    Self::CodexAppServer => f.write_str("codex_app_server"),
+                    Self::CodexCli => f.write_str("codex_cli"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderBackendV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "claude_code_cli" => Ok(Self::ClaudeCodeCli),
+                    "codex_app_server" => Ok(Self::CodexAppServer),
+                    "codex_cli" => Ok(Self::CodexCli),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `WorkProviderRouteId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkProviderRouteId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkProviderRouteId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProviderRouteId> for ::std::string::String {
+            fn from(value: WorkProviderRouteId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkProviderRouteId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderRouteId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkProviderRouteId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProviderRouteV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "provider_id",
+        ///    "route_id"
+        ///  ],
+        ///  "properties": {
+        ///    "provider_id": {
+        ///      "$ref": "#/definitions/ProviderId"
+        ///    },
+        ///    "route_id": {
+        ///      "$ref": "#/definitions/WorkProviderRouteId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProviderRouteV1 {
+            pub provider_id: ProviderId,
+            pub route_id: WorkProviderRouteId,
+        }
+        ///`WorkflowDefinition`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "pinned_catalog_digest",
+        ///    "pinned_configuration_digest",
+        ///    "pinned_policy_digest",
+        ///    "project_id",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "pinned_catalog_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "steps": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStep"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: u64,
+            pub pinned_catalog_digest: ManifestDigest,
+            pub pinned_configuration_digest: ManifestDigest,
+            pub pinned_policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub steps: ::std::vec::Vec<WorkflowStep>,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowFanOut`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "max_width"
+        ///  ],
+        ///  "properties": {
+        ///    "max_width": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowFanOut {
+            pub max_width: u32,
+        }
+        ///Strongly typed canonical identity: `WorkflowOperationRef`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOperationRef(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOperationRef {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOperationRef> for ::std::string::String {
+            fn from(value: WorkflowOperationRef) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOperationRef {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOperationRef {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOperationRef {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputArtifact`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact",
+        ///    "attempt_identity"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact": {
+        ///      "$ref": "#/definitions/WorkArtifactRefV1"
+        ///    },
+        ///    "attempt_identity": {
+        ///      "$ref": "#/definitions/WorkAttemptIdentityV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputArtifact {
+            pub artifact: WorkArtifactRefV1,
+            pub attempt_identity: WorkAttemptIdentityV1,
+        }
+        ///Strongly typed canonical identity: `WorkflowOutputName`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOutputName`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOutputName(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOutputName {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOutputName> for ::std::string::String {
+            fn from(value: WorkflowOutputName) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOutputName {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOutputName {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOutputName {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputReference`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "output_name",
+        ///    "producer_step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    },
+        ///    "producer_step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputReference {
+            pub output_name: WorkflowOutputName,
+            pub producer_step_id: WorkflowStepId,
+        }
+        ///`WorkflowPlacementReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "backend",
+        ///    "configuration_digest",
+        ///    "model",
+        ///    "placement_digest",
+        ///    "provider_registry_digest",
+        ///    "route",
+        ///    "run_id",
+        ///    "step_id",
+        ///    "topology_digest",
+        ///    "worktree_placement"
+        ///  ],
+        ///  "properties": {
+        ///    "backend": {
+        ///      "$ref": "#/definitions/WorkProviderBackendV1"
+        ///    },
+        ///    "configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "model": {
+        ///      "type": "string"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "route": {
+        ///      "$ref": "#/definitions/WorkProviderRouteV1"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    },
+        ///    "topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_placement": {
+        ///      "$ref": "#/definitions/WorktreePlacementModeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowPlacementReceipt {
+            pub backend: WorkProviderBackendV1,
+            pub configuration_digest: ManifestDigest,
+            pub model: ::std::string::String,
+            pub placement_digest: ManifestDigest,
+            pub provider_registry_digest: ManifestDigest,
+            pub route: WorkProviderRouteV1,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+            pub topology_digest: ManifestDigest,
+            pub worktree_placement: WorktreePlacementModeV1,
+        }
+        ///`WorkflowRunEvent`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "event",
+        ///    "input_digest",
+        ///    "occurred_at",
+        ///    "run_id",
+        ///    "sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "event": {
+        ///      "$ref": "#/definitions/WorkflowRunEventKind"
+        ///    },
+        ///    "input_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunEvent {
+            pub command_id: WorkCommandId,
+            pub event: WorkflowRunEventKind,
+            pub input_digest: ManifestDigest,
+            pub occurred_at: UtcMicros,
+            pub run_id: RunId,
+            pub sequence: u64,
+        }
+        ///`WorkflowRunEventKind`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "definition",
+        ///        "pinned_provider_registry_digest",
+        ///        "pinned_topology_digest",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "definition": {
+        ///          "$ref": "#/definitions/WorkflowDefinition"
+        ///        },
+        ///        "pinned_provider_registry_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "pinned_topology_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "admitted"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "placement",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "placement": {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_started"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_completed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_failed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "paused"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "resumed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancellation_requested"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancelled"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "type")]
+        pub enum WorkflowRunEventKind {
+            #[serde(rename = "admitted")]
+            Admitted {
+                definition: WorkflowDefinition,
+                pinned_provider_registry_digest: ManifestDigest,
+                pinned_topology_digest: ManifestDigest,
+            },
+            #[serde(rename = "step_started")]
+            StepStarted {
+                placement: WorkflowPlacementReceipt,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_completed")]
+            StepCompleted {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_failed")]
+            StepFailed {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "resumed")]
+            Resumed,
+            #[serde(rename = "cancellation_requested")]
+            CancellationRequested,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        ///`WorkflowRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition",
+        ///    "history",
+        ///    "pinned_provider_registry_digest",
+        ///    "pinned_topology_digest",
+        ///    "run_id",
+        ///    "sequence",
+        ///    "status",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition": {
+        ///      "$ref": "#/definitions/WorkflowDefinition"
+        ///    },
+        ///    "history": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowRunEvent"
+        ///      }
+        ///    },
+        ///    "pinned_provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowRunStatus"
+        ///    },
+        ///    "steps": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepRunProjection"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunProjection {
+            pub definition: WorkflowDefinition,
+            pub history: ::std::vec::Vec<WorkflowRunEvent>,
+            pub pinned_provider_registry_digest: ManifestDigest,
+            pub pinned_topology_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub sequence: u64,
+            pub status: WorkflowRunStatus,
+            pub steps:
+                ::std::collections::HashMap<::std::string::String, WorkflowStepRunProjection>,
+        }
+        ///`WorkflowRunStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "running",
+        ///    "paused",
+        ///    "cancelling",
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowRunStatus {
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "cancelling")]
+            Cancelling,
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowRunStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Running => f.write_str("running"),
+                    Self::Paused => f.write_str("paused"),
+                    Self::Cancelling => f.write_str("cancelling"),
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowRunStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "running" => Ok(Self::Running),
+                    "paused" => Ok(Self::Paused),
+                    "cancelling" => Ok(Self::Cancelling),
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStep`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "inputs",
+        ///    "operation",
+        ///    "outputs",
+        ///    "predecessors",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "fan_out": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowFanOut"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "inputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputReference"
+        ///      }
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/WorkflowOperationRef"
+        ///    },
+        ///    "outputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputName"
+        ///      }
+        ///    },
+        ///    "predecessors": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStepId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStep {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub fan_out: ::std::option::Option<WorkflowFanOut>,
+            pub inputs: ::std::vec::Vec<WorkflowOutputReference>,
+            pub operation: WorkflowOperationRef,
+            pub outputs: ::std::vec::Vec<WorkflowOutputName>,
+            pub predecessors: Vec<WorkflowStepId>,
+            pub step_id: WorkflowStepId,
+        }
+        ///`WorkflowStepEffectOutcome`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled",
+        ///    "timed_out",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepEffectOutcome {
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "timed_out")]
+            TimedOut,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for WorkflowStepEffectOutcome {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::TimedOut => f.write_str("timed_out"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepEffectOutcome {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "timed_out" => Ok(Self::TimedOut),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStepEffectReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "effect_digest",
+        ///    "outcome",
+        ///    "output_set_digest",
+        ///    "placement_digest",
+        ///    "receipt_digest",
+        ///    "run_id",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/WorkflowStepEffectOutcome"
+        ///    },
+        ///    "output_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "receipt_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepEffectReceipt {
+            pub effect_digest: ManifestDigest,
+            pub outcome: WorkflowStepEffectOutcome,
+            pub output_set_digest: ManifestDigest,
+            pub placement_digest: ManifestDigest,
+            pub receipt_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+        }
+        ///Strongly typed canonical identity: `WorkflowStepId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowStepId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowStepId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowStepId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowStepId> for ::std::string::String {
+            fn from(value: WorkflowStepId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowStepId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowStepId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowStepOutput`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifacts",
+        ///    "output_name"
+        ///  ],
+        ///  "properties": {
+        ///    "artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputArtifact"
+        ///      }
+        ///    },
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepOutput {
+            pub artifacts: ::std::vec::Vec<WorkflowOutputArtifact>,
+            pub output_name: WorkflowOutputName,
+        }
+        ///`WorkflowStepRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outputs",
+        ///    "status"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "outputs": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepOutput"
+        ///      }
+        ///    },
+        ///    "placement_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowStepStatus"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepRunProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub effect_receipt: ::std::option::Option<WorkflowStepEffectReceipt>,
+            pub outputs: ::std::collections::HashMap<::std::string::String, WorkflowStepOutput>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub placement_receipt: ::std::option::Option<WorkflowPlacementReceipt>,
+            pub status: WorkflowStepStatus,
+        }
+        ///`WorkflowStepStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "blocked",
+        ///    "ready",
+        ///    "running",
+        ///    "succeeded",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepStatus {
+            #[serde(rename = "blocked")]
+            Blocked,
+            #[serde(rename = "ready")]
+            Ready,
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "succeeded")]
+            Succeeded,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowStepStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Blocked => f.write_str("blocked"),
+                    Self::Ready => f.write_str("ready"),
+                    Self::Running => f.write_str("running"),
+                    Self::Succeeded => f.write_str("succeeded"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "blocked" => Ok(Self::Blocked),
+                    "ready" => Ok(Self::Ready),
+                    "running" => Ok(Self::Running),
+                    "succeeded" => Ok(Self::Succeeded),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorktreePlacementModeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "existing_worktree_only"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "sibling_of_primary_checkout"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "repository_local_root"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "root_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "configured_root"
+        ///        },
+        ///        "root_id": {
+        ///          "type": "string"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "root_id")]
+        pub enum WorktreePlacementModeV1 {
+            #[serde(rename = "existing_worktree_only")]
+            ExistingWorktreeOnly,
+            #[serde(rename = "sibling_of_primary_checkout")]
+            SiblingOfPrimaryCheckout,
+            #[serde(rename = "repository_local_root")]
+            RepositoryLocalRoot,
+            #[serde(rename = "configured_root")]
+            ConfiguredRoot(::std::string::String),
+        }
+    }
+    pub type Request = request::WorkflowRunResumeRequest;
+    pub type Result = result::WorkflowRunProjection;
+}
+typed_operation!(
+    WorkflowResumeRun,
+    workflow_resume_run,
+    "operation.workflow.resume_run",
+    OperationTransport::Http {
+        route: "/application/workflow/resume-run"
+    },
+    "binding.http.workflow.resume_run",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.workflow.resume_run.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod workflow_retire_definition {
     pub mod request {
         /// Error types.
@@ -124919,6 +133654,2522 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.workflow.retire_definition.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod workflow_start_run {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ProviderId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProviderId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProviderId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProviderId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProviderId> for ::std::string::String {
+            fn from(value: ProviderId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProviderId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProviderId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProviderId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Provider protocol selected by the pinned Work configuration snapshot.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Provider protocol selected by the pinned Work configuration snapshot.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "claude_code_cli",
+        ///    "codex_app_server",
+        ///    "codex_cli"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProviderBackendV1 {
+            #[serde(rename = "claude_code_cli")]
+            ClaudeCodeCli,
+            #[serde(rename = "codex_app_server")]
+            CodexAppServer,
+            #[serde(rename = "codex_cli")]
+            CodexCli,
+        }
+        impl ::std::fmt::Display for WorkProviderBackendV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ClaudeCodeCli => f.write_str("claude_code_cli"),
+                    Self::CodexAppServer => f.write_str("codex_app_server"),
+                    Self::CodexCli => f.write_str("codex_cli"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderBackendV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "claude_code_cli" => Ok(Self::ClaudeCodeCli),
+                    "codex_app_server" => Ok(Self::CodexAppServer),
+                    "codex_cli" => Ok(Self::CodexCli),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `WorkProviderRouteId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkProviderRouteId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkProviderRouteId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProviderRouteId> for ::std::string::String {
+            fn from(value: WorkProviderRouteId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkProviderRouteId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderRouteId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkProviderRouteId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProviderRouteV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "provider_id",
+        ///    "route_id"
+        ///  ],
+        ///  "properties": {
+        ///    "provider_id": {
+        ///      "$ref": "#/definitions/ProviderId"
+        ///    },
+        ///    "route_id": {
+        ///      "$ref": "#/definitions/WorkProviderRouteId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProviderRouteV1 {
+            pub provider_id: ProviderId,
+            pub route_id: WorkProviderRouteId,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowProviderRegistration`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "backend",
+        ///    "model",
+        ///    "priority",
+        ///    "route"
+        ///  ],
+        ///  "properties": {
+        ///    "backend": {
+        ///      "$ref": "#/definitions/WorkProviderBackendV1"
+        ///    },
+        ///    "model": {
+        ///      "type": "string"
+        ///    },
+        ///    "priority": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "route": {
+        ///      "$ref": "#/definitions/WorkProviderRouteV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowProviderRegistration {
+            pub backend: WorkProviderBackendV1,
+            pub model: ::std::string::String,
+            pub priority: u32,
+            pub route: WorkProviderRouteV1,
+        }
+        /**Starts (admits) a journaled workflow run from an active definition.
+
+        The daemon derives every admission digest itself: the definition's own
+        pinned policy/configuration/catalog digests are checked against the live
+        environment, the topology digest comes from the evaluated topology policy,
+        and the provider registry digest is computed from this registration — the
+        caller never supplies a digest the runtime must trust.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunStartRequest",
+        ///  "description": "Starts (admits) a journaled workflow run from an active definition.\n\nThe daemon derives every admission digest itself: the definition's own\npinned policy/configuration/catalog digests are checked against the live\nenvironment, the topology digest comes from the evaluated topology policy,\nand the provider registry digest is computed from this registration — the\ncaller never supplies a digest the runtime must trust.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "provider",
+        ///    "run_id"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "provider": {
+        ///      "$ref": "#/definitions/WorkflowProviderRegistration"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunStartRequest {
+            pub command_id: WorkCommandId,
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: ::std::num::NonZeroU64,
+            pub provider: WorkflowProviderRegistration,
+            pub run_id: RunId,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `AttemptId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `AttemptId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct AttemptId(pub ::std::string::String);
+        impl ::std::ops::Deref for AttemptId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<AttemptId> for ::std::string::String {
+            fn from(value: AttemptId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for AttemptId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for AttemptId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for AttemptId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProviderId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProviderId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProviderId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProviderId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProviderId> for ::std::string::String {
+            fn from(value: ProviderId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProviderId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProviderId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProviderId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorkArtifactId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkArtifactId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkArtifactId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkArtifactId> for ::std::string::String {
+            fn from(value: WorkArtifactId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkArtifactId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkArtifactId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkArtifactId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkArtifactRefV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact_id",
+        ///    "byte_length",
+        ///    "digest"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact_id": {
+        ///      "$ref": "#/definitions/WorkArtifactId"
+        ///    },
+        ///    "byte_length": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkArtifactRefV1 {
+            pub artifact_id: WorkArtifactId,
+            pub byte_length: u64,
+            pub digest: ManifestDigest,
+        }
+        ///`WorkAttemptIdentityV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "attempt_id",
+        ///    "run_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "attempt_id": {
+        ///      "$ref": "#/definitions/AttemptId"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAttemptIdentityV1 {
+            pub attempt_id: AttemptId,
+            pub run_id: RunId,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `WorkCommandId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkCommandId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkCommandId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkCommandId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkCommandId> for ::std::string::String {
+            fn from(value: WorkCommandId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkCommandId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkCommandId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkCommandId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Provider protocol selected by the pinned Work configuration snapshot.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Provider protocol selected by the pinned Work configuration snapshot.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "claude_code_cli",
+        ///    "codex_app_server",
+        ///    "codex_cli"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProviderBackendV1 {
+            #[serde(rename = "claude_code_cli")]
+            ClaudeCodeCli,
+            #[serde(rename = "codex_app_server")]
+            CodexAppServer,
+            #[serde(rename = "codex_cli")]
+            CodexCli,
+        }
+        impl ::std::fmt::Display for WorkProviderBackendV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ClaudeCodeCli => f.write_str("claude_code_cli"),
+                    Self::CodexAppServer => f.write_str("codex_app_server"),
+                    Self::CodexCli => f.write_str("codex_cli"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderBackendV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "claude_code_cli" => Ok(Self::ClaudeCodeCli),
+                    "codex_app_server" => Ok(Self::CodexAppServer),
+                    "codex_cli" => Ok(Self::CodexCli),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProviderBackendV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `WorkProviderRouteId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkProviderRouteId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkProviderRouteId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProviderRouteId> for ::std::string::String {
+            fn from(value: WorkProviderRouteId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkProviderRouteId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderRouteId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkProviderRouteId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProviderRouteV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "provider_id",
+        ///    "route_id"
+        ///  ],
+        ///  "properties": {
+        ///    "provider_id": {
+        ///      "$ref": "#/definitions/ProviderId"
+        ///    },
+        ///    "route_id": {
+        ///      "$ref": "#/definitions/WorkProviderRouteId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProviderRouteV1 {
+            pub provider_id: ProviderId,
+            pub route_id: WorkProviderRouteId,
+        }
+        ///`WorkflowDefinition`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "pinned_catalog_digest",
+        ///    "pinned_configuration_digest",
+        ///    "pinned_policy_digest",
+        ///    "project_id",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "pinned_catalog_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "steps": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStep"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: u64,
+            pub pinned_catalog_digest: ManifestDigest,
+            pub pinned_configuration_digest: ManifestDigest,
+            pub pinned_policy_digest: ManifestDigest,
+            pub project_id: ProjectId,
+            pub steps: ::std::vec::Vec<WorkflowStep>,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowFanOut`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "max_width"
+        ///  ],
+        ///  "properties": {
+        ///    "max_width": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowFanOut {
+            pub max_width: u32,
+        }
+        ///Strongly typed canonical identity: `WorkflowOperationRef`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOperationRef(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOperationRef {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOperationRef> for ::std::string::String {
+            fn from(value: WorkflowOperationRef) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOperationRef {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOperationRef {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOperationRef {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputArtifact`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact",
+        ///    "attempt_identity"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact": {
+        ///      "$ref": "#/definitions/WorkArtifactRefV1"
+        ///    },
+        ///    "attempt_identity": {
+        ///      "$ref": "#/definitions/WorkAttemptIdentityV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputArtifact {
+            pub artifact: WorkArtifactRefV1,
+            pub attempt_identity: WorkAttemptIdentityV1,
+        }
+        ///Strongly typed canonical identity: `WorkflowOutputName`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowOutputName`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowOutputName(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowOutputName {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowOutputName> for ::std::string::String {
+            fn from(value: WorkflowOutputName) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowOutputName {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowOutputName {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowOutputName {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowOutputReference`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "output_name",
+        ///    "producer_step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    },
+        ///    "producer_step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowOutputReference {
+            pub output_name: WorkflowOutputName,
+            pub producer_step_id: WorkflowStepId,
+        }
+        ///`WorkflowPlacementReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "backend",
+        ///    "configuration_digest",
+        ///    "model",
+        ///    "placement_digest",
+        ///    "provider_registry_digest",
+        ///    "route",
+        ///    "run_id",
+        ///    "step_id",
+        ///    "topology_digest",
+        ///    "worktree_placement"
+        ///  ],
+        ///  "properties": {
+        ///    "backend": {
+        ///      "$ref": "#/definitions/WorkProviderBackendV1"
+        ///    },
+        ///    "configuration_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "model": {
+        ///      "type": "string"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "route": {
+        ///      "$ref": "#/definitions/WorkProviderRouteV1"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    },
+        ///    "topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_placement": {
+        ///      "$ref": "#/definitions/WorktreePlacementModeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowPlacementReceipt {
+            pub backend: WorkProviderBackendV1,
+            pub configuration_digest: ManifestDigest,
+            pub model: ::std::string::String,
+            pub placement_digest: ManifestDigest,
+            pub provider_registry_digest: ManifestDigest,
+            pub route: WorkProviderRouteV1,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+            pub topology_digest: ManifestDigest,
+            pub worktree_placement: WorktreePlacementModeV1,
+        }
+        ///`WorkflowRunEvent`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "command_id",
+        ///    "event",
+        ///    "input_digest",
+        ///    "occurred_at",
+        ///    "run_id",
+        ///    "sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "command_id": {
+        ///      "$ref": "#/definitions/WorkCommandId"
+        ///    },
+        ///    "event": {
+        ///      "$ref": "#/definitions/WorkflowRunEventKind"
+        ///    },
+        ///    "input_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "occurred_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunEvent {
+            pub command_id: WorkCommandId,
+            pub event: WorkflowRunEventKind,
+            pub input_digest: ManifestDigest,
+            pub occurred_at: UtcMicros,
+            pub run_id: RunId,
+            pub sequence: u64,
+        }
+        ///`WorkflowRunEventKind`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "definition",
+        ///        "pinned_provider_registry_digest",
+        ///        "pinned_topology_digest",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "definition": {
+        ///          "$ref": "#/definitions/WorkflowDefinition"
+        ///        },
+        ///        "pinned_provider_registry_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "pinned_topology_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "admitted"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "placement",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "placement": {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_started"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_completed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "effect_receipt",
+        ///        "outputs",
+        ///        "step_id",
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "effect_receipt": {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        "outputs": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkflowStepOutput"
+        ///          }
+        ///        },
+        ///        "step_id": {
+        ///          "$ref": "#/definitions/WorkflowStepId"
+        ///        },
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "step_failed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "paused"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "resumed"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancellation_requested"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "type"
+        ///      ],
+        ///      "properties": {
+        ///        "type": {
+        ///          "type": "string",
+        ///          "const": "cancelled"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "type")]
+        pub enum WorkflowRunEventKind {
+            #[serde(rename = "admitted")]
+            Admitted {
+                definition: WorkflowDefinition,
+                pinned_provider_registry_digest: ManifestDigest,
+                pinned_topology_digest: ManifestDigest,
+            },
+            #[serde(rename = "step_started")]
+            StepStarted {
+                placement: WorkflowPlacementReceipt,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_completed")]
+            StepCompleted {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "step_failed")]
+            StepFailed {
+                effect_receipt: WorkflowStepEffectReceipt,
+                outputs: ::std::vec::Vec<WorkflowStepOutput>,
+                step_id: WorkflowStepId,
+            },
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "resumed")]
+            Resumed,
+            #[serde(rename = "cancellation_requested")]
+            CancellationRequested,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        ///`WorkflowRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowRunProjection",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition",
+        ///    "history",
+        ///    "pinned_provider_registry_digest",
+        ///    "pinned_topology_digest",
+        ///    "run_id",
+        ///    "sequence",
+        ///    "status",
+        ///    "steps"
+        ///  ],
+        ///  "properties": {
+        ///    "definition": {
+        ///      "$ref": "#/definitions/WorkflowDefinition"
+        ///    },
+        ///    "history": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowRunEvent"
+        ///      }
+        ///    },
+        ///    "pinned_provider_registry_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "pinned_topology_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowRunStatus"
+        ///    },
+        ///    "steps": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepRunProjection"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowRunProjection {
+            pub definition: WorkflowDefinition,
+            pub history: ::std::vec::Vec<WorkflowRunEvent>,
+            pub pinned_provider_registry_digest: ManifestDigest,
+            pub pinned_topology_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub sequence: u64,
+            pub status: WorkflowRunStatus,
+            pub steps:
+                ::std::collections::HashMap<::std::string::String, WorkflowStepRunProjection>,
+        }
+        ///`WorkflowRunStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "running",
+        ///    "paused",
+        ///    "cancelling",
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowRunStatus {
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "paused")]
+            Paused,
+            #[serde(rename = "cancelling")]
+            Cancelling,
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowRunStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Running => f.write_str("running"),
+                    Self::Paused => f.write_str("paused"),
+                    Self::Cancelling => f.write_str("cancelling"),
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowRunStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "running" => Ok(Self::Running),
+                    "paused" => Ok(Self::Paused),
+                    "cancelling" => Ok(Self::Cancelling),
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowRunStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStep`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "inputs",
+        ///    "operation",
+        ///    "outputs",
+        ///    "predecessors",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "fan_out": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowFanOut"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "inputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputReference"
+        ///      }
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/WorkflowOperationRef"
+        ///    },
+        ///    "outputs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputName"
+        ///      }
+        ///    },
+        ///    "predecessors": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowStepId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStep {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub fan_out: ::std::option::Option<WorkflowFanOut>,
+            pub inputs: ::std::vec::Vec<WorkflowOutputReference>,
+            pub operation: WorkflowOperationRef,
+            pub outputs: ::std::vec::Vec<WorkflowOutputName>,
+            pub predecessors: Vec<WorkflowStepId>,
+            pub step_id: WorkflowStepId,
+        }
+        ///`WorkflowStepEffectOutcome`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "completed",
+        ///    "failed",
+        ///    "cancelled",
+        ///    "timed_out",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepEffectOutcome {
+            #[serde(rename = "completed")]
+            Completed,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "timed_out")]
+            TimedOut,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for WorkflowStepEffectOutcome {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Completed => f.write_str("completed"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::TimedOut => f.write_str("timed_out"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepEffectOutcome {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "completed" => Ok(Self::Completed),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "timed_out" => Ok(Self::TimedOut),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepEffectOutcome {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkflowStepEffectReceipt`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "effect_digest",
+        ///    "outcome",
+        ///    "output_set_digest",
+        ///    "placement_digest",
+        ///    "receipt_digest",
+        ///    "run_id",
+        ///    "step_id"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/WorkflowStepEffectOutcome"
+        ///    },
+        ///    "output_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "placement_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "receipt_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "step_id": {
+        ///      "$ref": "#/definitions/WorkflowStepId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepEffectReceipt {
+            pub effect_digest: ManifestDigest,
+            pub outcome: WorkflowStepEffectOutcome,
+            pub output_set_digest: ManifestDigest,
+            pub placement_digest: ManifestDigest,
+            pub receipt_digest: ManifestDigest,
+            pub run_id: RunId,
+            pub step_id: WorkflowStepId,
+        }
+        ///Strongly typed canonical identity: `WorkflowStepId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowStepId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowStepId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowStepId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowStepId> for ::std::string::String {
+            fn from(value: WorkflowStepId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowStepId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowStepId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkflowStepOutput`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifacts",
+        ///    "output_name"
+        ///  ],
+        ///  "properties": {
+        ///    "artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkflowOutputArtifact"
+        ///      }
+        ///    },
+        ///    "output_name": {
+        ///      "$ref": "#/definitions/WorkflowOutputName"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepOutput {
+            pub artifacts: ::std::vec::Vec<WorkflowOutputArtifact>,
+            pub output_name: WorkflowOutputName,
+        }
+        ///`WorkflowStepRunProjection`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "outputs",
+        ///    "status"
+        ///  ],
+        ///  "properties": {
+        ///    "effect_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowStepEffectReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "outputs": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "$ref": "#/definitions/WorkflowStepOutput"
+        ///      }
+        ///    },
+        ///    "placement_receipt": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkflowPlacementReceipt"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "status": {
+        ///      "$ref": "#/definitions/WorkflowStepStatus"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowStepRunProjection {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub effect_receipt: ::std::option::Option<WorkflowStepEffectReceipt>,
+            pub outputs: ::std::collections::HashMap<::std::string::String, WorkflowStepOutput>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub placement_receipt: ::std::option::Option<WorkflowPlacementReceipt>,
+            pub status: WorkflowStepStatus,
+        }
+        ///`WorkflowStepStatus`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "blocked",
+        ///    "ready",
+        ///    "running",
+        ///    "succeeded",
+        ///    "failed",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowStepStatus {
+            #[serde(rename = "blocked")]
+            Blocked,
+            #[serde(rename = "ready")]
+            Ready,
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "succeeded")]
+            Succeeded,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkflowStepStatus {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Blocked => f.write_str("blocked"),
+                    Self::Ready => f.write_str("ready"),
+                    Self::Running => f.write_str("running"),
+                    Self::Succeeded => f.write_str("succeeded"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowStepStatus {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "blocked" => Ok(Self::Blocked),
+                    "ready" => Ok(Self::Ready),
+                    "running" => Ok(Self::Running),
+                    "succeeded" => Ok(Self::Succeeded),
+                    "failed" => Ok(Self::Failed),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowStepStatus {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorktreePlacementModeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "existing_worktree_only"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "sibling_of_primary_checkout"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "repository_local_root"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "root_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "configured_root"
+        ///        },
+        ///        "root_id": {
+        ///          "type": "string"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "root_id")]
+        pub enum WorktreePlacementModeV1 {
+            #[serde(rename = "existing_worktree_only")]
+            ExistingWorktreeOnly,
+            #[serde(rename = "sibling_of_primary_checkout")]
+            SiblingOfPrimaryCheckout,
+            #[serde(rename = "repository_local_root")]
+            RepositoryLocalRoot,
+            #[serde(rename = "configured_root")]
+            ConfiguredRoot(::std::string::String),
+        }
+    }
+    pub type Request = request::WorkflowRunStartRequest;
+    pub type Result = result::WorkflowRunProjection;
+}
+typed_operation!(
+    WorkflowStartRun,
+    workflow_start_run,
+    "operation.workflow.start_run",
+    OperationTransport::Http {
+        route: "/application/workflow/start-run"
+    },
+    "binding.http.workflow.start_run",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.workflow.start_run.result",
     1
 );
 #[allow(clippy::all)]
