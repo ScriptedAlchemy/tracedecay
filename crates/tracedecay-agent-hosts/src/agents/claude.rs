@@ -61,6 +61,10 @@ impl AgentIntegration for ClaudeIntegration {
         Some(claude_native_install_action(None).remediation)
     }
 
+    fn interactive_removal_guidance(&self) -> Option<String> {
+        Some(claude_native_remove_action().remediation)
+    }
+
     fn activate_project_host_component_registration(
         &self,
         _components: &[super::host_bundle_v2::HostBundleComponentV1],

@@ -80,6 +80,10 @@ impl AgentIntegration for KimiIntegration {
         Some(kimi_official_lifecycle_unavailable("install", None).remediation)
     }
 
+    fn interactive_removal_guidance(&self) -> Option<String> {
+        Some(kimi_official_lifecycle_unavailable("remove", None).remediation)
+    }
+
     fn supports_local_install(&self) -> bool {
         true
     }

@@ -1549,6 +1549,20 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             };
             if native_state_already_matches {
                 self.should_apply = false;
+            } else if self.operation
+                == crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Uninstall
+            {
+                // Removal is the host's to perform first: stripping a bundle the
+                // host still has registered would leave it resolving a
+                // marketplace that no longer exists. This arm must precede the
+                // update/activation arms below — both of those remediate as
+                // "refresh or activate the plugin", which can never unblock an
+                // uninstall, so routing removal through them makes the host's
+                // integration impossible to remove. Once the operator has run
+                // the host's own removal the registration reads `Missing`,
+                // `native_state_already_matches` holds, and the transaction
+                // proceeds to delete the receipt-owned artifacts.
+                return Err(crate::agents::host_bundle_v2::HostBundleError::NativeRemovalRequired);
             } else if matches!(
                 self.operation,
                 crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
@@ -1559,7 +1573,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
                 return Err(crate::agents::host_bundle_v2::HostBundleError::NativeUpdateRequired);
             } else {
                 // Native-only activation must complete in the host before the
-                // transaction claims or removes any staged artifact.
+                // transaction claims any staged artifact.
                 return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedCapability);
             }
         }

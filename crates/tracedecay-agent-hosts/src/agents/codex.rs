@@ -54,6 +54,12 @@ impl AgentIntegration for CodexIntegration {
         )
     }
 
+    fn interactive_removal_guidance(&self) -> Option<String> {
+        Some(
+            "Codex owns plugin removal; run `codex plugin remove tracedecay@personal`, then re-run TraceDecay to remove its staged source package.".to_string(),
+        )
+    }
+
     fn prepare_non_interactive_install(
         &self,
         ctx: &InstallContext,

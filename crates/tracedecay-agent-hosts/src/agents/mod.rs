@@ -244,6 +244,26 @@ pub trait AgentIntegration {
         None
     }
 
+    /// Operator guidance for removing a host-native registration TraceDecay
+    /// cannot drop itself, or `None` for a host whose registration the
+    /// receipt-backed lifecycle owns outright.
+    ///
+    /// The removal twin of [`AgentIntegration::interactive_activation_guidance`].
+    /// A host that activates only through an interactive UI also *deactivates*
+    /// only there, so `Uninstall` must refuse while the registration stands —
+    /// deleting the receipt-owned artifacts underneath a live registration
+    /// leaves the host resolving a bundle that no longer exists. The refusal
+    /// travels as [`host_bundle_v2::HostBundleError::NativeRemovalRequired`],
+    /// and this string is what makes it actionable: without it an operator is
+    /// told a capability is unsupported rather than which host command to run.
+    ///
+    /// Every integration returning `Some` from `interactive_activation_guidance`
+    /// should return `Some` here too; the two are the same host property seen
+    /// from opposite ends of the lifecycle.
+    fn interactive_removal_guidance(&self) -> Option<String> {
+        None
+    }
+
     /// Refresh tracedecay-generated artifacts (plugin code, baked binary
     /// paths, embedded assets) for every *detected* existing installation,
     /// without writing to any agent config file. Pins, MCP registrations,
