@@ -53,6 +53,69 @@ assert_fastembed_fixture() {
   python3 "$validator" "$fixture_root"
 }
 
+# The FastEmbed distribution-acquisition regression suite is doubly conditional:
+# its module is `#[cfg(all(test, feature = "semantic-fastembed"))]` and its
+# tests are `#[ignore]`d because they need this gate's isolated profile and
+# verified Jina fixture. That means it runs in exactly one place — the semantic
+# leg below, under `--features semantic-fastembed --run-ignored all`. If either
+# side of that pairing is dropped the suite stops running *silently*: the lib
+# test binary still has hundreds of other tests, so `--no-tests=fail` would not
+# notice. Assert the pairing statically, before the expensive packaging work.
+assert_gated_acquisition_suite() {
+  local source_repo=$1
+  local gate_script=$2
+  python3 - "$source_repo" "$gate_script" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+gate = Path(sys.argv[2])
+
+declaration = repo / "crates/tracedecay-semantic/src/model_lifecycle.rs"
+suite = repo / "crates/tracedecay-semantic/src/model_lifecycle/distribution_acquisition_acceptance.rs"
+
+if not suite.is_file():
+    raise SystemExit(
+        "distribution acceptance: the FastEmbed distribution-acquisition regression "
+        f"suite is missing: {suite}"
+    )
+
+declaration_text = declaration.read_text(encoding="utf-8")
+if not re.search(
+    r'#\[cfg\(all\(test,\s*feature\s*=\s*"semantic-fastembed"\)\)\]\s*\n'
+    r'#\[path = "model_lifecycle/distribution_acquisition_acceptance\.rs"\]\s*\n'
+    r"mod distribution_acquisition_acceptance;",
+    declaration_text,
+):
+    raise SystemExit(
+        "distribution acceptance: the acquisition suite is no longer declared under "
+        f'#[cfg(all(test, feature = "semantic-fastembed"))] in {declaration}'
+    )
+
+suite_text = suite.read_text(encoding="utf-8")
+ignored = len(re.findall(r"#\[ignore", suite_text))
+tests = len(re.findall(r"#\[test\]", suite_text))
+if tests == 0 or ignored != tests:
+    raise SystemExit(
+        "distribution acceptance: the acquisition suite must be entirely #[ignore]d "
+        f"so only this gate runs it (found {tests} tests, {ignored} ignored)"
+    )
+
+gate_text = gate.read_text(encoding="utf-8")
+for required in ("--features semantic-fastembed", "--run-ignored all"):
+    if required not in gate_text:
+        raise SystemExit(
+            "distribution acceptance: this gate no longer passes "
+            f"{required!r}, so the FastEmbed acquisition suite would never run"
+        )
+print(
+    f"distribution acceptance: FastEmbed acquisition suite gated and reachable "
+    f"({tests} tests)"
+)
+PY
+}
+
 assert_required_assets() {
   local root_package=$1
   local required
@@ -274,6 +337,8 @@ for fixture in \
     "$repo/tests/fixtures/packaged_host_events/$fixture" ||
     die "packaged host-event fixture copy differs from its authority: $fixture"
 done
+
+assert_gated_acquisition_suite "$repo" "$script_path"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution.XXXXXX")
 cleanup() {
