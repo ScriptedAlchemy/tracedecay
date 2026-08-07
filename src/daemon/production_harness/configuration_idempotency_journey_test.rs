@@ -455,7 +455,7 @@ async fn configuration_set_has_cli_mcp_http_sdk_parity_and_replays_after_restart
         ApplicationConfigurationSet::IDEMPOTENCY,
         IdempotencyContract::Required
     );
-    assert!(!ApplicationConfigurationSet::CANCELLABLE);
+    const { assert!(!ApplicationConfigurationSet::CANCELLABLE) };
     assert!(ApplicationConfigurationSet::CANCELLATION_POINTS.is_empty());
     assert_eq!(
         ApplicationConfigurationSet::RECONCILIATION,

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 const PENDING_CAPACITY: usize = 1_024;
-const PENDING_TTL: Duration = Duration::from_secs(60);
+const PENDING_TTL: Duration = Duration::from_mins(1);
 
 #[derive(Default)]
 struct State {

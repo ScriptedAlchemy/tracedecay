@@ -787,7 +787,7 @@ async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reco
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let open = tasks
         .start(route, async move {
-            started_tx.send(()).map_err(|_| TraceDecayError::Config {
+            started_tx.send(()).map_err(|()| TraceDecayError::Config {
                 message: "account deletion race observer dropped".to_owned(),
             })?;
             release_rx.await.map_err(|_| TraceDecayError::Config {
@@ -1846,7 +1846,7 @@ async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
         .start(unrelated.clone(), async move {
             started_tx
                 .send(())
-                .map_err(|_| crate::errors::TraceDecayError::Config {
+                .map_err(|()| crate::errors::TraceDecayError::Config {
                     message: "unrelated open observer dropped".to_owned(),
                 })?;
             release_rx

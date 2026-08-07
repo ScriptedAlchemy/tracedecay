@@ -76,6 +76,11 @@ impl SemanticVectorRetentionBacklogV1 {
     }
 }
 
+// `Observed` is matched by field-destructuring across several call sites
+// (doctor_kernel, git_watch/store_maintenance); boxing the receipt would
+// ripple through all of them for a cold, infrequently-read maintenance
+// status.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SemanticVectorRetentionReadV1 {
     Unknown,
@@ -202,7 +207,7 @@ impl StoreTelemetrySamplingRegistry {
             *progress = SemanticVectorRetentionProgressV1::default();
             return true;
         }
-        progress.cursor = census.continuation.clone();
+        progress.cursor.clone_from(&census.continuation);
         if census.continuation.is_some() {
             if census.complete_receipt.is_some() {
                 *progress = SemanticVectorRetentionProgressV1::default();
@@ -449,7 +454,7 @@ pub(super) struct BranchStoreGcCadenceV1 {
 }
 
 /// Interval between branch-store GC passes across mounted projects.
-const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_hours(24);
 
 #[derive(Clone)]
 pub(super) struct MaintenanceCoordinator {

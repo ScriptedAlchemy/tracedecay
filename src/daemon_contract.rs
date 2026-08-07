@@ -285,6 +285,10 @@ impl DaemonLspSessionAccess {
     }
 }
 
+// `StartAttempt` is matched and constructed across several call sites
+// (work_cli, service::invocation::work); boxing it would ripple through all
+// of them for a request/response contract type, not a hot allocation path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
 pub(crate) enum WorkApplicationInvocationV1 {
@@ -2315,6 +2319,10 @@ impl DaemonFeedbackResult {
 
 /// Bounded operation outcomes. LSP payloads remain protocol frames, not an
 /// unrestricted stream or arbitrary daemon-socket response.
+// `WorkApplication` is matched and constructed across two dozen call sites
+// (work_cli, application_surface, service::invocation::work and its tests);
+// boxing it would ripple through all of them for a wire contract type.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationOutcome {

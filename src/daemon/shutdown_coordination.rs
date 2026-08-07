@@ -186,8 +186,12 @@ pub(super) async fn join_shutdown_owner_phases(
     prepare_shutdown_owner_phases(phases).join(deadline).await
 }
 
+/// One prepared owner: its original ordinal, name, cancellation-time panic
+/// message (if cancelling it panicked), and its join factory.
+type PreparedShutdownOwner = (usize, &'static str, Option<String>, ShutdownJoinFactory);
+
 pub(super) struct PreparedShutdownOwners {
-    phases: Vec<Vec<(usize, &'static str, Option<String>, ShutdownJoinFactory)>>,
+    phases: Vec<Vec<PreparedShutdownOwner>>,
 }
 
 pub(super) fn prepare_shutdown_owner_phases(

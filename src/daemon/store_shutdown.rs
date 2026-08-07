@@ -49,6 +49,7 @@ impl ShutdownTaskReceipt {
             .all(|outcome| outcome.status == ShutdownTaskStatus::Clean)
     }
 
+    #[cfg(test)]
     pub(super) fn status(&self) -> ShutdownTaskStatus {
         let failures = self
             .outcomes
@@ -87,7 +88,7 @@ impl ShutdownTaskReceipt {
             {
                 Some(index) => match self.outcomes[index].status.clone() {
                     ShutdownTaskStatus::Clean => {
-                        self.outcomes[index].status = failure.status.clone()
+                        self.outcomes[index].status = failure.status.clone();
                     }
                     ShutdownTaskStatus::Failed(error) if error != *prior_error => {
                         self.outcomes[index].status = ShutdownTaskStatus::Failed(format!(

@@ -205,7 +205,7 @@ mod tests {
     use crate::sessions::{SessionMessageRecord, SessionRecord};
     use serde_json::Value;
     use tracedecay_domain::SessionId;
-    use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+    use tracedecay_runtime_core::db::engine::params;
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {
         SessionRecord {

@@ -7,7 +7,7 @@
 //! publishes and answers queries. Awaiting it on the open critical path
 //! coupled open to the starved reconcile lane and to network stalls (observed
 //! 924 s). Both upgrades therefore run as background tasks after open
-//! returns; the advisory registrars are idempotent (AlreadyRegistered) and
+//! returns; the advisory registrars are idempotent (`AlreadyRegistered`) and
 //! self-contained.
 //!
 //! The deferred feedback upgrade covers the cold-open gap: the dependent

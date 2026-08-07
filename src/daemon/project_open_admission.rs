@@ -238,7 +238,7 @@ impl ProjectOpenFailure {
                     found_version,
                     required_version,
                 } => Some(ProjectOpenTypedFailure::ProfileResetRequired {
-                    component: *component,
+                    component,
                     found_version: *found_version,
                     required_version: *required_version,
                 }),
@@ -265,7 +265,7 @@ impl ProjectOpenFailure {
                 required_version,
             }) => {
                 return TraceDecayError::ProfileResetRequired {
-                    component: *component,
+                    component,
                     found_version: *found_version,
                     required_version: *required_version,
                 };
@@ -588,7 +588,7 @@ impl ProjectOpenTasks {
         let mut drained = true;
         for (route, completion) in completions {
             match tokio::time::timeout_at(deadline, wait_for_project_open_task(completion)).await {
-                Ok(_) => joined.push(route),
+                Ok(()) => joined.push(route),
                 Err(_) => drained = false,
             }
         }

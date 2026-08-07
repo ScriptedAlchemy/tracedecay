@@ -37,7 +37,7 @@ struct ReplayTargetV1 {
 
 enum ReplayCommandV1 {
     Replay {
-        frame: RemoteReplayFrameV1,
+        frame: Box<RemoteReplayFrameV1>,
         current_writer: RemoteWriterAuthorityV1,
         reply: mpsc::SyncSender<
             Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1>,
@@ -51,7 +51,7 @@ enum ReplayCommandV1 {
     },
     InstallFence {
         project_id: ProjectId,
-        install: RemoteWriterFenceInstallV1,
+        install: Box<RemoteWriterFenceInstallV1>,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         reply: mpsc::SyncSender<Result<StoreCommitReceiptV1, String>>,
     },
@@ -128,7 +128,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                                 &runtime,
                                 &worker_targets,
                                 &project_id,
-                                install,
+                                *install,
                                 probe,
                             );
                             if reply.send(outcome).is_err() {
@@ -250,7 +250,7 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
         self.sender
             .try_send(ReplayCommandV1::InstallFence {
                 project_id,
-                install,
+                install: Box::new(install),
                 probe,
                 reply,
             })
@@ -309,7 +309,7 @@ impl RemoteReplayTransactionPortV1 for DaemonRemoteReplayTransactionAuthorityV1 
         let (reply, response) = mpsc::sync_channel(1);
         self.sender
             .try_send(ReplayCommandV1::Replay {
-                frame: frame.clone(),
+                frame: Box::new(frame.clone()),
                 current_writer: current_writer.clone(),
                 reply,
             })

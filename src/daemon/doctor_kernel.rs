@@ -936,7 +936,7 @@ pub async fn collect_retention_backlog_findings(
 /// budget made the finding unreachable on every profile that actually had
 /// something to report, because one sealed generation alone exceeds any budget
 /// small enough to be called cheap.
-pub(crate) async fn collect_code_generation_retention_findings(
+pub(super) async fn collect_code_generation_retention_findings(
     schedulers: &super::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     maintenance_observations: &super::maintenance::StoreTelemetrySamplingRegistry,
     configuration: Option<

@@ -67,9 +67,10 @@ struct PanicOnceHistoricalIngestor {
 impl SessionHistoricalIngestor for PanicOnceHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
-            if self.passes.fetch_add(1, Ordering::AcqRel) == 0 {
-                panic!("historical ingest panic fixture");
-            }
+            assert!(
+                self.passes.fetch_add(1, Ordering::AcqRel) != 0,
+                "historical ingest panic fixture"
+            );
             SessionHistoricalIngestOutcome::Complete
         })
     }

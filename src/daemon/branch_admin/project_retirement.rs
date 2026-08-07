@@ -56,6 +56,7 @@ impl StoreAdministration {
 
     // pub(crate): the test-transport production harness joins retirements from
     // outside branch_admin during its shutdown sequence.
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) async fn join_project_server_retirements(&self) {
         let completions = self
             .project_server_retirements

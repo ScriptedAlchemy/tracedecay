@@ -520,6 +520,7 @@ impl DaemonEngine {
         Ok(tasks.cached_failure(&route).await)
     }
 
+    #[cfg(test)]
     pub(super) async fn shutdown_project_open_tasks(&self) {
         project_open_tasks(&self.project_open_gates)
             .await

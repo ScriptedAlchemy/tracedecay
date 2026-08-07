@@ -905,10 +905,7 @@ fn completion_termination(
 }
 
 fn saturating_usize_to_u64(value: usize) -> u64 {
-    match u64::try_from(value) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn contract_error(error: impl std::fmt::Display) -> crate::errors::TraceDecayError {

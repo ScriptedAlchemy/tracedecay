@@ -17,7 +17,7 @@ use tracedecay_usecases::config::retrieval::{
 };
 use tracedecay_usecases::semantic_runtime::{
     SemanticEvaluationDiversityCandidateV1, SemanticEvaluationFusionCandidateV1,
-    SemanticEvaluationProfileCandidateV1, SemanticRuntimeStateV1, SemanticVectorGraphProviderV1,
+    SemanticEvaluationProfileCandidateV1, SemanticRuntimeStateV1,
 };
 use tracedecay_usecases::store::vector_generations::{
     GraphVectorGenerationStoreV1, PublishedVectorGenerationV1,
@@ -130,7 +130,7 @@ pub(super) async fn wait_for_semantic_generation(
     Arc<tracedecay_code_index::production::CodeIndexPublishedGenerationV1>,
     PublishedVectorGenerationV1,
 ) {
-    tokio::time::timeout(Duration::from_secs(180), async {
+    tokio::time::timeout(Duration::from_mins(3), async {
         loop {
             let resources = harness.resources.as_ref().expect("live harness");
             let Some(scope) = resources

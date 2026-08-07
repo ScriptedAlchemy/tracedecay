@@ -105,12 +105,6 @@ impl PreparedQueryActivationV1 {
         self.activated.configuration_revision()
     }
 
-    pub(crate) fn base_configuration_revision(
-        &self,
-    ) -> Option<&tracedecay_domain::configuration::ConfigurationRevisionId> {
-        current_transition(&self.activated).map(|event| &event.base_revision)
-    }
-
     pub(crate) fn query_authority(&self) -> &Arc<QueryAuthorityV1> {
         &self.query_authority
     }
@@ -450,36 +444,6 @@ impl DaemonQueryAuthorityProviderV1 {
             ActivatedQueryStateV1 {
                 scope: scope.clone(),
                 state: initial,
-                cursor_keys,
-            },
-        );
-        drop(current);
-        Ok(self.status(Some(&scope)))
-    }
-
-    /// Publish a state only after its configuration activation succeeded.
-    ///
-    /// Subsequent publications are compare-and-swapped against the previous
-    /// active profile digest and exact scope captured by the activation event.
-    pub(crate) fn update_after_successful_activation(
-        &self,
-        scope: ResolvedScope,
-        activated: RetrievalProfileStateV1,
-        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
-    ) -> Result<QueryAuthorityProviderStatusV1, QueryAuthorityUpdateErrorV1> {
-        scope
-            .validate()
-            .map_err(|_| QueryAuthorityUpdateErrorV1::InvalidScope)?;
-        let mut current = self
-            .activated
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        validate_successful_activation_update(&current, &scope, &activated)?;
-        current.insert(
-            scope.scope_digest.clone(),
-            ActivatedQueryStateV1 {
-                scope: scope.clone(),
-                state: activated,
                 cursor_keys,
             },
         );

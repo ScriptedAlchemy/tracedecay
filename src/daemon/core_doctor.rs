@@ -101,10 +101,9 @@ fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
 fn doctor_runtime_temporal_report(
     report: crate::global_db::SessionTemporalHealthReport,
 ) -> serde_json::Value {
-    let value = serde_json::to_value(report).unwrap_or_else(|_| {
+    serde_json::to_value(report).unwrap_or_else(|_| {
         doctor_runtime_temporal_unavailable("session_health_serialization_failed")
-    });
-    value
+    })
 }
 
 fn doctor_runtime_unavailable(

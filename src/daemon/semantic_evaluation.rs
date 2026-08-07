@@ -232,11 +232,11 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
                     SemanticActivationCoordinationErrorV1::Unavailable,
                 ));
             }
-            let sequence = workers.next_sequence.checked_add(1).ok_or_else(|| {
+            let sequence = workers.next_sequence.checked_add(1).ok_or(
                 DaemonSemanticEvaluationExecutionErrorV1::Coordination(
                     SemanticActivationCoordinationErrorV1::Unavailable,
-                )
-            })?;
+                ),
+            )?;
             workers.next_sequence = sequence;
             let worker_control = Arc::clone(&control);
             let result_control = Arc::clone(&control);

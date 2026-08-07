@@ -2,7 +2,7 @@
 //!
 //! The adapter receives neither a locator nor a database handle. It resolves
 //! the same registered runtime used by replay and recovery, verifies the
-//! durable RemoteNode authority before and after the read, and dispatches the
+//! durable `RemoteNode` authority before and after the read, and dispatches the
 //! canonical repository read operation.
 
 use std::collections::BTreeSet;
@@ -41,7 +41,7 @@ use tracedecay_tool_catalog::SortContractId;
 
 use super::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1;
 
-/// Query adapter over one authenticated RemoteNode store and the canonical
+/// Query adapter over one authenticated `RemoteNode` store and the canonical
 /// project runtime registry shared with replay/recovery.
 pub(crate) struct DaemonRemoteExactObservationQueryPortV1 {
     authority: Arc<RemoteSqliteStorageV1>,

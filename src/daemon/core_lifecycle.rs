@@ -246,10 +246,10 @@ impl DaemonLifecycle {
                 None
             }
         };
-        if let Some(task) = task {
-            if let Err(error) = task.await {
-                tracing::error!(%error, "daemon shutdown coordinator task failed after receipt");
-            }
+        if let Some(task) = task
+            && let Err(error) = task.await
+        {
+            tracing::error!(%error, "daemon shutdown coordinator task failed after receipt");
         }
     }
 
