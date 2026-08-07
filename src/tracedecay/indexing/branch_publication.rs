@@ -79,11 +79,9 @@ fn next_branch_graph_publication_epoch(
                 })
                 .ok()
         })
-        .map(BranchGraphPublicationEpochV1::get)
-        .unwrap_or(0);
+        .map_or(0, BranchGraphPublicationEpochV1::get);
     let next = external_epoch
-        .map(BranchGraphPublicationEpochV1::get)
-        .unwrap_or(0)
+        .map_or(0, BranchGraphPublicationEpochV1::get)
         .max(graph_epoch)
         .checked_add(1)
         .ok_or_else(|| TraceDecayError::Config {
@@ -95,6 +93,7 @@ fn next_branch_graph_publication_epoch(
 }
 
 impl TraceDecay {
+    #[cfg(test)]
     pub(crate) async fn published_branch_graph_source(
         &self,
     ) -> Option<crate::branch_meta::BranchGraphSourceV1> {

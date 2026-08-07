@@ -943,6 +943,7 @@ pub struct OrphanSweepReport {
 ///
 /// The caller (daemon backstop tick or Doctor pass) owns cadence and mutation
 /// authority.
+#[cfg(test)]
 pub(crate) async fn sweep_orphan_stores(
     db: &RegisteredGlobalDb,
     profile_root: &Path,

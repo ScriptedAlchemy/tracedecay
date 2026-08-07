@@ -723,7 +723,7 @@ pub struct GitReadSurfaceRequest {
 /// remote, so no transport can widen this journey into generic Git execution.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NativeIntegrationSurfaceRequest {
-    StackSnapshot(NativeIntegrationStackSnapshotSurfaceRequest),
+    StackSnapshot(Box<NativeIntegrationStackSnapshotSurfaceRequest>),
     Preflight(Box<NativeIntegrationPreflightSurfaceRequest>),
     Apply(NativeIntegrationApplySurfaceRequest),
     Status(NativeIntegrationStatusSurfaceRequest),

@@ -485,7 +485,7 @@ mod tests {
         .await
         .expect("lazy dependency index");
 
-        assert_eq!(indexed, [dependency.clone()]);
+        assert_eq!(indexed, std::slice::from_ref(&dependency));
         assert!(cancellation.commit_started());
         assert!(!cancellation.cancel(UtcMicros(41)));
         assert!(

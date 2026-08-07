@@ -34,18 +34,23 @@ impl ResolvedWorkExecutableBinding {
         &self.canonical_path
     }
 
+    // Only read by this module's own `#[cfg(test)]` coverage.
+    #[cfg(test)]
     pub(crate) fn executable(&self) -> &WorkExecutableReference {
         &self.executable
     }
 
+    #[cfg(test)]
     pub(crate) fn configuration_revision_id(&self) -> &ConfigurationRevisionId {
         &self.configuration_revision_id
     }
 
+    #[cfg(test)]
     pub(crate) fn configuration_snapshot_id(&self) -> &ConfigurationSnapshotId {
         &self.configuration_snapshot_id
     }
 
+    #[cfg(test)]
     pub(crate) const fn verified_byte_length(&self) -> u64 {
         self.verified_byte_length
     }

@@ -306,14 +306,8 @@ where
 }
 
 fn transcript_span_id(observation: &SpanObservation, worktree: &str) -> String {
-    let thread_id = match observation.thread_id.as_deref() {
-        Some(thread_id) => thread_id,
-        None => "",
-    };
-    let branch = match observation.branch.as_deref() {
-        Some(branch) => branch,
-        None => "",
-    };
+    let thread_id = observation.thread_id.as_deref().unwrap_or_default();
+    let branch = observation.branch.as_deref().unwrap_or_default();
     let material = format!(
         "{}\0{}\0{thread_id}\0{branch}\0{}\0{}\0{:?}",
         observation.provider, observation.session_id, worktree, observation.ts, observation.source,

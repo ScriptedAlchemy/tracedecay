@@ -232,6 +232,42 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     } else {
         "unknown (no indexed source bytes)".to_owned()
     };
+    let runtime_queue = format!(
+        "{} shard ops / {}; global {} / {} budget",
+        d.runtime_registry.aggregate.queued_operations,
+        bytes_human(d.runtime_registry.aggregate.queued_bytes),
+        d.runtime_registry
+            .aggregate
+            .global_queued_bytes
+            .map_or_else(|| "unknown".to_owned(), bytes_human),
+        bytes_human(d.runtime_registry.global_queue_max_bytes),
+    );
+    let runtime_contention = format!(
+        "writer busy {}, readers waiting general {} / health {}",
+        d.runtime_registry.aggregate.writer_busy_events,
+        d.runtime_registry.aggregate.general_reader_waiters,
+        d.runtime_registry.aggregate.health_reader_waiters,
+    );
+    let runtime_interrupts = format!(
+        "cancelled {}, deadline {}, shed {}, conflicts {}; {}/{} active writers observed ({})",
+        d.runtime_registry.aggregate.cancelled_operations,
+        d.runtime_registry.aggregate.deadline_exceeded_operations,
+        d.runtime_registry.aggregate.shed_operations,
+        d.runtime_registry.aggregate.conflicted_operations,
+        d.runtime_registry.aggregate.writer_telemetry_shards,
+        d.runtime_registry.aggregate.writer_present,
+        if d.runtime_registry.aggregate.writer_telemetry_complete {
+            "complete"
+        } else {
+            "partial"
+        },
+    );
+    let runtime_writer_time = format!(
+        "queue {} µs / transaction {} µs across {} committed batches since current writer start",
+        d.runtime_registry.aggregate.writer_queue_wait_micros,
+        d.runtime_registry.aggregate.writer_transaction_micros,
+        d.runtime_registry.aggregate.committed_batches,
+    );
     format!(
         "tracedecay {ver} runtime snapshot ({os})\n\
          ────────────────────────────────────────\n\
@@ -312,42 +348,10 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         runtime_opening = d.runtime_registry.aggregate.opening,
         runtime_draining = d.runtime_registry.aggregate.draining,
         runtime_omitted = d.runtime_registry.omitted_shards,
-        runtime_queue = format!(
-            "{} shard ops / {}; global {} / {} budget",
-            d.runtime_registry.aggregate.queued_operations,
-            bytes_human(d.runtime_registry.aggregate.queued_bytes),
-            d.runtime_registry
-                .aggregate
-                .global_queued_bytes
-                .map_or_else(|| "unknown".to_owned(), bytes_human),
-            bytes_human(d.runtime_registry.global_queue_max_bytes),
-        ),
-        runtime_contention = format!(
-            "writer busy {}, readers waiting general {} / health {}",
-            d.runtime_registry.aggregate.writer_busy_events,
-            d.runtime_registry.aggregate.general_reader_waiters,
-            d.runtime_registry.aggregate.health_reader_waiters,
-        ),
-        runtime_interrupts = format!(
-            "cancelled {}, deadline {}, shed {}, conflicts {}; {}/{} active writers observed ({})",
-            d.runtime_registry.aggregate.cancelled_operations,
-            d.runtime_registry.aggregate.deadline_exceeded_operations,
-            d.runtime_registry.aggregate.shed_operations,
-            d.runtime_registry.aggregate.conflicted_operations,
-            d.runtime_registry.aggregate.writer_telemetry_shards,
-            d.runtime_registry.aggregate.writer_present,
-            if d.runtime_registry.aggregate.writer_telemetry_complete {
-                "complete"
-            } else {
-                "partial"
-            },
-        ),
-        runtime_writer_time = format!(
-            "queue {} µs / transaction {} µs across {} committed batches since current writer start",
-            d.runtime_registry.aggregate.writer_queue_wait_micros,
-            d.runtime_registry.aggregate.writer_transaction_micros,
-            d.runtime_registry.aggregate.committed_batches,
-        ),
+        runtime_queue = runtime_queue,
+        runtime_contention = runtime_contention,
+        runtime_interrupts = runtime_interrupts,
+        runtime_writer_time = runtime_writer_time,
         runtime_wal = d
             .runtime_registry
             .aggregate

@@ -148,19 +148,6 @@ pub(crate) async fn correlate_registered_hint_outcomes(
     .await
 }
 
-pub(crate) async fn observe_registered_hint_outcomes(
-    analytics: &RegisteredGlobalDb,
-    sessions: &RegisteredGlobalDb,
-    project_id: &str,
-    now_secs: i64,
-) {
-    if let Err(error) =
-        correlate_registered_hint_outcomes(analytics, sessions, project_id, now_secs).await
-    {
-        tracing::warn!(%error, "startup hint-outcome correlation failed");
-    }
-}
-
 fn required_event_field(
     value: Option<String>,
     field: &'static str,

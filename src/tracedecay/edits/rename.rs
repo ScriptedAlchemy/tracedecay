@@ -10,6 +10,7 @@
 //! dispatch, unresolved refs) are reported and never rewritten.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::Path;
 
 use tracedecay_application::source_edit::{
@@ -283,7 +284,7 @@ impl TraceDecay {
                 if !diff.is_empty() {
                     diff.push('\n');
                 }
-                diff.push_str(&format!("--- {}\n", file.relative_path));
+                let _ = writeln!(diff, "--- {}", file.relative_path);
                 diff.push_str(&bounded_region_diff(
                     &file.original,
                     &file.modified,

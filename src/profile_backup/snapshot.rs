@@ -1,8 +1,8 @@
 //! Database-aware artifact snapshots for complete profile backups.
 //!
 //! A complete profile backup must capture every database as a verified,
-//! self-contained artifact instead of a blind byte copy: SQLite files are
-//! snapshotted through the SQLite backup API (folding any WAL), and Grafeo
+//! self-contained artifact instead of a blind byte copy: `SQLite` files are
+//! snapshotted through the `SQLite` backup API (folding any WAL), and Grafeo
 //! graph stores are rebuilt through the graph database's verified
 //! backup/restore path (folding any WAL sidecar and proving the artifact
 //! opens under the current format authority). Write-ahead and shared-memory

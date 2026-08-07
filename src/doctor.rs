@@ -175,8 +175,9 @@ fn render_doctor_finding(
     let evidence = finding
         .evidence()
         .first()
-        .map(|evidence| evidence.reference().as_str())
-        .unwrap_or("doctor.evidence.unavailable");
+        .map_or("doctor.evidence.unavailable", |evidence| {
+            evidence.reference().as_str()
+        });
     let message = format!(
         "{:?}: {} ({evidence})",
         finding.family(),
@@ -260,8 +261,9 @@ fn database_health_from_storage_runtime_findings<'a>(
         let evidence = finding
             .evidence()
             .first()
-            .map(|evidence| evidence.reference().as_str())
-            .unwrap_or("canonical_storage_runtime_evidence_missing");
+            .map_or("canonical_storage_runtime_evidence_missing", |evidence| {
+                evidence.reference().as_str()
+            });
         match finding.state() {
             State::Degraded => DatabaseHealth::failed(evidence),
             State::HealthyCompleteCoverage => DatabaseHealth::Healthy,
@@ -1141,12 +1143,12 @@ fn check_user_config(
             "Worldwide counter upload setting unavailable from canonical configuration: {error}"
         )),
     }
-    if let Some(config_path) = crate::user_config::config_path() {
-        if config_path.exists() {
-            let config = crate::user_config::UserConfig::load();
-            if config.pending_upload > 0 {
-                dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
-            }
+    if let Some(config_path) = crate::user_config::config_path()
+        && config_path.exists()
+    {
+        let config = crate::user_config::UserConfig::load();
+        if config.pending_upload > 0 {
+            dc.info(&format!("Pending upload: {} tokens", config.pending_upload));
         }
     }
 }

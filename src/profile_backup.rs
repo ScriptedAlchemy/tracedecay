@@ -1,7 +1,7 @@
 //! Complete profile backup, verification, and restore rehearsal.
 //!
 //! A complete profile backup is a directory of database-aware snapshot
-//! artifacts (SQLite backup-API snapshots, verified Grafeo graph snapshots,
+//! artifacts (`SQLite` backup-API snapshots, verified Grafeo graph snapshots,
 //! and plain copies for everything else) plus a manifest that binds the
 //! backup to its exact brain/profile identity, the durable identity of every
 //! contained project store, and a SHA-256 inventory of every artifact.
