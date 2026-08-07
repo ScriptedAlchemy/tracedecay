@@ -100,6 +100,10 @@ fn project_route_problem_kind(reason_code: &str) -> Option<&'static str> {
     match reason_code {
         "tool_dispatch_deadline_exceeded" => Some("deadline_exceeded"),
         "tool_dispatch_cancelled" => Some("cancelled"),
+        // The client stopped awaiting an admitted effect worker. Neither
+        // cancellation nor a timeout may claim the effect did not happen, so
+        // this is its own terminal rather than a flavour of the two above.
+        "tool_dispatch_effect_unknown" => Some("effect_unknown"),
         "tool_dispatch_shutdown"
         | "mcp_dispatch_effect_journey_unverified"
         | "application_surface_unavailable" => Some("unavailable"),
@@ -127,9 +131,10 @@ pub(crate) fn tool_error_response(
             "retryable": retryable,
             "detail": detail,
         });
-        if let (Some(kind), Some(object)) =
-            (project_route_problem_kind(reason_code), data.as_object_mut())
-        {
+        if let (Some(kind), Some(object)) = (
+            project_route_problem_kind(reason_code),
+            data.as_object_mut(),
+        ) {
             object.insert("kind".to_string(), json!(kind));
             object.insert("code".to_string(), json!(reason_code));
         }

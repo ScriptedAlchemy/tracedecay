@@ -45,6 +45,21 @@ impl DispatchExecutionSettlement {
     }
 }
 
+impl DispatchSettlement {
+    /// Whether the admitted worker may already have crossed its commit point.
+    ///
+    /// A worker that never started cannot have produced an effect, so the
+    /// client's cancellation or deadline is the whole truth. Once the worker is
+    /// settling or has joined without handing back its canonical result, the
+    /// effect state is unknown and no client-side terminal may claim otherwise.
+    const fn effect_may_have_committed(self) -> bool {
+        match self {
+            Self::NotStarted => false,
+            Self::Settling | Self::Joined => true,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct DispatchFailure {
     error: TraceDecayError,
@@ -498,7 +513,41 @@ async fn receive_canonical_result<T>(
     received_result(result.await)
 }
 
+/// The one terminal an admitted-but-unsettled dispatch is allowed to report.
+///
+/// Plan 21: after admission the daemon's operation/effect receipt is
+/// authoritative, and if an effect may have crossed its commit point then
+/// cancellation or a client timeout cannot replace effect-unknown state. The
+/// worker settlement is what decides which of those two worlds the caller is
+/// in, so it selects the reason code rather than only decorating the message.
+fn effect_unknown_error(
+    tool_name: &str,
+    settlement: DispatchSettlement,
+    cause: &str,
+) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "tool_dispatch_effect_unknown",
+        false,
+        format!(
+            "tool '{tool_name}' stopped being awaited after {cause}, but its admitted worker had already started; worker settlement is {settlement:?} and its effect state is unknown. Inspect the daemon receipt before retrying."
+        ),
+    )
+}
+
+/// Whether abandoning this tool mid-flight can leave state behind.
+///
+/// A read that stops being awaited leaves nothing to reconcile, so it keeps the
+/// plain cancelled/deadline terminal. Only a tool whose dispatch contract
+/// declares an effect can reach effect-unknown.
+fn tool_carries_effect(tool_name: &str) -> bool {
+    crate::mcp::tools::binding::mcp_dispatch_contract(tool_name)
+        .is_ok_and(|contract| !contract.read_only())
+}
+
 fn dispatch_cancelled_error(tool_name: &str, settlement: DispatchSettlement) -> TraceDecayError {
+    if settlement.effect_may_have_committed() && tool_carries_effect(tool_name) {
+        return effect_unknown_error(tool_name, settlement, "cancellation");
+    }
     TraceDecayError::project_route(
         "tool_dispatch_cancelled",
         true,
@@ -509,6 +558,9 @@ fn dispatch_cancelled_error(tool_name: &str, settlement: DispatchSettlement) -> 
 }
 
 fn dispatch_deadline_error(tool_name: &str, settlement: DispatchSettlement) -> TraceDecayError {
+    if settlement.effect_may_have_committed() && tool_carries_effect(tool_name) {
+        return effect_unknown_error(tool_name, settlement, "its absolute deadline");
+    }
     TraceDecayError::project_route(
         "tool_dispatch_deadline_exceeded",
         true,
@@ -628,5 +680,59 @@ mod tests {
         );
         assert_eq!(committed.settlement(), DispatchSettlement::Joined);
         registry.shutdown().await;
+    }
+
+    /// A live-cancellable effect tool whose worker was already admitted cannot
+    /// answer "cancelled": the effect may have crossed its commit point, and
+    /// the caller has to inspect the daemon receipt instead of retrying.
+    #[tokio::test]
+    async fn live_cancellation_after_admission_reports_effect_unknown_for_an_effect_tool() {
+        let registry = Arc::new(RetainedDispatchRegistry::new());
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancel.effect-in-flight")
+                .expect("cancellation");
+        let control = DispatchControl::new(
+            "tracedecay_str_replace",
+            deadline_after(std::time::Duration::from_secs(60)),
+            cancellation.clone(),
+        )
+        .expect("control");
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::new(tokio::sync::Notify::new());
+        let started = Arc::clone(&worker_started);
+        let release = Arc::clone(&worker_release);
+        let runner_registry = Arc::clone(&registry);
+        let runner = tokio::spawn(async move {
+            control
+                .run_retained(&runner_registry, async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok::<_, crate::errors::TraceDecayError>("effect state is the daemon's to say")
+                })
+                .await
+        });
+
+        worker_started.notified().await;
+        assert!(cancellation.cancel(tracedecay_application::clock::now_micros()));
+        let abandoned = runner.await.expect("dispatch runner");
+        let settlement = Arc::clone(&abandoned.settlement);
+        let failure = abandoned
+            .result
+            .expect_err("an abandoned effect worker cannot report success");
+        assert_eq!(
+            failure.project_route_context().map(|context| context.0),
+            Some("tool_dispatch_effect_unknown"),
+            "an admitted effect worker may have crossed its commit point"
+        );
+        assert_eq!(
+            failure.project_route_context().map(|context| context.1),
+            Some(false),
+            "effect-unknown is never a safe blind retry"
+        );
+        assert_eq!(settlement.snapshot(), DispatchSettlement::Settling);
+
+        worker_release.notify_one();
+        registry.shutdown().await;
+        assert_eq!(settlement.snapshot(), DispatchSettlement::Joined);
     }
 }
