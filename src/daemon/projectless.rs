@@ -104,6 +104,9 @@ pub(super) async fn projectless_tools_call_response(
             return JsonRpcResponse::error(id, ErrorCode::InvalidParams, message.to_string());
         }
     };
+    if let Err(error) = store_administration.ensure_account_active().await {
+        return JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string());
+    }
     if tool_name == "tracedecay_admin_project" {
         #[derive(serde::Deserialize)]
         #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]

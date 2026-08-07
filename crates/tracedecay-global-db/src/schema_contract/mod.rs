@@ -23,4 +23,5 @@ pub use invariants::{
 pub use validation::validate_registry_schema_contract;
 pub(super) use validation::{
     validate_authority_schema_contract, validate_observation_migration_source,
+    validate_remote_deletion_schema_contract,
 };

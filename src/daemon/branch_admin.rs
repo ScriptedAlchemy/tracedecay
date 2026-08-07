@@ -10,6 +10,7 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
+use super::StoreOwnerKey;
 use super::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 #[cfg(unix)]
 use super::memory_repair_scheduler::MemoryRepairSchedulerHandle;
@@ -27,7 +28,7 @@ use super::{
 };
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
-
+mod project_retirement;
 mod remote_deletion_lifecycle;
 
 /// Resolves the writer scope for one store family.
@@ -113,7 +114,7 @@ struct MaintenanceReaperHandle {
 #[cfg(unix)]
 struct MaintenanceReaperRegistryState {
     accepting: bool,
-    pending: usize,
+    pending: HashMap<StoreOwnerKey, usize>,
     next_generation: u64,
     reapers: HashMap<MaintenanceReaperKey, MaintenanceReaperHandle>,
 }
@@ -136,7 +137,7 @@ impl Default for MaintenanceReaperRegistry {
         Self {
             state: std::sync::Mutex::new(MaintenanceReaperRegistryState {
                 accepting: true,
-                pending: 0,
+                pending: HashMap::new(),
                 next_generation: 1,
                 reapers: HashMap::new(),
             }),
@@ -159,24 +160,32 @@ impl MaintenanceReaperRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn reserve(self: &Arc<Self>) -> Option<MaintenanceReaperReservation> {
+    fn reserve(self: &Arc<Self>, owner: &ProjectServerKey) -> Option<MaintenanceReaperReservation> {
         let mut state = self.state();
         if !state.accepting {
             return None;
         }
-        state.pending += 1;
+        *state.pending.entry(owner.owner.clone()).or_default() += 1;
         drop(state);
         self.changed.notify_waiters();
         Some(MaintenanceReaperReservation {
             registry: Arc::clone(self),
+            owner: owner.owner.clone(),
             active: true,
         })
     }
 
-    fn release_reservation(&self) {
+    fn release_reservation(&self, owner: &StoreOwnerKey) {
         let mut state = self.state();
-        debug_assert!(state.pending > 0);
-        state.pending = state.pending.saturating_sub(1);
+        let mut remove = false;
+        if let Some(pending) = state.pending.get_mut(owner) {
+            debug_assert!(*pending > 0);
+            *pending = pending.saturating_sub(1);
+            remove = *pending == 0;
+        }
+        if remove {
+            state.pending.remove(owner);
+        }
         drop(state);
         self.changed.notify_waiters();
     }
@@ -209,6 +218,7 @@ impl MaintenanceReaperRegistry {
 #[cfg(unix)]
 pub(super) struct MaintenanceReaperReservation {
     registry: Arc<MaintenanceReaperRegistry>,
+    owner: StoreOwnerKey,
     active: bool,
 }
 
@@ -216,7 +226,7 @@ pub(super) struct MaintenanceReaperReservation {
 impl Drop for MaintenanceReaperReservation {
     fn drop(&mut self) {
         if self.active {
-            self.registry.release_reservation();
+            self.registry.release_reservation(&self.owner);
         }
     }
 }
@@ -440,7 +450,8 @@ pub(super) struct StoreAdministration {
     session_runtime_registries: SharedSessionRuntimeRegistries,
     gate: Arc<StoreWriterGates>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
-    project_server_retirements: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    project_server_retirements:
+        Arc<tokio::sync::Mutex<Vec<project_retirement::ProjectServerRetirement>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
@@ -575,6 +586,7 @@ impl StoreAdministration {
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
+        self.ensure_account_active().await?;
         self.session_runtime_registry().await
     }
 
@@ -582,13 +594,14 @@ impl StoreAdministration {
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
+        self.ensure_account_active().await?;
         self.session_runtime_registry().await
     }
 
     pub(super) async fn registered_profile_session_database(
         &self,
     ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
-        self.ensure_profile_not_remote_deleted().await?;
+        self.ensure_account_active().await?;
         self.session_runtime_registry()
             .await?
             .profile_sessions()
@@ -623,7 +636,7 @@ impl StoreAdministration {
             .await
     }
 
-    async fn ensure_profile_not_remote_deleted(&self) -> Result<()> {
+    pub(super) async fn ensure_account_active(&self) -> Result<()> {
         let database = self.raw_registered_profile_database().await?;
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
@@ -638,6 +651,15 @@ impl StoreAdministration {
             ));
         }
         Ok(())
+    }
+
+    pub(super) async fn remote_account_deletion_tombstone(
+        &self,
+    ) -> Result<Option<crate::global_db::RemoteDeletionTombstone>> {
+        let database = self.raw_registered_profile_database().await?;
+        database
+            .remote_account_deletion_tombstone(self.profile_identity()?.profile_id().as_str())
+            .await
     }
 
     pub(super) async fn mounted_registered_session_databases(
@@ -748,39 +770,6 @@ impl StoreAdministration {
 
     pub(super) fn project_servers(&self) -> &Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>> {
         &self.project_servers
-    }
-
-    pub(super) async fn track_project_server_retirement(&self, task: tokio::task::JoinHandle<()>) {
-        let mut retirements = self.project_server_retirements.lock().await;
-        retirements.retain(|retirement| !retirement.is_finished());
-        retirements.push(task);
-    }
-
-    pub(super) async fn join_project_server_retirements(&self) {
-        let retirements = std::mem::take(&mut *self.project_server_retirements.lock().await);
-        for retirement in retirements {
-            let _ = retirement.await;
-        }
-    }
-
-    pub(super) async fn settle_project_server_retirements(
-        &self,
-        timeout: std::time::Duration,
-    ) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut retirements = self.project_server_retirements.lock().await;
-        let mut joined = Vec::new();
-        let mut settled = true;
-        for (index, retirement) in retirements.iter_mut().enumerate() {
-            match tokio::time::timeout_at(deadline, retirement).await {
-                Ok(_) => joined.push(index),
-                Err(_) => settled = false,
-            }
-        }
-        for index in joined.into_iter().rev() {
-            retirements.swap_remove(index);
-        }
-        settled
     }
 
     pub(super) async fn host_admission_broker(
@@ -979,8 +968,11 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
-    pub(super) fn reserve_retirement_reaper(&self) -> Option<MaintenanceReaperReservation> {
-        self.retirement_reapers.reserve()
+    pub(super) fn reserve_retirement_reaper(
+        &self,
+        owner: &ProjectServerKey,
+    ) -> Option<MaintenanceReaperReservation> {
+        self.retirement_reapers.reserve(owner)
     }
 
     #[cfg(unix)]
@@ -996,6 +988,7 @@ impl StoreAdministration {
         F: Future<Output = ()> + Send + 'static,
     {
         debug_assert!(Arc::ptr_eq(&reservation.registry, &self.retirement_reapers));
+        debug_assert_eq!(reservation.owner, owner.owner);
         #[cfg(test)]
         if let Some(barrier) = self
             .retirement_reapers
@@ -1032,8 +1025,15 @@ impl StoreAdministration {
             },
         );
         debug_assert!(replaced.is_none());
-        debug_assert!(state.pending > 0);
-        state.pending = state.pending.saturating_sub(1);
+        let mut remove_pending = false;
+        if let Some(pending) = state.pending.get_mut(&reservation.owner) {
+            debug_assert!(*pending > 0);
+            *pending = pending.saturating_sub(1);
+            remove_pending = *pending == 0;
+        }
+        if remove_pending {
+            state.pending.remove(&reservation.owner);
+        }
         reservation.active = false;
         drop(state);
         self.retirement_reapers.changed.notify_waiters();
@@ -1048,7 +1048,7 @@ impl StoreAdministration {
                 let mut state = self.retirement_reapers.state();
                 state.accepting = false;
                 (
-                    state.pending,
+                    state.pending.values().copied().sum::<usize>(),
                     state
                         .reapers
                         .values()
@@ -1077,6 +1077,87 @@ impl StoreAdministration {
             }
             for (_, termination) in reapers {
                 termination.wait().await;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn settle_retirement_reapers(&self, timeout: std::time::Duration) -> bool {
+        self.settle_retirement_reapers_for_owner(None, timeout, true)
+            .await
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn settle_retirement_reapers_for_project(
+        &self,
+        profile_root: &Path,
+        project_id: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        self.settle_retirement_reapers_for_owner(Some((profile_root, project_id)), timeout, false)
+            .await
+    }
+
+    #[cfg(unix)]
+    async fn settle_retirement_reapers_for_owner(
+        &self,
+        owner: Option<(&Path, &str)>,
+        timeout: std::time::Duration,
+        stop_accepting: bool,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let changed = self.retirement_reapers.changed.notified();
+            let (pending, matching) = {
+                let mut state = self.retirement_reapers.state();
+                if stop_accepting {
+                    state.accepting = false;
+                }
+                let pending = state
+                    .pending
+                    .iter()
+                    .filter(|(key, _)| {
+                        owner.is_none_or(|(profile_root, project_id)| {
+                            key.profile_root == profile_root
+                                && key.project_id.as_deref() == Some(project_id)
+                        })
+                    })
+                    .map(|(_, pending)| *pending)
+                    .sum::<usize>();
+                let matching = state
+                    .reapers
+                    .iter()
+                    .filter(|(key, _)| {
+                        owner.is_none_or(|(profile_root, project_id)| {
+                            key.owner.owner.profile_root == profile_root
+                                && key.owner.owner.project_id.as_deref() == Some(project_id)
+                        })
+                    })
+                    .map(|(_, handle)| {
+                        (handle.retired_task.clone(), Arc::clone(&handle.termination))
+                    })
+                    .collect::<Vec<_>>();
+                (pending, matching)
+            };
+            if pending == 0 && matching.is_empty() {
+                return true;
+            }
+            for (task, _) in &matching {
+                task.abort();
+            }
+            if matching.is_empty() {
+                if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                    return false;
+                }
+                continue;
+            }
+            for (_, termination) in matching {
+                if tokio::time::timeout_at(deadline, termination.wait())
+                    .await
+                    .is_err()
+                {
+                    return false;
+                }
             }
         }
     }
@@ -1137,6 +1218,7 @@ impl StoreAdministration {
         &self,
         profile_root: &Path,
     ) -> Result<Vec<crate::dashboard::AutomationSchedulerOwnerReconcileOutcome>> {
+        self.ensure_account_active().await?;
         let profile_root = authority::canonical_identity_path(profile_root)?;
         let servers = {
             let registry = self.project_servers.lock().await;

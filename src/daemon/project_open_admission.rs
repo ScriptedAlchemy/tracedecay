@@ -5,11 +5,11 @@
 //! open stays backed off, so a repeated request neither stampedes nor retries a
 //! known-unrepairable store.
 //!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
+//! `use super::*` re-exposes the daemon authorities used by these admission
+//! and ownership records.
 
 use super::*;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
@@ -78,12 +78,22 @@ pub(super) struct ProjectOpenTasks {
 struct ProjectOpenTaskRegistry {
     routes: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
     retiring: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
+    closed_profiles: BTreeSet<PathBuf>,
 }
 
 struct ProjectOpenTaskEntry {
     state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
     cancellation: CancellationToken,
+    completion: tokio::sync::watch::Receiver<bool>,
     task: JoinHandle<()>,
+}
+
+struct ProjectOpenTaskCompletionFinalizer(tokio::sync::watch::Sender<bool>);
+
+impl Drop for ProjectOpenTaskCompletionFinalizer {
+    fn drop(&mut self) {
+        self.0.send_replace(true);
+    }
 }
 
 #[derive(Clone)]
@@ -117,6 +127,30 @@ pub(super) enum ProjectOpenTaskClaim {
     InFlight(tokio::sync::watch::Receiver<ProjectOpenTaskState>),
     Failed(ProjectOpenFailure),
     Saturated,
+}
+
+fn project_route_matches_identity(
+    route: &ProjectRouteKey,
+    profile_root: &Path,
+    project_id: &str,
+    project_roots: &BTreeSet<PathBuf>,
+) -> bool {
+    route.profile_root == profile_root
+        && (project_roots.contains(&route.project_path)
+            || crate::storage::resolve_persisted_layout(&route.project_path, profile_root)
+                .ok()
+                .flatten()
+                .and_then(|layout| layout.identity.project_id)
+                .as_deref()
+                == Some(project_id))
+}
+
+async fn wait_for_project_open_task(mut completion: tokio::sync::watch::Receiver<bool>) {
+    while !*completion.borrow() {
+        if completion.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Whether the authority audit failed because it could not read the database,
@@ -339,6 +373,13 @@ impl ProjectOpenTasks {
         let now = Instant::now();
         let mut registry = self.registry.lock().await;
         registry.prune(now);
+        if registry.closed_profiles.contains(&route.profile_root) {
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
+                message: "project open denied: authenticated profile was remotely deleted"
+                    .to_owned(),
+                retry_at: None,
+            });
+        }
         if let Some(entry) = registry.retiring.get(&route) {
             return ProjectOpenTaskClaim::InFlight(entry.state.clone());
         }
@@ -357,7 +398,9 @@ impl ProjectOpenTasks {
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
+        let (task_completion, completion) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(async move {
+            let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
             let state = match open(task_cancellation).await {
                 Ok(()) => ProjectOpenTaskState::Ready,
                 Err(error) => ProjectOpenTaskState::Failed(ProjectOpenFailure::from_error(&error)),
@@ -369,6 +412,7 @@ impl ProjectOpenTasks {
             ProjectOpenTaskEntry {
                 state: state.clone(),
                 cancellation,
+                completion,
                 task,
             },
         );
@@ -414,30 +458,92 @@ impl ProjectOpenTasks {
             .await
     }
 
-    pub(super) async fn shutdown_project_roots(
+    pub(super) async fn shutdown_project_identity(
         &self,
         profile_root: &Path,
+        project_id: &str,
         project_roots: &std::collections::BTreeSet<PathBuf>,
     ) -> bool {
-        {
+        self.shutdown_project_identity_with_deadline(
+            profile_root,
+            project_id,
+            project_roots,
+            DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await
+    }
+
+    pub(super) async fn shutdown_project_identity_with_deadline(
+        &self,
+        profile_root: &Path,
+        project_id: &str,
+        project_roots: &std::collections::BTreeSet<PathBuf>,
+        timeout: Duration,
+    ) -> bool {
+        let routes = {
             let mut registry = self.registry.lock().await;
-            let routes = registry
+            let mut routes = registry
                 .routes
                 .keys()
                 .filter(|route| {
-                    route.profile_root == profile_root
-                        && project_roots.contains(&route.project_path)
+                    project_route_matches_identity(route, profile_root, project_id, project_roots)
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            for route in routes {
+            for route in &routes {
+                if let Some(entry) = registry.routes.remove(route) {
+                    entry.cancellation.cancel();
+                    registry.retiring.insert(route.clone(), entry);
+                }
+            }
+            let retiring_routes = registry
+                .retiring
+                .keys()
+                .filter(|route| {
+                    !routes.contains(route)
+                        && project_route_matches_identity(
+                            route,
+                            profile_root,
+                            project_id,
+                            project_roots,
+                        )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            routes.extend(retiring_routes);
+            routes
+        };
+        self.drain_retiring_routes(routes, timeout).await
+    }
+
+    pub(super) async fn shutdown_profile_with_deadline(
+        &self,
+        profile_root: &Path,
+        timeout: Duration,
+    ) -> bool {
+        let routes = {
+            let mut registry = self.registry.lock().await;
+            registry.closed_profiles.insert(profile_root.to_path_buf());
+            let active = registry
+                .routes
+                .keys()
+                .filter(|route| route.profile_root == profile_root)
+                .cloned()
+                .collect::<Vec<_>>();
+            for route in active {
                 if let Some(entry) = registry.routes.remove(&route) {
                     entry.cancellation.cancel();
                     registry.retiring.insert(route, entry);
                 }
             }
-        }
-        self.drain_retiring(DAEMON_TASK_ABORT_DEADLINE).await
+            registry
+                .retiring
+                .keys()
+                .filter(|route| route.profile_root == profile_root)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        self.drain_retiring_routes(routes, timeout).await
     }
 
     pub(super) async fn shutdown_with_deadline(
@@ -452,26 +558,40 @@ impl ProjectOpenTasks {
                 registry.retiring.insert(route, entry);
             }
         }
-        self.drain_retiring(cooperative_deadline + post_abort_deadline)
+        let routes = self
+            .registry
+            .lock()
+            .await
+            .retiring
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.drain_retiring_routes(routes, cooperative_deadline + post_abort_deadline)
             .await
     }
 
-    async fn drain_retiring(&self, timeout: Duration) -> bool {
+    async fn drain_retiring_routes(&self, routes: Vec<ProjectRouteKey>, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut registry = self.registry.lock().await;
-        let routes = registry.retiring.keys().cloned().collect::<Vec<_>>();
+        let completions = {
+            let mut registry = self.registry.lock().await;
+            routes
+                .into_iter()
+                .filter_map(|route| {
+                    let entry = registry.retiring.get_mut(&route)?;
+                    entry.cancellation.cancel();
+                    Some((route, entry.completion.clone()))
+                })
+                .collect::<Vec<_>>()
+        };
         let mut joined = Vec::new();
         let mut drained = true;
-        for route in routes {
-            let Some(entry) = registry.retiring.get_mut(&route) else {
-                continue;
-            };
-            entry.cancellation.cancel();
-            match tokio::time::timeout_at(deadline, &mut entry.task).await {
+        for (route, completion) in completions {
+            match tokio::time::timeout_at(deadline, wait_for_project_open_task(completion)).await {
                 Ok(_) => joined.push(route),
                 Err(_) => drained = false,
             }
         }
+        let mut registry = self.registry.lock().await;
         for route in joined {
             registry.retiring.remove(&route);
         }

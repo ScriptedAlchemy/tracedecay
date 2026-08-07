@@ -1,5 +1,7 @@
 //! Destructive lifecycle administration for mounted remote deletion requests.
 
+mod runtime_retirement;
+
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -11,9 +13,7 @@ use super::super::remote_deletion::{
     RemoteDeletionExecutionError, RemoteDeletionFailureCode, RemoteDeletionPhase,
     RemoteDeletionReceipt, RemoteDeletionReceiptTarget,
 };
-use super::{
-    StoreAdministration, authority, destructive_reservation_error, project_server_lifecycle,
-};
+use super::{StoreAdministration, authority, destructive_reservation_error};
 
 struct RemoteDeletionCleanupError {
     code: RemoteDeletionFailureCode,
@@ -385,12 +385,90 @@ impl StoreAdministration {
                     };
                     receipt.tombstone_id = Some(tombstone.tombstone_id.clone());
                     receipt.tombstone_recorded = true;
-                    if tombstone.cleanup == crate::global_db::RemoteDeletionCleanupState::Deleted {
-                        return Ok(receipt.complete());
+                    let open_tasks =
+                        super::super::project_open_tasks(owners.project_open_gates.as_ref()).await;
+                    if !open_tasks
+                        .shutdown_profile_with_deadline(
+                            &profile_root,
+                            super::super::DAEMON_TASK_ABORT_DEADLINE,
+                        )
+                        .await
+                    {
+                        let cleanup = crate::global_db::RemoteDeletionCleanupState::Settling {
+                            failure_code:
+                                RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                            phase: RemoteDeletionPhase::CancelRuntimeOwners,
+                            retryable: true,
+                        };
+                        database
+                            .transition_remote_deletion_tombstone(
+                                &tombstone,
+                                tombstone.cleanup.clone(),
+                                cleanup,
+                            )
+                            .await
+                            .map_err(|error| {
+                                RemoteDeletionExecutionError::new(
+                                    receipt.clone(),
+                                    RemoteDeletionFailureCode::TombstoneUnavailable,
+                                    RemoteDeletionPhase::PersistTombstone,
+                                    true,
+                                    error,
+                                )
+                            })?;
+                        return Err(RemoteDeletionExecutionError::new(
+                            receipt,
+                            RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                            RemoteDeletionPhase::CancelRuntimeOwners,
+                            true,
+                            TraceDecayError::Config {
+                                message:
+                                    "remote-deleted account project opens are still settling"
+                                        .to_owned(),
+                            },
+                        ));
                     }
                     self.shutdown_host_admission_replay().await;
                     self.session_temporal_refresh_schedulers.shutdown().await;
                     self.host_admission_brokers.lock().await.clear();
+                    #[cfg(unix)]
+                    if !self
+                        .settle_retirement_reapers(super::super::DAEMON_TASK_ABORT_DEADLINE)
+                        .await
+                    {
+                        let cleanup = crate::global_db::RemoteDeletionCleanupState::Settling {
+                            failure_code: RemoteDeletionFailureCode::RuntimeOwnersSettling,
+                            phase: RemoteDeletionPhase::CancelRuntimeOwners,
+                            retryable: true,
+                        };
+                        database
+                            .transition_remote_deletion_tombstone(
+                                &tombstone,
+                                tombstone.cleanup.clone(),
+                                cleanup,
+                            )
+                            .await
+                            .map_err(|error| {
+                                RemoteDeletionExecutionError::new(
+                                    receipt.clone(),
+                                    RemoteDeletionFailureCode::TombstoneUnavailable,
+                                    RemoteDeletionPhase::PersistTombstone,
+                                    true,
+                                    error,
+                                )
+                            })?;
+                        return Err(RemoteDeletionExecutionError::new(
+                            receipt,
+                            RemoteDeletionFailureCode::RuntimeOwnersSettling,
+                            RemoteDeletionPhase::CancelRuntimeOwners,
+                            true,
+                            TraceDecayError::Config {
+                                message:
+                                    "remote-deleted account runtime owners are still settling"
+                                        .to_owned(),
+                            },
+                        ));
+                    }
                     let projects = match self
                         .remote_deletion_project_ids(&database, &profile_root)
                         .await
@@ -611,7 +689,7 @@ impl StoreAdministration {
             })?;
         let open_tasks = super::super::project_open_tasks(owners.project_open_gates.as_ref()).await;
         if !open_tasks
-            .shutdown_project_roots(profile_root, &project_roots)
+            .shutdown_project_identity(profile_root, project_id, &project_roots)
             .await
         {
             return Err(cleanup_error(
@@ -836,152 +914,6 @@ impl StoreAdministration {
                     error,
                 )
             })?;
-        Ok(())
-    }
-
-    async fn remote_deleted_project_roots(
-        &self,
-        database: &Arc<crate::global_db::RegisteredGlobalDb>,
-        profile_root: &Path,
-        project_id: &str,
-    ) -> Result<BTreeSet<std::path::PathBuf>> {
-        let mut roots = BTreeSet::new();
-        if let Some(context) = database.project_registry_context_by_id(project_id).await? {
-            roots.insert(std::path::PathBuf::from(context.project.canonical_root));
-            roots.insert(std::path::PathBuf::from(context.project.display_root));
-            if let Some(git_common_dir) = context.project.git_common_dir {
-                roots.insert(std::path::PathBuf::from(git_common_dir));
-            }
-            roots.extend(
-                context
-                    .aliases
-                    .into_iter()
-                    .map(|alias| std::path::PathBuf::from(alias.alias_path)),
-            );
-        }
-        {
-            let registry = self.project_servers.lock().await;
-            roots.extend(
-                registry
-                    .servers
-                    .keys()
-                    .filter(|key| {
-                        key.owner.profile_root == profile_root
-                            && key.owner.project_id.as_deref() == Some(project_id)
-                    })
-                    .map(|key| key.project_root.clone()),
-            );
-        }
-        roots.retain(|root| root.is_absolute());
-        Ok(roots)
-    }
-
-    async fn retire_remote_deleted_project_work(
-        &self,
-        profile_root: &Path,
-        project_id: &str,
-    ) -> Result<()> {
-        let (owners, servers) = {
-            let mut registry = self.project_servers.lock().await;
-            let owners = registry
-                .servers
-                .keys()
-                .filter(|key| {
-                    key.owner.profile_root == profile_root
-                        && key.owner.project_id.as_deref() == Some(project_id)
-                })
-                .map(|key| key.owner.clone())
-                .collect::<Vec<_>>();
-            let servers = owners
-                .iter()
-                .flat_map(|owner| registry.remove_owner(owner))
-                .collect::<Vec<_>>();
-            (owners, servers)
-        };
-        for server in &servers {
-            server.revoke_project_server_responses();
-            server.cancel_startup_transcript_ingest();
-            server.abort_project_server_requests();
-        }
-        for owner in &owners {
-            self.session_temporal_refresh_schedulers
-                .retire_project(owner)
-                .await;
-        }
-        #[cfg(unix)]
-        self.abort_remote_deleted_maintenance_schedulers(profile_root, project_id)
-            .await?;
-        project_server_lifecycle::schedule_project_server_retirement(self, servers, None).await;
-        if !self
-            .settle_project_server_retirements(super::super::DAEMON_TASK_ABORT_DEADLINE)
-            .await
-        {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "remote-deleted project '{project_id}' runtime owners are still settling"
-                ),
-            });
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    async fn abort_remote_deleted_maintenance_schedulers(
-        &self,
-        profile_root: &Path,
-        project_id: &str,
-    ) -> Result<()> {
-        let mut tasks = Vec::new();
-        {
-            let mut schedulers = self.automation_schedulers.lock().await;
-            let keys = schedulers
-                .keys()
-                .filter(|key| {
-                    key.owner.profile_root == profile_root
-                        && key.owner.project_id.as_deref() == Some(project_id)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            for key in keys {
-                if let Some(mut scheduler) = schedulers.remove(&key)
-                    && let Some(task) = scheduler.task.take()
-                {
-                    tasks.push(task);
-                }
-            }
-        }
-        {
-            let mut schedulers = self.memory_repair_schedulers.lock().await;
-            let keys = schedulers
-                .keys()
-                .filter(|key| {
-                    key.owner.profile_root == profile_root
-                        && key.owner.project_id.as_deref() == Some(project_id)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            for key in keys {
-                if let Some(mut scheduler) = schedulers.remove(&key)
-                    && let Some(task) = scheduler.task.take()
-                {
-                    tasks.push(task);
-                }
-            }
-        }
-        for task in tasks {
-            task.abort();
-            self.track_project_server_retirement(task).await;
-        }
-        if !self
-            .settle_project_server_retirements(super::super::DAEMON_TASK_ABORT_DEADLINE)
-            .await
-        {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "remote-deleted project '{project_id}' maintenance tasks are still settling"
-                ),
-            });
-        }
         Ok(())
     }
 }

@@ -41,15 +41,29 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         authority.record().epoch,
         &authority.record().process_run_id,
     )?;
-    let (listener, endpoint) = BrokerListener::bind(authority.endpoint()).await?;
-    authority.publish_endpoint(&endpoint)?;
-    log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
-
     let store_administration =
         StoreAdministration::default().with_profile_identity(authority.profile_identity().clone());
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation = DaemonInvocationState::default();
     invocation.configure_github_read_only_credentials(authority.profile_identity());
+    let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: store_administration.clone(),
+        invocation: invocation.clone(),
+        project_open_gates: Arc::clone(&project_open_gates),
+    };
+    if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
+        remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
+    {
+        log_daemon_event(
+            "remote_account_deletion_resume",
+            &[("outcome", format!("{:?}", receipt.status))],
+        );
+        return Ok(());
+    }
+    let (listener, endpoint) = BrokerListener::bind(authority.endpoint()).await?;
+    authority.publish_endpoint(&endpoint)?;
+    log_daemon_event("daemon_listening", &[("endpoint", endpoint.to_string())]);
+
     let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
     install_http_application_cold_resolver(
         &http_application_registry,
@@ -200,6 +214,24 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         authority.record().epoch,
         &authority.record().process_run_id,
     )?;
+    let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
+    let engine = DaemonEngine::default()
+        .with_profile_identity(authority.profile_identity().clone())
+        .with_http_application_registry(http_application_registry.clone());
+    let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
+        remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
+    {
+        log_daemon_event(
+            "remote_account_deletion_resume",
+            &[("outcome", format!("{:?}", receipt.status))],
+        );
+        return Ok(());
+    }
     let socket_path = match authority.endpoint() {
         transport::DaemonEndpoint::Unix(path) => path.clone(),
         transport::DaemonEndpoint::Loopback(_) => {
@@ -229,10 +261,6 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_listening",
         &[("endpoint", bound_endpoint.to_string())],
     );
-    let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
-    let engine = DaemonEngine::default()
-        .with_profile_identity(authority.profile_identity().clone())
-        .with_http_application_registry(http_application_registry.clone());
     install_http_application_cold_resolver(
         &http_application_registry,
         engine.store_administration.clone(),

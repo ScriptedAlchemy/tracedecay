@@ -399,6 +399,128 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn deletion_drain_retains_already_transferred_maintenance_reaper_until_retry() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/deletion-reaper-test"),
+            global_db_path: PathBuf::from("/profiles/deletion-reaper-test/global.db"),
+            project_id: Some("deletion-reaper-test".to_owned()),
+            store_root: PathBuf::from("/stores/deletion-reaper-test"),
+            graph_db_path: PathBuf::from("/stores/deletion-reaper-test/graph.db"),
+        },
+        project_root: PathBuf::from("/projects/deletion-reaper-test"),
+        scope_prefix: None,
+    };
+    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    started_rx.await.expect("maintenance owner started");
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(key.clone(), test_automation_scheduler_handle(task));
+    let retirement = engine
+        .retire_automation_scheduler_locked(&key)
+        .await
+        .expect("transfer owner to retirement reaper");
+    engine
+        .store_administration
+        .wait_for_retirement_reaper_count_for_test(1)
+        .await;
+
+    assert!(
+        !engine
+            .store_administration
+            .settle_retirement_reapers(tokio::time::Duration::from_millis(25))
+            .await,
+        "deletion must remain settling while a transferred owner can still write"
+    );
+    assert_eq!(
+        engine.store_administration.retirement_reaper_count().await,
+        1
+    );
+    release.release();
+    completed_rx.await.expect("maintenance owner completed");
+    assert!(
+        engine
+            .store_administration
+            .settle_retirement_reapers(tokio::time::Duration::from_secs(1))
+            .await,
+        "retry must join the retained retirement reaper"
+    );
+    retirement.wait().await;
+    assert_eq!(
+        engine.store_administration.retirement_reaper_count().await,
+        0
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn project_reaper_settle_ignores_unrelated_pending_registration() {
+    let engine = DaemonEngine::default();
+    let unrelated = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/unrelated-pending-reaper"),
+            global_db_path: PathBuf::from("/profiles/unrelated-pending-reaper/global.db"),
+            project_id: Some("proj_unrelated_pending_reaper".to_owned()),
+            store_root: PathBuf::from("/stores/unrelated-pending-reaper"),
+            graph_db_path: PathBuf::from("/stores/unrelated-pending-reaper/graph.db"),
+        },
+        project_root: PathBuf::from("/projects/unrelated-pending-reaper"),
+        scope_prefix: None,
+    };
+    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    started_rx
+        .await
+        .expect("unrelated maintenance owner started");
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(unrelated.clone(), test_automation_scheduler_handle(task));
+    let barrier = engine
+        .store_administration
+        .install_retirement_reaper_registration_barrier_for_test();
+    let retirement_engine = engine.clone();
+    let retirement_key = unrelated.clone();
+    let retirement = tokio::spawn(async move {
+        retirement_engine
+            .retire_automation_scheduler_locked(&retirement_key)
+            .await
+    });
+    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, barrier.wait_until_reached())
+        .await
+        .expect("unrelated reaper registration barrier was not reached");
+
+    let target_settled = engine
+        .store_administration
+        .settle_retirement_reapers_for_project(
+            std::path::Path::new("/profiles/target-project"),
+            "proj_target",
+            tokio::time::Duration::from_millis(25),
+        )
+        .await;
+    barrier.release();
+    let retirement = retirement
+        .await
+        .expect("unrelated retirement task")
+        .expect("unrelated retirement ownership");
+    release.release();
+    completed_rx
+        .await
+        .expect("unrelated maintenance owner completed");
+    retirement.wait().await;
+    assert!(
+        target_settled,
+        "target cleanup must not wait on an unrelated pending reaper registration"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_contended_repair_retirement_blocks_restart_until_join() {
     use super::super::memory_repair_scheduler::MemoryRepairSchedulerReconcileOutcome;
 

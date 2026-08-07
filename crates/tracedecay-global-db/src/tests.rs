@@ -153,6 +153,58 @@ async fn remote_deletion_tombstone_preserves_exact_identity_and_cleanup_state() 
 }
 
 #[tokio::test]
+async fn deleted_remote_tombstone_can_reopen_for_post_tombstone_reconciliation() {
+    let harness = RegisteredGlobalDbHarness::open("remote-deletion-reconciliation").await;
+    let pending = RemoteDeletionTombstone {
+        target: RemoteDeletionTarget::Account,
+        profile_id: "profile_reconciliation".to_owned(),
+        project_id: None,
+        tombstone_id: "tombstone.reconciliation".to_owned(),
+        recorded_at_micros: 1,
+        cleanup: RemoteDeletionCleanupState::Pending,
+    };
+    harness
+        .registered
+        .record_remote_deletion_tombstone(pending.clone())
+        .await
+        .expect("record account tombstone");
+    let deleted = RemoteDeletionTombstone {
+        cleanup: RemoteDeletionCleanupState::Deleted,
+        ..pending.clone()
+    };
+    harness
+        .registered
+        .transition_remote_deletion_tombstone(
+            &pending,
+            RemoteDeletionCleanupState::Pending,
+            RemoteDeletionCleanupState::Deleted,
+        )
+        .await
+        .expect("complete account deletion");
+    let settling = RemoteDeletionCleanupState::Settling {
+        failure_code: RemoteDeletionFailureCode::RuntimeOwnersSettling,
+        phase: RemoteDeletionPhase::CancelRuntimeOwners,
+        retryable: true,
+    };
+
+    assert!(matches!(
+        harness
+            .registered
+            .transition_remote_deletion_tombstone(
+                &deleted,
+                RemoteDeletionCleanupState::Deleted,
+                settling,
+            )
+            .await
+            .expect("reopen cleanup after post-tombstone work appears"),
+        RemoteDeletionTombstoneTransitionOutcome::Updated(RemoteDeletionTombstone {
+            cleanup: RemoteDeletionCleanupState::Settling { .. },
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn git_common_dir_aliases_share_one_project_and_store_authority() {
     let harness = RegisteredGlobalDbHarness::open("common-dir-single-authority").await;
     let root = harness.storage_root().join("repository");
