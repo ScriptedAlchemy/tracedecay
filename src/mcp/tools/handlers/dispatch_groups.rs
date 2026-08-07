@@ -371,35 +371,10 @@ pub(super) async fn dispatch_git_tools(
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-<<<<<<< ours
     // Tree walks and revwalks still need a uniform dispatch deadline. Branch
     // generation reads additionally carry this deadline into their bounded
     // blocking/ref and daemon-generation executors, so timing out this future
     // also tells the underlying operation to stop at its next checkpoint.
-=======
-    if matches!(
-        tool_name,
-        "tracedecay_branch_search" | "tracedecay_branch_diff"
-    ) {
-        let controls = tracedecay_application::BranchQueryControlsV1 {
-            deadline: options.application_deadline.clone(),
-            cancellation: options.application_cancellation.clone(),
-        };
-        return if tool_name == "tracedecay_branch_search" {
-            git::handle_branch_search(options.branch_query_port, args, controls).await
-        } else {
-            git::handle_branch_diff(options.branch_query_port, args, controls).await
-        };
-    }
-
-    // Every git handler below performs unbounded gix work — tree walks,
-    // revwalks, diffs, the branch-add index build — so a diverged or
-    // pathological ref would hang the request. The admission layer carries a
-    // dispatch deadline for exactly this (thirty seconds by default, see
-    // `dispatch_deadline_horizon_micros`); enforcing it here bounds every
-    // handler uniformly and reports exhaustion as the same typed semantic
-    // error the other git failures surface.
->>>>>>> theirs
     let carried_deadline = options.application_deadline.as_ref();
     let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
 
@@ -410,7 +385,6 @@ pub(super) async fn dispatch_git_tools(
             "tracedecay_changelog" => git::handle_changelog(cg, args).await,
             "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
             "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
-<<<<<<< ours
             "tracedecay_branch_search" => {
                 git::handle_branch_search(
                     cg,
@@ -442,9 +416,6 @@ pub(super) async fn dispatch_git_tools(
                 )
                 .await
             }
-=======
-            "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
->>>>>>> theirs
             _ => Err(unknown_tool_error(tool_name)),
         }
     };
