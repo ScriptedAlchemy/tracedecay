@@ -126,12 +126,14 @@ describe('the multi-root capability the daemon reports', () => {
     expect(panel.querySelector('[data-multi-root="unavailable"]')).toBeNull();
   });
 
-  it('reports a capability read that failed as unknown, not as no scope set', async () => {
+  it('reports a capability read that failed with its typed state, not as no scope set', async () => {
     vi.stubGlobal('fetch', serve({}, 500));
     renderPanel();
 
+    // The refusal keeps its own taxonomy: an HTTP 500 arrives as the typed
+    // `error` outcome with its detail, not as one flattened "did not answer".
     const panel = await screen.findByLabelText('Multi-root scope set');
-    await waitFor(() => expect(panel.textContent).toMatch(/did not answer/i));
+    await waitFor(() => expect(panel.textContent).toMatch(/HTTP 500/i));
     expect(panel.querySelector('[data-multi-root]')).toBeNull();
   });
 });

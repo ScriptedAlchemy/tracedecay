@@ -114,10 +114,13 @@ function PlanBody({ data }: { data: z.infer<typeof PlanSchema> }) {
     (hygiene ? hygiene.secret_like.length + hygiene.transient.length : 0) +
     supersession.length;
   if (flagged === 0) {
+    // The hygiene figures come only with a served `hygiene` block; a plan
+    // without one has not measured them, and "no candidates" is a measurement.
     return (
       <p className="text-2xs text-text-muted">
-        nothing proposed across {data.total_facts.toLocaleString()} facts — no near-duplicate,
-        secret-like, transient, or superseded candidates
+        {hygiene
+          ? `nothing proposed across ${data.total_facts.toLocaleString()} facts — no near-duplicate, secret-like, transient, or superseded candidates`
+          : `nothing proposed across ${data.total_facts.toLocaleString()} facts — no near-duplicate candidates · hygiene and supersession figures unreported`}
       </p>
     );
   }
@@ -126,9 +129,9 @@ function PlanBody({ data }: { data: z.infer<typeof PlanSchema> }) {
     <div className="flex flex-col gap-2">
       <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-2xs">
         <PlanFigure label="dedup deletes" value={data.actions.length} />
-        <PlanFigure label="supersession" value={supersession.length} />
-        <PlanFigure label="secret-like" value={hygiene?.secret_like.length ?? 0} />
-        <PlanFigure label="transient" value={hygiene?.transient.length ?? 0} />
+        <PlanFigure label="supersession" value={hygiene ? supersession.length : null} />
+        <PlanFigure label="secret-like" value={hygiene ? hygiene.secret_like.length : null} />
+        <PlanFigure label="transient" value={hygiene ? hygiene.transient.length : null} />
       </dl>
       {shown.length > 0 ? (
         <ul className="flex flex-col gap-1.5" aria-label="Possible supersessions">
@@ -159,11 +162,12 @@ function PlanBody({ data }: { data: z.infer<typeof PlanSchema> }) {
   );
 }
 
-function PlanFigure({ label, value }: { label: string; value: number }) {
+/** `null` is a figure the plan did not report, which is not a zero. */
+function PlanFigure({ label, value }: { label: string; value: number | null }) {
   return (
     <div className="flex items-baseline justify-between gap-2">
       <dt className="td-legend">{label}</dt>
-      <dd className="tabular text-2xs">{value.toLocaleString()}</dd>
+      <dd className="tabular text-2xs">{value == null ? 'unreported' : value.toLocaleString()}</dd>
     </div>
   );
 }

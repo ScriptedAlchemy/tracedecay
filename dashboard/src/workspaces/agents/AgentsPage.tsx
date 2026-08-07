@@ -151,8 +151,18 @@ export function AgentsPage() {
         const rows: UsageRow[] = data.by_category;
         const dominance = summarizeDominance(rows);
         const diag = envelopePayload(diagnostics.data);
-        const diagnosticsAvailable = diag?.available !== false;
-        const diagnosticsRead = diagnosticsAvailable ? diag : undefined;
+        const diagnosticsRead = diag?.available === false ? undefined : diag ?? undefined;
+        // A dash in the diagnostics figures is three different facts: a read
+        // still in flight, a read that failed, and a source that answered and
+        // declared itself unavailable. Only the last one may be called
+        // "unavailable" — the strip used to label all three that way.
+        const diagnosticsAbsence = diagnostics.isPending
+          ? 'diagnostics still loading'
+          : diag == null
+            ? 'analytics diagnostics could not be read'
+            : diag.available === false
+              ? 'analytics diagnostics unavailable'
+              : null;
         const window = describeWindow(
           data.available ? data.event_count : diagnosticsRead?.event_count,
           diagnosticsRead?.events_per_hour,
@@ -163,7 +173,7 @@ export function AgentsPage() {
             ? `${diagnosticsRead.hook_window.rows_scanned.toLocaleString()} hook rows scanned`
             : diagnosticsRead
               ? 'hook window unreported'
-              : 'analytics diagnostics unavailable';
+              : (diagnosticsAbsence ?? 'analytics diagnostics unavailable');
         return (
           <div
             className="flex h-full flex-col overflow-auto"
@@ -215,7 +225,7 @@ export function AgentsPage() {
                 {
                   label: 'mcp tool calls',
                   value: exact(diagnosticsRead?.mcp_tool_call_count),
-                  note: 'inside the window',
+                  note: diagnosticsRead ? 'inside the window' : (diagnosticsAbsence ?? 'inside the window'),
                 },
                 {
                   label: 'hook calls',

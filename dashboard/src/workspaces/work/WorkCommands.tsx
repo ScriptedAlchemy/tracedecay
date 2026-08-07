@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { WorkProjection, WorkProjectionSnapshotV1 } from '../../contracts/index.ts';
-import { StateChip } from '../../ui/StateChip.tsx';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import type { WorkResult } from './workApi.ts';
 import { useWorkCommand } from './workQueries.ts';
@@ -54,16 +54,16 @@ const COMMAND_LABEL: Record<WorkCommandKind, string> = {
 function commandReading(
   result: WorkResult<WorkProjection> | undefined,
   pending: boolean,
-): { state: 'loading' | 'ready' | 'conflicting' | 'error'; detail: string } | undefined {
+): { state: DomainStateKind; detail: string } | undefined {
   if (pending) return { state: 'loading', detail: 'sending' };
   if (result === undefined) return undefined;
   if (result.outcome === 'value') {
     return { state: 'ready', detail: `committed at version ${result.value.version}` };
   }
-  return {
-    state: result.state === 'conflicting' ? 'conflicting' : 'error',
-    detail: result.detail,
-  };
+  // The refusal's own taxonomy, untranslated: an unreachable daemon, a denied
+  // write and a moved task are different facts, and mapping everything but
+  // `conflicting` onto `error` dressed all of them in the same chip.
+  return { state: result.state, detail: result.detail };
 }
 
 function CommandButton({
@@ -88,10 +88,7 @@ function CommandButton({
         {label}
       </button>
       {reading === undefined ? null : (
-        <StateChip
-          kind={reading.state === 'loading' ? 'loading' : reading.state}
-          detail={reading.detail}
-        />
+        <StateChip kind={reading.state} detail={reading.detail} />
       )}
     </div>
   );

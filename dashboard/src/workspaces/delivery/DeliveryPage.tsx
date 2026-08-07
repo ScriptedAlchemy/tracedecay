@@ -99,11 +99,43 @@ export function DeliveryPage() {
               </div>
             );
           }
-
-          const tree = data.project_tree ?? [];
+          // Every other non-ok status — `registry_unavailable` today, whatever
+          // `projects.rs` adds tomorrow (`status` is a plain string on the
+          // wire) — is a failed read. It used to fall through to
+          // `project_tree ?? []` and draw the same pixels as a measured empty
+          // registry; a refused read must say so instead.
+          if (data.status !== 'ok') {
+            return (
+              <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+                <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+                  <StateChip
+                    kind={data.status === 'registry_unavailable' ? 'unavailable' : 'unknown'}
+                    detail={
+                      data.status === 'registry_unavailable'
+                        ? 'project registry read failed'
+                        : `unrecognised registry status: ${data.status}`
+                    }
+                  />
+                  {data.error ? (
+                    <p className="text-xs leading-relaxed text-text-muted">{data.error}</p>
+                  ) : null}
+                </div>
+              </div>
+            );
+          }
+          // `ok` sends the tree, but the field is nullable because the failure
+          // responses send it as an explicit null. A null here contradicts the
+          // status and is not an empty workspace.
+          if (!data.project_tree) {
+            return (
+              <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+                <StateChip kind="partial" detail="registry response is inconsistent" />
+              </div>
+            );
+          }
           return (
             <DeliveryBody_
-              tree={tree}
+              tree={data.project_tree}
               truncated={data.truncated === true}
               selectedId={selectedId}
               onSelect={setSelectedId}
@@ -209,7 +241,15 @@ function DeliveryBody_({
         ]}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row">
+      {/* The scrolling body takes a name and the tab stop: wide field plots
+        * and tables can overflow it with nothing focusable in view
+        * (axe: scrollable-region-focusable). */}
+      <div
+        role="region"
+        aria-label="Delivery content"
+        tabIndex={0}
+        className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row"
+      >
         <div className="flex min-w-0 flex-1 flex-col gap-2">
           <DeliveryFieldPlot
             field={field}
@@ -466,6 +506,9 @@ function RepoTable({
       <div
         role="region"
         aria-label="Repositories table"
+        // Table rows hold no focusable elements, so the scroll region itself
+        // must be keyboard-operable.
+        tabIndex={0}
         className="mt-1.5 max-h-80 overflow-auto border border-edge-subtle"
       >
         <table className="w-full border-collapse text-2xs">
@@ -662,7 +705,11 @@ function RepoDetail({
             />
           ) : (
             <>
-              <ul className="max-h-40 overflow-auto border border-edge-subtle">
+              <ul
+                aria-label="Branch names"
+                tabIndex={0}
+                className="max-h-40 overflow-auto border border-edge-subtle"
+              >
                 {group.branches.map((branch) => (
                   <li
                     key={branch}

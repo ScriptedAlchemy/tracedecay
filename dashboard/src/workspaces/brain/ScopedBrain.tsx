@@ -2,7 +2,12 @@ import { useMemo, useRef } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
-import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
+import {
+  CenteredState,
+  ReadSection,
+  envelopeReadState,
+  type ReadState,
+} from '../../ui/ReadSection.tsx';
 import { FigureRail } from '../../ui/instrument.tsx';
 import { elideStart, splitCount } from '../../ui/format.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
@@ -121,10 +126,23 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     analyticsRead?.available === true && analyticsRead.usage.available ? analyticsRead.usage : null;
 
   // Named per source, so a dash in the readout is accounted for rather than
-  // being left to read as zero. Only for sources that answered and declared
-  // themselves unavailable — a read still in flight, or one that failed, is
-  // already reported by its own boundary.
+  // being left to read as zero. Of the HUD's sources only the subgraph has its
+  // own boundary; the overview, memory and analytics reads report here — a
+  // read still in flight, a failed read and a source that declared itself
+  // unavailable are three different sentences, not one shared dash.
+  const readAbsence = (
+    name: string,
+    read: { isPending: boolean; data: EnvelopeResult<unknown> | undefined },
+  ): string | null =>
+    read.isPending
+      ? `${name}: still reading.`
+      : read.data?.outcome === 'transport'
+        ? `${name}: the read failed${read.data.detail ? ` (${read.data.detail})` : ''}.`
+        : null;
   const unmeasured = [
+    readAbsence('Graph totals', overview),
+    readAbsence('Memory', memory),
+    readAbsence('Analytics', analytics),
     memoryRead !== null && memoryRead.exists === false
       ? `Memory: ${memoryRead.error || 'this project has no memory bank.'}`
       : null,
@@ -256,7 +274,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
 function projectContextReadState(
   pending: boolean,
   result: ReturnType<typeof useProjectEntry>['data'],
-): import('../../ui/ReadSection.tsx').ReadState<ProjectContextPayloadV1> {
+): ReadState<ProjectContextPayloadV1> {
   if (pending) return { kind: 'blocked', state: 'loading', detail: 'reading project registry' };
   if (!result) return { kind: 'blocked', state: 'unknown', detail: 'no response recorded' };
   if (result.outcome === 'transport') {

@@ -14,8 +14,10 @@
  * work across it".
  */
 import { multiRootReading, useCapabilities } from '../../data/query/capabilities.ts';
-import type { MultiRootReading } from '../../data/query/capabilities.ts';
+import type { CapabilitiesRead, MultiRootReading } from '../../data/query/capabilities.ts';
+import type { LegacyResult } from '../../data/query/legacy.ts';
 import { CenteredState } from '../../ui/ReadSection.tsx';
+import { StateChip } from '../../ui/StateChip.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { elideStart } from '../../ui/format.ts';
 
@@ -28,17 +30,58 @@ export function MultiRootPanel() {
   if (capabilities.isPending) {
     return <PanelFrame><p className="td-value text-3xs text-text-muted">reading capabilities…</p></PanelFrame>;
   }
-  if (!result || result.outcome !== 'ok') {
+  if (!result) {
     return (
       <PanelFrame>
         <p className="td-value text-3xs text-text-muted">
-          The capability bundle did not answer, so whether a scope set is mounted is unknown.
+          The capability read produced no response, so whether a scope set is mounted is unknown.
         </p>
       </PanelFrame>
     );
   }
+  if (result.outcome !== 'ok') {
+    return <PanelFrame><CapabilityRefusal result={result} /></PanelFrame>;
+  }
 
   return <PanelFrame><MultiRootBody reading={multiRootReading(result.data.multi_root)} /></PanelFrame>;
+}
+
+/** The bundle's typed refusals, each wearing its own state. One muted "did not
+ * answer" sentence used to cover all six, which told a reader with an expired
+ * session and a reader whose daemon was down the same thing. */
+function CapabilityRefusal({
+  result,
+}: {
+  result: Exclude<LegacyResult<CapabilitiesRead>, { outcome: 'ok' }>;
+}) {
+  switch (result.outcome) {
+    case 'unavailable':
+      return (
+        <StateChip
+          kind="unavailable"
+          detail={result.reason ?? `capability bundle reported ${result.status}`}
+        />
+      );
+    case 'offline':
+      return <StateChip kind="offline" detail="the daemon could not be reached" />;
+    case 'unauthorized':
+      return <StateChip kind="unauthorized" detail="the capability read was not authorized" />;
+    case 'denied':
+      return <StateChip kind="denied" detail="the capability read was denied" />;
+    case 'error':
+      return <StateChip kind="error" detail={result.detail} />;
+    case 'unsupported_schema':
+      return (
+        <StateChip
+          kind="unsupported_schema"
+          detail="the capability bundle is not a shape this build reads"
+        />
+      );
+    default: {
+      const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
 }
 
 function MultiRootBody({ reading }: { reading: MultiRootReading }) {

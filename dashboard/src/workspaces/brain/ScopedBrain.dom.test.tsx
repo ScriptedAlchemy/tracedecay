@@ -199,7 +199,9 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByText(/the read failed/i)).toBeTruthy());
+    // The boundary chip plus the HUD's per-source accounting lines — several
+    // sources say so, and each of them is telling the truth.
+    await waitFor(() => expect(screen.getAllByText(/the read failed/i).length).toBeGreaterThan(0));
     expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
     expect(screen.queryByTestId('graph-canvas')).toBeNull();
     // The independently successful registry backbone remains available.
@@ -231,7 +233,12 @@ describe('ScopedBrain', () => {
       expect(screen.getByText(/no symbols are indexed for ai-train/i)).toBeTruthy(),
     );
     expect(screen.queryByText(/unverified/i)).toBeNull();
-    expect(screen.queryByText(/the read failed/i)).toBeNull();
+    // The subgraph read SUCCEEDED, so no failure chip may replace the graph.
+    // The unmocked secondary sources (overview, memory, analytics) truthfully
+    // account for their own failed reads in the HUD list and nowhere else.
+    for (const failure of screen.queryAllByText(/the read failed/i)) {
+      expect(failure.tagName).toBe('LI');
+    }
     expect(screen.queryByTestId('graph-canvas')).toBeNull();
   });
 
@@ -495,7 +502,7 @@ describe('ScopedBrain', () => {
     );
     renderScoped();
 
-    await waitFor(() => expect(screen.getByText(/the read failed/i)).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText(/the read failed/i).length).toBeGreaterThan(0));
     for (const label of ['nodes', 'edges', 'files', 'facts', 'entities', 'events']) {
       expect(readout(label), `${label} was resolved from a failed read`).toBe('—');
     }

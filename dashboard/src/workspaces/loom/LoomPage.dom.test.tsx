@@ -637,9 +637,10 @@ describe('LoomPage', () => {
       '/api/plugins/hermes-lcm/timeline': { status: 500, body: { error: 'boom' } },
     });
     await screen.findByText('Deliver Git primitive runtime');
-    // The busiest-day readout falls to its stated unread state; the threads,
-    // which come from a different endpoint, still draw.
-    expect(screen.getByText('timeline unread')).toBeTruthy();
+    // The busiest-day readout names the failed read as a failure — not as
+    // "unread", which is also what loading looks like; the threads, which
+    // come from a different endpoint, still draw.
+    expect(screen.getByText('timeline read failed')).toBeTruthy();
   });
 
   it('gives the canvas an accessible description and a real table alongside', async () => {

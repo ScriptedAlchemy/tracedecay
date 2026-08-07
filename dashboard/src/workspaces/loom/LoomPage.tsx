@@ -182,12 +182,29 @@ export function LoomPage() {
                   {
                     label: 'busiest day',
                     value: busiestDay ? formatCount(busiestDay.count) : '—',
-                    note: busiestDay ? busiestDay.bucket : 'timeline unread',
+                    // A dash must say why: a timeline still loading, a refused
+                    // read, and a served-but-empty timeline are three different
+                    // facts, not one "unread".
+                    note: busiestDay
+                      ? busiestDay.bucket
+                      : timeline.isPending
+                        ? 'timeline loading'
+                        : timeline.data?.outcome === 'envelope'
+                          ? 'no timeline activity recorded'
+                          : 'timeline read failed',
                   },
                 ]}
               />
 
-              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row">
+              {/* The scrolling body takes a name and the tab stop: the weave
+                * canvas and tables can overflow it with nothing focusable in
+                * view (axe: scrollable-region-focusable). */}
+              <div
+                role="region"
+                aria-label="Loom content"
+                tabIndex={0}
+                className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row"
+              >
                 <div className="flex min-w-0 flex-1 flex-col gap-2">
                   {weave.threads.length === 0 ? (
                     <EmptyWeave undated={weave.undated} rows={rows.length} />
@@ -300,7 +317,7 @@ function TemporalBoundary({
       <StateChip kind={kind} detail={detail} />
     </div>
   );
-  if (pending) return plate('unknown', 'reading Loom temporal authorities');
+  if (pending) return plate('loading', 'reading Loom temporal authorities');
   if (!result) return plate('offline', 'Loom temporal response unavailable');
   if (result.outcome === 'transport') {
     return plate(result.state, result.detail ?? 'Loom temporal response unavailable');
@@ -438,6 +455,9 @@ function ThreadTable({
       <div
         role="region"
         aria-label="Threads table"
+        // Keyboard-operable on its own: with no thread selected the rows may
+        // be the only content, and they are not focusable elements.
+        tabIndex={0}
         className="mt-1.5 max-h-72 overflow-auto border border-edge-subtle"
       >
         <table className="w-full border-collapse text-2xs">

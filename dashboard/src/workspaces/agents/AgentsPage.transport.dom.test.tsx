@@ -142,6 +142,13 @@ describe('AgentsPage under HTTP transport faults', () => {
     const failed = [...document.querySelectorAll('[data-state="error"]')];
     expect(failed.length).toBeGreaterThan(0);
     for (const chip of failed) expect(chip.textContent).toContain('HTTP 500');
+
+    // And the dashes are accounted for as a FAILED read. "unavailable" is the
+    // source's own declaration, which never arrived here — the strip used to
+    // put that word in the daemon's mouth for every pending or failed read.
+    expect(screen.getAllByText(/analytics diagnostics could not be read/i).length)
+      .toBeGreaterThan(0);
+    expect(screen.queryByText(/analytics diagnostics unavailable/i)).toBeNull();
   });
 });
 

@@ -436,6 +436,25 @@ describe('DeliveryPage', () => {
     expect(screen.queryByText(/holds no repositories/)).toBeNull();
   });
 
+  it('renders a failed registry read as a failure, never as an empty field', async () => {
+    // `registry_unavailable` used to fall through `project_tree ?? []` and
+    // draw the same "holds no repositories" pixels as a measured empty
+    // registry — a refused read wearing an empty success.
+    renderDelivery(
+      registry({
+        status: 'registry_unavailable',
+        error: 'registry database could not be opened',
+        summary: null,
+        projects: null,
+        project_tree: null,
+        truncated: null,
+      }),
+    );
+    await screen.findByText(/registry database could not be opened/);
+    expect(screen.queryByText(/holds no repositories/)).toBeNull();
+    expect(screen.queryByText(/Registry readings/)).toBeNull();
+  });
+
   it('renders an empty registry as an answered question', async () => {
     renderDelivery(
       registry({
