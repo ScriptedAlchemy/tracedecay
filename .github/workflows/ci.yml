@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, feature/holographic-memory]
+    branches: [master, feature/holographic-memory, codex/tracedecay-total-redesign-plan]
   pull_request:
     branches: ['**']
 
