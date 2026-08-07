@@ -56,7 +56,7 @@ use tracedecay::mcp::tools::{
     render_tool_cli_help, short_tool_name,
 };
 use tracedecay::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_application::{CancellationSignal, Deadline, RetryDirective};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -294,7 +294,7 @@ async fn dispatch_cli_application_surface(
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let request = match parse_application_surface_request(operation, tool_args) {
+    let request = match parse_application_surface_request(operation, tool_args.clone()) {
         Ok(request) => request,
         Err(error) => {
             if let Ok(handshake) =
@@ -315,39 +315,79 @@ async fn dispatch_cli_application_surface(
             });
         }
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-        .unwrap_or(i64::MAX);
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let deadline = Deadline::new(UtcMicros(
-        now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
-    ))
-    .map_err(|error| TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
-    let cancellation =
-        CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str())).map_err(
-            |error| TraceDecayError::Config {
-                message: error.to_string(),
-            },
-        )?;
     let handshake = DaemonHandshake::for_current_client(project, None, false, false)?;
     let client = DaemonInvocationClient::for_current(handshake)?;
-    let result = resolve_cli_application_surface(
-        operation,
-        request_id,
-        request,
-        requested_format,
-        deadline,
-        cancellation,
-        Some(&client),
-    )
-    .await
-    .map_err(|error| TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
+    // A cold daemon answers a retryable pre-admission problem while the
+    // project open still warms in the background (bounded by the daemon's
+    // foreground open wait). The compatibility tool path rides that state out
+    // through its project-open retry loop; the typed surface path must present
+    // the same transport behavior, so re-send the same request per the
+    // envelope's own retry directive until the CLI deadline expires.
+    let mut next_request = Some(request);
+    let result = loop {
+        let request = match next_request.take() {
+            Some(request) => request,
+            None => parse_application_surface_request(operation, tool_args.clone()).map_err(
+                |error| TraceDecayError::Config {
+                    message: error.to_string(),
+                },
+            )?,
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+            .unwrap_or(i64::MAX);
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let request_deadline = Deadline::new(UtcMicros(
+            now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
+        ))
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+        let cancellation =
+            CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
+                .map_err(|error| TraceDecayError::Config {
+                    message: error.to_string(),
+                })?;
+        let result = resolve_cli_application_surface(
+            operation,
+            request_id.clone(),
+            request,
+            requested_format,
+            request_deadline,
+            cancellation,
+            Some(&client),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+        let Some(delay) = cli_surface_retry_delay(&result) else {
+            break result;
+        };
+        if deadline.saturating_duration_since(Instant::now()) <= delay {
+            break result;
+        }
+        tokio::time::sleep(delay).await;
+    };
     print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
+}
+
+/// Delay before re-sending the same request, when the daemon answered a
+/// retryable pre-admission problem whose envelope directs an after-delay retry
+/// of the same request (a project open still warming or a saturated open
+/// queue). Terminal problems and post-admission outcomes are never retried.
+fn cli_surface_retry_delay(result: &ApplicationSurfaceInvocationResult) -> Option<Duration> {
+    const DEFAULT_SURFACE_RETRY_DELAY: Duration = Duration::from_millis(250);
+    let envelope = result.result.as_ref().err()?;
+    let problem = envelope.problem.as_ref();
+    (problem.retryable && problem.retry == RetryDirective::AfterDelay && problem.is_pre_admission())
+        .then(|| {
+            problem
+                .retry_after_millis
+                .map(Duration::from_millis)
+                .unwrap_or(DEFAULT_SURFACE_RETRY_DELAY)
+        })
 }
 
 fn print_cli_application_surface(
