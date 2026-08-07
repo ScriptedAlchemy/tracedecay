@@ -6,9 +6,8 @@ use tracedecay_store::runtime::{
     GraphPublicationProjectionPageRequestV1, GraphPublicationReplayLookupV1,
     GraphPublicationReplayPageRequestV1, GraphPublicationReplayRetirementV1,
     GraphPublicationRetiredCleanupPageRequestV1, GraphPublicationStoreV1,
-    GraphRecoveredGenerationDigestV1, GraphReplayRetirementOutcomeV1,
-    GraphRetiredReplayCleanupFinalizeOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
-    GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
+    GraphReplayRetirementOutcomeV1, GraphRetiredReplayCleanupFinalizeOutcomeV1,
+    GraphVerifiedHeadCasOutcomeV1, GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
     MAX_GRAPH_PUBLICATION_PROJECTION_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_RECORDS_V1,
 };
 
