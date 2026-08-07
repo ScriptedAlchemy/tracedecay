@@ -513,6 +513,90 @@ fn post_dashboard_envelope(agent: &ureq::Agent, url: &str, body: &Value) -> (u16
     (status, parsed)
 }
 
+/// Polls one Work read until the per-project runtime leaves its mounting
+/// window, holding every pre-terminal answer to the typed warming contract.
+///
+/// The mounting window between daemon start and the project runtime binding is
+/// a real production state the dashboard renders as retryable warming, so it
+/// is graded here rather than slept past: every answer inside the window must
+/// be the typed retryable unavailable problem — never an empty success, a
+/// crash, or a concealment — and the first answer outside it is returned for
+/// the caller's strict assertions.
+fn poll_past_warming(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u16, Value) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (status, body) = post();
+        assert_canonical_envelope(label, status, &body);
+        if status != 503 {
+            return (status, body);
+        }
+        let problem = &body["value"]["problem"];
+        assert_eq!(
+            problem["kind"], "unavailable",
+            "{label} may only answer the typed unavailable problem while warming: {body}"
+        );
+        assert_eq!(
+            problem["retryable"], true,
+            "{label} warming answer must be retryable: {body}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "{label} never left the warming state: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Polls one list read past warming *and* past the typed absent window while
+/// the verified topology publication catches up with a write, holding every
+/// intermediate answer to its typed state.
+fn poll_terminal_list(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u16, Value) {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (status, body) = poll_past_warming(label, post);
+        assert_eq!(status, 200, "{label}: {body}");
+        assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
+        let state = &body["value"]["outcome"]["value"]["payload"]["state"];
+        if state.as_str() == Some("listed") {
+            return (status, body);
+        }
+        assert_eq!(
+            *state,
+            Value::String("absent".to_owned()),
+            "{label} may only answer the typed absent state before the \
+             topology publication catches up: {body}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "{label} never served the verified topology after the write: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Grades one refused answer: the canonical problem envelope, the exact typed
+/// problem kind, the HTTP status that kind maps to, and its retry disposition.
+///
+/// This deliberately does not reuse [`assert_canonical_envelope`]: that helper
+/// reads any `404` as an unmounted route, but a concealed denial answers `404`
+/// *with* the canonical problem record — the discriminator between the two is
+/// the envelope in the body, which is exactly what is asserted here.
+fn assert_typed_problem(label: &str, status: u16, body: &Value, expected: (u16, &str, bool)) {
+    let (expected_status, expected_kind, expected_retryable) = expected;
+    assert_eq!(status, expected_status, "{label}: {body}");
+    assert_eq!(
+        body["kind"], "problem",
+        "{label} must answer the canonical problem envelope: {body}"
+    );
+    let problem = &body["value"]["problem"];
+    assert_eq!(problem["kind"], expected_kind, "{label}: {body}");
+    assert_eq!(problem["retryable"], expected_retryable, "{label}: {body}");
+    assert!(
+        problem["retry"].is_string(),
+        "{label} problem must state a retry directive: {body}"
+    );
+}
+
 /// The Work surface answers real requests, on both surfaces that publish it.
 ///
 /// The dashboard Work workspace binds `/api/work/*`; the SDKs and hosts call the
@@ -520,87 +604,122 @@ fn post_dashboard_envelope(agent: &ureq::Agent, url: &str, body: &Value) -> (u16
 /// handler, owner, and dispatch "one segment of path apart", and nothing proved
 /// it: every previous test of the surface either stubbed the owner, mocked the
 /// fetch, or graded route registration without looking at the answer. This runs
-/// both surfaces of one live daemon and holds each answer to the canonical
-/// envelope, so a drift on either side is a failure with a named side.
+/// both surfaces of one live daemon in the order a real client encounters them
+/// and grades every typed state the dashboard renders — warming, absence,
+/// staleness, denial, refusal, and the real payloads — so a drift on either
+/// side is a failure with a named side.
 #[test]
 fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     let fixture = ProductionDaemon::start();
+    let dashboard = DashboardProcess::start(&fixture);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .into();
 
-    let mut daemon_answers = BTreeMap::new();
-    for (segment, request) in bound_work_requests() {
-        let url = fixture.external_url(&format!("/application/work/{segment}"));
-        let (status, body) = post_envelope(&agent, &url, &fixture, &request);
-        assert_canonical_envelope(&format!("daemon work/{segment}"), status, &body);
-        daemon_answers.insert(segment, (status, body));
+    let list_request = serde_json::json!({ "page_size": 25, "cursor": null });
+    let daemon_list = fixture.external_url("/application/work/list-attempts");
+    let dashboard_list = format!("{}/api/work/list-attempts", dashboard.base_url);
+
+    // -- Warming, then typed absence: a scope with no Work at all. -----------
+    // An empty authorized scope is the explicit `absent` state, not an empty
+    // page and not a concealment; a fabricated empty list here is exactly what
+    // the typed state exists to prevent.
+    for (label, post) in [
+        (
+            "daemon work/list-attempts (empty scope)",
+            &mut (|| post_envelope(&agent, &daemon_list, &fixture, &list_request))
+                as &mut dyn FnMut() -> (u16, Value),
+        ),
+        (
+            "dashboard api/work/list-attempts (empty scope)",
+            &mut || post_dashboard_envelope(&agent, &dashboard_list, &list_request),
+        ),
+    ] {
+        let (status, body) = poll_past_warming(label, post);
+        eprintln!("{label} -> {status} {body}");
+        assert_eq!(status, 200, "{label}: {body}");
+        assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
+        assert_eq!(
+            body["value"]["outcome"]["value"]["payload"]["state"], "absent",
+            "{label} must answer the typed absent state for a scope with no Work: {body}"
+        );
     }
 
-    // `create` is an authoritative effect: it must come back reconciled, with a
-    // receipt, and carrying the task it just wrote — not merely "not an error".
-    let (_, created) = &daemon_answers["create"];
-    let effect = &created["value"]["outcome"]["value"];
-    assert_eq!(
-        created["value"]["outcome"]["outcome"], "effect",
-        "{created}"
-    );
-    assert_eq!(effect["reconciliation"], "reconciled", "{created}");
-    assert_eq!(effect["receipt"]["outcome"], "completed", "{created}");
-    assert_eq!(
-        effect["payload"]["task_id"], "task.work-surface-conformance",
-        "{created}"
-    );
+    // -- Staleness against an absent topology. -------------------------------
+    // A cursor names the snapshot it was minted under; with no topology in
+    // scope, resuming would fabricate a page, so the answer is the typed stale
+    // refusal that tells the client to restart from the first page.
+    let stale = superseded_cursor_request();
+    for (label, (status, body)) in [
+        (
+            "daemon work/list-attempts (cursor without topology)",
+            post_envelope(&agent, &daemon_list, &fixture, &stale),
+        ),
+        (
+            "dashboard api/work/list-attempts (cursor without topology)",
+            post_dashboard_envelope(&agent, &dashboard_list, &stale),
+        ),
+    ] {
+        eprintln!("{label} -> {status} {body}");
+        assert_typed_problem(label, status, &body, (409, "stale", true));
+    }
 
-    // `snapshot` is the read the Work workspace opens with, so the write above
-    // has to be visible in it. This is the leg that proves the two operations
-    // share one store through the daemon rather than each answering plausibly.
-    let (_, snapshot) = &daemon_answers["snapshot"];
-    let evidence = &snapshot["value"]["outcome"]["value"];
-    assert_eq!(
-        snapshot["value"]["outcome"]["outcome"], "evidence",
-        "{snapshot}"
-    );
-    assert_eq!(
-        evidence["payload"]["coverage"]["state"], "complete",
-        "{snapshot}"
-    );
-    let projections = evidence["payload"]["projections"]
-        .as_array()
-        .unwrap_or_else(|| panic!("the snapshot must carry projections: {snapshot}"));
-    assert!(
-        projections
-            .iter()
-            .any(|projection| projection["task_id"] == "task.work-surface-conformance"),
-        "the created task must be readable through the snapshot: {snapshot}"
-    );
+    // -- Denial: an attempt that does not exist is concealed. ----------------
+    // Absence and denial share one shape by design, so probing an identity
+    // cannot reveal whether it exists for someone else.
+    let missing_attempt = serde_json::json!({
+        "task_id": "task.work-surface-conformance",
+        "run_id": "run.work-surface-conformance",
+        "attempt_id": "attempt.work-surface-conformance.1",
+    });
+    let daemon_status = fixture.external_url("/application/work/attempt-status");
+    let dashboard_status = format!("{}/api/work/attempt-status", dashboard.base_url);
+    for (label, (status, body)) in [
+        (
+            "daemon work/attempt-status (missing attempt)",
+            post_envelope(&agent, &daemon_status, &fixture, &missing_attempt),
+        ),
+        (
+            "dashboard api/work/attempt-status (missing attempt)",
+            post_dashboard_envelope(&agent, &dashboard_status, &missing_attempt),
+        ),
+    ] {
+        eprintln!("{label} -> {status} {body}");
+        assert_typed_problem(
+            label,
+            status,
+            &body,
+            (404, "not_found_or_not_authorized", false),
+        );
+    }
 
-    // `list-attempts` has no verified topology in a project that has never run
-    // one, and says so as a retryable unavailable rather than an empty success.
-    // An empty list here would be a falsified reading, which is exactly what the
-    // typed absence exists to prevent.
-    let (status, attempts) = &daemon_answers["list-attempts"];
-    assert_eq!(*status, 503, "{attempts}");
-    assert_eq!(
-        attempts["value"]["problem"]["kind"], "unavailable",
-        "{attempts}"
-    );
-    assert_eq!(
-        attempts["value"]["problem"]["retryable"], true,
-        "{attempts}"
-    );
-
-    // A body the typed request contract rejects is a refusal, not a crash and
-    // not a success: the decode happens before dispatch, so the operation must
-    // never observe it.
+    // -- Refusals the typed request contract makes before dispatch. ----------
+    // An out-of-bounds page size decodes but is refused by the operation; a
+    // body the contract cannot decode is refused before the operation ever
+    // observes it. Both are client refusals, never server faults.
+    for (label, request) in [
+        (
+            "daemon work/list-attempts (zero page size)",
+            serde_json::json!({ "page_size": 0 }),
+        ),
+        (
+            "daemon work/list-attempts (page size above the cap)",
+            serde_json::json!({ "page_size": 1_001 }),
+        ),
+    ] {
+        let (status, body) = post_envelope(&agent, &daemon_list, &fixture, &request);
+        eprintln!("{label} -> {status} {body}");
+        assert_typed_problem(label, status, &body, (400, "invalid_request", false));
+    }
     let (status, body) = post_envelope(
         &agent,
         &fixture.external_url("/application/work/snapshot"),
         &fixture,
         &serde_json::json!({ "page_size": "not-a-number" }),
     );
+    eprintln!("DAEMON work/snapshot malformed -> {status} {body}");
     assert_eq!(
         body["kind"], "problem",
         "a malformed body is refused: {body}"
@@ -618,22 +737,165 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         &fixture,
         &serde_json::json!({}),
     );
+    eprintln!("DAEMON work/not-an-operation -> {status} {body}");
     assert_eq!(status, 404, "an unmounted Work segment is refused: {body}");
 
-    let dashboard = DashboardProcess::start(&fixture);
-    for (segment, request) in bound_work_requests() {
-        let url = format!("{}/api/work/{segment}", dashboard.base_url);
-        let (status, body) = post_dashboard_envelope(&agent, &url, &request);
-        assert_canonical_envelope(&format!("dashboard api/work/{segment}"), status, &body);
+    // -- Real payload: create through the daemon, read through both mounts. --
+    // `create` is an authoritative effect: it must come back reconciled, with a
+    // receipt, and carrying the task it just wrote — not merely "not an error".
+    let (status, created) = post_envelope(
+        &agent,
+        &fixture.external_url("/application/work/create"),
+        &fixture,
+        &serde_json::json!({
+            "task_id": "task.work-surface-conformance",
+            "title": "Work surface conformance",
+            "dependencies": [],
+            "command_id": "command.work-surface-conformance",
+            "occurred_at": 1_700_000_000_000_000i64,
+        }),
+    );
+    eprintln!("DAEMON work/create -> {status} {created}");
+    assert_canonical_envelope("daemon work/create", status, &created);
+    let effect = &created["value"]["outcome"]["value"];
+    assert_eq!(
+        created["value"]["outcome"]["outcome"], "effect",
+        "{created}"
+    );
+    assert_eq!(effect["reconciliation"], "reconciled", "{created}");
+    assert_eq!(effect["receipt"]["outcome"], "completed", "{created}");
+    assert_eq!(
+        effect["payload"]["task_id"], "task.work-surface-conformance",
+        "{created}"
+    );
 
-        // Same handler, same owner, same dispatch: the two mounts may not
-        // disagree about whether the operation is served.
-        let (_, daemon_body) = &daemon_answers[segment];
+    // `snapshot` is the read the Work workspace opens with, so the write above
+    // has to be visible through both mounts. This is the leg that proves the
+    // operations share one store through the daemon rather than each answering
+    // plausibly.
+    let snapshot_request = serde_json::json!({ "page_size": 25 });
+    for (label, (status, snapshot)) in [
+        (
+            "daemon work/snapshot",
+            post_envelope(
+                &agent,
+                &fixture.external_url("/application/work/snapshot"),
+                &fixture,
+                &snapshot_request,
+            ),
+        ),
+        (
+            "dashboard api/work/snapshot",
+            post_dashboard_envelope(
+                &agent,
+                &format!("{}/api/work/snapshot", dashboard.base_url),
+                &snapshot_request,
+            ),
+        ),
+    ] {
+        eprintln!("{label} -> {status} {snapshot}");
+        assert_canonical_envelope(label, status, &snapshot);
+        let evidence = &snapshot["value"]["outcome"]["value"];
         assert_eq!(
-            body["kind"], daemon_body["kind"],
-            "the dashboard and daemon mounts of work/{segment} disagree:\n  dashboard: {body}\n  daemon: {daemon_body}"
+            snapshot["value"]["outcome"]["outcome"], "evidence",
+            "{snapshot}"
+        );
+        assert_eq!(
+            evidence["payload"]["coverage"]["state"], "complete",
+            "{snapshot}"
+        );
+        let projections = evidence["payload"]["projections"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{label} must carry projections: {snapshot}"));
+        assert!(
+            projections
+                .iter()
+                .any(|projection| projection["task_id"] == "task.work-surface-conformance"),
+            "the created task must be readable through {label}: {snapshot}"
         );
     }
+
+    // -- The list bound to the verified topology the write produced. ---------
+    // With Work now in scope, the list must leave `absent`: the terminal answer
+    // is one page bound to a named verified topology generation, whose empty
+    // attempt set is the explicit zero-complete coverage — an authorized empty
+    // result, distinct from both absence and concealment. The window while the
+    // topology publication catches up must stay typed.
+    let mut generations = Vec::new();
+    for (label, post) in [
+        (
+            "daemon work/list-attempts (verified topology)",
+            &mut (|| post_envelope(&agent, &daemon_list, &fixture, &list_request))
+                as &mut dyn FnMut() -> (u16, Value),
+        ),
+        (
+            "dashboard api/work/list-attempts (verified topology)",
+            &mut || post_dashboard_envelope(&agent, &dashboard_list, &list_request),
+        ),
+    ] {
+        let (status, body) = poll_terminal_list(label, post);
+        eprintln!("{label} -> {status} {body}");
+        let payload = &body["value"]["outcome"]["value"]["payload"];
+        assert_eq!(
+            payload["topology"]["task_count"], 1,
+            "{label} must bind the one created task: {body}"
+        );
+        assert!(
+            payload["topology"]["generation"].is_string(),
+            "{label} must name the verified topology generation: {body}"
+        );
+        assert_eq!(
+            payload["attempts"].as_array().map(Vec::len),
+            Some(0),
+            "{label} must return the explicit empty authorized page: {body}"
+        );
+        assert_eq!(
+            payload["coverage"]["coverage"], "complete",
+            "{label} empty page must be complete coverage, not a truncation: {body}"
+        );
+        assert_eq!(payload["coverage"]["returned"], 0, "{label}: {body}");
+        generations.push(payload["topology"]["generation"].clone());
+    }
+    assert_eq!(
+        generations[0], generations[1],
+        "the two mounts must serve the same verified topology generation"
+    );
+
+    // -- Staleness against a superseded generation. --------------------------
+    // The verified topology now exists, so a cursor minted under any other
+    // generation is refused as stale rather than silently re-anchored.
+    let (status, body) =
+        post_envelope(&agent, &daemon_list, &fixture, &superseded_cursor_request());
+    eprintln!("DAEMON work/list-attempts superseded cursor -> {status} {body}");
+    assert_typed_problem(
+        "daemon work/list-attempts (superseded cursor)",
+        status,
+        &body,
+        (409, "stale", true),
+    );
+
+    // A cursor minted under the live generation resumes: strictly after the
+    // named identity there is nothing, and the answer says so as complete
+    // coverage rather than re-serving the page or refusing.
+    let live_cursor = serde_json::json!({
+        "page_size": 25,
+        "cursor": {
+            "generation": generations[0],
+            "start_after": {
+                "task_id": "task.work-surface-conformance",
+                "run_id": "run.work-surface-conformance",
+                "attempt_id": "attempt.work-surface-conformance.1",
+            },
+        },
+    });
+    let (status, body) = post_envelope(&agent, &daemon_list, &fixture, &live_cursor);
+    eprintln!("DAEMON work/list-attempts live cursor -> {status} {body}");
+    assert_canonical_envelope("daemon work/list-attempts (live cursor)", status, &body);
+    assert_eq!(status, 200, "{body}");
+    let payload = &body["value"]["outcome"]["value"]["payload"];
+    assert_eq!(payload["state"], "listed", "{body}");
+    assert_eq!(payload["coverage"]["coverage"], "complete", "{body}");
+    assert_eq!(payload["coverage"]["returned"], 0, "{body}");
 }
 
 #[test]
