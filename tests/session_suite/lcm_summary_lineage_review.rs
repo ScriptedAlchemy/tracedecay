@@ -12,7 +12,6 @@ use tracedecay::sessions::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
 };
 use tracedecay_graph_db::NeverCancelled;
-use tracedecay_runtime_core::db::engine::QueryExecutor;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
@@ -844,14 +843,91 @@ async fn concurrent_publications_leave_one_active_generation() {
         db.lcm_publish_immutable_summary(left_publication),
         db.lcm_publish_immutable_summary(right_publication),
     );
-    left_result.unwrap();
-    right_result.unwrap();
+    left_result.expect("the losing publisher must succeed against the refreshed generation");
+    right_result.expect("the losing publisher must succeed against the refreshed generation");
     let counts = db
         .lcm_lineage_counts_for_test(Some("session-concurrent"))
         .await
         .unwrap();
     assert_eq!(counts.active_generations, 1);
     assert_eq!(counts.total_generations, 2);
+
+    let database = db
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    let session_id = tracedecay_domain::SessionId::new("session-concurrent").expect("session id");
+    // A loser that re-applied the refreshed generation may leave its own
+    // superseded marker pending; recovery settles exactly that marker.
+    database
+        .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
+        .await
+        .expect("settle any superseded publication marker");
+    let (active_generation, relations) = database
+        .active_session_summary_relations(
+            &session_id,
+            &[
+                "summary.concurrent.alpha".to_owned(),
+                "summary.concurrent.beta".to_owned(),
+            ],
+            10,
+            Arc::new(NeverCancelled),
+        )
+        .await
+        .expect("read the active native relation projection");
+    assert_eq!(active_generation.value(), 2);
+    assert_eq!(relations.len(), 2);
+
+    // Exactly one publication wins each generation, every receipt settles as
+    // applied with the watermark the native graph acknowledged, and no
+    // replayable effect survives that could double-apply.
+    let snapshot = database.read_snapshot().await.expect("receipt snapshot");
+    let mut receipt_rows = snapshot
+        .query(
+            "SELECT generation, state, expected_graph_watermark, graph_watermark
+             FROM session_relation_receipts
+             WHERE session_id = ?1
+             ORDER BY generation",
+            [session_id.as_str()],
+        )
+        .await
+        .expect("relation receipt query");
+    let mut receipt_generations = Vec::new();
+    while let Some(row) = receipt_rows.next().await.expect("relation receipt row") {
+        receipt_generations.push(row.get::<i64>(0).expect("receipt generation"));
+        assert_eq!(row.get::<String>(1).expect("receipt state"), "applied");
+        assert_eq!(
+            row.get::<Option<String>>(3).expect("acknowledged watermark"),
+            Some(row.get::<String>(2).expect("expected watermark")),
+        );
+    }
+    assert_eq!(receipt_generations, vec![1, 2]);
+    drop(receipt_rows);
+    let mut journal_rows = snapshot
+        .query(
+            "SELECT COUNT(*) FROM session_relation_effect_journal WHERE session_id = ?1",
+            [session_id.as_str()],
+        )
+        .await
+        .expect("effect journal query");
+    assert_eq!(
+        journal_rows
+            .next()
+            .await
+            .expect("effect journal count")
+            .expect("effect journal count row")
+            .get::<i64>(0)
+            .expect("effect journal count value"),
+        0
+    );
+    drop(journal_rows);
+    drop(snapshot);
+    assert_eq!(
+        database
+            .recover_pending_session_relation_projections(10, Arc::new(NeverCancelled))
+            .await
+            .expect("recovery after settlement is idempotent"),
+        0
+    );
 }
 
 #[tokio::test]

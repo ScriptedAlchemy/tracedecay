@@ -5,7 +5,8 @@ use tracedecay_domain::{
     AgentInstanceId, MessageOccurrenceIdV1, RetrievalAnchorId, SessionId, ThreadId, UtcMicros,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphLabel, GraphProjectionReadRequest, GraphProperty, GraphPropertyName,
+    GraphCancellation, GraphLabel, GraphProjectionReadRequest, GraphProjectionTelemetryRequest,
+    GraphProperty, GraphPropertyName,
 };
 
 use super::{
@@ -36,6 +37,22 @@ impl SessionRelationGraphStore {
         }
         let namespace = namespace(scope)?;
         let projection_id = projection(session_id, generation)?;
+        // A generation that was never applied to the native graph reads as an
+        // empty page; only the telemetry receipt distinguishes "applied empty"
+        // from "absent", and absent must stay typed so callers fall back to
+        // canonical reconstruction instead of adopting a hollow projection.
+        if self
+            .database
+            .projection_telemetry(GraphProjectionTelemetryRequest {
+                namespace: namespace.clone(),
+                projection: projection_id.clone(),
+                cancellation: Arc::clone(&cancellation),
+            })
+            .map_err(map_graph_error)?
+            .is_none()
+        {
+            return Err(SessionRelationError::NotFound);
+        }
         let page = self
             .database
             .read_projection(GraphProjectionReadRequest {

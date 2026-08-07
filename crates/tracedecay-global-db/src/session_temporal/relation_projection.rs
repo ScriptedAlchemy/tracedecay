@@ -23,6 +23,10 @@ use crate::RegisteredGlobalDb;
 const RECONSTRUCT_OPERATION: &str = "reconstruct native session relation projection";
 const DEFAULT_MAX_ENTITIES: usize = 100_000;
 const DEFAULT_MAX_RELATIONS: usize = 100_000;
+// Concurrent publishers may supersede a generation between the loser's
+// reconstruction and its receipt acknowledgement; each retry re-reads the
+// refreshed generation, so the bound only limits back-to-back supersessions.
+const APPLY_PUBLICATION_RACE_ATTEMPTS: usize = 3;
 
 struct CanonicalOccurrence {
     occurrence_id: MessageOccurrenceIdV1,
@@ -69,25 +73,62 @@ impl RegisteredGlobalDb {
         session_id: &SessionId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> SessionStoreResult<GraphWatermark> {
-        let generation = self.active_relation_generation(session_id).await?;
         let (scope, _) = self
             .session_relation_store()
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let snapshot = self
-            .read_snapshot()
+        let mut last_race = None;
+        for _ in 0..APPLY_PUBLICATION_RACE_ATTEMPTS {
+            let generation = self.active_relation_generation(session_id).await?;
+            let snapshot = self
+                .read_snapshot()
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let projection = reconstruct_session_relation_projection(
+                &snapshot,
+                scope,
+                session_id,
+                generation,
+                DEFAULT_MAX_ENTITIES,
+                DEFAULT_MAX_RELATIONS,
+                Arc::clone(&cancellation),
+            )
+            .await?;
+            drop(snapshot);
+            let error = match super::relation_receipts::apply_relation_projection(
+                self,
+                &projection,
+                Arc::clone(&cancellation),
+            )
             .await
-            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let projection = reconstruct_session_relation_projection(
-            &snapshot,
-            scope,
-            session_id,
-            generation,
-            DEFAULT_MAX_ENTITIES,
-            DEFAULT_MAX_RELATIONS,
-            Arc::clone(&cancellation),
-        )
-        .await?;
-        super::relation_receipts::apply_relation_projection(self, &projection, cancellation).await
+            {
+                Ok(watermark) => return Ok(watermark),
+                Err(error) => error,
+            };
+            // Concurrent publishers race this post-commit apply. Retry only
+            // when the durable publication state provably moved past this
+            // attempt — a newer generation superseded the one just
+            // reconstructed, or a peer settled this generation's receipt
+            // first. The retry re-reads the refreshed generation; a genuine
+            // mismatch re-surfaces as soon as the state stops moving.
+            let refreshed = self.active_relation_generation(session_id).await?;
+            if refreshed == generation
+                && !super::relation_receipts::relation_receipt_applied(
+                    self,
+                    session_id,
+                    generation,
+                )
+                .await?
+            {
+                return Err(error);
+            }
+            last_race = Some(error);
+        }
+        Err(last_race.unwrap_or_else(|| {
+            storage_message(
+                RECONSTRUCT_OPERATION,
+                "active session relation projection kept racing past its retry budget",
+            )
+        }))
     }
 
     pub async fn recover_pending_session_relation_projections(

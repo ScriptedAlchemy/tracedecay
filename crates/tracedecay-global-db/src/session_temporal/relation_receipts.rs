@@ -198,6 +198,42 @@ pub(crate) async fn apply_relation_projection(
     Ok(applied)
 }
 
+/// Reports whether a peer applier already settled this generation's receipt.
+///
+/// Concurrent post-commit appliers of the same generation race the effect
+/// journal cleanup; the loser consults this before retrying so an applied
+/// receipt reads as progress rather than corruption.
+pub(crate) async fn relation_receipt_applied(
+    database: &RegisteredGlobalDb,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+) -> SessionStoreResult<bool> {
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let mut rows = snapshot
+        .query(
+            "SELECT state
+             FROM session_relation_receipts
+             WHERE session_id = ?1 AND generation = ?2",
+            params![
+                session_id.as_str(),
+                generation_i64(generation, RECEIPT_OPERATION)?
+            ],
+        )
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    let state = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?
+        .map(|row| row.get::<String>(0))
+        .transpose()
+        .map_err(|error| storage(RECEIPT_OPERATION, error))?;
+    Ok(state.as_deref() == Some("applied"))
+}
+
 async fn expected_receipt(
     conn: &impl QueryExecutor,
     session_id: &SessionId,
