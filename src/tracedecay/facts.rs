@@ -213,7 +213,7 @@ impl TraceDecay {
     /// side effect.
     pub async fn repair_project_memory_once(
         &self,
-    ) -> Result<tracedecay_store::CompatibilityMemoryRepairStatsV1> {
+    ) -> Result<tracedecay_store::ProjectMemoryMemoryRepairStatsV1> {
         let context = self.generated_memory_operation("daemon memory repair")?;
         self.project_memory_application()
             .await?

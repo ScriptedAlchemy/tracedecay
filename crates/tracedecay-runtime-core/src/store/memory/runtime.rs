@@ -485,10 +485,9 @@ impl RuntimeRequestProbeV1 for RuntimeFactProbe {
     }
 
     fn try_begin_commit(&self) -> bool {
-        self.write_control.as_ref().map_or_else(
-            || self.interruption().is_none(),
-            FactWriteControl::try_begin_commit,
-        )
+        self.write_control
+            .as_ref()
+            .is_some_and(FactWriteControl::try_begin_commit)
     }
 
     fn requires_isolated_commit(&self) -> bool {

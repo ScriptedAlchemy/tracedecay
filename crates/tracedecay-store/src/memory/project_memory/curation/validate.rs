@@ -1,8 +1,8 @@
 use tracedecay_domain::{Confidence, DomainError, FactOwnerV1};
 
 use super::super::super::{FactStoreError, FactStoreResult};
-use super::super::CompatibilityFactTargetV1;
-use super::{CompatibilityLegacyEntityTargetV1, MAX_COMPATIBILITY_CURATION_TARGETS};
+use super::super::ProjectMemoryFactTargetV1;
+use super::{ProjectMemoryLegacyEntityTargetV1, MAX_COMPATIBILITY_CURATION_TARGETS};
 
 pub(super) fn validate_curation_confidence(
     confidence: Confidence,
@@ -18,7 +18,7 @@ pub(super) fn validate_curation_confidence(
 
 pub(super) fn validate_curation_fact_target(
     owner: &FactOwnerV1,
-    target: &CompatibilityFactTargetV1,
+    target: &ProjectMemoryFactTargetV1,
 ) -> FactStoreResult<()> {
     if target.owner() != owner {
         return Err(FactStoreError::OwnerMismatch);
@@ -28,7 +28,7 @@ pub(super) fn validate_curation_fact_target(
 
 pub(super) fn validate_curation_entity_target(
     owner: &FactOwnerV1,
-    target: &CompatibilityLegacyEntityTargetV1,
+    target: &ProjectMemoryLegacyEntityTargetV1,
 ) -> FactStoreResult<()> {
     if target.owner() != owner {
         return Err(FactStoreError::OwnerMismatch);
@@ -38,7 +38,7 @@ pub(super) fn validate_curation_entity_target(
 
 pub(super) fn validate_curation_evidence(
     owner: &FactOwnerV1,
-    evidence_facts: &[CompatibilityFactTargetV1],
+    evidence_facts: &[ProjectMemoryFactTargetV1],
 ) -> FactStoreResult<()> {
     if evidence_facts.is_empty() || evidence_facts.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
         return Err(FactStoreError::InvalidQueryLimit {

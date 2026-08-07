@@ -134,6 +134,7 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
             cg.project_root(),
             store_layout.identity.project_id.as_deref(),
         ),
+        graph_read_authority: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: super::project_memory_owner(cg)?,
@@ -180,6 +181,7 @@ fn user_state(
         // A profile-owned state has no exact project root; scope resolution
         // fails closed rather than fabricating one from the profile path.
         resolved_scope: None,
+        graph_read_authority: None,
         project_graph: None,
         project_graph_resolver: None,
         memory_owner: tracedecay_domain::FactOwnerV1::Profile,
@@ -203,7 +205,7 @@ fn user_state(
         config_path: profile_root.join("config.json"),
         dashboard_root: dashboard_root.to_path_buf(),
         retention_config: crate::config::RetentionConfig::default(),
-        user_settings: Arc::new(ProductionUserSettingsDaemonClient),
+        user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,

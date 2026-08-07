@@ -531,7 +531,7 @@ fn proposal_record_projects_typed_automation_run_id() {
         "entities": [],
         "metadata": {},
     });
-    let request = CompatibilityFactAddCommandV1::new(
+    let request = ProjectMemoryFactAddCommandV1::new(
         owner.clone(),
         id("operation.automation-proposal"),
         "durable proposal".to_owned(),
@@ -547,11 +547,11 @@ fn proposal_record_projects_typed_automation_run_id() {
     .unwrap()
     .with_automation_run_id("run.fixture.1".to_owned())
     .unwrap();
-    let record = CompatibilityFactProposalRecordV1::new(
+    let record = ProjectMemoryFactProposalRecordV1::new(
         id("proposal.automation.fixture"),
         owner,
-        CompatibilityFactProposalRevisionV1::new(1).unwrap(),
-        CompatibilityFactProposalStateV1::PendingApproval,
+        ProjectMemoryFactProposalRevisionV1::new(1).unwrap(),
+        ProjectMemoryFactProposalStateV1::PendingApproval,
         request,
         None,
         None,
@@ -565,8 +565,8 @@ fn proposal_record_projects_typed_automation_run_id() {
 
 #[test]
 fn repair_stats_preserve_the_atomic_feedback_batch_outcome() {
-    let stats = CompatibilityMemoryRepairStatsV1::new(3, 2).with_feedback_history_repair(
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
+    let stats = ProjectMemoryMemoryRepairStatsV1::new(3, 2).with_feedback_history_repair(
+        ProjectMemoryFeedbackRepairProgressV1::Incomplete {
             processed: 512,
             remaining: Some(9),
         },
@@ -576,30 +576,30 @@ fn repair_stats_preserve_the_atomic_feedback_batch_outcome() {
     assert_eq!(stats.banks_rebuilt(), 2);
     assert_eq!(
         stats.feedback_history_repair(),
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
+        ProjectMemoryFeedbackRepairProgressV1::Incomplete {
             processed: 512,
             remaining: Some(9),
         }
     );
     assert_eq!(
-        CompatibilityMemoryRepairStatsV1::default().feedback_history_repair(),
-        CompatibilityFeedbackRepairProgressV1::Unknown
+        ProjectMemoryMemoryRepairStatsV1::default().feedback_history_repair(),
+        ProjectMemoryFeedbackRepairProgressV1::Unknown
     );
     // Saturation defaults off and round-trips through the builder without
     // disturbing the feedback-history outcome.
     assert!(!stats.saturated());
-    assert!(!CompatibilityMemoryRepairStatsV1::default().saturated());
+    assert!(!ProjectMemoryMemoryRepairStatsV1::default().saturated());
     assert!(stats.with_saturated(true).saturated());
 }
 
 #[test]
 fn dashboard_queries_bound_the_finite_read_surface() {
     assert!(matches!(
-        CompatibilityDashboardMemoryOverviewQueryV1::new(FactOwnerV1::Profile, 0, 1),
+        ProjectMemoryDashboardMemoryOverviewQueryV1::new(FactOwnerV1::Profile, 0, 1),
         Err(FactStoreError::InvalidQueryLimit { .. })
     ));
     assert!(matches!(
-        CompatibilityDashboardVectorPointsQueryV1::new(
+        ProjectMemoryDashboardVectorPointsQueryV1::new(
             FactOwnerV1::Profile,
             None,
             MAX_COMPATIBILITY_DASHBOARD_VECTORS + 1,
@@ -607,7 +607,7 @@ fn dashboard_queries_bound_the_finite_read_surface() {
         Err(FactStoreError::InvalidQueryLimit { .. })
     ));
     assert!(matches!(
-        CompatibilityDashboardOplogQueryV1::new(
+        ProjectMemoryDashboardOplogQueryV1::new(
             FactOwnerV1::Profile,
             MAX_COMPATIBILITY_DASHBOARD_OPLOG + 1,
         ),

@@ -307,14 +307,14 @@ async fn memory_status_payload(state: &DashboardState) -> Result<MemoryStatusPay
         largest_bank_utilization_pct,
         feedback_history_repair: MemoryFeedbackHistoryRepairV1 {
             state: match typed_status.feedback_history_repair() {
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => {
+                tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::Unknown => "unknown",
+                tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::NotRequired => {
                     "not_required"
                 }
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => {
+                tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::Complete { .. } => {
                     "complete"
                 }
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => {
+                tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::Incomplete { .. } => {
                     "incomplete"
                 }
             }
@@ -348,17 +348,17 @@ async fn fact_trust_history_payload(
         .iter()
         .map(|event| {
             let action = match event.action() {
-                tracedecay_store::CompatibilityFactFeedbackActionV1::Helpful => "helpful",
-                tracedecay_store::CompatibilityFactFeedbackActionV1::Unhelpful => "unhelpful",
+                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Helpful => "helpful",
+                tracedecay_store::ProjectMemoryFactFeedbackActionV1::Unhelpful => "unhelpful",
             };
             let availability = match event.details_availability() {
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Available => {
+                tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available => {
                     "available"
                 }
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted => {
+                tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted => {
                     "legacy_redacted"
                 }
-                tracedecay_store::CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown => {
+                tracedecay_store::ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown => {
                     "unknown"
                 }
             };
@@ -383,10 +383,10 @@ async fn fact_trust_history_payload(
         .collect();
     let repair_progress = history.repair_progress();
     let repair_state = match repair_progress {
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
-        tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
+        tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::Unknown => "unknown",
+        tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::NotRequired => "not_required",
+        tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::Complete { .. } => "complete",
+        tracedecay_store::ProjectMemoryFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
     };
     Ok(Some(json!({
         "fact_id": fact_id,

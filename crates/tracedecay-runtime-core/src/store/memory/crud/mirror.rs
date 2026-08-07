@@ -43,15 +43,15 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactHistoryQueryV1,
-    CompatibilityFactHistoryV1, CompatibilityFactListQueryV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactTargetV1, FactCommitOutcome, FactCommitReceipt,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactPageV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1, FactCommitOutcome, FactCommitReceipt,
     FactCompatibilityResult, FactLineageQuery, FactStoreError, FactStoreResult, FactWriteBatch,
 };
 pub(in crate::store::memory) async fn list_compatibility_facts_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactListQueryV1,
-) -> FactCompatibilityResult<CompatibilityFactPageV1> {
+    query: &ProjectMemoryFactListQueryV1,
+) -> FactCompatibilityResult<ProjectMemoryFactPageV1> {
     let key = OwnerKey::new(query.owner())?;
     let category = query.category().map(compatibility_category_label);
     let min_trust = query.min_trust().map(Confidence::as_f64);
@@ -191,13 +191,13 @@ pub(in crate::store::memory) async fn list_compatibility_facts_tx(
     let next = has_more
         .then(|| facts.last().map(|fact| fact.fact_id().clone()))
         .flatten();
-    CompatibilityFactPageV1::new(query.owner().clone(), facts, next).map_err(Into::into)
+    ProjectMemoryFactPageV1::new(query.owner().clone(), facts, next).map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn get_compatibility_fact_tx(
     transaction: &Transaction<'_>,
-    target: &CompatibilityFactTargetV1,
-) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
+    target: &ProjectMemoryFactTargetV1,
+) -> FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>> {
     let Some(fact_id) = resolve_compatibility_target_tx(transaction, target).await? else {
         return Ok(None);
     };
@@ -216,8 +216,8 @@ fn compatibility_content_digest(content: &str) -> FactStoreResult<LocatorDigest>
 
 pub(in crate::store::memory) async fn find_compatibility_fact_by_content_digest_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactContentDigestQueryV1,
-) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
+    query: &ProjectMemoryFactContentDigestQueryV1,
+) -> FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>> {
     let key = OwnerKey::new(query.owner())?;
     let mut rows = transaction
         .query(
@@ -271,8 +271,8 @@ pub(in crate::store::memory) async fn find_compatibility_fact_by_content_digest_
 
 pub(in crate::store::memory) async fn compatibility_fact_history_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactHistoryQueryV1,
-) -> FactCompatibilityResult<CompatibilityFactHistoryV1> {
+    query: &ProjectMemoryFactHistoryQueryV1,
+) -> FactCompatibilityResult<ProjectMemoryFactHistoryV1> {
     let fact_id = resolve_compatibility_target_tx(transaction, query.target())
         .await?
         .ok_or_else(|| storage_message(QUERY_OPERATION, "compatibility fact target is missing"))?;
@@ -283,7 +283,7 @@ pub(in crate::store::memory) async fn compatibility_fact_history_tx(
         query.limit(),
     )?;
     let events = query_fact_lineage_tx(transaction, &lineage).await?;
-    CompatibilityFactHistoryV1::new(query.target().owner().clone(), fact_id, events, None)
+    ProjectMemoryFactHistoryV1::new(query.target().owner().clone(), fact_id, events, None)
         .map_err(Into::into)
 }
 

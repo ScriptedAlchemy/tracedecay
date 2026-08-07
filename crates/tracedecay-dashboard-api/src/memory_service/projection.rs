@@ -10,7 +10,7 @@ use super::super::DashboardState;
 use super::super::memory_analysis::pca_scores;
 use super::facts::fact_summary_json;
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_store::CompatibilityDashboardVectorPointV1;
+use tracedecay_store::ProjectMemoryDashboardVectorPointV1;
 
 pub(super) const PROJECTION_POINT_CAP: i64 = 2000;
 
@@ -21,7 +21,7 @@ pub fn projection_point_cap() -> i64 {
 }
 
 pub(super) fn vector_rows(
-    points: Vec<CompatibilityDashboardVectorPointV1>,
+    points: Vec<ProjectMemoryDashboardVectorPointV1>,
 ) -> Vec<(Value, Vec<f64>)> {
     points
         .into_iter()

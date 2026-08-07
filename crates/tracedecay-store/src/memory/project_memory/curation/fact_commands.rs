@@ -5,16 +5,16 @@ use tracedecay_domain::{
 };
 
 use super::super::super::{
-    CompatibilityFactFeedbackActionV1, FactStoreError, FactStoreResult,
+    ProjectMemoryFactFeedbackActionV1, FactStoreError, FactStoreResult,
     MAX_COMPATIBILITY_REASON_BYTES,
 };
 use super::super::{
-    CompatibilityFactIdV1, CompatibilityFactProjectionV1, CompatibilityFactTargetV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
     validate_compatibility_text,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactAddCommandV1 {
+pub struct ProjectMemoryFactAddCommandV1 {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
     content: String,
@@ -32,7 +32,7 @@ pub struct CompatibilityFactAddCommandV1 {
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactAddCommandV1 {
+impl ProjectMemoryFactAddCommandV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
@@ -149,7 +149,7 @@ impl CompatibilityFactAddCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactUpdatePatchV1 {
+pub struct ProjectMemoryFactUpdatePatchV1 {
     content: Option<String>,
     category: Option<FactCategoryV1>,
     source: Option<Option<String>>,
@@ -159,7 +159,7 @@ pub struct CompatibilityFactUpdatePatchV1 {
     trust: Option<Confidence>,
 }
 
-impl CompatibilityFactUpdatePatchV1 {
+impl ProjectMemoryFactUpdatePatchV1 {
     pub fn new(
         content: Option<String>,
         category: Option<FactCategoryV1>,
@@ -233,20 +233,20 @@ impl CompatibilityFactUpdatePatchV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactUpdateCommandV1 {
-    target: CompatibilityFactTargetV1,
+pub struct ProjectMemoryFactUpdateCommandV1 {
+    target: ProjectMemoryFactTargetV1,
     operation_id: ProvenanceId,
     expected_last_event_id: Option<FactEventId>,
-    patch: CompatibilityFactUpdatePatchV1,
+    patch: ProjectMemoryFactUpdatePatchV1,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactUpdateCommandV1 {
+impl ProjectMemoryFactUpdateCommandV1 {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: ProjectMemoryFactTargetV1,
         operation_id: ProvenanceId,
         expected_last_event_id: Option<FactEventId>,
-        patch: CompatibilityFactUpdatePatchV1,
+        patch: ProjectMemoryFactUpdatePatchV1,
         actor: Option<ActorId>,
     ) -> FactStoreResult<Self> {
         operation_id.validate()?;
@@ -265,7 +265,7 @@ impl CompatibilityFactUpdateCommandV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
         &self.target
     }
     pub fn operation_id(&self) -> &ProvenanceId {
@@ -274,7 +274,7 @@ impl CompatibilityFactUpdateCommandV1 {
     pub fn expected_last_event_id(&self) -> Option<&FactEventId> {
         self.expected_last_event_id.as_ref()
     }
-    pub fn patch(&self) -> &CompatibilityFactUpdatePatchV1 {
+    pub fn patch(&self) -> &ProjectMemoryFactUpdatePatchV1 {
         &self.patch
     }
     pub fn actor(&self) -> Option<&ActorId> {
@@ -283,16 +283,16 @@ impl CompatibilityFactUpdateCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactRemoveCommandV1 {
-    target: CompatibilityFactTargetV1,
+pub struct ProjectMemoryFactRemoveCommandV1 {
+    target: ProjectMemoryFactTargetV1,
     operation_id: ProvenanceId,
     expected_last_event_id: Option<FactEventId>,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactRemoveCommandV1 {
+impl ProjectMemoryFactRemoveCommandV1 {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: ProjectMemoryFactTargetV1,
         operation_id: ProvenanceId,
         expected_last_event_id: Option<FactEventId>,
         actor: Option<ActorId>,
@@ -312,7 +312,7 @@ impl CompatibilityFactRemoveCommandV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
         &self.target
     }
     pub fn operation_id(&self) -> &ProvenanceId {
@@ -327,22 +327,22 @@ impl CompatibilityFactRemoveCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackCommandV1 {
-    target: CompatibilityFactTargetV1,
+pub struct ProjectMemoryFactFeedbackCommandV1 {
+    target: ProjectMemoryFactTargetV1,
     operation_id: ProvenanceId,
     expected_last_event_id: Option<FactEventId>,
-    action: CompatibilityFactFeedbackActionV1,
+    action: ProjectMemoryFactFeedbackActionV1,
     actor: Option<ActorId>,
     source: Option<String>,
     reason: Option<String>,
 }
 
-impl CompatibilityFactFeedbackCommandV1 {
+impl ProjectMemoryFactFeedbackCommandV1 {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: ProjectMemoryFactTargetV1,
         operation_id: ProvenanceId,
         expected_last_event_id: Option<FactEventId>,
-        action: CompatibilityFactFeedbackActionV1,
+        action: ProjectMemoryFactFeedbackActionV1,
         actor: Option<ActorId>,
         source: Option<String>,
         reason: Option<String>,
@@ -379,7 +379,7 @@ impl CompatibilityFactFeedbackCommandV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
         &self.target
     }
     pub fn operation_id(&self) -> &ProvenanceId {
@@ -388,7 +388,7 @@ impl CompatibilityFactFeedbackCommandV1 {
     pub fn expected_last_event_id(&self) -> Option<&FactEventId> {
         self.expected_last_event_id.as_ref()
     }
-    pub fn action(&self) -> CompatibilityFactFeedbackActionV1 {
+    pub fn action(&self) -> ProjectMemoryFactFeedbackActionV1 {
         self.action
     }
     pub fn actor(&self) -> Option<&ActorId> {
@@ -403,7 +403,7 @@ impl CompatibilityFactFeedbackCommandV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactAddDispositionV1 {
+pub enum ProjectMemoryFactAddDispositionV1 {
     Added,
     NearDuplicate,
     PossibleConflict,
@@ -411,19 +411,19 @@ pub enum CompatibilityFactAddDispositionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactAddOutcomeV1 {
-    fact: Option<CompatibilityFactProjectionV1>,
-    disposition: CompatibilityFactAddDispositionV1,
-    closest_fact_id: Option<CompatibilityFactIdV1>,
+pub struct ProjectMemoryFactAddOutcomeV1 {
+    fact: Option<ProjectMemoryFactProjectionV1>,
+    disposition: ProjectMemoryFactAddDispositionV1,
+    closest_fact_id: Option<ProjectMemoryFactIdV1>,
     similarity_millionths: Option<u32>,
     reason: Option<String>,
 }
 
-impl CompatibilityFactAddOutcomeV1 {
+impl ProjectMemoryFactAddOutcomeV1 {
     pub fn new(
-        fact: Option<CompatibilityFactProjectionV1>,
-        disposition: CompatibilityFactAddDispositionV1,
-        closest_fact_id: Option<CompatibilityFactIdV1>,
+        fact: Option<ProjectMemoryFactProjectionV1>,
+        disposition: ProjectMemoryFactAddDispositionV1,
+        closest_fact_id: Option<ProjectMemoryFactIdV1>,
         similarity_millionths: Option<u32>,
         reason: Option<String>,
     ) -> FactStoreResult<Self> {
@@ -445,13 +445,13 @@ impl CompatibilityFactAddOutcomeV1 {
         })
     }
 
-    pub fn fact(&self) -> Option<&CompatibilityFactProjectionV1> {
+    pub fn fact(&self) -> Option<&ProjectMemoryFactProjectionV1> {
         self.fact.as_ref()
     }
-    pub fn disposition(&self) -> CompatibilityFactAddDispositionV1 {
+    pub fn disposition(&self) -> ProjectMemoryFactAddDispositionV1 {
         self.disposition
     }
-    pub fn closest_fact_id(&self) -> Option<&CompatibilityFactIdV1> {
+    pub fn closest_fact_id(&self) -> Option<&ProjectMemoryFactIdV1> {
         self.closest_fact_id.as_ref()
     }
     pub fn similarity_millionths(&self) -> Option<u32> {
@@ -463,14 +463,14 @@ impl CompatibilityFactAddOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactUpdateOutcomeV1 {
-    fact: CompatibilityFactProjectionV1,
+pub struct ProjectMemoryFactUpdateOutcomeV1 {
+    fact: ProjectMemoryFactProjectionV1,
     trust_delta_millionths: i32,
 }
 
-impl CompatibilityFactUpdateOutcomeV1 {
+impl ProjectMemoryFactUpdateOutcomeV1 {
     pub fn new(
-        fact: CompatibilityFactProjectionV1,
+        fact: ProjectMemoryFactProjectionV1,
         trust_delta_millionths: i32,
     ) -> FactStoreResult<Self> {
         if !(-1_000_000..=1_000_000).contains(&trust_delta_millionths) {
@@ -484,7 +484,7 @@ impl CompatibilityFactUpdateOutcomeV1 {
         })
     }
 
-    pub fn fact(&self) -> &CompatibilityFactProjectionV1 {
+    pub fn fact(&self) -> &ProjectMemoryFactProjectionV1 {
         &self.fact
     }
     pub fn trust_delta_millionths(&self) -> i32 {
@@ -493,20 +493,20 @@ impl CompatibilityFactUpdateOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactRemoveOutcomeV1 {
+pub struct ProjectMemoryFactRemoveOutcomeV1 {
     /// `None` only for the idempotent no-op disposition: the target never
     /// resolved to a stored fact inside this transaction (never added, or
     /// concurrently removed just before this attempt), so there is no
     /// projection to report. `removed` and `remaining_fact_count` remain
     /// meaningful in that case.
-    fact: Option<CompatibilityFactProjectionV1>,
+    fact: Option<ProjectMemoryFactProjectionV1>,
     removed: bool,
     remaining_fact_count: u64,
 }
 
-impl CompatibilityFactRemoveOutcomeV1 {
+impl ProjectMemoryFactRemoveOutcomeV1 {
     pub fn new(
-        fact: CompatibilityFactProjectionV1,
+        fact: ProjectMemoryFactProjectionV1,
         removed: bool,
         remaining_fact_count: u64,
     ) -> Self {
@@ -529,7 +529,7 @@ impl CompatibilityFactRemoveOutcomeV1 {
         }
     }
 
-    pub fn fact(&self) -> Option<&CompatibilityFactProjectionV1> {
+    pub fn fact(&self) -> Option<&ProjectMemoryFactProjectionV1> {
         self.fact.as_ref()
     }
     pub fn removed(&self) -> bool {
@@ -541,8 +541,8 @@ impl CompatibilityFactRemoveOutcomeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackOutcomeV1 {
-    fact: CompatibilityFactProjectionV1,
+pub struct ProjectMemoryFactFeedbackOutcomeV1 {
+    fact: ProjectMemoryFactProjectionV1,
     event_id: FactEventId,
     /// Numeric event identity from the authoritative V1 mirror.  It is only
     /// present when the adapter durably recorded that mirror row; callers must
@@ -555,10 +555,10 @@ pub struct CompatibilityFactFeedbackOutcomeV1 {
     unhelpful_count: u64,
 }
 
-impl CompatibilityFactFeedbackOutcomeV1 {
+impl ProjectMemoryFactFeedbackOutcomeV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        fact: CompatibilityFactProjectionV1,
+        fact: ProjectMemoryFactProjectionV1,
         event_id: FactEventId,
         legacy_feedback_event_id: Option<i64>,
         old_trust: Confidence,
@@ -586,7 +586,7 @@ impl CompatibilityFactFeedbackOutcomeV1 {
         })
     }
 
-    pub fn fact(&self) -> &CompatibilityFactProjectionV1 {
+    pub fn fact(&self) -> &ProjectMemoryFactProjectionV1 {
         &self.fact
     }
     pub fn event_id(&self) -> &FactEventId {

@@ -6,9 +6,9 @@ use tracedecay_domain::{
 };
 
 use super::super::super::queries::validate_limit;
-use super::super::super::{CompatibilityMemoryRepairStatsV1, FactStoreError, FactStoreResult};
+use super::super::super::{ProjectMemoryMemoryRepairStatsV1, FactStoreError, FactStoreResult};
 use super::super::{
-    CompatibilityFactMappingV1, CompatibilityFactTargetV1, validate_compatibility_metadata,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_compatibility_metadata,
     validate_compatibility_text,
 };
 use super::validate::{
@@ -20,12 +20,12 @@ use super::{MAX_COMPATIBILITY_CURATION_OPERATIONS, MAX_COMPATIBILITY_CURATION_TA
 /// Stable, owner-scoped identity for a historical integer entity row. This is
 /// only a compatibility target; it is never derived from a path or label.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompatibilityLegacyEntityTargetV1 {
+pub struct ProjectMemoryLegacyEntityTargetV1 {
     owner: FactOwnerV1,
     legacy_entity_id: i64,
 }
 
-impl CompatibilityLegacyEntityTargetV1 {
+impl ProjectMemoryLegacyEntityTargetV1 {
     pub fn new(owner: FactOwnerV1, legacy_entity_id: i64) -> FactStoreResult<Self> {
         owner.validate()?;
         if legacy_entity_id <= 0 {
@@ -47,7 +47,7 @@ impl CompatibilityLegacyEntityTargetV1 {
         self.legacy_entity_id
     }
 
-    pub(in crate::memory::compatibility) fn validate(&self) -> FactStoreResult<()> {
+    pub(in crate::memory::project_memory) fn validate(&self) -> FactStoreResult<()> {
         self.owner.validate()?;
         if self.legacy_entity_id <= 0 {
             return Err(FactStoreError::InvalidLegacyFactId {
@@ -62,7 +62,7 @@ impl CompatibilityLegacyEntityTargetV1 {
 /// `Supports` and `DerivedFrom` are persisted as typed relations rather than
 /// being misrepresented as a canonical lineage action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactRelationV1 {
+pub enum ProjectMemoryFactRelationV1 {
     Supports,
     Contradicts,
     Supersedes,
@@ -70,18 +70,18 @@ pub enum CompatibilityFactRelationV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactNormalizeTagsV1 {
-    fact: CompatibilityFactTargetV1,
+pub struct ProjectMemoryFactNormalizeTagsV1 {
+    fact: ProjectMemoryFactTargetV1,
     tags: Vec<String>,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactNormalizeTagsV1 {
+impl ProjectMemoryFactNormalizeTagsV1 {
     pub fn new(
-        fact: CompatibilityFactTargetV1,
+        fact: ProjectMemoryFactTargetV1,
         tags: Vec<String>,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
         confidence: Confidence,
     ) -> FactStoreResult<Self> {
         if tags.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
@@ -101,7 +101,7 @@ impl CompatibilityFactNormalizeTagsV1 {
         })
     }
 
-    pub fn fact(&self) -> &CompatibilityFactTargetV1 {
+    pub fn fact(&self) -> &ProjectMemoryFactTargetV1 {
         &self.fact
     }
 
@@ -109,7 +109,7 @@ impl CompatibilityFactNormalizeTagsV1 {
         &self.tags
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
         &self.evidence_facts
     }
 
@@ -119,18 +119,18 @@ impl CompatibilityFactNormalizeTagsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactMergeEntitiesV1 {
-    winner: CompatibilityLegacyEntityTargetV1,
-    losers: Vec<CompatibilityLegacyEntityTargetV1>,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+pub struct ProjectMemoryFactMergeEntitiesV1 {
+    winner: ProjectMemoryLegacyEntityTargetV1,
+    losers: Vec<ProjectMemoryLegacyEntityTargetV1>,
+    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactMergeEntitiesV1 {
+impl ProjectMemoryFactMergeEntitiesV1 {
     pub fn new(
-        winner: CompatibilityLegacyEntityTargetV1,
-        losers: Vec<CompatibilityLegacyEntityTargetV1>,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        winner: ProjectMemoryLegacyEntityTargetV1,
+        losers: Vec<ProjectMemoryLegacyEntityTargetV1>,
+        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
         confidence: Confidence,
     ) -> FactStoreResult<Self> {
         validate_entity_merge(&winner, &losers)?;
@@ -142,15 +142,15 @@ impl CompatibilityFactMergeEntitiesV1 {
         })
     }
 
-    pub fn winner(&self) -> &CompatibilityLegacyEntityTargetV1 {
+    pub fn winner(&self) -> &ProjectMemoryLegacyEntityTargetV1 {
         &self.winner
     }
 
-    pub fn losers(&self) -> &[CompatibilityLegacyEntityTargetV1] {
+    pub fn losers(&self) -> &[ProjectMemoryLegacyEntityTargetV1] {
         &self.losers
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
         &self.evidence_facts
     }
 
@@ -160,18 +160,18 @@ impl CompatibilityFactMergeEntitiesV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactAddAliasV1 {
-    entity: CompatibilityLegacyEntityTargetV1,
+pub struct ProjectMemoryFactAddAliasV1 {
+    entity: ProjectMemoryLegacyEntityTargetV1,
     alias: String,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactAddAliasV1 {
+impl ProjectMemoryFactAddAliasV1 {
     pub fn new(
-        entity: CompatibilityLegacyEntityTargetV1,
+        entity: ProjectMemoryLegacyEntityTargetV1,
         alias: String,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
         confidence: Confidence,
     ) -> FactStoreResult<Self> {
         validate_compatibility_text(&alias, "compatibility curation alias")?;
@@ -183,7 +183,7 @@ impl CompatibilityFactAddAliasV1 {
         })
     }
 
-    pub fn entity(&self) -> &CompatibilityLegacyEntityTargetV1 {
+    pub fn entity(&self) -> &ProjectMemoryLegacyEntityTargetV1 {
         &self.entity
     }
 
@@ -191,7 +191,7 @@ impl CompatibilityFactAddAliasV1 {
         &self.alias
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
         &self.evidence_facts
     }
 
@@ -207,12 +207,12 @@ impl CompatibilityFactAddAliasV1 {
 /// JSON authorities that can drift.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct CompatibilityRelationProvenanceV1 {
+pub struct ProjectMemoryRelationProvenanceV1 {
     metadata: Value,
     sanitization_receipt: SanitizationReceiptV1,
 }
 
-impl CompatibilityRelationProvenanceV1 {
+impl ProjectMemoryRelationProvenanceV1 {
     pub fn new(
         metadata: Value,
         sanitization_receipt: SanitizationReceiptV1,
@@ -251,7 +251,7 @@ impl CompatibilityRelationProvenanceV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for CompatibilityRelationProvenanceV1 {
+impl<'de> Deserialize<'de> for ProjectMemoryRelationProvenanceV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -269,26 +269,26 @@ impl<'de> Deserialize<'de> for CompatibilityRelationProvenanceV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactLinkV1 {
-    source: CompatibilityFactTargetV1,
-    target: CompatibilityFactTargetV1,
-    relation: CompatibilityFactRelationV1,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+pub struct ProjectMemoryFactLinkV1 {
+    source: ProjectMemoryFactTargetV1,
+    target: ProjectMemoryFactTargetV1,
+    relation: ProjectMemoryFactRelationV1,
+    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
     confidence: Confidence,
     source_label: String,
-    provenance: CompatibilityRelationProvenanceV1,
+    provenance: ProjectMemoryRelationProvenanceV1,
 }
 
-impl CompatibilityFactLinkV1 {
+impl ProjectMemoryFactLinkV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        source: CompatibilityFactTargetV1,
-        target: CompatibilityFactTargetV1,
-        relation: CompatibilityFactRelationV1,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        source: ProjectMemoryFactTargetV1,
+        target: ProjectMemoryFactTargetV1,
+        relation: ProjectMemoryFactRelationV1,
+        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
         confidence: Confidence,
         source_label: String,
-        provenance: CompatibilityRelationProvenanceV1,
+        provenance: ProjectMemoryRelationProvenanceV1,
     ) -> FactStoreResult<Self> {
         if source == target {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -307,19 +307,19 @@ impl CompatibilityFactLinkV1 {
         })
     }
 
-    pub fn source(&self) -> &CompatibilityFactTargetV1 {
+    pub fn source(&self) -> &ProjectMemoryFactTargetV1 {
         &self.source
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
         &self.target
     }
 
-    pub fn relation(&self) -> CompatibilityFactRelationV1 {
+    pub fn relation(&self) -> ProjectMemoryFactRelationV1 {
         self.relation
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
         &self.evidence_facts
     }
 
@@ -335,22 +335,22 @@ impl CompatibilityFactLinkV1 {
         self.provenance.metadata()
     }
 
-    pub fn provenance(&self) -> &CompatibilityRelationProvenanceV1 {
+    pub fn provenance(&self) -> &ProjectMemoryRelationProvenanceV1 {
         &self.provenance
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactRepairVectorV1 {
-    fact: CompatibilityFactTargetV1,
-    evidence_facts: Vec<CompatibilityFactTargetV1>,
+pub struct ProjectMemoryFactRepairVectorV1 {
+    fact: ProjectMemoryFactTargetV1,
+    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
     confidence: Confidence,
 }
 
-impl CompatibilityFactRepairVectorV1 {
+impl ProjectMemoryFactRepairVectorV1 {
     pub fn new(
-        fact: CompatibilityFactTargetV1,
-        evidence_facts: Vec<CompatibilityFactTargetV1>,
+        fact: ProjectMemoryFactTargetV1,
+        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
         confidence: Confidence,
     ) -> Self {
         Self {
@@ -360,11 +360,11 @@ impl CompatibilityFactRepairVectorV1 {
         }
     }
 
-    pub fn fact(&self) -> &CompatibilityFactTargetV1 {
+    pub fn fact(&self) -> &ProjectMemoryFactTargetV1 {
         &self.fact
     }
 
-    pub fn evidence_facts(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
         &self.evidence_facts
     }
 
@@ -376,15 +376,15 @@ impl CompatibilityFactRepairVectorV1 {
 /// Finite set of curation operations; this is intentionally not a generic
 /// command dispatcher.
 #[derive(Clone, Debug, PartialEq)]
-pub enum CompatibilityFactCurationOperationV1 {
-    NormalizeTags(CompatibilityFactNormalizeTagsV1),
-    MergeEntities(CompatibilityFactMergeEntitiesV1),
-    AddAlias(CompatibilityFactAddAliasV1),
-    LinkFacts(CompatibilityFactLinkV1),
-    RepairVector(CompatibilityFactRepairVectorV1),
+pub enum ProjectMemoryFactCurationOperationV1 {
+    NormalizeTags(ProjectMemoryFactNormalizeTagsV1),
+    MergeEntities(ProjectMemoryFactMergeEntitiesV1),
+    AddAlias(ProjectMemoryFactAddAliasV1),
+    LinkFacts(ProjectMemoryFactLinkV1),
+    RepairVector(ProjectMemoryFactRepairVectorV1),
 }
 
-impl CompatibilityFactCurationOperationV1 {
+impl ProjectMemoryFactCurationOperationV1 {
     fn validate_for(&self, owner: &FactOwnerV1, min_confidence: Confidence) -> FactStoreResult<()> {
         match self {
             Self::NormalizeTags(operation) => {
@@ -421,21 +421,21 @@ impl CompatibilityFactCurationOperationV1 {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompatibilityFactCurationBatchV1 {
+pub struct ProjectMemoryFactCurationBatchV1 {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
     actor: Option<ActorId>,
     min_confidence: Confidence,
-    operations: Vec<CompatibilityFactCurationOperationV1>,
+    operations: Vec<ProjectMemoryFactCurationOperationV1>,
 }
 
-impl CompatibilityFactCurationBatchV1 {
+impl ProjectMemoryFactCurationBatchV1 {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,
         actor: Option<ActorId>,
         min_confidence: Confidence,
-        operations: Vec<CompatibilityFactCurationOperationV1>,
+        operations: Vec<ProjectMemoryFactCurationOperationV1>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         operation_id.validate()?;
@@ -471,34 +471,34 @@ impl CompatibilityFactCurationBatchV1 {
         self.min_confidence
     }
 
-    pub fn operations(&self) -> &[CompatibilityFactCurationOperationV1] {
+    pub fn operations(&self) -> &[ProjectMemoryFactCurationOperationV1] {
         &self.operations
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactCurationReceiptV1 {
+pub struct ProjectMemoryFactCurationReceiptV1 {
     owner: FactOwnerV1,
-    changed_facts: Vec<CompatibilityFactMappingV1>,
+    changed_facts: Vec<ProjectMemoryFactMappingV1>,
     normalized_tags: u64,
     merged_entities: u64,
     aliases_added: u64,
     facts_linked: u64,
     vectors_repaired: u64,
-    derived_repair: CompatibilityMemoryRepairStatsV1,
+    derived_repair: ProjectMemoryMemoryRepairStatsV1,
 }
 
-impl CompatibilityFactCurationReceiptV1 {
+impl ProjectMemoryFactCurationReceiptV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
-        changed_facts: Vec<CompatibilityFactMappingV1>,
+        changed_facts: Vec<ProjectMemoryFactMappingV1>,
         normalized_tags: u64,
         merged_entities: u64,
         aliases_added: u64,
         facts_linked: u64,
         vectors_repaired: u64,
-        derived_repair: CompatibilityMemoryRepairStatsV1,
+        derived_repair: ProjectMemoryMemoryRepairStatsV1,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         if changed_facts.len() > MAX_COMPATIBILITY_CURATION_TARGETS
@@ -531,7 +531,7 @@ impl CompatibilityFactCurationReceiptV1 {
         &self.owner
     }
 
-    pub fn changed_facts(&self) -> &[CompatibilityFactMappingV1] {
+    pub fn changed_facts(&self) -> &[ProjectMemoryFactMappingV1] {
         &self.changed_facts
     }
 
@@ -555,14 +555,14 @@ impl CompatibilityFactCurationReceiptV1 {
         self.vectors_repaired
     }
 
-    pub fn derived_repair(&self) -> &CompatibilityMemoryRepairStatsV1 {
+    pub fn derived_repair(&self) -> &ProjectMemoryMemoryRepairStatsV1 {
         &self.derived_repair
     }
 }
 
 fn validate_entity_merge(
-    winner: &CompatibilityLegacyEntityTargetV1,
-    losers: &[CompatibilityLegacyEntityTargetV1],
+    winner: &ProjectMemoryLegacyEntityTargetV1,
+    losers: &[ProjectMemoryLegacyEntityTargetV1],
 ) -> FactStoreResult<()> {
     if losers.is_empty() || losers.len() > MAX_COMPATIBILITY_CURATION_TARGETS {
         return Err(FactStoreError::InvalidQueryLimit {

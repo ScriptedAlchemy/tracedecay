@@ -4,8 +4,8 @@ use super::super::queries::validate_limit;
 use super::super::{FactStoreError, FactStoreResult};
 use super::curation::MAX_COMPATIBILITY_CURATION_TARGETS;
 use super::{
-    CompatibilityFactHistoryV1, CompatibilityFactProjectionV1, CompatibilityFactTargetV1,
-    CompatibilityLegacyEntityTargetV1, validate_compatibility_text,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryLegacyEntityTargetV1, validate_compatibility_text,
 };
 
 const MAX_COMPATIBILITY_DASHBOARD_FACTS: usize = 100;
@@ -19,13 +19,13 @@ pub(in crate::memory) const MAX_COMPATIBILITY_DASHBOARD_OPLOG: usize = 300;
 /// Explicit, bounded dashboard overview request. It is intentionally not a
 /// general query language: the dashboard receives one finite snapshot shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardMemoryOverviewQueryV1 {
+pub struct ProjectMemoryDashboardMemoryOverviewQueryV1 {
     owner: FactOwnerV1,
     fact_limit: usize,
     graph_limit: usize,
 }
 
-impl CompatibilityDashboardMemoryOverviewQueryV1 {
+impl ProjectMemoryDashboardMemoryOverviewQueryV1 {
     pub fn new(owner: FactOwnerV1, fact_limit: usize, graph_limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
         validate_limit(fact_limit, MAX_COMPATIBILITY_DASHBOARD_FACTS)?;
@@ -53,14 +53,14 @@ impl CompatibilityDashboardMemoryOverviewQueryV1 {
 /// A safe projection for dashboard fact rows. `fact` retains the canonical
 /// availability state instead of inventing payload fields for unavailable rows.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompatibilityDashboardFactSummaryV1 {
-    pub fact: CompatibilityFactProjectionV1,
+pub struct ProjectMemoryDashboardFactSummaryV1 {
+    pub fact: ProjectMemoryFactProjectionV1,
     pub has_hrr_vector: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardEntityV1 {
-    pub target: CompatibilityLegacyEntityTargetV1,
+pub struct ProjectMemoryDashboardEntityV1 {
+    pub target: ProjectMemoryLegacyEntityTargetV1,
     pub name: String,
     pub entity_type: String,
     pub aliases: Vec<String>,
@@ -68,9 +68,9 @@ pub struct CompatibilityDashboardEntityV1 {
     pub fact_count: u64,
 }
 
-impl CompatibilityDashboardEntityV1 {
+impl ProjectMemoryDashboardEntityV1 {
     pub fn new(
-        target: CompatibilityLegacyEntityTargetV1,
+        target: ProjectMemoryLegacyEntityTargetV1,
         name: String,
         entity_type: String,
         aliases: Vec<String>,
@@ -101,15 +101,15 @@ impl CompatibilityDashboardEntityV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardFactEntityLinkV1 {
-    pub fact: CompatibilityFactTargetV1,
-    pub entity: CompatibilityLegacyEntityTargetV1,
+pub struct ProjectMemoryDashboardFactEntityLinkV1 {
+    pub fact: ProjectMemoryFactTargetV1,
+    pub entity: ProjectMemoryLegacyEntityTargetV1,
 }
 
-impl CompatibilityDashboardFactEntityLinkV1 {
+impl ProjectMemoryDashboardFactEntityLinkV1 {
     pub fn new(
-        fact: CompatibilityFactTargetV1,
-        entity: CompatibilityLegacyEntityTargetV1,
+        fact: ProjectMemoryFactTargetV1,
+        entity: ProjectMemoryLegacyEntityTargetV1,
     ) -> FactStoreResult<Self> {
         fact.validate()?;
         entity.validate()?;
@@ -121,12 +121,12 @@ impl CompatibilityDashboardFactEntityLinkV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardNamedCountV1 {
+pub struct ProjectMemoryDashboardNamedCountV1 {
     pub name: String,
     pub count: u64,
 }
 
-impl CompatibilityDashboardNamedCountV1 {
+impl ProjectMemoryDashboardNamedCountV1 {
     pub fn new(name: String, count: u64) -> FactStoreResult<Self> {
         validate_compatibility_text(&name, "dashboard count name")?;
         Ok(Self { name, count })
@@ -134,7 +134,7 @@ impl CompatibilityDashboardNamedCountV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompatibilityDashboardHrrStateV1 {
+pub enum ProjectMemoryDashboardHrrStateV1 {
     Ready,
     MissingVectors,
     MissingBank,
@@ -142,7 +142,7 @@ pub enum CompatibilityDashboardHrrStateV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardHrrCoverageV1 {
+pub struct ProjectMemoryDashboardHrrCoverageV1 {
     pub category: String,
     pub fact_count: u64,
     pub hrr_vector_count: u64,
@@ -151,10 +151,10 @@ pub struct CompatibilityDashboardHrrCoverageV1 {
     pub bank_fact_count: u64,
     pub dimension: Option<u32>,
     pub updated_at: Option<UtcMicros>,
-    pub state: CompatibilityDashboardHrrStateV1,
+    pub state: ProjectMemoryDashboardHrrStateV1,
 }
 
-impl CompatibilityDashboardHrrCoverageV1 {
+impl ProjectMemoryDashboardHrrCoverageV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         category: String,
@@ -165,7 +165,7 @@ impl CompatibilityDashboardHrrCoverageV1 {
         bank_fact_count: u64,
         dimension: Option<u32>,
         updated_at: Option<UtcMicros>,
-        state: CompatibilityDashboardHrrStateV1,
+        state: ProjectMemoryDashboardHrrStateV1,
     ) -> FactStoreResult<Self> {
         validate_compatibility_text(&category, "dashboard HRR category")?;
         validate_compatibility_text(&bank_name, "dashboard HRR bank name")?;
@@ -189,7 +189,7 @@ impl CompatibilityDashboardHrrCoverageV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardMemoryBankV1 {
+pub struct ProjectMemoryDashboardMemoryBankV1 {
     pub name: String,
     pub dimension: Option<u32>,
     pub fact_count: u64,
@@ -197,7 +197,7 @@ pub struct CompatibilityDashboardMemoryBankV1 {
     pub updated_at: Option<UtcMicros>,
 }
 
-impl CompatibilityDashboardMemoryBankV1 {
+impl ProjectMemoryDashboardMemoryBankV1 {
     pub fn new(
         name: String,
         dimension: Option<u32>,
@@ -217,13 +217,13 @@ impl CompatibilityDashboardMemoryBankV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardGrowthPointV1 {
+pub struct ProjectMemoryDashboardGrowthPointV1 {
     pub period: String,
     pub fact_count: u64,
     pub cumulative_fact_count: u64,
 }
 
-impl CompatibilityDashboardGrowthPointV1 {
+impl ProjectMemoryDashboardGrowthPointV1 {
     pub fn new(
         period: String,
         fact_count: u64,
@@ -241,38 +241,38 @@ impl CompatibilityDashboardGrowthPointV1 {
 /// One fixed, bounded dashboard overview shape. Counters and graph relationships
 /// stay typed; arbitrary query result rows are not exposed across the store port.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompatibilityDashboardMemoryOverviewV1 {
+pub struct ProjectMemoryDashboardMemoryOverviewV1 {
     pub owner: FactOwnerV1,
     pub fact_count: u64,
     pub entity_count: u64,
     pub bank_count: u64,
-    pub facts: Vec<CompatibilityDashboardFactSummaryV1>,
-    pub entities: Vec<CompatibilityDashboardEntityV1>,
-    pub fact_entity_links: Vec<CompatibilityDashboardFactEntityLinkV1>,
-    pub categories: Vec<CompatibilityDashboardNamedCountV1>,
-    pub entity_types: Vec<CompatibilityDashboardNamedCountV1>,
-    pub hrr_coverage: Vec<CompatibilityDashboardHrrCoverageV1>,
-    pub memory_banks: Vec<CompatibilityDashboardMemoryBankV1>,
-    pub trust_histogram: Vec<CompatibilityDashboardNamedCountV1>,
-    pub growth: Vec<CompatibilityDashboardGrowthPointV1>,
+    pub facts: Vec<ProjectMemoryDashboardFactSummaryV1>,
+    pub entities: Vec<ProjectMemoryDashboardEntityV1>,
+    pub fact_entity_links: Vec<ProjectMemoryDashboardFactEntityLinkV1>,
+    pub categories: Vec<ProjectMemoryDashboardNamedCountV1>,
+    pub entity_types: Vec<ProjectMemoryDashboardNamedCountV1>,
+    pub hrr_coverage: Vec<ProjectMemoryDashboardHrrCoverageV1>,
+    pub memory_banks: Vec<ProjectMemoryDashboardMemoryBankV1>,
+    pub trust_histogram: Vec<ProjectMemoryDashboardNamedCountV1>,
+    pub growth: Vec<ProjectMemoryDashboardGrowthPointV1>,
 }
 
-impl CompatibilityDashboardMemoryOverviewV1 {
+impl ProjectMemoryDashboardMemoryOverviewV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
         fact_count: u64,
         entity_count: u64,
         bank_count: u64,
-        facts: Vec<CompatibilityDashboardFactSummaryV1>,
-        entities: Vec<CompatibilityDashboardEntityV1>,
-        fact_entity_links: Vec<CompatibilityDashboardFactEntityLinkV1>,
-        categories: Vec<CompatibilityDashboardNamedCountV1>,
-        entity_types: Vec<CompatibilityDashboardNamedCountV1>,
-        hrr_coverage: Vec<CompatibilityDashboardHrrCoverageV1>,
-        memory_banks: Vec<CompatibilityDashboardMemoryBankV1>,
-        trust_histogram: Vec<CompatibilityDashboardNamedCountV1>,
-        growth: Vec<CompatibilityDashboardGrowthPointV1>,
+        facts: Vec<ProjectMemoryDashboardFactSummaryV1>,
+        entities: Vec<ProjectMemoryDashboardEntityV1>,
+        fact_entity_links: Vec<ProjectMemoryDashboardFactEntityLinkV1>,
+        categories: Vec<ProjectMemoryDashboardNamedCountV1>,
+        entity_types: Vec<ProjectMemoryDashboardNamedCountV1>,
+        hrr_coverage: Vec<ProjectMemoryDashboardHrrCoverageV1>,
+        memory_banks: Vec<ProjectMemoryDashboardMemoryBankV1>,
+        trust_histogram: Vec<ProjectMemoryDashboardNamedCountV1>,
+        growth: Vec<ProjectMemoryDashboardGrowthPointV1>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         for fact in &facts {
@@ -330,17 +330,17 @@ impl CompatibilityDashboardMemoryOverviewV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardFactDetailQueryV1 {
-    target: CompatibilityFactTargetV1,
+pub struct ProjectMemoryDashboardFactDetailQueryV1 {
+    target: ProjectMemoryFactTargetV1,
 }
 
-impl CompatibilityDashboardFactDetailQueryV1 {
-    pub fn new(target: CompatibilityFactTargetV1) -> FactStoreResult<Self> {
+impl ProjectMemoryDashboardFactDetailQueryV1 {
+    pub fn new(target: ProjectMemoryFactTargetV1) -> FactStoreResult<Self> {
         target.validate()?;
         Ok(Self { target })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
         &self.target
     }
 }
@@ -348,17 +348,17 @@ impl CompatibilityDashboardFactDetailQueryV1 {
 /// Detail includes lineage when the backend can resolve it, but keeps the same
 /// availability-preserving fact projection used by list and search views.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompatibilityDashboardFactDetailV1 {
-    pub fact: CompatibilityFactProjectionV1,
-    pub entities: Vec<CompatibilityDashboardEntityV1>,
-    pub history: Option<CompatibilityFactHistoryV1>,
+pub struct ProjectMemoryDashboardFactDetailV1 {
+    pub fact: ProjectMemoryFactProjectionV1,
+    pub entities: Vec<ProjectMemoryDashboardEntityV1>,
+    pub history: Option<ProjectMemoryFactHistoryV1>,
 }
 
-impl CompatibilityDashboardFactDetailV1 {
+impl ProjectMemoryDashboardFactDetailV1 {
     pub fn new(
-        fact: CompatibilityFactProjectionV1,
-        entities: Vec<CompatibilityDashboardEntityV1>,
-        history: Option<CompatibilityFactHistoryV1>,
+        fact: ProjectMemoryFactProjectionV1,
+        entities: Vec<ProjectMemoryDashboardEntityV1>,
+        history: Option<ProjectMemoryFactHistoryV1>,
     ) -> FactStoreResult<Self> {
         if entities.len() > MAX_COMPATIBILITY_DASHBOARD_GRAPH {
             return Err(FactStoreError::InvalidQueryLimit {
@@ -387,13 +387,13 @@ impl CompatibilityDashboardFactDetailV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardVectorPointsQueryV1 {
+pub struct ProjectMemoryDashboardVectorPointsQueryV1 {
     owner: FactOwnerV1,
     search: Option<String>,
     limit: usize,
 }
 
-impl CompatibilityDashboardVectorPointsQueryV1 {
+impl ProjectMemoryDashboardVectorPointsQueryV1 {
     pub fn new(owner: FactOwnerV1, search: Option<String>, limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
         validate_limit(limit, MAX_COMPATIBILITY_DASHBOARD_VECTORS)?;
@@ -423,17 +423,17 @@ impl CompatibilityDashboardVectorPointsQueryV1 {
 /// A finite point for client-side PCA/similarity. Vectors are capped and checked
 /// for finite components, and unavailable facts retain no fabricated vector.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CompatibilityDashboardVectorPointV1 {
-    pub fact: CompatibilityDashboardFactSummaryV1,
+pub struct ProjectMemoryDashboardVectorPointV1 {
+    pub fact: ProjectMemoryDashboardFactSummaryV1,
     pub vector: Option<Vec<f64>>,
     pub bank_name: Option<String>,
     pub entity_count: u64,
     pub connection_count: u64,
 }
 
-impl CompatibilityDashboardVectorPointV1 {
+impl ProjectMemoryDashboardVectorPointV1 {
     pub fn new(
-        fact: CompatibilityDashboardFactSummaryV1,
+        fact: ProjectMemoryDashboardFactSummaryV1,
         vector: Option<Vec<f64>>,
         bank_name: Option<String>,
         entity_count: u64,
@@ -449,7 +449,7 @@ impl CompatibilityDashboardVectorPointV1 {
         if let Some(bank_name) = &bank_name {
             validate_compatibility_text(bank_name, "dashboard vector bank name")?;
         }
-        if matches!(fact.fact, CompatibilityFactProjectionV1::Unavailable(_)) && vector.is_some() {
+        if matches!(fact.fact, ProjectMemoryFactProjectionV1::Unavailable(_)) && vector.is_some() {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "dashboard unavailable vector",
             }));
@@ -465,12 +465,12 @@ impl CompatibilityDashboardVectorPointV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardOplogQueryV1 {
+pub struct ProjectMemoryDashboardOplogQueryV1 {
     owner: FactOwnerV1,
     limit: usize,
 }
 
-impl CompatibilityDashboardOplogQueryV1 {
+impl ProjectMemoryDashboardOplogQueryV1 {
     pub fn new(owner: FactOwnerV1, limit: usize) -> FactStoreResult<Self> {
         owner.validate()?;
         validate_limit(limit, MAX_COMPATIBILITY_DASHBOARD_OPLOG)?;
@@ -487,13 +487,13 @@ impl CompatibilityDashboardOplogQueryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompatibilityDashboardOplogDetailsV1 {
+pub enum ProjectMemoryDashboardOplogDetailsV1 {
     Available { summary: String },
     Redacted,
     Unknown,
 }
 
-impl CompatibilityDashboardOplogDetailsV1 {
+impl ProjectMemoryDashboardOplogDetailsV1 {
     pub fn available(summary: String) -> FactStoreResult<Self> {
         validate_compatibility_text(&summary, "dashboard oplog detail")?;
         Ok(Self::Available { summary })
@@ -501,21 +501,21 @@ impl CompatibilityDashboardOplogDetailsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityDashboardOplogEntryV1 {
+pub struct ProjectMemoryDashboardOplogEntryV1 {
     pub id: i64,
     pub occurred_at: UtcMicros,
     pub operation: String,
-    pub fact: Option<CompatibilityFactTargetV1>,
-    pub details: CompatibilityDashboardOplogDetailsV1,
+    pub fact: Option<ProjectMemoryFactTargetV1>,
+    pub details: ProjectMemoryDashboardOplogDetailsV1,
 }
 
-impl CompatibilityDashboardOplogEntryV1 {
+impl ProjectMemoryDashboardOplogEntryV1 {
     pub fn new(
         id: i64,
         occurred_at: UtcMicros,
         operation: String,
-        fact: Option<CompatibilityFactTargetV1>,
-        details: CompatibilityDashboardOplogDetailsV1,
+        fact: Option<ProjectMemoryFactTargetV1>,
+        details: ProjectMemoryDashboardOplogDetailsV1,
     ) -> FactStoreResult<Self> {
         if id <= 0 {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {

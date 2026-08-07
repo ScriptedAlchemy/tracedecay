@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use crate::memory::encoding::HolographicEncoder;
 
 use tracedecay_domain::UtcMicros;
-use tracedecay_store::CompatibilityFactV1;
+use tracedecay_store::ProjectMemoryFactV1;
 
 pub(super) fn compatibility_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -29,7 +29,7 @@ pub(super) fn compatibility_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-pub(super) fn compatibility_fact_tokens(fact: &CompatibilityFactV1) -> Vec<String> {
+pub(super) fn compatibility_fact_tokens(fact: &ProjectMemoryFactV1) -> Vec<String> {
     let mut tokens = fact.content().map(compatibility_tokens).unwrap_or_default();
     if let Some(tags) = fact.tags() {
         for tag in tags {
@@ -79,7 +79,7 @@ pub(super) fn compatibility_jaccard(left: &[String], right: &[String]) -> f64 {
 pub(super) fn compatibility_holographic_score(
     encoder: &HolographicEncoder,
     query_vector: &[f64],
-    fact: &CompatibilityFactV1,
+    fact: &ProjectMemoryFactV1,
 ) -> f64 {
     let Some(content) = fact.content() else {
         return 0.0;

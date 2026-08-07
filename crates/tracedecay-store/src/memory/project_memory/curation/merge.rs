@@ -2,27 +2,27 @@ use tracedecay_domain::{ActorId, DomainError, FactOwnerV1, ProvenanceId};
 
 use super::super::super::{FactStoreError, FactStoreResult};
 use super::super::{
-    CompatibilityFactMappingV1, CompatibilityFactTargetV1, validate_compatibility_text,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_compatibility_text,
 };
 use super::MAX_COMPATIBILITY_CURATION_TARGETS;
 use super::validate::validate_curation_fact_target;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactMergeCommandV1 {
+pub struct ProjectMemoryFactMergeCommandV1 {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
-    winner: CompatibilityFactTargetV1,
-    losers: Vec<CompatibilityFactTargetV1>,
+    winner: ProjectMemoryFactTargetV1,
+    losers: Vec<ProjectMemoryFactTargetV1>,
     merged_content: Option<String>,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityFactMergeCommandV1 {
+impl ProjectMemoryFactMergeCommandV1 {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,
-        winner: CompatibilityFactTargetV1,
-        losers: Vec<CompatibilityFactTargetV1>,
+        winner: ProjectMemoryFactTargetV1,
+        losers: Vec<ProjectMemoryFactTargetV1>,
         merged_content: Option<String>,
         actor: Option<ActorId>,
     ) -> FactStoreResult<Self> {
@@ -67,11 +67,11 @@ impl CompatibilityFactMergeCommandV1 {
         &self.operation_id
     }
 
-    pub fn winner(&self) -> &CompatibilityFactTargetV1 {
+    pub fn winner(&self) -> &ProjectMemoryFactTargetV1 {
         &self.winner
     }
 
-    pub fn losers(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn losers(&self) -> &[ProjectMemoryFactTargetV1] {
         &self.losers
     }
 
@@ -85,19 +85,19 @@ impl CompatibilityFactMergeCommandV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactMergeOutcomeV1 {
+pub struct ProjectMemoryFactMergeOutcomeV1 {
     owner: FactOwnerV1,
-    winner: CompatibilityFactMappingV1,
+    winner: ProjectMemoryFactMappingV1,
     content_updated: bool,
-    deleted_losers: Vec<CompatibilityFactMappingV1>,
+    deleted_losers: Vec<ProjectMemoryFactMappingV1>,
 }
 
-impl CompatibilityFactMergeOutcomeV1 {
+impl ProjectMemoryFactMergeOutcomeV1 {
     pub fn new(
         owner: FactOwnerV1,
-        winner: CompatibilityFactMappingV1,
+        winner: ProjectMemoryFactMappingV1,
         content_updated: bool,
-        deleted_losers: Vec<CompatibilityFactMappingV1>,
+        deleted_losers: Vec<ProjectMemoryFactMappingV1>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         if winner.owner() != &owner
@@ -130,7 +130,7 @@ impl CompatibilityFactMergeOutcomeV1 {
         &self.owner
     }
 
-    pub fn winner(&self) -> &CompatibilityFactMappingV1 {
+    pub fn winner(&self) -> &ProjectMemoryFactMappingV1 {
         &self.winner
     }
 
@@ -138,19 +138,19 @@ impl CompatibilityFactMergeOutcomeV1 {
         self.content_updated
     }
 
-    pub fn deleted_losers(&self) -> &[CompatibilityFactMappingV1] {
+    pub fn deleted_losers(&self) -> &[ProjectMemoryFactMappingV1] {
         &self.deleted_losers
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityMemoryRepairCommandV1 {
+pub struct ProjectMemoryMemoryRepairCommandV1 {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
     actor: Option<ActorId>,
 }
 
-impl CompatibilityMemoryRepairCommandV1 {
+impl ProjectMemoryMemoryRepairCommandV1 {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,

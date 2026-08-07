@@ -32,25 +32,25 @@ use tracedecay_domain::{
     LegacyHistoryCoverageV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactAddCommandV1, CompatibilityFactAddDispositionV1,
-    CompatibilityFactAddOutcomeV1, CompatibilityFactFeedbackActionV1, CompatibilityFactIdV1,
-    CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1, FactCompatibilityResult,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1, FactCompatibilityResult,
     FactStoreError, FactStoreResult, FactWriteBatch, StoredFactV1,
 };
 pub(super) fn compatibility_feedback_action_label(
-    action: CompatibilityFactFeedbackActionV1,
+    action: ProjectMemoryFactFeedbackActionV1,
 ) -> &'static str {
     match action {
-        CompatibilityFactFeedbackActionV1::Helpful => "helpful",
-        CompatibilityFactFeedbackActionV1::Unhelpful => "unhelpful",
+        ProjectMemoryFactFeedbackActionV1::Helpful => "helpful",
+        ProjectMemoryFactFeedbackActionV1::Unhelpful => "unhelpful",
     }
 }
 
-pub(super) fn compatibility_feedback_delta(action: CompatibilityFactFeedbackActionV1) -> f64 {
+pub(super) fn compatibility_feedback_delta(action: ProjectMemoryFactFeedbackActionV1) -> f64 {
     match action {
-        CompatibilityFactFeedbackActionV1::Helpful => 0.05,
-        CompatibilityFactFeedbackActionV1::Unhelpful => -0.10,
+        ProjectMemoryFactFeedbackActionV1::Helpful => 0.05,
+        ProjectMemoryFactFeedbackActionV1::Unhelpful => -0.10,
     }
 }
 
@@ -58,7 +58,7 @@ pub(super) fn compatibility_feedback_delta(action: CompatibilityFactFeedbackActi
 pub(super) async fn compatibility_mirror_feedback_tx(
     transaction: &Transaction<'_>,
     legacy_fact_id: i64,
-    action: CompatibilityFactFeedbackActionV1,
+    action: ProjectMemoryFactFeedbackActionV1,
     old_trust: Confidence,
     new_trust: Confidence,
     timestamp: i64,
@@ -76,10 +76,10 @@ pub(super) async fn compatibility_mirror_feedback_tx(
              WHERE fact_id = ?5",
             params![
                 new_trust.as_f64(),
-                i64::from(matches!(action, CompatibilityFactFeedbackActionV1::Helpful)),
+                i64::from(matches!(action, ProjectMemoryFactFeedbackActionV1::Helpful)),
                 i64::from(matches!(
                     action,
-                    CompatibilityFactFeedbackActionV1::Unhelpful
+                    ProjectMemoryFactFeedbackActionV1::Unhelpful
                 )),
                 timestamp,
                 legacy_fact_id,
@@ -119,7 +119,7 @@ pub(super) async fn compatibility_update_feedback_projection_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-    action: CompatibilityFactFeedbackActionV1,
+    action: ProjectMemoryFactFeedbackActionV1,
     timestamp: UtcMicros,
 ) -> FactStoreResult<()> {
     let key = OwnerKey::new(owner)?;
@@ -131,10 +131,10 @@ pub(super) async fn compatibility_update_feedback_projection_tx(
                 last_feedback_at = ?3
              WHERE fact_id = ?4 AND owner_kind = ?5 AND project_id = ?6",
             params![
-                i64::from(matches!(action, CompatibilityFactFeedbackActionV1::Helpful)),
+                i64::from(matches!(action, ProjectMemoryFactFeedbackActionV1::Helpful)),
                 i64::from(matches!(
                     action,
-                    CompatibilityFactFeedbackActionV1::Unhelpful
+                    ProjectMemoryFactFeedbackActionV1::Unhelpful
                 )),
                 timestamp.0,
                 fact_id.as_str(),
@@ -255,7 +255,7 @@ async fn compatibility_replay_add_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactAddOutcomeV1> {
     let outcome = receipt
         .receipt
         .get("outcome")
@@ -267,9 +267,9 @@ async fn compatibility_replay_add_tx(
             )
         })?;
     match outcome {
-        "rejected_secret_like" => CompatibilityFactAddOutcomeV1::new(
+        "rejected_secret_like" => ProjectMemoryFactAddOutcomeV1::new(
             None,
-            CompatibilityFactAddDispositionV1::RejectedSecretLike,
+            ProjectMemoryFactAddDispositionV1::RejectedSecretLike,
             None,
             None,
             receipt
@@ -295,16 +295,16 @@ async fn compatibility_replay_add_tx(
                     )
                 })?;
             let closest = if outcome == "near_duplicate" {
-                Some(CompatibilityFactIdV1::new(owner.clone(), fact_id.clone())?)
+                Some(ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?)
             } else {
                 None
             };
-            CompatibilityFactAddOutcomeV1::new(
+            ProjectMemoryFactAddOutcomeV1::new(
                 Some(fact),
                 if outcome == "added" {
-                    CompatibilityFactAddDispositionV1::Added
+                    ProjectMemoryFactAddDispositionV1::Added
                 } else {
-                    CompatibilityFactAddDispositionV1::NearDuplicate
+                    ProjectMemoryFactAddDispositionV1::NearDuplicate
                 },
                 closest,
                 None,
@@ -323,8 +323,8 @@ async fn compatibility_replay_add_tx(
 pub(in crate::store::memory) async fn add_compatibility_fact_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactAddCommandV1,
-) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1> {
+    request: &ProjectMemoryFactAddCommandV1,
+) -> FactCompatibilityResult<ProjectMemoryFactAddOutcomeV1> {
     let payload_metadata = compatibility_payload_metadata(request.metadata());
     let request_digest = compatibility_digest(json!({
         "owner": request.owner(),
@@ -380,7 +380,7 @@ pub(in crate::store::memory) async fn add_compatibility_fact_tx(
                         "duplicate compatibility fact projection is missing",
                     )
                 })?;
-            let closest = CompatibilityFactIdV1::new(request.owner().clone(), fact_id.clone())?;
+            let closest = ProjectMemoryFactIdV1::new(request.owner().clone(), fact_id.clone())?;
             let receipt = json!({ "outcome": "near_duplicate" });
             compatibility_record_operation_receipt_tx(
                 transaction,
@@ -394,9 +394,9 @@ pub(in crate::store::memory) async fn add_compatibility_fact_tx(
                 now,
             )
             .await?;
-            CompatibilityFactAddOutcomeV1::new(
+            ProjectMemoryFactAddOutcomeV1::new(
                 Some(fact),
-                CompatibilityFactAddDispositionV1::NearDuplicate,
+                ProjectMemoryFactAddDispositionV1::NearDuplicate,
                 Some(closest),
                 None,
                 None,
@@ -439,9 +439,9 @@ pub(in crate::store::memory) async fn add_compatibility_fact_tx(
                 now,
             )
             .await?;
-            CompatibilityFactAddOutcomeV1::new(
+            ProjectMemoryFactAddOutcomeV1::new(
                 Some(fact),
-                CompatibilityFactAddDispositionV1::Added,
+                ProjectMemoryFactAddDispositionV1::Added,
                 None,
                 None,
                 None,
@@ -455,7 +455,7 @@ async fn compatibility_replay_update_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactUpdateOutcomeV1> {
     let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
             COMPATIBILITY_WRITE_OPERATION,
@@ -481,14 +481,14 @@ async fn compatibility_replay_update_tx(
                 "compatibility update receipt is malformed",
             )
         })?;
-    CompatibilityFactUpdateOutcomeV1::new(fact, trust_delta_millionths).map_err(Into::into)
+    ProjectMemoryFactUpdateOutcomeV1::new(fact, trust_delta_millionths).map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn update_compatibility_fact_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactUpdateCommandV1,
-) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1> {
+    request: &ProjectMemoryFactUpdateCommandV1,
+) -> FactCompatibilityResult<ProjectMemoryFactUpdateOutcomeV1> {
     let request_digest = compatibility_digest(json!({
         "target": compatibility_target_digest(request.target())?,
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
@@ -623,14 +623,14 @@ pub(in crate::store::memory) async fn update_compatibility_fact_tx(
         now,
     )
     .await?;
-    CompatibilityFactUpdateOutcomeV1::new(fact, trust_delta_millionths).map_err(Into::into)
+    ProjectMemoryFactUpdateOutcomeV1::new(fact, trust_delta_millionths).map_err(Into::into)
 }
 
 async fn compatibility_replay_remove_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactRemoveOutcomeV1> {
     let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
             COMPATIBILITY_WRITE_OPERATION,
@@ -656,7 +656,7 @@ async fn compatibility_replay_remove_tx(
             )
         })?;
     let remaining_fact_count = compatibility_active_fact_count_tx(transaction, owner).await?;
-    Ok(CompatibilityFactRemoveOutcomeV1::new(
+    Ok(ProjectMemoryFactRemoveOutcomeV1::new(
         fact,
         removed,
         remaining_fact_count,
@@ -666,8 +666,8 @@ async fn compatibility_replay_remove_tx(
 pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactRemoveCommandV1,
-) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1> {
+    request: &ProjectMemoryFactRemoveCommandV1,
+) -> FactCompatibilityResult<ProjectMemoryFactRemoveOutcomeV1> {
     let request_digest = compatibility_digest(json!({
         "target": compatibility_target_digest(request.target())?,
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
@@ -696,7 +696,7 @@ pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
     else {
         let remaining_fact_count =
             compatibility_active_fact_count_tx(transaction, request.target().owner()).await?;
-        return Ok(CompatibilityFactRemoveOutcomeV1::not_found(
+        return Ok(ProjectMemoryFactRemoveOutcomeV1::not_found(
             remaining_fact_count,
         ));
     };
@@ -704,7 +704,7 @@ pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
     let Some(current) = load_current_projection(transaction, &owner_key, &fact_id).await? else {
         let remaining_fact_count =
             compatibility_active_fact_count_tx(transaction, request.target().owner()).await?;
-        return Ok(CompatibilityFactRemoveOutcomeV1::not_found(
+        return Ok(ProjectMemoryFactRemoveOutcomeV1::not_found(
             remaining_fact_count,
         ));
     };
@@ -830,7 +830,7 @@ pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
         now,
     )
     .await?;
-    Ok(CompatibilityFactRemoveOutcomeV1::new(
+    Ok(ProjectMemoryFactRemoveOutcomeV1::new(
         fact,
         removed,
         remaining_fact_count,

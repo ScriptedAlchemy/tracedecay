@@ -7,9 +7,9 @@ use crate::db::engine::params;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
-    CompatibilityFeedbackRepairProgressV1, CompatibilityMemoryAlgebraV1,
-    CompatibilityMemoryFeedbackFunnelV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1, FactCompatibilityResult,
+    ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryMemoryAlgebraV1,
+    ProjectMemoryMemoryFeedbackFunnelV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1, FactCompatibilityResult,
     FactStoreResult,
 };
 
@@ -162,8 +162,8 @@ async fn compatibility_owner_has_dirty_banks_tx(
 pub(super) async fn compatibility_memory_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    feedback_repair: CompatibilityFeedbackRepairProgressV1,
-) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {
+    feedback_repair: ProjectMemoryFeedbackRepairProgressV1,
+) -> FactCompatibilityResult<ProjectMemoryMemoryStatusV1> {
     let (
         fact_count,
         helpful_count,
@@ -285,16 +285,16 @@ pub(super) async fn compatibility_memory_status_tx(
         "bank count",
     )?;
     let projection_state = if missing_vector_count == 0 && !dirty_banks {
-        CompatibilityProjectionStateV1::Ready
+        ProjectMemoryProjectionStateV1::Ready
     } else {
-        CompatibilityProjectionStateV1::Rebuilding
+        ProjectMemoryProjectionStateV1::Rebuilding
     };
-    CompatibilityMemoryStatusV1::new(
+    ProjectMemoryMemoryStatusV1::new(
         owner.clone(),
         fact_count,
         entity_count,
         bank_count,
-        CompatibilityMemoryAlgebraV1::new(
+        ProjectMemoryMemoryAlgebraV1::new(
             "amari_fhrr".to_owned(),
             HolographicEncoder::DIMENSIONS as u64,
             fact_count.saturating_mul(HolographicEncoder::DIMENSIONS as u64),
@@ -308,8 +308,8 @@ pub(super) async fn compatibility_memory_status_tx(
         unhelpful_count,
         missing_vector_count,
         projection_state,
-        CompatibilityMemoryRepairStatsV1::new(0, 0),
-        CompatibilityMemoryFeedbackFunnelV1::new(
+        ProjectMemoryMemoryRepairStatsV1::new(0, 0),
+        ProjectMemoryMemoryFeedbackFunnelV1::new(
             retrieval_count_total,
             access_count_total,
             retrieved_fact_count,

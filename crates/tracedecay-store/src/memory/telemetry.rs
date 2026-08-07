@@ -12,7 +12,7 @@ use super::{
 /// Counters and timestamps V1 clients expose.  They are non-negative by type
 /// and stay separate from the immutable fact payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactTelemetryV1 {
+pub struct ProjectMemoryFactTelemetryV1 {
     retrieval_count: u64,
     access_count: u64,
     helpful_count: u64,
@@ -24,7 +24,7 @@ pub struct CompatibilityFactTelemetryV1 {
     last_feedback_at: Option<UtcMicros>,
 }
 
-impl CompatibilityFactTelemetryV1 {
+impl ProjectMemoryFactTelemetryV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         retrieval_count: u64,
@@ -89,7 +89,7 @@ impl CompatibilityFactTelemetryV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityProjectionStateV1 {
+pub enum ProjectMemoryProjectionStateV1 {
     Ready,
     Rebuilding,
     Stale,
@@ -97,21 +97,21 @@ pub enum CompatibilityProjectionStateV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactStatusV1 {
+pub struct ProjectMemoryFactStatusV1 {
     owner: FactOwnerV1,
     fact_id: Option<FactId>,
     payload_access: Option<PayloadAccessState>,
-    projection_state: CompatibilityProjectionStateV1,
+    projection_state: ProjectMemoryProjectionStateV1,
     projected_as_of: Option<UtcMicros>,
     vector_watermark: Option<VectorWatermark>,
 }
 
-impl CompatibilityFactStatusV1 {
+impl ProjectMemoryFactStatusV1 {
     pub fn new(
         owner: FactOwnerV1,
         fact_id: Option<FactId>,
         payload_access: Option<PayloadAccessState>,
-        projection_state: CompatibilityProjectionStateV1,
+        projection_state: ProjectMemoryProjectionStateV1,
         projected_as_of: Option<UtcMicros>,
         vector_watermark: Option<VectorWatermark>,
     ) -> FactStoreResult<Self> {
@@ -144,7 +144,7 @@ impl CompatibilityFactStatusV1 {
     pub fn payload_access(&self) -> Option<PayloadAccessState> {
         self.payload_access
     }
-    pub fn projection_state(&self) -> CompatibilityProjectionStateV1 {
+    pub fn projection_state(&self) -> ProjectMemoryProjectionStateV1 {
         self.projection_state
     }
     pub fn projected_as_of(&self) -> Option<UtcMicros> {
@@ -158,7 +158,7 @@ impl CompatibilityFactStatusV1 {
 /// Owner aggregate for the legacy memory-status response.  Counts originate
 /// from one authority snapshot rather than handler-side joins.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityMemoryFeedbackFunnelV1 {
+pub struct ProjectMemoryMemoryFeedbackFunnelV1 {
     retrieval_count_total: u64,
     access_count_total: u64,
     retrieved_fact_count: u64,
@@ -167,7 +167,7 @@ pub struct CompatibilityMemoryFeedbackFunnelV1 {
     seen_to_feedback_ratio: Option<u64>,
 }
 
-impl CompatibilityMemoryFeedbackFunnelV1 {
+impl ProjectMemoryMemoryFeedbackFunnelV1 {
     pub fn new(
         retrieval_count_total: u64,
         access_count_total: u64,
@@ -207,12 +207,12 @@ impl CompatibilityMemoryFeedbackFunnelV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityMemoryStatusV1 {
+pub struct ProjectMemoryMemoryStatusV1 {
     owner: FactOwnerV1,
     fact_count: u64,
     entity_count: u64,
     bank_count: u64,
-    algebra: CompatibilityMemoryAlgebraV1,
+    algebra: ProjectMemoryMemoryAlgebraV1,
     trust_0_025_count: u64,
     trust_025_050_count: u64,
     trust_050_075_count: u64,
@@ -221,17 +221,17 @@ pub struct CompatibilityMemoryStatusV1 {
     helpful_count: u64,
     unhelpful_count: u64,
     missing_vector_count: u64,
-    projection_state: CompatibilityProjectionStateV1,
-    repair: CompatibilityMemoryRepairStatsV1,
-    feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
-    feedback_funnel: CompatibilityMemoryFeedbackFunnelV1,
+    projection_state: ProjectMemoryProjectionStateV1,
+    repair: ProjectMemoryMemoryRepairStatsV1,
+    feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
+    feedback_funnel: ProjectMemoryMemoryFeedbackFunnelV1,
 }
 
 /// Bounded migration/repair state for V1 feedback history. A request may report
 /// incomplete work, but never hides it by returning an empty or fabricated
 /// history while the daemon continues the remaining batches.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum CompatibilityFeedbackRepairProgressV1 {
+pub enum ProjectMemoryFeedbackRepairProgressV1 {
     /// No V2 history projection exists for this owner yet.
     #[default]
     Unknown,
@@ -247,7 +247,7 @@ pub enum CompatibilityFeedbackRepairProgressV1 {
     },
 }
 
-impl CompatibilityFeedbackRepairProgressV1 {
+impl ProjectMemoryFeedbackRepairProgressV1 {
     pub fn is_complete(self) -> bool {
         matches!(self, Self::NotRequired | Self::Complete { .. })
     }
@@ -269,12 +269,12 @@ impl CompatibilityFeedbackRepairProgressV1 {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CompatibilityMemoryRepairStatsV1 {
+pub struct ProjectMemoryMemoryRepairStatsV1 {
     missing_vectors_repaired: u64,
     banks_rebuilt: u64,
     /// Exact feedback-history batch outcome when this is an explicit repair
     /// receipt. Other repair-producing paths leave this `Unknown`.
-    feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
+    feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
     /// Whether the producing repair pass filled a per-pass batch cap and may
     /// have more backlog behind it. Computed by the store, which alone knows
     /// the caps; consumers (e.g. the daemon scheduler) read [`Self::saturated`]
@@ -283,13 +283,13 @@ pub struct CompatibilityMemoryRepairStatsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityMemoryAlgebraV1 {
+pub struct ProjectMemoryMemoryAlgebraV1 {
     name: String,
     hrr_dim: u64,
     estimated_capacity: u64,
 }
 
-impl CompatibilityMemoryAlgebraV1 {
+impl ProjectMemoryMemoryAlgebraV1 {
     pub fn new(name: String, hrr_dim: u64, estimated_capacity: u64) -> FactStoreResult<Self> {
         if name.trim().is_empty() || name.len() > MAX_COMPATIBILITY_SEARCH_BYTES {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -314,19 +314,19 @@ impl CompatibilityMemoryAlgebraV1 {
     }
 }
 
-impl CompatibilityMemoryRepairStatsV1 {
+impl ProjectMemoryMemoryRepairStatsV1 {
     pub fn new(missing_vectors_repaired: u64, banks_rebuilt: u64) -> Self {
         Self {
             missing_vectors_repaired,
             banks_rebuilt,
-            feedback_history_repair: CompatibilityFeedbackRepairProgressV1::Unknown,
+            feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1::Unknown,
             saturated: false,
         }
     }
 
     pub fn with_feedback_history_repair(
         mut self,
-        feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
+        feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
     ) -> Self {
         self.feedback_history_repair = feedback_history_repair;
         self
@@ -345,7 +345,7 @@ impl CompatibilityMemoryRepairStatsV1 {
     pub fn banks_rebuilt(&self) -> u64 {
         self.banks_rebuilt
     }
-    pub fn feedback_history_repair(&self) -> CompatibilityFeedbackRepairProgressV1 {
+    pub fn feedback_history_repair(&self) -> ProjectMemoryFeedbackRepairProgressV1 {
         self.feedback_history_repair
     }
     /// True when the producing repair pass filled a per-pass batch cap and may
@@ -356,14 +356,14 @@ impl CompatibilityMemoryRepairStatsV1 {
     }
 }
 
-impl CompatibilityMemoryStatusV1 {
+impl ProjectMemoryMemoryStatusV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
         fact_count: u64,
         entity_count: u64,
         bank_count: u64,
-        algebra: CompatibilityMemoryAlgebraV1,
+        algebra: ProjectMemoryMemoryAlgebraV1,
         trust_0_025_count: u64,
         trust_025_050_count: u64,
         trust_050_075_count: u64,
@@ -372,9 +372,9 @@ impl CompatibilityMemoryStatusV1 {
         helpful_count: u64,
         unhelpful_count: u64,
         missing_vector_count: u64,
-        projection_state: CompatibilityProjectionStateV1,
-        repair: CompatibilityMemoryRepairStatsV1,
-        feedback_funnel: CompatibilityMemoryFeedbackFunnelV1,
+        projection_state: ProjectMemoryProjectionStateV1,
+        repair: ProjectMemoryMemoryRepairStatsV1,
+        feedback_funnel: ProjectMemoryMemoryFeedbackFunnelV1,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         Ok(Self {
@@ -393,14 +393,14 @@ impl CompatibilityMemoryStatusV1 {
             missing_vector_count,
             projection_state,
             repair,
-            feedback_history_repair: CompatibilityFeedbackRepairProgressV1::Unknown,
+            feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1::Unknown,
             feedback_funnel,
         })
     }
 
     pub fn with_feedback_history_repair(
         mut self,
-        feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
+        feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
     ) -> Self {
         self.feedback_history_repair = feedback_history_repair;
         self
@@ -418,7 +418,7 @@ impl CompatibilityMemoryStatusV1 {
     pub fn bank_count(&self) -> u64 {
         self.bank_count
     }
-    pub fn algebra(&self) -> &CompatibilityMemoryAlgebraV1 {
+    pub fn algebra(&self) -> &ProjectMemoryMemoryAlgebraV1 {
         &self.algebra
     }
     pub fn trust_0_025_count(&self) -> u64 {
@@ -445,56 +445,56 @@ impl CompatibilityMemoryStatusV1 {
     pub fn missing_vector_count(&self) -> u64 {
         self.missing_vector_count
     }
-    pub fn feedback_history_repair(&self) -> CompatibilityFeedbackRepairProgressV1 {
+    pub fn feedback_history_repair(&self) -> ProjectMemoryFeedbackRepairProgressV1 {
         self.feedback_history_repair
     }
-    pub fn projection_state(&self) -> CompatibilityProjectionStateV1 {
+    pub fn projection_state(&self) -> ProjectMemoryProjectionStateV1 {
         self.projection_state
     }
-    pub fn repair(&self) -> CompatibilityMemoryRepairStatsV1 {
+    pub fn repair(&self) -> ProjectMemoryMemoryRepairStatsV1 {
         self.repair
     }
-    pub fn feedback_funnel(&self) -> &CompatibilityMemoryFeedbackFunnelV1 {
+    pub fn feedback_funnel(&self) -> &ProjectMemoryMemoryFeedbackFunnelV1 {
         &self.feedback_funnel
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactFeedbackActionV1 {
+pub enum ProjectMemoryFactFeedbackActionV1 {
     Helpful,
     Unhelpful,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactFeedbackDetailsAvailabilityV1 {
+pub enum ProjectMemoryFactFeedbackDetailsAvailabilityV1 {
     Available,
     LegacyRedacted,
     Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackHistoryEntryV1 {
+pub struct ProjectMemoryFactFeedbackHistoryEntryV1 {
     event_id: FactEventId,
     occurred_at: UtcMicros,
-    action: CompatibilityFactFeedbackActionV1,
+    action: ProjectMemoryFactFeedbackActionV1,
     old_trust: Confidence,
     new_trust: Confidence,
     source: Option<String>,
     note: Option<String>,
-    details_availability: CompatibilityFactFeedbackDetailsAvailabilityV1,
+    details_availability: ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 }
 
-impl CompatibilityFactFeedbackHistoryEntryV1 {
+impl ProjectMemoryFactFeedbackHistoryEntryV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         event_id: FactEventId,
         occurred_at: UtcMicros,
-        action: CompatibilityFactFeedbackActionV1,
+        action: ProjectMemoryFactFeedbackActionV1,
         old_trust: Confidence,
         new_trust: Confidence,
         source: Option<String>,
         note: Option<String>,
-        details_availability: CompatibilityFactFeedbackDetailsAvailabilityV1,
+        details_availability: ProjectMemoryFactFeedbackDetailsAvailabilityV1,
     ) -> FactStoreResult<Self> {
         event_id.validate()?;
         if source.as_ref().is_some_and(|value| {
@@ -506,7 +506,7 @@ impl CompatibilityFactFeedbackHistoryEntryV1 {
                 field: "compatibility fact feedback history details",
             }));
         }
-        if details_availability != CompatibilityFactFeedbackDetailsAvailabilityV1::Available
+        if details_availability != ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available
             && (source.is_some() || note.is_some())
         {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -531,7 +531,7 @@ impl CompatibilityFactFeedbackHistoryEntryV1 {
     pub fn occurred_at(&self) -> UtcMicros {
         self.occurred_at
     }
-    pub fn action(&self) -> CompatibilityFactFeedbackActionV1 {
+    pub fn action(&self) -> ProjectMemoryFactFeedbackActionV1 {
         self.action
     }
     pub fn old_trust(&self) -> Confidence {
@@ -546,38 +546,38 @@ impl CompatibilityFactFeedbackHistoryEntryV1 {
     pub fn note(&self) -> Option<&str> {
         self.note.as_deref()
     }
-    pub fn details_availability(&self) -> CompatibilityFactFeedbackDetailsAvailabilityV1 {
+    pub fn details_availability(&self) -> ProjectMemoryFactFeedbackDetailsAvailabilityV1 {
         self.details_availability
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackHistoryV1 {
+pub struct ProjectMemoryFactFeedbackHistoryV1 {
     owner: FactOwnerV1,
-    events: Vec<CompatibilityFactFeedbackHistoryEntryV1>,
+    events: Vec<ProjectMemoryFactFeedbackHistoryEntryV1>,
     next_after: Option<FactLineageCursor>,
-    repair_progress: CompatibilityFeedbackRepairProgressV1,
+    repair_progress: ProjectMemoryFeedbackRepairProgressV1,
 }
 
-impl CompatibilityFactFeedbackHistoryV1 {
+impl ProjectMemoryFactFeedbackHistoryV1 {
     pub fn new(
         owner: FactOwnerV1,
-        events: Vec<CompatibilityFactFeedbackHistoryEntryV1>,
+        events: Vec<ProjectMemoryFactFeedbackHistoryEntryV1>,
         next_after: Option<FactLineageCursor>,
     ) -> FactStoreResult<Self> {
         Self::new_with_repair_progress(
             owner,
             events,
             next_after,
-            CompatibilityFeedbackRepairProgressV1::Unknown,
+            ProjectMemoryFeedbackRepairProgressV1::Unknown,
         )
     }
 
     pub fn new_with_repair_progress(
         owner: FactOwnerV1,
-        events: Vec<CompatibilityFactFeedbackHistoryEntryV1>,
+        events: Vec<ProjectMemoryFactFeedbackHistoryEntryV1>,
         next_after: Option<FactLineageCursor>,
-        repair_progress: CompatibilityFeedbackRepairProgressV1,
+        repair_progress: ProjectMemoryFeedbackRepairProgressV1,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         if events.len() > MAX_LINEAGE_LIMIT {
@@ -586,7 +586,7 @@ impl CompatibilityFactFeedbackHistoryV1 {
                 max: MAX_LINEAGE_LIMIT,
             });
         }
-        let mut previous: Option<&CompatibilityFactFeedbackHistoryEntryV1> = None;
+        let mut previous: Option<&ProjectMemoryFactFeedbackHistoryEntryV1> = None;
         for event in &events {
             if previous.is_some_and(|value| {
                 (value.occurred_at(), value.event_id()) >= (event.occurred_at(), event.event_id())
@@ -606,13 +606,13 @@ impl CompatibilityFactFeedbackHistoryV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn events(&self) -> &[CompatibilityFactFeedbackHistoryEntryV1] {
+    pub fn events(&self) -> &[ProjectMemoryFactFeedbackHistoryEntryV1] {
         &self.events
     }
     pub fn next_after(&self) -> Option<&FactLineageCursor> {
         self.next_after.as_ref()
     }
-    pub fn repair_progress(&self) -> CompatibilityFeedbackRepairProgressV1 {
+    pub fn repair_progress(&self) -> ProjectMemoryFeedbackRepairProgressV1 {
         self.repair_progress
     }
 }

@@ -4,47 +4,47 @@ use tracedecay_domain::{
     LegacyFactMappingV1, PayloadAccessState, UtcMicros,
 };
 
-mod compatibility;
+mod project_memory;
 mod error;
 mod queries;
 mod telemetry;
 mod traits;
 mod write;
 
-pub use compatibility::{
-    CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,
-    CompatibilityDashboardFactDetailV1, CompatibilityDashboardFactEntityLinkV1,
-    CompatibilityDashboardFactSummaryV1, CompatibilityDashboardGrowthPointV1,
-    CompatibilityDashboardHrrCoverageV1, CompatibilityDashboardHrrStateV1,
-    CompatibilityDashboardMemoryBankV1, CompatibilityDashboardMemoryOverviewQueryV1,
-    CompatibilityDashboardMemoryOverviewV1, CompatibilityDashboardNamedCountV1,
-    CompatibilityDashboardOplogDetailsV1, CompatibilityDashboardOplogEntryV1,
-    CompatibilityDashboardOplogQueryV1, CompatibilityDashboardVectorPointV1,
-    CompatibilityDashboardVectorPointsQueryV1, CompatibilityFactAddAliasV1,
-    CompatibilityFactAddCommandV1, CompatibilityFactAddDispositionV1,
-    CompatibilityFactAddOutcomeV1, CompatibilityFactAvailabilityV1,
-    CompatibilityFactContradictionPageV1, CompatibilityFactContradictionQueryV1,
-    CompatibilityFactContradictionV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,
-    CompatibilityFactFeedbackCommandV1, CompatibilityFactFeedbackOutcomeV1,
-    CompatibilityFactHistoryV1, CompatibilityFactIdV1, CompatibilityFactInspectionV1,
-    CompatibilityFactLinkV1, CompatibilityFactMappingV1, CompatibilityFactMergeCommandV1,
-    CompatibilityFactMergeEntitiesV1, CompatibilityFactMergeOutcomeV1,
-    CompatibilityFactNormalizeTagsV1, CompatibilityFactPageV1, CompatibilityFactProjectionV1,
-    CompatibilityFactProposalImportReceiptV1, CompatibilityFactProposalImportV1,
-    CompatibilityFactProposalLegacyRecordV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionResultV1,
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
-    CompatibilityFactRelationV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRepairVectorV1,
-    CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchCursorV1,
-    CompatibilityFactSearchFilterV1, CompatibilityFactSearchHitV1, CompatibilityFactSearchKindV1,
-    CompatibilityFactSearchPageV1, CompatibilityFactSearchScoresV1, CompatibilityFactSourceV1,
-    CompatibilityFactTargetV1, CompatibilityFactUnavailableV1, CompatibilityFactUpdateCommandV1,
-    CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1, CompatibilityFactV1,
-    CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
-    CompatibilityRelationProvenanceV1, FactProposalPromotionStateV1, PromoteFactProposal,
+pub use project_memory::{
+    ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactDetailQueryV1,
+    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardFactEntityLinkV1,
+    ProjectMemoryDashboardFactSummaryV1, ProjectMemoryDashboardGrowthPointV1,
+    ProjectMemoryDashboardHrrCoverageV1, ProjectMemoryDashboardHrrStateV1,
+    ProjectMemoryDashboardMemoryBankV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardNamedCountV1,
+    ProjectMemoryDashboardOplogDetailsV1, ProjectMemoryDashboardOplogEntryV1,
+    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddAliasV1,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactAvailabilityV1,
+    ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
+    ProjectMemoryFactContradictionV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackOutcomeV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1, ProjectMemoryFactInspectionV1,
+    ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1, ProjectMemoryFactMergeCommandV1,
+    ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactMergeOutcomeV1,
+    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactProposalImportReceiptV1, ProjectMemoryFactProposalImportV1,
+    ProjectMemoryFactProposalLegacyRecordV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
+    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
+    ProjectMemoryFactRelationV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRepairVectorV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
+    ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchHitV1, ProjectMemoryFactSearchKindV1,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1, ProjectMemoryFactSourceV1,
+    ProjectMemoryFactTargetV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
+    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairCommandV1,
+    ProjectMemoryRelationProvenanceV1, FactProposalPromotionStateV1, PromoteFactProposal,
     PromoteFactProposalOutcome,
 };
 pub use error::{
@@ -52,25 +52,25 @@ pub use error::{
     FactStoreResult,
 };
 pub use queries::{
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactFeedbackHistoryQueryV1,
-    CompatibilityFactHistoryQueryV1, CompatibilityFactListQueryV1, CompatibilityFactSearchQuery,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactFeedbackHistoryQueryV1,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactSearchQuery,
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
     FactCurrentQuery, FactCurrentResponseV1, FactLineageCursor, FactLineageQuery,
     FactLineageResponseV1, FactQueryCoverageV1, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS,
     RetrievalAnchorQuery,
 };
 pub use telemetry::{
-    CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackDetailsAvailabilityV1,
-    CompatibilityFactFeedbackHistoryEntryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactStatusV1, CompatibilityFactTelemetryV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryAlgebraV1, CompatibilityMemoryFeedbackFunnelV1,
-    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CompatibilityProjectionStateV1,
+    ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactFeedbackDetailsAvailabilityV1,
+    ProjectMemoryFactFeedbackHistoryEntryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, ProjectMemoryFeedbackRepairProgressV1,
+    ProjectMemoryMemoryAlgebraV1, ProjectMemoryMemoryFeedbackFunnelV1,
+    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1,
 };
 pub use traits::{FactCompatibilityStore, FactProposalStore, FactStore};
 pub use write::{FactCommitConflict, FactCommitOutcome, FactCommitReceipt, FactWriteBatch};
 
 #[cfg(test)]
-use compatibility::dashboard::{
+use project_memory::dashboard::{
     MAX_COMPATIBILITY_DASHBOARD_OPLOG, MAX_COMPATIBILITY_DASHBOARD_VECTORS,
 };
 #[cfg(test)]

@@ -5,7 +5,7 @@ use crate::store::memory::primitives::{OwnerKey, storage_message};
 use tempfile::tempdir;
 use tracedecay_domain::{Confidence, FactId, FactOwnerV1, ProjectId, UtcMicros};
 use tracedecay_store::{
-    CompatibilityRelationProvenanceV1, FactCompatibilityResult, FactCompatibilityStoreError,
+    ProjectMemoryRelationProvenanceV1, FactCompatibilityResult, FactCompatibilityStoreError,
     FactStoreError,
 };
 
@@ -105,7 +105,7 @@ async fn curated_correction_provenance_is_exact_owner_scoped_and_replay_safe() {
             row.get::<String>(3).unwrap(),
             "compatibility_curation_normalize_tags"
         );
-        let provenance = serde_json::from_str::<CompatibilityRelationProvenanceV1>(
+        let provenance = serde_json::from_str::<ProjectMemoryRelationProvenanceV1>(
             &row.get::<String>(4).unwrap(),
         )
         .unwrap();

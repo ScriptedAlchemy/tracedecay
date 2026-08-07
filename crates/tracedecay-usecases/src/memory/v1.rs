@@ -2,14 +2,14 @@
 
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
-    CompatibilityFactAddOutcomeV1, CompatibilityFactContradictionQueryV1,
-    CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackDetailsAvailabilityV1, CompatibilityFactFeedbackHistoryQueryV1,
-    CompatibilityFactListQueryV1, CompatibilityFactProjectionV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchFilterV1,
-    CompatibilityFactSearchKindV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdatePatchV1,
-    CompatibilityFeedbackRepairProgressV1, FactCompatibilityStore,
+    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContradictionQueryV1,
+    ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactFeedbackDetailsAvailabilityV1, ProjectMemoryFactFeedbackHistoryQueryV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchFilterV1,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
+    ProjectMemoryFeedbackRepairProgressV1, FactCompatibilityStore,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
@@ -45,7 +45,7 @@ pub enum V1UpdateFactOutcome {
 #[derive(Clone, Debug, PartialEq)]
 pub struct V1FactTrustHistoryV1 {
     pub entries: Vec<TrustHistoryEntry>,
-    pub repair_progress: CompatibilityFeedbackRepairProgressV1,
+    pub repair_progress: ProjectMemoryFeedbackRepairProgressV1,
 }
 
 /// Legacy status fields and feedback-history repair state from one authority
@@ -53,7 +53,7 @@ pub struct V1FactTrustHistoryV1 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct V1MemoryStatusWithRepairV1 {
     pub status: MemoryStatus,
-    pub feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
+    pub feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
 }
 
 impl<A: FactCompatibilityStore> MemoryApplication<A> {
@@ -84,7 +84,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         context: MemoryOperationContext,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         self.search_v1(
-            CompatibilityFactSearchKindV1::Search,
+            ProjectMemoryFactSearchKindV1::Search,
             Some(request.query.clone()),
             request,
             Some(context),
@@ -100,7 +100,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         self.search_v1(
-            CompatibilityFactSearchKindV1::Search,
+            ProjectMemoryFactSearchKindV1::Search,
             Some(request.query.clone()),
             request,
             None,
@@ -115,7 +115,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         context: MemoryOperationContext,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         self.search_v1(
-            CompatibilityFactSearchKindV1::Probe,
+            ProjectMemoryFactSearchKindV1::Probe,
             Some(request.query.clone()),
             request,
             Some(context),
@@ -129,7 +129,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         self.search_v1(
-            CompatibilityFactSearchKindV1::Probe,
+            ProjectMemoryFactSearchKindV1::Probe,
             Some(request.query.clone()),
             request,
             None,
@@ -144,7 +144,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         context: MemoryOperationContext,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         self.search_v1(
-            CompatibilityFactSearchKindV1::Related {
+            ProjectMemoryFactSearchKindV1::Related {
                 entity: request.query.clone(),
             },
             None,
@@ -160,7 +160,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         request: SearchFactsRequest,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
         self.search_v1(
-            CompatibilityFactSearchKindV1::Related {
+            ProjectMemoryFactSearchKindV1::Related {
                 entity: request.query.clone(),
             },
             None,
@@ -182,7 +182,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         entities.sort_unstable();
         entities.dedup();
         self.search_v1(
-            CompatibilityFactSearchKindV1::Reason { entities },
+            ProjectMemoryFactSearchKindV1::Reason { entities },
             None,
             SearchFactsRequest {
                 query: String::new(),
@@ -207,7 +207,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         entities.sort_unstable();
         entities.dedup();
         self.search_v1(
-            CompatibilityFactSearchKindV1::Reason { entities },
+            ProjectMemoryFactSearchKindV1::Reason { entities },
             None,
             SearchFactsRequest {
                 query: String::new(),
@@ -234,7 +234,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             }
         })?;
         let page = self
-            .find_compatibility_contradictions(CompatibilityFactContradictionQueryV1::new(
+            .find_compatibility_contradictions(ProjectMemoryFactContradictionQueryV1::new(
                 self.owner.clone(),
                 category.map(fact_category),
                 (threshold.as_f64() * 1_000_000.0).round() as u32,
@@ -286,7 +286,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         context: Option<MemoryOperationContext>,
     ) -> Result<Vec<FactRecord>, MemoryApplicationError> {
         let page = self
-            .list_compatibility_facts(CompatibilityFactListQueryV1::new(
+            .list_compatibility_facts(ProjectMemoryFactListQueryV1::new(
                 self.owner.clone(),
                 category.map(fact_category),
                 compatibility_confidence(min_trust)?,
@@ -301,7 +301,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         let records = page
             .facts()
             .iter()
-            .filter(|fact| matches!(fact, CompatibilityFactProjectionV1::Available(_)))
+            .filter(|fact| matches!(fact, ProjectMemoryFactProjectionV1::Available(_)))
             .map(|fact| compatibility_projection_record(&self.compatibility_scope, fact))
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(context) = context.as_ref() {
@@ -318,7 +318,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         match self.get_compatibility_fact(target).await? {
             // A removed or otherwise unavailable fact reads as absent under
             // the V1 contract; only reachable payloads project to records.
-            None | Some(CompatibilityFactProjectionV1::Unavailable(_)) => Ok(None),
+            None | Some(ProjectMemoryFactProjectionV1::Unavailable(_)) => Ok(None),
             Some(projection) => {
                 compatibility_projection_record(&self.compatibility_scope, &projection).map(Some)
             }
@@ -345,7 +345,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             });
         };
         let target = self.legacy_compatibility_target(request.fact_id)?;
-        let patch = CompatibilityFactUpdatePatchV1::new(
+        let patch = ProjectMemoryFactUpdatePatchV1::new(
             request.content,
             request.category.map(fact_category),
             request.source.map(Some),
@@ -355,7 +355,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             compatibility_confidence(request.trust)?,
         )?;
         let outcome = self
-            .update_compatibility_fact(CompatibilityFactUpdateCommandV1::new(
+            .update_compatibility_fact(ProjectMemoryFactUpdateCommandV1::new(
                 target,
                 context.operation_id().clone(),
                 None,
@@ -385,7 +385,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         // window where a concurrent remove between them could still surface
         // an authority error instead of the idempotent no-op.
         let outcome = self
-            .remove_compatibility_fact(CompatibilityFactRemoveCommandV1::new(
+            .remove_compatibility_fact(ProjectMemoryFactRemoveCommandV1::new(
                 target,
                 context.operation_id().clone(),
                 None,
@@ -420,11 +420,11 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             });
         };
         let action = match request.action {
-            FeedbackAction::Helpful => CompatibilityFactFeedbackActionV1::Helpful,
-            FeedbackAction::Unhelpful => CompatibilityFactFeedbackActionV1::Unhelpful,
+            FeedbackAction::Helpful => ProjectMemoryFactFeedbackActionV1::Helpful,
+            FeedbackAction::Unhelpful => ProjectMemoryFactFeedbackActionV1::Unhelpful,
         };
         let outcome = self
-            .record_compatibility_fact_feedback(CompatibilityFactFeedbackCommandV1::new(
+            .record_compatibility_fact_feedback(ProjectMemoryFactFeedbackCommandV1::new(
                 self.legacy_compatibility_target(request.fact_id)?,
                 context.operation_id().clone(),
                 None,
@@ -476,7 +476,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         limit: usize,
     ) -> Result<V1FactTrustHistoryV1, MemoryApplicationError> {
         let history = self
-            .get_compatibility_feedback_history(CompatibilityFactFeedbackHistoryQueryV1::new(
+            .get_compatibility_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
                 self.legacy_compatibility_target(fact_id)?,
                 None,
                 limit,
@@ -487,15 +487,15 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             .iter()
             .filter(|event| {
                 event.details_availability()
-                    == CompatibilityFactFeedbackDetailsAvailabilityV1::Available
+                    == ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available
             })
             .filter_map(|event| {
                 let source = event.source()?;
                 Some(TrustHistoryEntry {
                     timestamp: event.occurred_at().0,
                     action: match event.action() {
-                        CompatibilityFactFeedbackActionV1::Helpful => FeedbackAction::Helpful,
-                        CompatibilityFactFeedbackActionV1::Unhelpful => FeedbackAction::Unhelpful,
+                        ProjectMemoryFactFeedbackActionV1::Helpful => FeedbackAction::Helpful,
+                        ProjectMemoryFactFeedbackActionV1::Unhelpful => FeedbackAction::Unhelpful,
                     },
                     old_trust: event.old_trust().as_f64(),
                     new_trust: event.new_trust().as_f64(),
@@ -541,18 +541,18 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     async fn search_v1(
         &self,
-        kind: CompatibilityFactSearchKindV1,
+        kind: ProjectMemoryFactSearchKindV1,
         query: Option<String>,
         request: SearchFactsRequest,
         context: Option<MemoryOperationContext>,
         recall: bool,
     ) -> Result<Vec<FactSearchResult>, MemoryApplicationError> {
-        let filter = CompatibilityFactSearchFilterV1::new(
+        let filter = ProjectMemoryFactSearchFilterV1::new(
             request.category.map(fact_category),
             compatibility_confidence(request.min_trust)?,
             None,
         )?;
-        let query = CompatibilityFactSearchQuery::with_filter(
+        let query = ProjectMemoryFactSearchQuery::with_filter(
             self.owner.clone(),
             kind.clone(),
             query,
@@ -561,12 +561,12 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             request.limit.unwrap_or(20),
         )?;
         let page = match kind {
-            CompatibilityFactSearchKindV1::Search => self.search_compatibility_facts(query).await?,
-            CompatibilityFactSearchKindV1::Probe => self.probe_compatibility_facts(query).await?,
-            CompatibilityFactSearchKindV1::Related { .. } => {
+            ProjectMemoryFactSearchKindV1::Search => self.search_compatibility_facts(query).await?,
+            ProjectMemoryFactSearchKindV1::Probe => self.probe_compatibility_facts(query).await?,
+            ProjectMemoryFactSearchKindV1::Related { .. } => {
                 self.related_compatibility_facts(query).await?
             }
-            CompatibilityFactSearchKindV1::Reason { .. } => {
+            ProjectMemoryFactSearchKindV1::Reason { .. } => {
                 self.reason_compatibility_facts(query).await?
             }
         };
@@ -574,7 +574,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             .hits()
             .iter()
             .map(|hit| {
-                CompatibilityFactTargetV1::Canonical(
+                ProjectMemoryFactTargetV1::Canonical(
                     hit.fact().mapping().compatibility_id().clone(),
                 )
             })
@@ -612,14 +612,14 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     async fn record_v1_retrieval(
         &self,
-        targets: Vec<CompatibilityFactTargetV1>,
+        targets: Vec<ProjectMemoryFactTargetV1>,
         context: &MemoryOperationContext,
         recall: bool,
     ) -> Result<(), MemoryApplicationError> {
         if targets.is_empty() {
             return Ok(());
         }
-        self.record_compatibility_fact_retrieval(CompatibilityFactRetrievalCommandV1::new(
+        self.record_compatibility_fact_retrieval(ProjectMemoryFactRetrievalCommandV1::new(
             self.owner.clone(),
             context.operation_id().clone(),
             targets,
@@ -631,7 +631,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     async fn project_add_fact_outcome_v1(
         &self,
-        outcome: CompatibilityFactAddOutcomeV1,
+        outcome: ProjectMemoryFactAddOutcomeV1,
     ) -> Result<AddFactOutcome, MemoryApplicationError> {
         let fact = outcome
             .fact()
@@ -640,7 +640,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         let closest_fact_id = match outcome.closest_fact_id() {
             Some(id) => {
                 let projection = self
-                    .get_compatibility_fact(CompatibilityFactTargetV1::Canonical(id.clone()))
+                    .get_compatibility_fact(ProjectMemoryFactTargetV1::Canonical(id.clone()))
                     .await?
                     .ok_or(MemoryApplicationError::IncompatibleLegacyProjection {
                         invariant: "closest legacy fact mapping",
@@ -656,16 +656,16 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             fact,
             diff: AddFactDiff {
                 diff: match outcome.disposition() {
-                    tracedecay_store::CompatibilityFactAddDispositionV1::Added => {
+                    tracedecay_store::ProjectMemoryFactAddDispositionV1::Added => {
                         AddFactDiffKind::Add
                     }
-                    tracedecay_store::CompatibilityFactAddDispositionV1::NearDuplicate => {
+                    tracedecay_store::ProjectMemoryFactAddDispositionV1::NearDuplicate => {
                         AddFactDiffKind::NearDuplicate
                     }
-                    tracedecay_store::CompatibilityFactAddDispositionV1::PossibleConflict => {
+                    tracedecay_store::ProjectMemoryFactAddDispositionV1::PossibleConflict => {
                         AddFactDiffKind::PossibleConflict
                     }
-                    tracedecay_store::CompatibilityFactAddDispositionV1::RejectedSecretLike => {
+                    tracedecay_store::ProjectMemoryFactAddDispositionV1::RejectedSecretLike => {
                         AddFactDiffKind::RejectedSecretLike
                     }
                 },

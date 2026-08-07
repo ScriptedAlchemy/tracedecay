@@ -4,7 +4,7 @@ use tracedecay_domain::FactOwnerV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-use tracedecay_store::{CompatibilityFactTargetV1, LegacyFactQuery};
+use tracedecay_store::{ProjectMemoryFactTargetV1, LegacyFactQuery};
 
 mod anchors;
 mod canonical;
@@ -39,28 +39,28 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::memory::types::{FeedbackAction, FeedbackRequest};
 #[cfg(test)]
 use tracedecay_store::{
-    CompatibilityDashboardFactDetailQueryV1, CompatibilityDashboardFactDetailV1,
-    CompatibilityDashboardMemoryOverviewQueryV1, CompatibilityDashboardMemoryOverviewV1,
-    CompatibilityDashboardOplogEntryV1, CompatibilityDashboardOplogQueryV1,
-    CompatibilityDashboardVectorPointV1, CompatibilityDashboardVectorPointsQueryV1,
-    CompatibilityFactAddCommandV1, CompatibilityFactAddOutcomeV1,
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactContradictionPageV1,
-    CompatibilityFactContradictionQueryV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationReceiptV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
-    CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
-    CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
-    CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactUpdateCommandV1,
-    CompatibilityFactUpdateOutcomeV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
+    ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
+    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalImportReceiptV1,
+    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
+    ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFeedbackRepairProgressV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome,
     FactCompatibilityStore, FactCompatibilityStoreError, FactCurrentQuery, FactLineageQuery,
     FactProposalStore, FactProposalStoreError, FactStore, FactStoreError, FactWriteBatch,
     PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
@@ -125,13 +125,13 @@ impl<A> MemoryApplication<A> {
     fn legacy_compatibility_target(
         &self,
         legacy_fact_id: i64,
-    ) -> Result<CompatibilityFactTargetV1, MemoryApplicationError> {
+    ) -> Result<ProjectMemoryFactTargetV1, MemoryApplicationError> {
         LegacyFactQuery::new(
             self.owner.clone(),
             self.compatibility_scope.source_store_id().clone(),
             legacy_fact_id,
         )
-        .map(CompatibilityFactTargetV1::Legacy)
+        .map(ProjectMemoryFactTargetV1::Legacy)
         .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "legacy numeric fact target",
         })

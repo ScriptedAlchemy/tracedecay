@@ -7,7 +7,7 @@ use super::super::{
     FactCommitOutcome, FactStoreError, FactStoreResult, FactWriteBatch,
     MAX_COMPATIBILITY_REASON_BYTES, validate_owned_fact_id,
 };
-use super::{CompatibilityFactAddCommandV1, CompatibilityFactMappingV1};
+use super::{ProjectMemoryFactAddCommandV1, ProjectMemoryFactMappingV1};
 
 /// Authoritative proposal states from which an interrupted promotion may resume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,7 +109,7 @@ impl PromoteFactProposalOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactProposalStateV1 {
+pub enum ProjectMemoryFactProposalStateV1 {
     PendingApproval,
     Applying,
     Applied,
@@ -118,9 +118,9 @@ pub enum CompatibilityFactProposalStateV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompatibilityFactProposalRevisionV1(u64);
+pub struct ProjectMemoryFactProposalRevisionV1(u64);
 
-impl CompatibilityFactProposalRevisionV1 {
+impl ProjectMemoryFactProposalRevisionV1 {
     pub fn new(value: u64) -> FactStoreResult<Self> {
         if value == 0 {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -136,18 +136,18 @@ impl CompatibilityFactProposalRevisionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalPromotionV1 {
+pub struct ProjectMemoryFactProposalPromotionV1 {
     owner: FactOwnerV1,
     proposal_id: ProvenanceId,
-    expected_revision: CompatibilityFactProposalRevisionV1,
+    expected_revision: ProjectMemoryFactProposalRevisionV1,
     reviewer: Option<ActorId>,
 }
 
-impl CompatibilityFactProposalPromotionV1 {
+impl ProjectMemoryFactProposalPromotionV1 {
     pub fn new(
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-        expected_revision: CompatibilityFactProposalRevisionV1,
+        expected_revision: ProjectMemoryFactProposalRevisionV1,
         reviewer: Option<ActorId>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -169,7 +169,7 @@ impl CompatibilityFactProposalPromotionV1 {
     pub fn proposal_id(&self) -> &ProvenanceId {
         &self.proposal_id
     }
-    pub fn expected_revision(&self) -> CompatibilityFactProposalRevisionV1 {
+    pub fn expected_revision(&self) -> ProjectMemoryFactProposalRevisionV1 {
         self.expected_revision
     }
     pub fn reviewer(&self) -> Option<&ActorId> {
@@ -178,29 +178,29 @@ impl CompatibilityFactProposalPromotionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalRecordV1 {
+pub struct ProjectMemoryFactProposalRecordV1 {
     proposal_id: ProvenanceId,
     owner: FactOwnerV1,
-    revision: CompatibilityFactProposalRevisionV1,
-    state: CompatibilityFactProposalStateV1,
-    request: CompatibilityFactAddCommandV1,
+    revision: ProjectMemoryFactProposalRevisionV1,
+    state: ProjectMemoryFactProposalStateV1,
+    request: ProjectMemoryFactAddCommandV1,
     applied_fact_id: Option<FactId>,
-    applied_mapping: Option<CompatibilityFactMappingV1>,
+    applied_mapping: Option<ProjectMemoryFactMappingV1>,
     automation_run_id: Option<String>,
     reviewer: Option<ActorId>,
     reason: Option<String>,
 }
 
-impl CompatibilityFactProposalRecordV1 {
+impl ProjectMemoryFactProposalRecordV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         proposal_id: ProvenanceId,
         owner: FactOwnerV1,
-        revision: CompatibilityFactProposalRevisionV1,
-        state: CompatibilityFactProposalStateV1,
-        request: CompatibilityFactAddCommandV1,
+        revision: ProjectMemoryFactProposalRevisionV1,
+        state: ProjectMemoryFactProposalStateV1,
+        request: ProjectMemoryFactAddCommandV1,
         applied_fact_id: Option<FactId>,
-        applied_mapping: Option<CompatibilityFactMappingV1>,
+        applied_mapping: Option<ProjectMemoryFactMappingV1>,
         reviewer: Option<ActorId>,
         reason: Option<String>,
     ) -> FactStoreResult<Self> {
@@ -251,13 +251,13 @@ impl CompatibilityFactProposalRecordV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn revision(&self) -> CompatibilityFactProposalRevisionV1 {
+    pub fn revision(&self) -> ProjectMemoryFactProposalRevisionV1 {
         self.revision
     }
-    pub fn state(&self) -> CompatibilityFactProposalStateV1 {
+    pub fn state(&self) -> ProjectMemoryFactProposalStateV1 {
         self.state
     }
-    pub fn request(&self) -> &CompatibilityFactAddCommandV1 {
+    pub fn request(&self) -> &ProjectMemoryFactAddCommandV1 {
         &self.request
     }
     pub fn applied_fact_id(&self) -> Option<&FactId> {
@@ -266,7 +266,7 @@ impl CompatibilityFactProposalRecordV1 {
     pub fn legacy_fact_id(&self) -> Option<i64> {
         self.applied_mapping
             .as_ref()
-            .and_then(CompatibilityFactMappingV1::legacy_fact_id)
+            .and_then(ProjectMemoryFactMappingV1::legacy_fact_id)
     }
     /// Durable automation identity from typed canonical command metadata. It
     /// is never inferred from proposal IDs, payload metadata, or sidecars.
@@ -286,7 +286,7 @@ impl CompatibilityFactProposalRecordV1 {
 /// `Quarantined` is a durable privacy rejection and must not be retried as an
 /// ordinary pending proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactProposalPromotionDispositionV1 {
+pub enum ProjectMemoryFactProposalPromotionDispositionV1 {
     NewlyPromoted,
     AlreadyPromoted,
     Quarantined,
@@ -296,25 +296,25 @@ pub enum CompatibilityFactProposalPromotionDispositionV1 {
 /// durable terminal record; callers run downstream digest work only for
 /// `NewlyPromoted`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalPromotionResultV1 {
-    proposal: CompatibilityFactProposalRecordV1,
-    disposition: CompatibilityFactProposalPromotionDispositionV1,
+pub struct ProjectMemoryFactProposalPromotionResultV1 {
+    proposal: ProjectMemoryFactProposalRecordV1,
+    disposition: ProjectMemoryFactProposalPromotionDispositionV1,
 }
 
-impl CompatibilityFactProposalPromotionResultV1 {
+impl ProjectMemoryFactProposalPromotionResultV1 {
     pub fn new(
-        proposal: CompatibilityFactProposalRecordV1,
-        disposition: CompatibilityFactProposalPromotionDispositionV1,
+        proposal: ProjectMemoryFactProposalRecordV1,
+        disposition: ProjectMemoryFactProposalPromotionDispositionV1,
     ) -> FactStoreResult<Self> {
         let state_matches_disposition = matches!(
             (proposal.state(), disposition),
             (
-                CompatibilityFactProposalStateV1::Applied,
-                CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted
-                    | CompatibilityFactProposalPromotionDispositionV1::AlreadyPromoted,
+                ProjectMemoryFactProposalStateV1::Applied,
+                ProjectMemoryFactProposalPromotionDispositionV1::NewlyPromoted
+                    | ProjectMemoryFactProposalPromotionDispositionV1::AlreadyPromoted,
             ) | (
-                CompatibilityFactProposalStateV1::Quarantined,
-                CompatibilityFactProposalPromotionDispositionV1::Quarantined,
+                ProjectMemoryFactProposalStateV1::Quarantined,
+                ProjectMemoryFactProposalPromotionDispositionV1::Quarantined,
             )
         );
         if !state_matches_disposition {
@@ -328,26 +328,26 @@ impl CompatibilityFactProposalPromotionResultV1 {
         })
     }
 
-    pub fn proposal(&self) -> &CompatibilityFactProposalRecordV1 {
+    pub fn proposal(&self) -> &ProjectMemoryFactProposalRecordV1 {
         &self.proposal
     }
 
-    pub fn disposition(&self) -> CompatibilityFactProposalPromotionDispositionV1 {
+    pub fn disposition(&self) -> ProjectMemoryFactProposalPromotionDispositionV1 {
         self.disposition
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalPageV1 {
+pub struct ProjectMemoryFactProposalPageV1 {
     owner: FactOwnerV1,
-    proposals: Vec<CompatibilityFactProposalRecordV1>,
+    proposals: Vec<ProjectMemoryFactProposalRecordV1>,
     next_after_proposal_id: Option<ProvenanceId>,
 }
 
-impl CompatibilityFactProposalPageV1 {
+impl ProjectMemoryFactProposalPageV1 {
     pub fn new(
         owner: FactOwnerV1,
-        proposals: Vec<CompatibilityFactProposalRecordV1>,
+        proposals: Vec<ProjectMemoryFactProposalRecordV1>,
         next_after_proposal_id: Option<ProvenanceId>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -387,7 +387,7 @@ impl CompatibilityFactProposalPageV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn proposals(&self) -> &[CompatibilityFactProposalRecordV1] {
+    pub fn proposals(&self) -> &[ProjectMemoryFactProposalRecordV1] {
         &self.proposals
     }
     pub fn next_after_proposal_id(&self) -> Option<&ProvenanceId> {
@@ -396,17 +396,17 @@ impl CompatibilityFactProposalPageV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalLegacyRecordV1 {
+pub struct ProjectMemoryFactProposalLegacyRecordV1 {
     legacy_proposal_id: i64,
-    state: CompatibilityFactProposalStateV1,
-    request: CompatibilityFactAddCommandV1,
+    state: ProjectMemoryFactProposalStateV1,
+    request: ProjectMemoryFactAddCommandV1,
 }
 
-impl CompatibilityFactProposalLegacyRecordV1 {
+impl ProjectMemoryFactProposalLegacyRecordV1 {
     pub fn new(
         legacy_proposal_id: i64,
-        state: CompatibilityFactProposalStateV1,
-        request: CompatibilityFactAddCommandV1,
+        state: ProjectMemoryFactProposalStateV1,
+        request: ProjectMemoryFactAddCommandV1,
     ) -> FactStoreResult<Self> {
         if legacy_proposal_id <= 0 {
             return Err(FactStoreError::InvalidLegacyFactId {
@@ -423,28 +423,28 @@ impl CompatibilityFactProposalLegacyRecordV1 {
     pub fn legacy_proposal_id(&self) -> i64 {
         self.legacy_proposal_id
     }
-    pub fn state(&self) -> CompatibilityFactProposalStateV1 {
+    pub fn state(&self) -> ProjectMemoryFactProposalStateV1 {
         self.state
     }
-    pub fn request(&self) -> &CompatibilityFactAddCommandV1 {
+    pub fn request(&self) -> &ProjectMemoryFactAddCommandV1 {
         &self.request
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalImportV1 {
+pub struct ProjectMemoryFactProposalImportV1 {
     owner: FactOwnerV1,
     source_store_id: SourceStoreId,
     sidecar_digest: LocatorDigest,
-    records: Vec<CompatibilityFactProposalLegacyRecordV1>,
+    records: Vec<ProjectMemoryFactProposalLegacyRecordV1>,
 }
 
-impl CompatibilityFactProposalImportV1 {
+impl ProjectMemoryFactProposalImportV1 {
     pub fn new(
         owner: FactOwnerV1,
         source_store_id: SourceStoreId,
         sidecar_digest: LocatorDigest,
-        records: Vec<CompatibilityFactProposalLegacyRecordV1>,
+        records: Vec<ProjectMemoryFactProposalLegacyRecordV1>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         source_store_id.validate()?;
@@ -484,13 +484,13 @@ impl CompatibilityFactProposalImportV1 {
     pub fn sidecar_digest(&self) -> &LocatorDigest {
         &self.sidecar_digest
     }
-    pub fn records(&self) -> &[CompatibilityFactProposalLegacyRecordV1] {
+    pub fn records(&self) -> &[ProjectMemoryFactProposalLegacyRecordV1] {
         &self.records
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactProposalImportReceiptV1 {
+pub struct ProjectMemoryFactProposalImportReceiptV1 {
     owner: FactOwnerV1,
     source_store_id: SourceStoreId,
     sidecar_digest: LocatorDigest,
@@ -498,7 +498,7 @@ pub struct CompatibilityFactProposalImportReceiptV1 {
     quarantined_count: usize,
 }
 
-impl CompatibilityFactProposalImportReceiptV1 {
+impl ProjectMemoryFactProposalImportReceiptV1 {
     pub fn new(
         owner: FactOwnerV1,
         source_store_id: SourceStoreId,

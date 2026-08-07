@@ -41,16 +41,16 @@ use tracedecay_domain::{
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactCurationBatchV1, CompatibilityFactCurationOperationV1,
-    CompatibilityFactCurationReceiptV1, CompatibilityFactMergeCommandV1,
-    CompatibilityFactMergeOutcomeV1, CompatibilityFactRelationV1, CompatibilityMemoryRepairStatsV1,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactMergeCommandV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactRelationV1, ProjectMemoryMemoryRepairStatsV1,
     FactCompatibilityResult, FactStoreError, FactStoreResult, FactWriteBatch,
 };
 pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactCurationBatchV1,
-) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1> {
+    request: &ProjectMemoryFactCurationBatchV1,
+) -> FactCompatibilityResult<ProjectMemoryFactCurationReceiptV1> {
     let request_digest = compatibility_digest(json!({
         "owner": request.owner(),
         "actor": request.actor().map(ActorId::as_str),
@@ -81,7 +81,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     let mut vectors_repaired = 0_u64;
     for operation in request.operations() {
         match operation {
-            CompatibilityFactCurationOperationV1::NormalizeTags(operation) => {
+            ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
                 changed.push(
                     compatibility_normalize_tags_tx(
                         db,
@@ -95,7 +95,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
                 );
                 normalized_tags = normalized_tags.saturating_add(1);
             }
-            CompatibilityFactCurationOperationV1::MergeEntities(operation) => {
+            ProjectMemoryFactCurationOperationV1::MergeEntities(operation) => {
                 changed.extend(
                     compatibility_merge_entities_tx(
                         db,
@@ -109,7 +109,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
                 );
                 merged_entities = merged_entities.saturating_add(1);
             }
-            CompatibilityFactCurationOperationV1::AddAlias(operation) => {
+            ProjectMemoryFactCurationOperationV1::AddAlias(operation) => {
                 changed.extend(
                     compatibility_add_entity_alias_tx(
                         db,
@@ -122,7 +122,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
                 );
                 aliases_added = aliases_added.saturating_add(1);
             }
-            CompatibilityFactCurationOperationV1::LinkFacts(operation) => {
+            ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
                 let (fact_ids, _) = compatibility_link_facts_tx(
                     transaction,
                     request.owner(),
@@ -134,7 +134,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
                 changed.extend(fact_ids);
                 facts_linked = facts_linked.saturating_add(1);
             }
-            CompatibilityFactCurationOperationV1::RepairVector(operation) => {
+            ProjectMemoryFactCurationOperationV1::RepairVector(operation) => {
                 changed.push(
                     compatibility_repair_vector_for_fact_tx(
                         db,
@@ -205,7 +205,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
         )
         .await?;
     }
-    CompatibilityFactCurationReceiptV1::new(
+    ProjectMemoryFactCurationReceiptV1::new(
         request.owner().clone(),
         mappings,
         normalized_tags,
@@ -213,7 +213,7 @@ pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
         aliases_added,
         facts_linked,
         vectors_repaired,
-        CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt),
+        ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt),
     )
     .map_err(Into::into)
 }
@@ -289,7 +289,7 @@ async fn compatibility_replay_merge_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactMergeOutcomeV1> {
     let winner_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
             COMPATIBILITY_WRITE_OPERATION,
@@ -344,7 +344,7 @@ async fn compatibility_replay_merge_tx(
                 "compatibility merge receipt content flag is malformed",
             )
         })?;
-    CompatibilityFactMergeOutcomeV1::new(owner.clone(), winner, content_updated, deleted_losers)
+    ProjectMemoryFactMergeOutcomeV1::new(owner.clone(), winner, content_updated, deleted_losers)
         .map_err(Into::into)
 }
 
@@ -471,10 +471,10 @@ async fn compatibility_rewire_merge_relations_tx(
             continue;
         }
         let relation = match relation.as_str() {
-            "supports" => CompatibilityFactRelationV1::Supports,
-            "contradicts" => CompatibilityFactRelationV1::Contradicts,
-            "supersedes" => CompatibilityFactRelationV1::Supersedes,
-            "derived_from" => CompatibilityFactRelationV1::DerivedFrom,
+            "supports" => ProjectMemoryFactRelationV1::Supports,
+            "contradicts" => ProjectMemoryFactRelationV1::Contradicts,
+            "supersedes" => ProjectMemoryFactRelationV1::Supersedes,
+            "derived_from" => ProjectMemoryFactRelationV1::DerivedFrom,
             _ => {
                 return Err(storage_message(
                     COMPATIBILITY_WRITE_OPERATION,
@@ -630,8 +630,8 @@ async fn compatibility_rewire_merge_relations_tx(
 pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactMergeCommandV1,
-) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1> {
+    request: &ProjectMemoryFactMergeCommandV1,
+) -> FactCompatibilityResult<ProjectMemoryFactMergeOutcomeV1> {
     let request_digest = compatibility_digest(json!({
         "owner": request.owner(),
         "winner": compatibility_target_digest(request.winner())?,
@@ -837,7 +837,7 @@ pub(in crate::store::memory) async fn merge_compatibility_facts_tx(
         now,
     )
     .await?;
-    CompatibilityFactMergeOutcomeV1::new(
+    ProjectMemoryFactMergeOutcomeV1::new(
         request.owner().clone(),
         winner,
         content_updated,

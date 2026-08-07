@@ -4,28 +4,28 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CompatibilityDashboardFactDetailQueryV1, CompatibilityDashboardFactDetailV1,
-    CompatibilityDashboardMemoryOverviewQueryV1, CompatibilityDashboardMemoryOverviewV1,
-    CompatibilityDashboardOplogEntryV1, CompatibilityDashboardOplogQueryV1,
-    CompatibilityDashboardVectorPointV1, CompatibilityDashboardVectorPointsQueryV1,
-    CompatibilityFactAddCommandV1, CompatibilityFactAddOutcomeV1,
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactContradictionPageV1,
-    CompatibilityFactContradictionQueryV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationReceiptV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
-    CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
-    CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
-    CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
+    ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
+    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalImportReceiptV1,
+    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
+    ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCurrentQuery, FactCurrentResponseV1,
     FactLineageQuery, FactLineageResponseV1, FactProposalStoreError, FactStoreResult,
     FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
@@ -102,163 +102,163 @@ pub trait FactProposalStore: FactStore {
 pub trait FactCompatibilityStore: FactProposalStore {
     fn list_compatibility_facts(
         &self,
-        query: CompatibilityFactListQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactPageV1>> + Send;
+        query: ProjectMemoryFactListQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactPageV1>> + Send;
 
     fn search_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactSearchPageV1>> + Send;
+        query: ProjectMemoryFactSearchQuery,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactSearchPageV1>> + Send;
 
     fn probe_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactSearchPageV1>> + Send;
+        query: ProjectMemoryFactSearchQuery,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactSearchPageV1>> + Send;
 
     fn related_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactSearchPageV1>> + Send;
+        query: ProjectMemoryFactSearchQuery,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactSearchPageV1>> + Send;
 
     fn reason_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactSearchPageV1>> + Send;
+        query: ProjectMemoryFactSearchQuery,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactSearchPageV1>> + Send;
 
     fn find_compatibility_contradictions(
         &self,
-        query: CompatibilityFactContradictionQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactContradictionPageV1>> + Send;
+        query: ProjectMemoryFactContradictionQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactContradictionPageV1>> + Send;
 
     fn get_compatibility_fact(
         &self,
-        target: CompatibilityFactTargetV1,
-    ) -> impl Future<Output = FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>> + Send;
+        target: ProjectMemoryFactTargetV1,
+    ) -> impl Future<Output = FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>>> + Send;
 
     fn compatibility_fact_history(
         &self,
-        query: CompatibilityFactHistoryQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactHistoryV1>> + Send;
+        query: ProjectMemoryFactHistoryQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactHistoryV1>> + Send;
 
     /// Pure snapshot read. Implementations must report repair state without
     /// advancing a repair batch or acquiring the writer lane.
     fn compatibility_memory_status(
         &self,
         owner: FactOwnerV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityMemoryStatusV1>> + Send;
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryMemoryStatusV1>> + Send;
 
     fn inspect_compatibility_fact(
         &self,
-        target: CompatibilityFactTargetV1,
-    ) -> impl Future<Output = FactCompatibilityResult<Option<CompatibilityFactInspectionV1>>> + Send;
+        target: ProjectMemoryFactTargetV1,
+    ) -> impl Future<Output = FactCompatibilityResult<Option<ProjectMemoryFactInspectionV1>>> + Send;
 
     fn add_compatibility_fact(
         &self,
-        request: CompatibilityFactAddCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactAddOutcomeV1>> + Send;
+        request: ProjectMemoryFactAddCommandV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactAddOutcomeV1>> + Send;
 
     fn update_compatibility_fact(
         &self,
-        request: CompatibilityFactUpdateCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1>> + Send;
+        request: ProjectMemoryFactUpdateCommandV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactUpdateOutcomeV1>> + Send;
 
     fn remove_compatibility_fact(
         &self,
-        request: CompatibilityFactRemoveCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1>> + Send;
+        request: ProjectMemoryFactRemoveCommandV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactRemoveOutcomeV1>> + Send;
 
     fn record_compatibility_fact_feedback(
         &self,
-        request: CompatibilityFactFeedbackCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1>> + Send;
+        request: ProjectMemoryFactFeedbackCommandV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactFeedbackOutcomeV1>> + Send;
 
     /// Pure snapshot read. Implementations must report repair state without
     /// advancing a repair batch or acquiring the writer lane.
     fn compatibility_fact_feedback_history(
         &self,
-        query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1>> + Send;
+        query: ProjectMemoryFactFeedbackHistoryQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactFeedbackHistoryV1>> + Send;
 
     /// Owner-scoped exact lookup for deduplication. `content_digest` is opaque and
     /// must be derived by the application boundary; implementations never accept
     /// raw content for this read.
     fn find_compatibility_fact_by_content_digest(
         &self,
-        query: CompatibilityFactContentDigestQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>> + Send;
+        query: ProjectMemoryFactContentDigestQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>>> + Send;
 
     /// Applies the finite V1 grooming operation set atomically for one owner.
     fn apply_compatibility_fact_curation(
         &self,
-        request: CompatibilityFactCurationBatchV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactCurationReceiptV1>> + Send;
+        request: ProjectMemoryFactCurationBatchV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactCurationReceiptV1>> + Send;
 
     /// Merges legacy fact records under a caller supplied, owner-bound operation id.
     fn merge_compatibility_facts(
         &self,
-        request: CompatibilityFactMergeCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactMergeOutcomeV1>> + Send;
+        request: ProjectMemoryFactMergeCommandV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactMergeOutcomeV1>> + Send;
 
     /// Repairs the finite V1 compatibility projection and returns measured
     /// results plus the exact feedback-history batch outcome from that same
     /// atomic command.
     fn repair_compatibility_memory(
         &self,
-        request: CompatibilityMemoryRepairCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>> + Send;
+        request: ProjectMemoryMemoryRepairCommandV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryMemoryRepairStatsV1>> + Send;
 
     /// Bounded dashboard summary. Implementations return safe typed projections,
     /// never arbitrary SQL rows or raw payloads for unavailable records.
     fn dashboard_compatibility_memory_overview(
         &self,
-        query: CompatibilityDashboardMemoryOverviewQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1>> + Send;
+        query: ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryDashboardMemoryOverviewV1>> + Send;
 
     /// Owner-bound detail view for one legacy fact and its typed entity links.
     fn dashboard_compatibility_fact_detail(
         &self,
-        query: CompatibilityDashboardFactDetailQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<Option<CompatibilityDashboardFactDetailV1>>> + Send;
+        query: ProjectMemoryDashboardFactDetailQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<Option<ProjectMemoryDashboardFactDetailV1>>> + Send;
 
     /// Bounded, finite vector points. Similarity pairs are deliberately derived
     /// from this capped output at the dashboard edge rather than by a generic query API.
     fn dashboard_compatibility_vector_points(
         &self,
-        query: CompatibilityDashboardVectorPointsQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<Vec<CompatibilityDashboardVectorPointV1>>> + Send;
+        query: ProjectMemoryDashboardVectorPointsQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<Vec<ProjectMemoryDashboardVectorPointV1>>> + Send;
 
     /// Bounded owner-scoped audit projection with availability-preserving details.
     fn dashboard_compatibility_memory_oplog(
         &self,
-        query: CompatibilityDashboardOplogQueryV1,
-    ) -> impl Future<Output = FactCompatibilityResult<Vec<CompatibilityDashboardOplogEntryV1>>> + Send;
+        query: ProjectMemoryDashboardOplogQueryV1,
+    ) -> impl Future<Output = FactCompatibilityResult<Vec<ProjectMemoryDashboardOplogEntryV1>>> + Send;
 
     fn record_compatibility_fact_retrieval(
         &self,
-        request: CompatibilityFactRetrievalCommandV1,
-    ) -> impl Future<Output = FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>>> + Send;
+        request: ProjectMemoryFactRetrievalCommandV1,
+    ) -> impl Future<Output = FactCompatibilityResult<Vec<ProjectMemoryFactProjectionV1>>> + Send;
 
     fn submit_compatibility_fact_proposal(
         &self,
         proposal_id: ProvenanceId,
-        request: CompatibilityFactAddCommandV1,
+        request: ProjectMemoryFactAddCommandV1,
         submitter: Option<ActorId>,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalRecordV1>> + Send;
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>> + Send;
 
     fn get_compatibility_fact_proposal(
         &self,
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-    ) -> impl Future<Output = FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>>> + Send;
+    ) -> impl Future<Output = FactCompatibilityResult<Option<ProjectMemoryFactProposalRecordV1>>> + Send;
 
     #[allow(clippy::too_many_arguments)]
     fn list_compatibility_fact_proposals(
         &self,
         owner: FactOwnerV1,
-        state: Option<CompatibilityFactProposalStateV1>,
+        state: Option<ProjectMemoryFactProposalStateV1>,
         after_proposal_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalPageV1>> + Send;
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalPageV1>> + Send;
 
     fn count_pending_compatibility_fact_proposals(
         &self,
@@ -270,25 +270,25 @@ pub trait FactCompatibilityStore: FactProposalStore {
         &self,
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-        expected_revision: CompatibilityFactProposalRevisionV1,
+        expected_revision: ProjectMemoryFactProposalRevisionV1,
         reviewer: ActorId,
         reason: String,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalRecordV1>> + Send;
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>> + Send;
 
     fn import_legacy_compatibility_fact_proposals(
         &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>> + Send;
+        request: ProjectMemoryFactProposalImportV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalImportReceiptV1>> + Send;
 
     fn promote_compatibility_fact_proposal(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalRecordV1>> + Send;
+        request: ProjectMemoryFactProposalPromotionV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>> + Send;
 
     /// Atomic promotion result for callers that must distinguish a new decision
     /// from an idempotent replay without a racy pre-read.
     fn promote_compatibility_fact_proposal_with_disposition(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1>> + Send;
+        request: ProjectMemoryFactProposalPromotionV1,
+    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalPromotionResultV1>> + Send;
 }

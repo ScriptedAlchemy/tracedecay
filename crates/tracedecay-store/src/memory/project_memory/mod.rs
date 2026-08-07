@@ -8,7 +8,7 @@ use tracedecay_domain::{
 
 use super::queries::{MAX_CURRENT_LIMIT, MAX_LINEAGE_LIMIT};
 use super::{
-    CompatibilityFactStatusV1, CompatibilityFactTelemetryV1, FactLineageCursor, FactStoreError,
+    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, FactLineageCursor, FactStoreError,
     FactStoreResult, LegacyFactQuery, MAX_COMPATIBILITY_REASON_BYTES,
     MAX_COMPATIBILITY_SEARCH_BYTES, StoredFactV1, validate_owned_fact_id,
 };
@@ -19,45 +19,45 @@ mod proposal;
 mod search;
 
 pub use curation::{
-    CompatibilityFactAddAliasV1, CompatibilityFactAddCommandV1, CompatibilityFactAddDispositionV1,
-    CompatibilityFactAddOutcomeV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,
-    CompatibilityFactFeedbackCommandV1, CompatibilityFactFeedbackOutcomeV1,
-    CompatibilityFactLinkV1, CompatibilityFactMergeCommandV1, CompatibilityFactMergeEntitiesV1,
-    CompatibilityFactMergeOutcomeV1, CompatibilityFactNormalizeTagsV1, CompatibilityFactRelationV1,
-    CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
-    CompatibilityFactRepairVectorV1, CompatibilityFactUpdateCommandV1,
-    CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1,
-    CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
-    CompatibilityRelationProvenanceV1,
+    ProjectMemoryFactAddAliasV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackOutcomeV1,
+    ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeEntitiesV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRelationV1,
+    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
+    ProjectMemoryFactRepairVectorV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1,
+    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairCommandV1,
+    ProjectMemoryRelationProvenanceV1,
 };
 pub use dashboard::{
-    CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,
-    CompatibilityDashboardFactDetailV1, CompatibilityDashboardFactEntityLinkV1,
-    CompatibilityDashboardFactSummaryV1, CompatibilityDashboardGrowthPointV1,
-    CompatibilityDashboardHrrCoverageV1, CompatibilityDashboardHrrStateV1,
-    CompatibilityDashboardMemoryBankV1, CompatibilityDashboardMemoryOverviewQueryV1,
-    CompatibilityDashboardMemoryOverviewV1, CompatibilityDashboardNamedCountV1,
-    CompatibilityDashboardOplogDetailsV1, CompatibilityDashboardOplogEntryV1,
-    CompatibilityDashboardOplogQueryV1, CompatibilityDashboardVectorPointV1,
-    CompatibilityDashboardVectorPointsQueryV1,
+    ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactDetailQueryV1,
+    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardFactEntityLinkV1,
+    ProjectMemoryDashboardFactSummaryV1, ProjectMemoryDashboardGrowthPointV1,
+    ProjectMemoryDashboardHrrCoverageV1, ProjectMemoryDashboardHrrStateV1,
+    ProjectMemoryDashboardMemoryBankV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardNamedCountV1,
+    ProjectMemoryDashboardOplogDetailsV1, ProjectMemoryDashboardOplogEntryV1,
+    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
+    ProjectMemoryDashboardVectorPointsQueryV1,
 };
 pub use proposal::{
-    CompatibilityFactProposalImportReceiptV1, CompatibilityFactProposalImportV1,
-    CompatibilityFactProposalLegacyRecordV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionResultV1,
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
+    ProjectMemoryFactProposalImportReceiptV1, ProjectMemoryFactProposalImportV1,
+    ProjectMemoryFactProposalLegacyRecordV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
+    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
     FactProposalPromotionStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
 };
 pub use search::{
-    CompatibilityFactContradictionPageV1, CompatibilityFactContradictionQueryV1,
-    CompatibilityFactContradictionV1, CompatibilityFactRetrievalCommandV1,
-    CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1, CompatibilityFactSearchHitV1,
-    CompatibilityFactSearchKindV1, CompatibilityFactSearchPageV1, CompatibilityFactSearchScoresV1,
+    ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
+    ProjectMemoryFactContradictionV1, ProjectMemoryFactRetrievalCommandV1,
+    ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchHitV1,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1,
 };
 
-fn validate_compatibility_entity(value: &str) -> FactStoreResult<()> {
+fn validate_project_memory_entity(value: &str) -> FactStoreResult<()> {
     validate_compatibility_text(value, "compatibility fact entity")
 }
 
@@ -87,12 +87,12 @@ fn validate_compatibility_metadata(value: &Value, field: &'static str) -> FactSt
 /// number; an optional [`LegacyFactMappingV1`] carries a historical `i64` only
 /// where the authoritative migration reconstructed one.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompatibilityFactIdV1 {
+pub struct ProjectMemoryFactIdV1 {
     owner: FactOwnerV1,
     fact_id: FactId,
 }
 
-impl CompatibilityFactIdV1 {
+impl ProjectMemoryFactIdV1 {
     pub fn new(owner: FactOwnerV1, fact_id: FactId) -> FactStoreResult<Self> {
         owner.validate()?;
         validate_owned_fact_id(&fact_id, &owner)?;
@@ -112,14 +112,14 @@ impl CompatibilityFactIdV1 {
 /// mapping is the sole source of a legacy integer identifier; callers must not
 /// coerce or hash canonical identifiers into one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactMappingV1 {
-    compatibility_id: CompatibilityFactIdV1,
+pub struct ProjectMemoryFactMappingV1 {
+    compatibility_id: ProjectMemoryFactIdV1,
     legacy_mapping: Option<LegacyFactMappingV1>,
 }
 
-impl CompatibilityFactMappingV1 {
+impl ProjectMemoryFactMappingV1 {
     pub fn new(
-        compatibility_id: CompatibilityFactIdV1,
+        compatibility_id: ProjectMemoryFactIdV1,
         legacy_mapping: Option<LegacyFactMappingV1>,
     ) -> FactStoreResult<Self> {
         if let Some(mapping) = &legacy_mapping {
@@ -136,7 +136,7 @@ impl CompatibilityFactMappingV1 {
         })
     }
 
-    pub fn compatibility_id(&self) -> &CompatibilityFactIdV1 {
+    pub fn compatibility_id(&self) -> &ProjectMemoryFactIdV1 {
         &self.compatibility_id
     }
 
@@ -169,12 +169,12 @@ impl CompatibilityFactMappingV1 {
 /// contain only sanitized domain identifiers; `Unknown` is explicit for legacy
 /// history that cannot be reconstructed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactSourceV1 {
+pub enum ProjectMemoryFactSourceV1 {
     Canonical(FactIdentitySourceV1),
     Unknown,
 }
 
-impl CompatibilityFactSourceV1 {
+impl ProjectMemoryFactSourceV1 {
     fn validate_for_owner(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
         if let Self::Canonical(source) = self {
             FactIdentityMaterialV1::new(owner.clone(), source.clone())?;
@@ -187,20 +187,20 @@ impl CompatibilityFactSourceV1 {
 /// state and the sanitized [`FactPayloadV1`] together so adapters cannot expose
 /// deleted or un-sanitized payload fields accidentally.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactV1 {
+pub struct ProjectMemoryFactV1 {
     fact: StoredFactV1,
-    mapping: CompatibilityFactMappingV1,
-    source: CompatibilityFactSourceV1,
+    mapping: ProjectMemoryFactMappingV1,
+    source: ProjectMemoryFactSourceV1,
     source_label: Option<String>,
-    telemetry: CompatibilityFactTelemetryV1,
+    telemetry: ProjectMemoryFactTelemetryV1,
 }
 
-impl CompatibilityFactV1 {
+impl ProjectMemoryFactV1 {
     pub fn new(
         fact: StoredFactV1,
-        mapping: CompatibilityFactMappingV1,
-        source: CompatibilityFactSourceV1,
-        telemetry: CompatibilityFactTelemetryV1,
+        mapping: ProjectMemoryFactMappingV1,
+        source: ProjectMemoryFactSourceV1,
+        telemetry: ProjectMemoryFactTelemetryV1,
     ) -> FactStoreResult<Self> {
         if fact.owner() != mapping.owner() {
             return Err(FactStoreError::OwnerMismatch);
@@ -215,7 +215,7 @@ impl CompatibilityFactV1 {
             return Err(FactStoreError::FactMismatch);
         }
         source.validate_for_owner(fact.owner())?;
-        if let CompatibilityFactSourceV1::Canonical(identity_source) = &source {
+        if let ProjectMemoryFactSourceV1::Canonical(identity_source) = &source {
             let material =
                 FactIdentityMaterialV1::new(fact.owner().clone(), identity_source.clone())?;
             if FactId::derive(&material)? != *fact.fact_id() {
@@ -259,19 +259,19 @@ impl CompatibilityFactV1 {
     pub fn fact_id(&self) -> &FactId {
         self.fact.fact_id()
     }
-    pub fn mapping(&self) -> &CompatibilityFactMappingV1 {
+    pub fn mapping(&self) -> &ProjectMemoryFactMappingV1 {
         &self.mapping
     }
     pub fn legacy_fact_id(&self) -> Option<i64> {
         self.mapping.legacy_fact_id()
     }
-    pub fn source(&self) -> &CompatibilityFactSourceV1 {
+    pub fn source(&self) -> &ProjectMemoryFactSourceV1 {
         &self.source
     }
     pub fn source_label(&self) -> Option<&str> {
         self.source_label.as_deref()
     }
-    pub fn telemetry(&self) -> &CompatibilityFactTelemetryV1 {
+    pub fn telemetry(&self) -> &ProjectMemoryFactTelemetryV1 {
         &self.telemetry
     }
     pub fn payload(&self) -> Option<&FactPayloadV1> {
@@ -297,16 +297,16 @@ impl CompatibilityFactV1 {
 /// A bounded, deterministic compatibility list page.  Facts are sorted by
 /// canonical `FactId` ascending, which makes the cursor stable across rebuilds.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactPageV1 {
+pub struct ProjectMemoryFactPageV1 {
     owner: FactOwnerV1,
-    facts: Vec<CompatibilityFactProjectionV1>,
+    facts: Vec<ProjectMemoryFactProjectionV1>,
     next_after_fact_id: Option<FactId>,
 }
 
-impl CompatibilityFactPageV1 {
+impl ProjectMemoryFactPageV1 {
     pub fn new(
         owner: FactOwnerV1,
-        facts: Vec<CompatibilityFactProjectionV1>,
+        facts: Vec<ProjectMemoryFactProjectionV1>,
         next_after_fact_id: Option<FactId>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -357,7 +357,7 @@ impl CompatibilityFactPageV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn facts(&self) -> &[CompatibilityFactProjectionV1] {
+    pub fn facts(&self) -> &[ProjectMemoryFactProjectionV1] {
         &self.facts
     }
     pub fn next_after_fact_id(&self) -> Option<&FactId> {
@@ -366,14 +366,14 @@ impl CompatibilityFactPageV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactHistoryV1 {
+pub struct ProjectMemoryFactHistoryV1 {
     owner: FactOwnerV1,
     fact_id: FactId,
     events: Vec<FactLineageEventV1>,
     next_after: Option<FactLineageCursor>,
 }
 
-impl CompatibilityFactHistoryV1 {
+impl ProjectMemoryFactHistoryV1 {
     pub fn new(
         owner: FactOwnerV1,
         fact_id: FactId,
@@ -434,19 +434,19 @@ impl CompatibilityFactHistoryV1 {
 /// Bounded detail projection used for V1 `get`, history, status, and dashboard
 /// inspection without exposing a database row or arbitrary JSON transport.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactInspectionV1 {
-    fact: CompatibilityFactV1,
-    history: CompatibilityFactHistoryV1,
+pub struct ProjectMemoryFactInspectionV1 {
+    fact: ProjectMemoryFactV1,
+    history: ProjectMemoryFactHistoryV1,
     anchors: Vec<RetrievalAnchorRecordV2>,
-    status: CompatibilityFactStatusV1,
+    status: ProjectMemoryFactStatusV1,
 }
 
-impl CompatibilityFactInspectionV1 {
+impl ProjectMemoryFactInspectionV1 {
     pub fn new(
-        fact: CompatibilityFactV1,
-        history: CompatibilityFactHistoryV1,
+        fact: ProjectMemoryFactV1,
+        history: ProjectMemoryFactHistoryV1,
         anchors: Vec<RetrievalAnchorRecordV2>,
-        status: CompatibilityFactStatusV1,
+        status: ProjectMemoryFactStatusV1,
     ) -> FactStoreResult<Self> {
         history.validate_for_owner(fact.owner())?;
         status.validate_for_owner(fact.owner())?;
@@ -488,16 +488,16 @@ impl CompatibilityFactInspectionV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         self.fact.owner()
     }
-    pub fn fact(&self) -> &CompatibilityFactV1 {
+    pub fn fact(&self) -> &ProjectMemoryFactV1 {
         &self.fact
     }
-    pub fn history(&self) -> &CompatibilityFactHistoryV1 {
+    pub fn history(&self) -> &ProjectMemoryFactHistoryV1 {
         &self.history
     }
     pub fn anchors(&self) -> &[RetrievalAnchorRecordV2] {
         &self.anchors
     }
-    pub fn status(&self) -> &CompatibilityFactStatusV1 {
+    pub fn status(&self) -> &ProjectMemoryFactStatusV1 {
         &self.status
     }
 }
@@ -506,12 +506,12 @@ impl CompatibilityFactInspectionV1 {
 /// historical numeric identity.  Resolution of the latter happens inside the
 /// authority transaction, never in a handler.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactTargetV1 {
-    Canonical(CompatibilityFactIdV1),
+pub enum ProjectMemoryFactTargetV1 {
+    Canonical(ProjectMemoryFactIdV1),
     Legacy(LegacyFactQuery),
 }
 
-impl CompatibilityFactTargetV1 {
+impl ProjectMemoryFactTargetV1 {
     fn validate(&self) -> FactStoreResult<()> {
         match self {
             Self::Canonical(target) => {
@@ -556,24 +556,24 @@ impl CompatibilityFactTargetV1 {
 /// Safe representation for a migrated or deleted fact that cannot satisfy the
 /// canonical active-assertion invariant of [`StoredFactV1`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactAvailabilityV1 {
+pub enum ProjectMemoryFactAvailabilityV1 {
     Deleted,
     Quarantined,
     Unavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactUnavailableV1 {
-    target: CompatibilityFactIdV1,
-    availability: CompatibilityFactAvailabilityV1,
-    status: CompatibilityFactStatusV1,
+pub struct ProjectMemoryFactUnavailableV1 {
+    target: ProjectMemoryFactIdV1,
+    availability: ProjectMemoryFactAvailabilityV1,
+    status: ProjectMemoryFactStatusV1,
 }
 
-impl CompatibilityFactUnavailableV1 {
+impl ProjectMemoryFactUnavailableV1 {
     pub fn new(
-        target: CompatibilityFactIdV1,
-        availability: CompatibilityFactAvailabilityV1,
-        status: CompatibilityFactStatusV1,
+        target: ProjectMemoryFactIdV1,
+        availability: ProjectMemoryFactAvailabilityV1,
+        status: ProjectMemoryFactStatusV1,
     ) -> FactStoreResult<Self> {
         status.validate_for_owner(target.owner())?;
         if status
@@ -589,24 +589,24 @@ impl CompatibilityFactUnavailableV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactIdV1 {
+    pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
     }
-    pub fn availability(&self) -> CompatibilityFactAvailabilityV1 {
+    pub fn availability(&self) -> ProjectMemoryFactAvailabilityV1 {
         self.availability
     }
-    pub fn status(&self) -> &CompatibilityFactStatusV1 {
+    pub fn status(&self) -> &ProjectMemoryFactStatusV1 {
         &self.status
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactProjectionV1 {
-    Available(Box<CompatibilityFactV1>),
-    Unavailable(CompatibilityFactUnavailableV1),
+pub enum ProjectMemoryFactProjectionV1 {
+    Available(Box<ProjectMemoryFactV1>),
+    Unavailable(ProjectMemoryFactUnavailableV1),
 }
 
-impl CompatibilityFactProjectionV1 {
+impl ProjectMemoryFactProjectionV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         match self {
             Self::Available(fact) => fact.owner(),
@@ -621,7 +621,7 @@ impl CompatibilityFactProjectionV1 {
         }
     }
 
-    pub fn mapping(&self) -> Option<&CompatibilityFactMappingV1> {
+    pub fn mapping(&self) -> Option<&ProjectMemoryFactMappingV1> {
         match self {
             Self::Available(fact) => Some(fact.mapping()),
             Self::Unavailable(_) => None,

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use tracedecay_domain::PayloadAccessState;
 use tracedecay_store::{
-    CompatibilityFactAvailabilityV1, CompatibilityFactProjectionV1, FactCompatibilityStore,
+    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactProjectionV1, FactCompatibilityStore,
 };
 
 use crate::application::memory::MemoryApplication;
@@ -213,7 +213,7 @@ async fn validate_fact_proposal<A: FactCompatibilityStore>(
             )
         })? {
         None => None,
-        Some(CompatibilityFactProjectionV1::Available(fact)) => {
+        Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
             let Some(fact_id) = fact.legacy_fact_id() else {
                 return Ok(rejected_unavailable_exact_duplicate(
                     proposal,
@@ -223,7 +223,7 @@ async fn validate_fact_proposal<A: FactCompatibilityStore>(
             };
             Some(fact_id)
         }
-        Some(CompatibilityFactProjectionV1::Unavailable(unavailable)) => {
+        Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
             return Ok(rejected_unavailable_exact_duplicate(
                 proposal,
                 compatibility_availability_label(unavailable.availability()),
@@ -392,11 +392,11 @@ fn rejected_unavailable_exact_duplicate(
     )
 }
 
-fn compatibility_availability_label(value: CompatibilityFactAvailabilityV1) -> &'static str {
+fn compatibility_availability_label(value: ProjectMemoryFactAvailabilityV1) -> &'static str {
     match value {
-        CompatibilityFactAvailabilityV1::Deleted => "deleted",
-        CompatibilityFactAvailabilityV1::Quarantined => "quarantined",
-        CompatibilityFactAvailabilityV1::Unavailable => "unavailable",
+        ProjectMemoryFactAvailabilityV1::Deleted => "deleted",
+        ProjectMemoryFactAvailabilityV1::Quarantined => "quarantined",
+        ProjectMemoryFactAvailabilityV1::Unavailable => "unavailable",
     }
 }
 

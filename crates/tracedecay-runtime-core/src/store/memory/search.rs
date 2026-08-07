@@ -10,11 +10,11 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::{Confidence, FactCategoryV1, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    CompatibilityFactContradictionPageV1, CompatibilityFactContradictionQueryV1,
-    CompatibilityFactContradictionV1, CompatibilityFactListQueryV1, CompatibilityFactProjectionV1,
-    CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchCursorV1,
-    CompatibilityFactSearchHitV1, CompatibilityFactSearchKindV1, CompatibilityFactSearchPageV1,
-    CompatibilityFactSearchQuery, CompatibilityFactSearchScoresV1, CompatibilityFactV1,
+    ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
+    ProjectMemoryFactContradictionV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
+    ProjectMemoryFactSearchHitV1, ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactSearchScoresV1, ProjectMemoryFactV1,
     FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 
@@ -44,9 +44,9 @@ fn compatibility_search_scores(
     query_tokens: &[String],
     encoder: &HolographicEncoder,
     query_vector: &[f64],
-    fact: &CompatibilityFactV1,
+    fact: &ProjectMemoryFactV1,
     now: UtcMicros,
-) -> FactStoreResult<(CompatibilityFactSearchScoresV1, String)> {
+) -> FactStoreResult<(ProjectMemoryFactSearchScoresV1, String)> {
     let fact_tokens = compatibility_fact_tokens(fact);
     let coverage = compatibility_term_coverage(query_tokens, &fact_tokens);
     let fts = coverage;
@@ -58,7 +58,7 @@ fn compatibility_search_scores(
     let score =
         (fts * 0.40 + jaccard * 0.30 + holographic * 0.30) * trust * temporal_decay * usage_boost;
     Ok((
-        CompatibilityFactSearchScoresV1::new(
+        ProjectMemoryFactSearchScoresV1::new(
             compatibility_millionths(score),
             compatibility_millionths(fts),
             compatibility_millionths(jaccard),
@@ -79,8 +79,8 @@ fn compatibility_search_scores(
 /// way: a cursor is only resumable against the exact order it was cut from, so
 /// every paged compatibility search shares this single definition.
 fn rank_and_seek(
-    ranked: &mut Vec<(CompatibilityFactSearchHitV1, UtcMicros)>,
-    after: Option<&CompatibilityFactSearchCursorV1>,
+    ranked: &mut Vec<(ProjectMemoryFactSearchHitV1, UtcMicros)>,
+    after: Option<&ProjectMemoryFactSearchCursorV1>,
 ) {
     ranked.sort_by(|(left, left_updated), (right, right_updated)| {
         right
@@ -105,24 +105,24 @@ async fn compatibility_available_facts_tx(
     owner: &FactOwnerV1,
     category: Option<FactCategoryV1>,
     min_trust: Option<Confidence>,
-) -> FactCompatibilityResult<Vec<CompatibilityFactV1>> {
-    let query = CompatibilityFactListQueryV1::new(owner.clone(), category, min_trust, None, 1_000)?;
+) -> FactCompatibilityResult<Vec<ProjectMemoryFactV1>> {
+    let query = ProjectMemoryFactListQueryV1::new(owner.clone(), category, min_trust, None, 1_000)?;
     let page = list_compatibility_facts_tx(transaction, &query).await?;
     Ok(page
         .facts()
         .iter()
         .filter_map(|projection| match projection {
-            CompatibilityFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
-            CompatibilityFactProjectionV1::Unavailable(_) => None,
+            ProjectMemoryFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
+            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
         })
         .collect())
 }
 
 async fn compatibility_search_candidates_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactSearchQuery,
+    query: &ProjectMemoryFactSearchQuery,
     min_trust: Confidence,
-) -> FactCompatibilityResult<Vec<CompatibilityFactV1>> {
+) -> FactCompatibilityResult<Vec<ProjectMemoryFactV1>> {
     let text = query.query().ok_or_else(|| {
         storage_message(
             COMPATIBILITY_READ_OPERATION,
@@ -223,14 +223,14 @@ async fn compatibility_search_candidates_tx(
         .await?
         .into_iter()
         .filter_map(|projection| match projection {
-            CompatibilityFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
-            CompatibilityFactProjectionV1::Unavailable(_) => None,
+            ProjectMemoryFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
+            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
         })
         .collect();
     Ok(facts)
 }
 
-fn compatibility_matches_entity(fact: &CompatibilityFactV1, entity: &str) -> bool {
+fn compatibility_matches_entity(fact: &ProjectMemoryFactV1, entity: &str) -> bool {
     let normalized = normalize_entity(entity).to_ascii_lowercase();
     !normalized.is_empty()
         && fact.entities().is_some_and(|entities| {
@@ -240,7 +240,7 @@ fn compatibility_matches_entity(fact: &CompatibilityFactV1, entity: &str) -> boo
         })
 }
 
-fn compatibility_matches_all_entities(fact: &CompatibilityFactV1, entities: &[String]) -> bool {
+fn compatibility_matches_all_entities(fact: &ProjectMemoryFactV1, entities: &[String]) -> bool {
     entities
         .iter()
         .all(|entity| compatibility_matches_entity(fact, entity))
@@ -248,13 +248,13 @@ fn compatibility_matches_all_entities(fact: &CompatibilityFactV1, entities: &[St
 
 async fn compatibility_rank_facts_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactSearchQuery,
-) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+    query: &ProjectMemoryFactSearchQuery,
+) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
     let min_trust = query
         .filter()
         .min_trust()
         .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
-    let mut facts = if matches!(query.kind(), CompatibilityFactSearchKindV1::Search) {
+    let mut facts = if matches!(query.kind(), ProjectMemoryFactSearchKindV1::Search) {
         compatibility_search_candidates_tx(transaction, query, min_trust).await?
     } else {
         compatibility_available_facts_tx(
@@ -268,7 +268,7 @@ async fn compatibility_rank_facts_tx(
     let now = compatibility_now()?;
     let mut ranked = Vec::with_capacity(facts.len());
     match query.kind() {
-        CompatibilityFactSearchKindV1::Search => {
+        ProjectMemoryFactSearchKindV1::Search => {
             let text = query.query().ok_or_else(|| {
                 storage_message(
                     COMPATIBILITY_READ_OPERATION,
@@ -301,12 +301,12 @@ async fn compatibility_rank_facts_tx(
                     continue;
                 }
                 ranked.push((
-                    CompatibilityFactSearchHitV1::new(fact.clone(), scores, Some(why))?,
+                    ProjectMemoryFactSearchHitV1::new(fact.clone(), scores, Some(why))?,
                     fact.telemetry().updated_at(),
                 ));
             }
         }
-        CompatibilityFactSearchKindV1::Probe => {
+        ProjectMemoryFactSearchKindV1::Probe => {
             let entity = query.query().ok_or_else(|| {
                 storage_message(
                     COMPATIBILITY_READ_OPERATION,
@@ -318,9 +318,9 @@ async fn compatibility_rank_facts_tx(
                 .filter(|fact| compatibility_matches_entity(fact, entity))
             {
                 let trust = compatibility_millionths(fact.fact().trust().as_f64());
-                let scores = CompatibilityFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
+                let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
                 ranked.push((
-                    CompatibilityFactSearchHitV1::new(
+                    ProjectMemoryFactSearchHitV1::new(
                         fact.clone(),
                         scores,
                         Some("entity probe".to_owned()),
@@ -329,15 +329,15 @@ async fn compatibility_rank_facts_tx(
                 ));
             }
         }
-        CompatibilityFactSearchKindV1::Related { entity } => {
+        ProjectMemoryFactSearchKindV1::Related { entity } => {
             for fact in facts
                 .drain(..)
                 .filter(|fact| compatibility_matches_entity(fact, &entity))
             {
                 let trust = compatibility_millionths(fact.fact().trust().as_f64());
-                let scores = CompatibilityFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
+                let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
                 ranked.push((
-                    CompatibilityFactSearchHitV1::new(
+                    ProjectMemoryFactSearchHitV1::new(
                         fact.clone(),
                         scores,
                         Some("entity related".to_owned()),
@@ -346,15 +346,15 @@ async fn compatibility_rank_facts_tx(
                 ));
             }
         }
-        CompatibilityFactSearchKindV1::Reason { entities } => {
+        ProjectMemoryFactSearchKindV1::Reason { entities } => {
             for fact in facts
                 .drain(..)
                 .filter(|fact| compatibility_matches_all_entities(fact, &entities))
             {
                 let trust = compatibility_millionths(fact.fact().trust().as_f64());
-                let scores = CompatibilityFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
+                let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
                 ranked.push((
-                    CompatibilityFactSearchHitV1::new(
+                    ProjectMemoryFactSearchHitV1::new(
                         fact.clone(),
                         scores,
                         Some("entity reasoning".to_owned()),
@@ -369,7 +369,7 @@ async fn compatibility_rank_facts_tx(
     ranked.truncate(query.limit());
     let next_after = if has_more {
         ranked.last().map(|(hit, updated_at)| {
-            CompatibilityFactSearchCursorV1::new(
+            ProjectMemoryFactSearchCursorV1::new(
                 hit.score_millionths(),
                 *updated_at,
                 hit.fact().fact_id().clone(),
@@ -379,7 +379,7 @@ async fn compatibility_rank_facts_tx(
         None
     }
     .transpose()?;
-    CompatibilityFactSearchPageV1::new(
+    ProjectMemoryFactSearchPageV1::new(
         query.owner().clone(),
         ranked.into_iter().map(|(hit, _)| hit).collect(),
         next_after,
@@ -389,23 +389,23 @@ async fn compatibility_rank_facts_tx(
 
 pub(super) async fn search_compatibility_facts_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactSearchQuery,
-) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+    query: &ProjectMemoryFactSearchQuery,
+) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
     compatibility_rank_facts_tx(transaction, query).await
 }
 
 pub(super) async fn probe_compatibility_facts_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactSearchQuery,
-) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+    query: &ProjectMemoryFactSearchQuery,
+) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
     compatibility_rank_facts_tx(transaction, query).await
 }
 
 pub(super) async fn related_compatibility_facts_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactSearchQuery,
-) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
-    let CompatibilityFactSearchKindV1::Related { entity } = query.kind() else {
+    query: &ProjectMemoryFactSearchQuery,
+) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
+    let ProjectMemoryFactSearchKindV1::Related { entity } = query.kind() else {
         return Err(storage_message(
             COMPATIBILITY_READ_OPERATION,
             "compatibility related query has the wrong kind",
@@ -455,7 +455,7 @@ pub(super) async fn related_compatibility_facts_tx(
     }
     drop(entity_rows);
     if source_entity_ids.is_empty() {
-        return CompatibilityFactSearchPageV1::new(query.owner().clone(), Vec::new(), None)
+        return ProjectMemoryFactSearchPageV1::new(query.owner().clone(), Vec::new(), None)
             .map_err(Into::into);
     }
 
@@ -589,14 +589,14 @@ pub(super) async fn related_compatibility_facts_tx(
     for projection in
         load_compatibility_projections_tx(transaction, query.owner(), &encountered).await?
     {
-        let CompatibilityFactProjectionV1::Available(fact) = projection else {
+        let ProjectMemoryFactProjectionV1::Available(fact) = projection else {
             continue;
         };
         let trust = compatibility_millionths(fact.fact().trust().as_f64());
-        let scores = CompatibilityFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
+        let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
         let updated_at = fact.telemetry().updated_at();
         ranked.push((
-            CompatibilityFactSearchHitV1::new(
+            ProjectMemoryFactSearchHitV1::new(
                 *fact,
                 scores,
                 Some("co-occurring entity".to_owned()),
@@ -611,7 +611,7 @@ pub(super) async fn related_compatibility_facts_tx(
     // here would falsely imply coverage beyond the intentionally capped
     // co-entity frontier.
     let next_after = None;
-    CompatibilityFactSearchPageV1::new(
+    ProjectMemoryFactSearchPageV1::new(
         query.owner().clone(),
         ranked.into_iter().map(|(hit, _)| hit).collect(),
         next_after,
@@ -621,15 +621,15 @@ pub(super) async fn related_compatibility_facts_tx(
 
 pub(super) async fn reason_compatibility_facts_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactSearchQuery,
-) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+    query: &ProjectMemoryFactSearchQuery,
+) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
     compatibility_rank_facts_tx(transaction, query).await
 }
 
 pub(super) async fn find_compatibility_contradictions_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactContradictionQueryV1,
-) -> FactCompatibilityResult<CompatibilityFactContradictionPageV1> {
+    query: &ProjectMemoryFactContradictionQueryV1,
+) -> FactCompatibilityResult<ProjectMemoryFactContradictionPageV1> {
     let mut facts = compatibility_available_facts_tx(
         transaction,
         query.owner(),
@@ -687,7 +687,7 @@ pub(super) async fn find_compatibility_contradictions_tx(
             } else {
                 (left.clone(), right_content)
             };
-            contradictions.push(CompatibilityFactContradictionV1::new(
+            contradictions.push(ProjectMemoryFactContradictionV1::new(
                 existing,
                 new_content.to_owned(),
                 score,
@@ -700,7 +700,7 @@ pub(super) async fn find_compatibility_contradictions_tx(
             }
         }
     }
-    CompatibilityFactContradictionPageV1::new(query.owner().clone(), contradictions)
+    ProjectMemoryFactContradictionPageV1::new(query.owner().clone(), contradictions)
         .map_err(Into::into)
 }
 
@@ -766,7 +766,7 @@ async fn compatibility_replay_retrieval_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>> {
+) -> FactCompatibilityResult<Vec<ProjectMemoryFactProjectionV1>> {
     let fact_ids = receipt
         .receipt
         .get("fact_ids")
@@ -802,8 +802,8 @@ async fn compatibility_replay_retrieval_tx(
 
 pub(super) async fn record_compatibility_fact_retrieval_tx(
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactRetrievalCommandV1,
-) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>> {
+    request: &ProjectMemoryFactRetrievalCommandV1,
+) -> FactCompatibilityResult<Vec<ProjectMemoryFactProjectionV1>> {
     let request_digest = compatibility_digest(json!({
         "targets": request
             .targets()

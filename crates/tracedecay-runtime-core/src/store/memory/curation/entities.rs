@@ -28,10 +28,10 @@ use crate::memory::entities::normalize_entity;
 use serde_json::{Value, json};
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    CompatibilityFactAddAliasV1, CompatibilityFactCurationOperationV1,
-    CompatibilityFactCurationReceiptV1, CompatibilityFactMappingV1,
-    CompatibilityFactMergeEntitiesV1, CompatibilityFactTargetV1, CompatibilityLegacyEntityTargetV1,
-    CompatibilityMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
+    ProjectMemoryFactAddAliasV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactMappingV1,
+    ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactTargetV1, ProjectMemoryLegacyEntityTargetV1,
+    ProjectMemoryMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 async fn compatibility_owner_entity_tx(
     transaction: &Transaction<'_>,
@@ -247,7 +247,7 @@ pub(super) async fn compatibility_merge_entities_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
-    operation: &CompatibilityFactMergeEntitiesV1,
+    operation: &ProjectMemoryFactMergeEntitiesV1,
     now: UtcMicros,
 ) -> FactStoreResult<Vec<FactId>> {
     let evidence =
@@ -393,7 +393,7 @@ pub(super) async fn compatibility_add_entity_alias_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    operation: &CompatibilityFactAddAliasV1,
+    operation: &ProjectMemoryFactAddAliasV1,
     now: UtcMicros,
 ) -> FactStoreResult<Vec<FactId>> {
     let evidence =
@@ -461,37 +461,37 @@ pub(super) async fn compatibility_add_entity_alias_tx(
 }
 
 pub(super) fn compatibility_curation_operation_digest(
-    operation: &CompatibilityFactCurationOperationV1,
+    operation: &ProjectMemoryFactCurationOperationV1,
 ) -> FactStoreResult<Value> {
-    let evidence = |targets: &[CompatibilityFactTargetV1]| {
+    let evidence = |targets: &[ProjectMemoryFactTargetV1]| {
         targets
             .iter()
             .map(compatibility_target_digest)
             .collect::<FactStoreResult<Vec<_>>>()
     };
     match operation {
-        CompatibilityFactCurationOperationV1::NormalizeTags(operation) => Ok(json!({
+        ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => Ok(json!({
             "kind": "normalize_tags",
             "fact": compatibility_target_digest(operation.fact())?,
             "tags": operation.tags(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
-        CompatibilityFactCurationOperationV1::MergeEntities(operation) => Ok(json!({
+        ProjectMemoryFactCurationOperationV1::MergeEntities(operation) => Ok(json!({
             "kind": "merge_entities",
             "winner": operation.winner().legacy_entity_id(),
-            "losers": operation.losers().iter().map(CompatibilityLegacyEntityTargetV1::legacy_entity_id).collect::<Vec<_>>(),
+            "losers": operation.losers().iter().map(ProjectMemoryLegacyEntityTargetV1::legacy_entity_id).collect::<Vec<_>>(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
-        CompatibilityFactCurationOperationV1::AddAlias(operation) => Ok(json!({
+        ProjectMemoryFactCurationOperationV1::AddAlias(operation) => Ok(json!({
             "kind": "add_alias",
             "entity": operation.entity().legacy_entity_id(),
             "alias": operation.alias(),
             "evidence": evidence(operation.evidence_facts())?,
             "confidence": operation.confidence().as_f64(),
         })),
-        CompatibilityFactCurationOperationV1::LinkFacts(operation) => Ok(json!({
+        ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => Ok(json!({
             "kind": "link_facts",
             "source": compatibility_target_digest(operation.source())?,
             "target": compatibility_target_digest(operation.target())?,
@@ -501,7 +501,7 @@ pub(super) fn compatibility_curation_operation_digest(
             "source_label": operation.source_label(),
             "provenance": operation.provenance(),
         })),
-        CompatibilityFactCurationOperationV1::RepairVector(operation) => Ok(json!({
+        ProjectMemoryFactCurationOperationV1::RepairVector(operation) => Ok(json!({
             "kind": "repair_vector",
             "fact": compatibility_target_digest(operation.fact())?,
             "evidence": evidence(operation.evidence_facts())?,
@@ -513,7 +513,7 @@ pub(super) fn compatibility_curation_operation_digest(
 pub(super) async fn compatibility_record_oplog_tx(
     transaction: &Transaction<'_>,
     operation: &str,
-    mapping: Option<&CompatibilityFactMappingV1>,
+    mapping: Option<&ProjectMemoryFactMappingV1>,
     detail: &Value,
     now: UtcMicros,
 ) -> FactStoreResult<()> {
@@ -523,7 +523,7 @@ pub(super) async fn compatibility_record_oplog_tx(
             params![
                 compatibility_legacy_timestamp(now),
                 operation,
-                mapping.and_then(CompatibilityFactMappingV1::legacy_fact_id),
+                mapping.and_then(ProjectMemoryFactMappingV1::legacy_fact_id),
                 to_json(detail, "serialize compatibility oplog detail")?,
             ],
         )
@@ -536,7 +536,7 @@ pub(super) async fn compatibility_replay_curation_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactCurationReceiptV1> {
     let ids = receipt
         .receipt
         .get("changed_fact_ids")
@@ -561,11 +561,11 @@ pub(super) async fn compatibility_replay_curation_tx(
     }
     let mappings =
         compatibility_curation_mappings_from_ids_tx(transaction, owner, &fact_ids).await?;
-    let derived_repair = CompatibilityMemoryRepairStatsV1::new(
+    let derived_repair = ProjectMemoryMemoryRepairStatsV1::new(
         compatibility_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?,
         compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?,
     );
-    CompatibilityFactCurationReceiptV1::new(
+    ProjectMemoryFactCurationReceiptV1::new(
         owner.clone(),
         mappings,
         compatibility_receipt_u64(&receipt.receipt, "normalized_tags")?,

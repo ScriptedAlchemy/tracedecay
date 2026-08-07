@@ -38,14 +38,14 @@ use tracedecay_domain::{
     FactLineageEventV1, FactOwnerV1, RetrievalAnchorRecordV2, UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactFeedbackActionV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackDetailsAvailabilityV1, CompatibilityFactFeedbackHistoryEntryV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryV1, CompatibilityFactInspectionV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalPromotionDispositionV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalStateV1, CompatibilityFactTargetV1,
-    CompatibilityFeedbackRepairProgressV1, FactCommitOutcome, FactCompatibilityResult,
+    ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactFeedbackDetailsAvailabilityV1, ProjectMemoryFactFeedbackHistoryEntryV1,
+    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPromotionDispositionV1,
+    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalStateV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryFeedbackRepairProgressV1, FactCommitOutcome, FactCompatibilityResult,
     FactLineageCursor, FactLineageQuery, FactStoreError, FactStoreResult, FactWriteBatch,
     PromoteFactProposalOutcome, StoredFactV1,
 };
@@ -89,7 +89,7 @@ fn compatibility_feedback_details(
     String,
     Option<String>,
     Option<String>,
-    CompatibilityFactFeedbackDetailsAvailabilityV1,
+    ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 ) {
     let persisted_source = match source {
         Some(source) => compatibility_feedback_detail(Some(source)),
@@ -104,14 +104,14 @@ fn compatibility_feedback_details(
             source.clone(),
             Some(source),
             persisted_note,
-            CompatibilityFactFeedbackDetailsAvailabilityV1::Available,
+            ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available,
         )
     } else {
         (
             "mcp".to_owned(),
             None,
             None,
-            CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown,
+            ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown,
         )
     }
 }
@@ -155,22 +155,22 @@ fn compatibility_feedback_batch(
 }
 
 fn compatibility_feedback_details_label(
-    availability: CompatibilityFactFeedbackDetailsAvailabilityV1,
+    availability: ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 ) -> &'static str {
     match availability {
-        CompatibilityFactFeedbackDetailsAvailabilityV1::Available => "available",
-        CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted => "legacy_redacted",
-        CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown => "unknown",
+        ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available => "available",
+        ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted => "legacy_redacted",
+        ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown => "unknown",
     }
 }
 
 fn compatibility_feedback_details_availability(
     value: &str,
-) -> FactStoreResult<CompatibilityFactFeedbackDetailsAvailabilityV1> {
+) -> FactStoreResult<ProjectMemoryFactFeedbackDetailsAvailabilityV1> {
     match value {
-        "available" => Ok(CompatibilityFactFeedbackDetailsAvailabilityV1::Available),
-        "legacy_redacted" => Ok(CompatibilityFactFeedbackDetailsAvailabilityV1::LegacyRedacted),
-        "unknown" => Ok(CompatibilityFactFeedbackDetailsAvailabilityV1::Unknown),
+        "available" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available),
+        "legacy_redacted" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted),
+        "unknown" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown),
         _ => Err(storage_message(
             COMPATIBILITY_READ_OPERATION,
             format!("unknown compatibility feedback detail availability {value:?}"),
@@ -180,10 +180,10 @@ fn compatibility_feedback_details_availability(
 
 fn compatibility_feedback_action(
     value: &str,
-) -> FactStoreResult<CompatibilityFactFeedbackActionV1> {
+) -> FactStoreResult<ProjectMemoryFactFeedbackActionV1> {
     match value {
-        "helpful" => Ok(CompatibilityFactFeedbackActionV1::Helpful),
-        "unhelpful" => Ok(CompatibilityFactFeedbackActionV1::Unhelpful),
+        "helpful" => Ok(ProjectMemoryFactFeedbackActionV1::Helpful),
+        "unhelpful" => Ok(ProjectMemoryFactFeedbackActionV1::Unhelpful),
         _ => Err(storage_message(
             COMPATIBILITY_READ_OPERATION,
             format!("unknown compatibility feedback action {value:?}"),
@@ -198,13 +198,13 @@ async fn compatibility_record_feedback_history_tx(
     fact_id: &FactId,
     event_id: &FactEventId,
     legacy_feedback_event_id: i64,
-    action: CompatibilityFactFeedbackActionV1,
+    action: ProjectMemoryFactFeedbackActionV1,
     old_trust: Confidence,
     new_trust: Confidence,
     occurred_at: UtcMicros,
     source: Option<&str>,
     note: Option<&str>,
-    availability: CompatibilityFactFeedbackDetailsAvailabilityV1,
+    availability: ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 ) -> FactStoreResult<()> {
     if legacy_feedback_event_id <= 0 {
         return Err(storage_message(
@@ -259,7 +259,7 @@ async fn compatibility_replay_feedback_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactFeedbackOutcomeV1> {
     let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
             COMPATIBILITY_WRITE_OPERATION,
@@ -290,7 +290,7 @@ async fn compatibility_replay_feedback_tx(
             "compatibility feedback receipt legacy event id is out of range",
         )
     })?;
-    CompatibilityFactFeedbackOutcomeV1::new(
+    ProjectMemoryFactFeedbackOutcomeV1::new(
         fact,
         event_id.clone(),
         Some(legacy_feedback_event_id),
@@ -305,8 +305,8 @@ async fn compatibility_replay_feedback_tx(
 
 pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactFeedbackCommandV1,
-) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
+    request: &ProjectMemoryFactFeedbackCommandV1,
+) -> FactCompatibilityResult<ProjectMemoryFactFeedbackOutcomeV1> {
     let request_digest = compatibility_digest(json!({
         "target": compatibility_target_digest(request.target())?,
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
@@ -445,7 +445,7 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         now,
     )
     .await?;
-    CompatibilityFactFeedbackOutcomeV1::new(
+    ProjectMemoryFactFeedbackOutcomeV1::new(
         fact,
         event_id,
         Some(legacy_feedback_event_id),
@@ -460,9 +460,9 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
 
 pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
     transaction: &Transaction<'_>,
-    query: &CompatibilityFactFeedbackHistoryQueryV1,
-    repair_progress: CompatibilityFeedbackRepairProgressV1,
-) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1> {
+    query: &ProjectMemoryFactFeedbackHistoryQueryV1,
+    repair_progress: ProjectMemoryFeedbackRepairProgressV1,
+) -> FactCompatibilityResult<ProjectMemoryFactFeedbackHistoryV1> {
     let fact_id = resolve_compatibility_target_tx(transaction, query.target())
         .await?
         .ok_or_else(|| {
@@ -513,7 +513,7 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
     {
-        events.push(CompatibilityFactFeedbackHistoryEntryV1::new(
+        events.push(ProjectMemoryFactFeedbackHistoryEntryV1::new(
             FactEventId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
                 .map_err(FactStoreError::from)?,
             UtcMicros(row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?),
@@ -541,7 +541,7 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
         })
         .flatten()
         .transpose()?;
-    CompatibilityFactFeedbackHistoryV1::new_with_repair_progress(
+    ProjectMemoryFactFeedbackHistoryV1::new_with_repair_progress(
         query.target().owner().clone(),
         events,
         next_after,
@@ -552,18 +552,18 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
 
 pub(in crate::store::memory) async fn inspect_compatibility_fact_tx(
     transaction: &Transaction<'_>,
-    target: &CompatibilityFactTargetV1,
-) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>> {
+    target: &ProjectMemoryFactTargetV1,
+) -> FactCompatibilityResult<Option<ProjectMemoryFactInspectionV1>> {
     let Some(fact_id) = resolve_compatibility_target_tx(transaction, target).await? else {
         return Ok(None);
     };
-    let Some(CompatibilityFactProjectionV1::Available(fact)) =
+    let Some(ProjectMemoryFactProjectionV1::Available(fact)) =
         load_compatibility_projection_tx(transaction, target.owner(), &fact_id).await?
     else {
         return Ok(None);
     };
     let lineage = FactLineageQuery::new(target.owner().clone(), fact_id.clone(), None, 1_000)?;
-    let history = CompatibilityFactHistoryV1::new(
+    let history = ProjectMemoryFactHistoryV1::new(
         target.owner().clone(),
         fact_id.clone(),
         query_fact_lineage_tx(transaction, &lineage).await?,
@@ -630,7 +630,7 @@ pub(in crate::store::memory) async fn inspect_compatibility_fact_tx(
                 "compatibility inspection status is missing",
             )
         })?;
-    CompatibilityFactInspectionV1::new(*fact, history, anchors, status)
+    ProjectMemoryFactInspectionV1::new(*fact, history, anchors, status)
         .map(Some)
         .map_err(Into::into)
 }
@@ -648,8 +648,8 @@ pub(in crate::store::memory) struct PromotionAttempt {
 pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactProposalPromotionV1,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+    request: &ProjectMemoryFactProposalPromotionV1,
+) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1> {
     let result =
         promote_compatibility_fact_proposal_with_disposition_tx(db, transaction, request).await?;
     Ok(result.proposal().clone())
@@ -658,8 +658,8 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_tx(
 pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_disposition_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactProposalPromotionV1,
-) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1> {
+    request: &ProjectMemoryFactProposalPromotionV1,
+) -> FactCompatibilityResult<ProjectMemoryFactProposalPromotionResultV1> {
     let material = json!({
         "proposal_id": request.proposal_id().as_str(),
         "expected_revision": request.expected_revision().get(),
@@ -679,11 +679,11 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
         let proposal =
             compatibility_replay_proposal_tx(transaction, request.owner(), &receipt).await?;
         let disposition = match proposal.state() {
-            CompatibilityFactProposalStateV1::Applied => {
-                CompatibilityFactProposalPromotionDispositionV1::AlreadyPromoted
+            ProjectMemoryFactProposalStateV1::Applied => {
+                ProjectMemoryFactProposalPromotionDispositionV1::AlreadyPromoted
             }
-            CompatibilityFactProposalStateV1::Quarantined => {
-                CompatibilityFactProposalPromotionDispositionV1::Quarantined
+            ProjectMemoryFactProposalStateV1::Quarantined => {
+                ProjectMemoryFactProposalPromotionDispositionV1::Quarantined
             }
             _ => {
                 return Err(storage_message(
@@ -693,7 +693,7 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
                 .into());
             }
         };
-        return CompatibilityFactProposalPromotionResultV1::new(proposal, disposition)
+        return ProjectMemoryFactProposalPromotionResultV1::new(proposal, disposition)
             .map_err(Into::into);
     }
     let proposal =
@@ -705,7 +705,7 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
                     "compatibility proposal is missing",
                 )
             })?;
-    if proposal.state() != CompatibilityFactProposalStateV1::PendingApproval
+    if proposal.state() != ProjectMemoryFactProposalStateV1::PendingApproval
         || proposal.revision() != request.expected_revision()
     {
         return Err(storage_message(
@@ -729,9 +729,9 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
             transaction,
             request.owner(),
             request.proposal_id(),
-            CompatibilityFactProposalStateV1::PendingApproval,
+            ProjectMemoryFactProposalStateV1::PendingApproval,
             request.expected_revision(),
-            CompatibilityFactProposalStateV1::Quarantined,
+            ProjectMemoryFactProposalStateV1::Quarantined,
             request.reviewer(),
             Some(reason),
             &request_digest,
@@ -768,9 +768,9 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
             },
         )
         .await?;
-        return CompatibilityFactProposalPromotionResultV1::new(
+        return ProjectMemoryFactProposalPromotionResultV1::new(
             quarantined,
-            CompatibilityFactProposalPromotionDispositionV1::Quarantined,
+            ProjectMemoryFactProposalPromotionDispositionV1::Quarantined,
         )
         .map_err(Into::into);
     };
@@ -833,9 +833,9 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
         transaction,
         request.owner(),
         request.proposal_id(),
-        CompatibilityFactProposalStateV1::PendingApproval,
+        ProjectMemoryFactProposalStateV1::PendingApproval,
         request.expected_revision(),
-        CompatibilityFactProposalStateV1::Applied,
+        ProjectMemoryFactProposalStateV1::Applied,
         request.reviewer(),
         None,
         &request_digest,
@@ -872,9 +872,9 @@ pub(in crate::store::memory) async fn promote_compatibility_fact_proposal_with_d
         },
     )
     .await?;
-    CompatibilityFactProposalPromotionResultV1::new(
+    ProjectMemoryFactProposalPromotionResultV1::new(
         promoted,
-        CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted,
+        ProjectMemoryFactProposalPromotionDispositionV1::NewlyPromoted,
     )
     .map_err(Into::into)
 }

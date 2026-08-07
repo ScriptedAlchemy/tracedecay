@@ -10,10 +10,10 @@ use tracedecay_domain::{
     FactPayloadV1, LegacyFactMappingV1, PayloadAccessState, UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
-    CompatibilityFactAvailabilityV1, CompatibilityFactIdV1, CompatibilityFactMappingV1,
-    CompatibilityFactProjectionV1, CompatibilityFactSourceV1, CompatibilityFactStatusV1,
-    CompatibilityFactTargetV1, CompatibilityFactTelemetryV1, CompatibilityFactUnavailableV1,
-    CompatibilityFactV1, CompatibilityProjectionStateV1, FactStoreError, FactStoreResult,
+    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactSourceV1, ProjectMemoryFactStatusV1,
+    ProjectMemoryFactTargetV1, ProjectMemoryFactTelemetryV1, ProjectMemoryFactUnavailableV1,
+    ProjectMemoryFactV1, ProjectMemoryProjectionStateV1, FactStoreError, FactStoreResult,
     LegacyFactQuery, StoredFactV1,
 };
 
@@ -26,12 +26,12 @@ use super::primitives::{
 
 const COMPATIBILITY_PROJECTION_BATCH_SIZE: usize = 400;
 
-fn compatibility_projection_state(value: &str) -> FactStoreResult<CompatibilityProjectionStateV1> {
+fn compatibility_projection_state(value: &str) -> FactStoreResult<ProjectMemoryProjectionStateV1> {
     match value {
-        "ready" => Ok(CompatibilityProjectionStateV1::Ready),
-        "rebuilding" => Ok(CompatibilityProjectionStateV1::Rebuilding),
-        "stale" => Ok(CompatibilityProjectionStateV1::Stale),
-        "unavailable" => Ok(CompatibilityProjectionStateV1::Unavailable),
+        "ready" => Ok(ProjectMemoryProjectionStateV1::Ready),
+        "rebuilding" => Ok(ProjectMemoryProjectionStateV1::Rebuilding),
+        "stale" => Ok(ProjectMemoryProjectionStateV1::Stale),
+        "unavailable" => Ok(ProjectMemoryProjectionStateV1::Unavailable),
         _ => Err(storage_message(
             QUERY_OPERATION,
             format!("unknown compatibility projection state {value:?}"),
@@ -41,11 +41,11 @@ fn compatibility_projection_state(value: &str) -> FactStoreResult<CompatibilityP
 
 fn compatibility_unavailable(
     access: Option<PayloadAccessState>,
-) -> CompatibilityFactAvailabilityV1 {
+) -> ProjectMemoryFactAvailabilityV1 {
     match access {
-        Some(PayloadAccessState::Deleted) => CompatibilityFactAvailabilityV1::Deleted,
-        Some(PayloadAccessState::Quarantined) => CompatibilityFactAvailabilityV1::Quarantined,
-        _ => CompatibilityFactAvailabilityV1::Unavailable,
+        Some(PayloadAccessState::Deleted) => ProjectMemoryFactAvailabilityV1::Deleted,
+        Some(PayloadAccessState::Quarantined) => ProjectMemoryFactAvailabilityV1::Quarantined,
+        _ => ProjectMemoryFactAvailabilityV1::Unavailable,
     }
 }
 
@@ -53,7 +53,7 @@ pub(super) async fn compatibility_fact_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactStoreResult<Option<CompatibilityFactStatusV1>> {
+) -> FactStoreResult<Option<ProjectMemoryFactStatusV1>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -90,7 +90,7 @@ pub(super) async fn compatibility_fact_status_tx(
         .as_deref()
         .map(|value| from_json::<VectorWatermark>(value, QUERY_OPERATION))
         .transpose()?;
-    CompatibilityFactStatusV1::new(
+    ProjectMemoryFactStatusV1::new(
         owner.clone(),
         Some(fact_id.clone()),
         Some(access),
@@ -149,9 +149,9 @@ pub(super) async fn compatibility_projection_metadata_tx(
     fact_id: &FactId,
     mapping: Option<&LegacyFactMappingV1>,
 ) -> FactStoreResult<(
-    CompatibilityFactSourceV1,
+    ProjectMemoryFactSourceV1,
     Option<String>,
-    CompatibilityFactTelemetryV1,
+    ProjectMemoryFactTelemetryV1,
 )> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
@@ -213,7 +213,7 @@ pub(super) async fn compatibility_projection_metadata_tx(
         }
         None => None,
     };
-    let telemetry = CompatibilityFactTelemetryV1::new(
+    let telemetry = ProjectMemoryFactTelemetryV1::new(
         nonnegative_u64(row_i64(&row, 2, QUERY_OPERATION)?, "retrieval count")?,
         nonnegative_u64(row_i64(&row, 3, QUERY_OPERATION)?, "access count")?,
         nonnegative_u64(row_i64(&row, 4, QUERY_OPERATION)?, "helpful count")?,
@@ -225,7 +225,7 @@ pub(super) async fn compatibility_projection_metadata_tx(
         row_optional_i64(&row, 9, QUERY_OPERATION)?.map(UtcMicros),
     )?;
     Ok((
-        CompatibilityFactSourceV1::Canonical(identity.source().clone()),
+        ProjectMemoryFactSourceV1::Canonical(identity.source().clone()),
         source_label,
         telemetry,
     ))
@@ -235,7 +235,7 @@ pub(super) async fn load_compatibility_projection_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-) -> FactStoreResult<Option<CompatibilityFactProjectionV1>> {
+) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
     Ok(
         load_compatibility_projections_tx(transaction, owner, std::slice::from_ref(fact_id))
             .await?
@@ -251,7 +251,7 @@ pub(super) async fn load_compatibility_projections_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_ids: &[FactId],
-) -> FactStoreResult<Vec<CompatibilityFactProjectionV1>> {
+) -> FactStoreResult<Vec<ProjectMemoryFactProjectionV1>> {
     if fact_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -327,7 +327,7 @@ pub(super) async fn load_compatibility_projections_tx(
         {
             let fact_id = FactId::new(row_string(&row, 0, QUERY_OPERATION)?)?;
             let access = parse_payload_access(&row_string(&row, 1, QUERY_OPERATION)?)?;
-            let status = CompatibilityFactStatusV1::new(
+            let status = ProjectMemoryFactStatusV1::new(
                 owner.clone(),
                 Some(fact_id.clone()),
                 Some(access),
@@ -356,17 +356,17 @@ pub(super) async fn load_compatibility_projections_tx(
                 }
                 None => None,
             };
-            let compatibility_id = CompatibilityFactIdV1::new(owner.clone(), fact_id.clone())?;
+            let compatibility_id = ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?;
             let mapping =
-                CompatibilityFactMappingV1::new(compatibility_id.clone(), legacy_mapping.clone())?;
+                ProjectMemoryFactMappingV1::new(compatibility_id.clone(), legacy_mapping.clone())?;
             let Some(active_assertion_id) = row_optional_string(&row, 8, QUERY_OPERATION)?
                 .map(FactAssertionId::new)
                 .transpose()?
             else {
                 projections.insert(
                     fact_id,
-                    CompatibilityFactProjectionV1::Unavailable(
-                        CompatibilityFactUnavailableV1::new(
+                    ProjectMemoryFactProjectionV1::Unavailable(
+                        ProjectMemoryFactUnavailableV1::new(
                             compatibility_id,
                             compatibility_unavailable(status.payload_access()),
                             status,
@@ -402,8 +402,8 @@ pub(super) async fn load_compatibility_projections_tx(
             if stored.payload().is_none() {
                 projections.insert(
                     fact_id,
-                    CompatibilityFactProjectionV1::Unavailable(
-                        CompatibilityFactUnavailableV1::new(
+                    ProjectMemoryFactProjectionV1::Unavailable(
+                        ProjectMemoryFactUnavailableV1::new(
                             compatibility_id,
                             compatibility_unavailable(status.payload_access()),
                             status,
@@ -422,7 +422,7 @@ pub(super) async fn load_compatibility_projections_tx(
                     "compatibility fact identity material mismatch",
                 ));
             }
-            let telemetry = CompatibilityFactTelemetryV1::new(
+            let telemetry = ProjectMemoryFactTelemetryV1::new(
                 nonnegative_u64(row_i64(&row, 13, QUERY_OPERATION)?, "retrieval count")?,
                 nonnegative_u64(row_i64(&row, 14, QUERY_OPERATION)?, "access count")?,
                 nonnegative_u64(row_i64(&row, 15, QUERY_OPERATION)?, "helpful count")?,
@@ -433,16 +433,16 @@ pub(super) async fn load_compatibility_projections_tx(
                 row_optional_i64(&row, 18, QUERY_OPERATION)?.map(UtcMicros),
                 row_optional_i64(&row, 19, QUERY_OPERATION)?.map(UtcMicros),
             )?;
-            let projection = CompatibilityFactV1::new(
+            let projection = ProjectMemoryFactV1::new(
                 stored,
                 mapping,
-                CompatibilityFactSourceV1::Canonical(identity.source().clone()),
+                ProjectMemoryFactSourceV1::Canonical(identity.source().clone()),
                 telemetry,
             )?
             .with_source_label(row_optional_string(&row, 20, QUERY_OPERATION)?)?;
             projections.insert(
                 fact_id,
-                CompatibilityFactProjectionV1::Available(Box::new(projection)),
+                ProjectMemoryFactProjectionV1::Available(Box::new(projection)),
             );
         }
     }
@@ -455,11 +455,11 @@ pub(super) async fn load_compatibility_projections_tx(
 
 pub(super) async fn resolve_compatibility_target_tx(
     transaction: &Transaction<'_>,
-    target: &CompatibilityFactTargetV1,
+    target: &ProjectMemoryFactTargetV1,
 ) -> FactStoreResult<Option<FactId>> {
     match target {
-        CompatibilityFactTargetV1::Canonical(target) => Ok(Some(target.fact_id().clone())),
-        CompatibilityFactTargetV1::Legacy(query) => {
+        ProjectMemoryFactTargetV1::Canonical(target) => Ok(Some(target.fact_id().clone())),
+        ProjectMemoryFactTargetV1::Legacy(query) => {
             resolve_legacy_fact_tx(transaction, query).await
         }
     }

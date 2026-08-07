@@ -22,13 +22,13 @@ use tracedecay_domain::{
     UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactAddCommandV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1, FactCompatibilityResult,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactProposalImportReceiptV1,
+    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, FactCompatibilityResult,
     FactStoreError, FactStoreResult,
 };
 fn compatibility_proposal_request_digest(
-    request: &CompatibilityFactAddCommandV1,
+    request: &ProjectMemoryFactAddCommandV1,
 ) -> FactStoreResult<String> {
     compatibility_digest(json!({
         "owner": request.owner(),
@@ -121,7 +121,7 @@ pub(in crate::store::memory) async fn compatibility_replay_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &CompatibilityOperationReceiptV1,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1> {
     let proposal_id = compatibility_proposal_receipt_proposal_id(receipt)?;
     compatibility_proposal_record_tx(transaction, owner, &proposal_id)
         .await?
@@ -138,11 +138,11 @@ pub(in crate::store::memory) async fn compatibility_replay_proposal_tx(
 async fn compatibility_insert_proposal_tx(
     transaction: &Transaction<'_>,
     proposal_id: &ProvenanceId,
-    request: &CompatibilityFactAddCommandV1,
+    request: &ProjectMemoryFactAddCommandV1,
     idempotency_key: &ProvenanceId,
     request_digest: &str,
     evidence: &Value,
-    state: CompatibilityFactProposalStateV1,
+    state: ProjectMemoryFactProposalStateV1,
     reviewer: Option<&ActorId>,
     reason: Option<&str>,
     origin: &'static str,
@@ -152,7 +152,7 @@ async fn compatibility_insert_proposal_tx(
     let state_label = compatibility_proposal_state_label(state);
     if matches!(
         state,
-        CompatibilityFactProposalStateV1::Applying | CompatibilityFactProposalStateV1::Applied
+        ProjectMemoryFactProposalStateV1::Applying | ProjectMemoryFactProposalStateV1::Applied
     ) {
         return Err(storage_message(
             COMPATIBILITY_WRITE_OPERATION,
@@ -253,9 +253,9 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-    expected_state: CompatibilityFactProposalStateV1,
-    expected_revision: CompatibilityFactProposalRevisionV1,
-    state: CompatibilityFactProposalStateV1,
+    expected_state: ProjectMemoryFactProposalStateV1,
+    expected_revision: ProjectMemoryFactProposalRevisionV1,
+    state: ProjectMemoryFactProposalStateV1,
     reviewer: Option<&ActorId>,
     reason: Option<&str>,
     request_digest: &str,
@@ -267,7 +267,7 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
     let key = OwnerKey::new(owner)?;
     let expected_label = compatibility_proposal_state_label(expected_state);
     let state_label = compatibility_proposal_state_label(state);
-    let applied = state == CompatibilityFactProposalStateV1::Applied;
+    let applied = state == ProjectMemoryFactProposalStateV1::Applied;
     if applied != (promoted_fact_id.is_some() && promoted_event_id.is_some())
         || (!applied
             && (promoted_fact_id.is_some()
@@ -365,9 +365,9 @@ pub(in crate::store::memory) async fn compatibility_advance_proposal_tx(
 pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
     transaction: &Transaction<'_>,
     proposal_id: ProvenanceId,
-    request: &CompatibilityFactAddCommandV1,
+    request: &ProjectMemoryFactAddCommandV1,
     submitter: Option<&ActorId>,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1> {
     let request_digest = compatibility_proposal_request_digest(request)?;
     if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
         transaction,
@@ -453,7 +453,7 @@ pub(in crate::store::memory) async fn submit_compatibility_fact_proposal_tx(
         request.operation_id(),
         &request_digest,
         &json!({ "kind": "compatibility-proposal-v1" }),
-        CompatibilityFactProposalStateV1::PendingApproval,
+        ProjectMemoryFactProposalStateV1::PendingApproval,
         submitter,
         None,
         "runtime",
@@ -489,10 +489,10 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-    expected_revision: CompatibilityFactProposalRevisionV1,
+    expected_revision: ProjectMemoryFactProposalRevisionV1,
     reviewer: &ActorId,
     reason: &str,
-) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1> {
     if reason.trim().is_empty() || reason.len() > 4_096 {
         return Err(
             FactStoreError::Contract(tracedecay_domain::DomainError::NonCanonical {
@@ -528,7 +528,7 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
                 "compatibility proposal is missing",
             )
         })?;
-    if proposal.state() != CompatibilityFactProposalStateV1::PendingApproval
+    if proposal.state() != ProjectMemoryFactProposalStateV1::PendingApproval
         || proposal.revision() != expected_revision
     {
         return Err(storage_message(
@@ -542,9 +542,9 @@ pub(in crate::store::memory) async fn reject_compatibility_fact_proposal_tx(
         transaction,
         owner,
         proposal_id,
-        CompatibilityFactProposalStateV1::PendingApproval,
+        ProjectMemoryFactProposalStateV1::PendingApproval,
         expected_revision,
-        CompatibilityFactProposalStateV1::Rejected,
+        ProjectMemoryFactProposalStateV1::Rejected,
         Some(reviewer),
         Some(reason),
         &request_digest,
@@ -629,9 +629,9 @@ async fn compatibility_legacy_proposal_mapping_tx(
 }
 
 fn compatibility_import_receipt_from_value(
-    request: &CompatibilityFactProposalImportV1,
+    request: &ProjectMemoryFactProposalImportV1,
     receipt: &Value,
-) -> FactStoreResult<CompatibilityFactProposalImportReceiptV1> {
+) -> FactStoreResult<ProjectMemoryFactProposalImportReceiptV1> {
     let imported_count = receipt
         .get("imported_count")
         .and_then(Value::as_u64)
@@ -652,7 +652,7 @@ fn compatibility_import_receipt_from_value(
                 "compatibility proposal import receipt is malformed",
             )
         })?;
-    CompatibilityFactProposalImportReceiptV1::new(
+    ProjectMemoryFactProposalImportReceiptV1::new(
         request.owner().clone(),
         request.source_store_id().clone(),
         request.sidecar_digest().clone(),
@@ -662,25 +662,25 @@ fn compatibility_import_receipt_from_value(
 }
 
 fn compatibility_import_initial_state(
-    state: CompatibilityFactProposalStateV1,
-) -> (CompatibilityFactProposalStateV1, Option<&'static str>) {
+    state: ProjectMemoryFactProposalStateV1,
+) -> (ProjectMemoryFactProposalStateV1, Option<&'static str>) {
     match state {
-        CompatibilityFactProposalStateV1::PendingApproval => {
-            (CompatibilityFactProposalStateV1::PendingApproval, None)
+        ProjectMemoryFactProposalStateV1::PendingApproval => {
+            (ProjectMemoryFactProposalStateV1::PendingApproval, None)
         }
-        CompatibilityFactProposalStateV1::Applying => (
-            CompatibilityFactProposalStateV1::PendingApproval,
+        ProjectMemoryFactProposalStateV1::Applying => (
+            ProjectMemoryFactProposalStateV1::PendingApproval,
             Some("legacy applying state normalized to pending"),
         ),
-        CompatibilityFactProposalStateV1::Rejected => {
-            (CompatibilityFactProposalStateV1::Rejected, None)
+        ProjectMemoryFactProposalStateV1::Rejected => {
+            (ProjectMemoryFactProposalStateV1::Rejected, None)
         }
-        CompatibilityFactProposalStateV1::Quarantined => (
-            CompatibilityFactProposalStateV1::Quarantined,
+        ProjectMemoryFactProposalStateV1::Quarantined => (
+            ProjectMemoryFactProposalStateV1::Quarantined,
             Some("legacy proposal was quarantined"),
         ),
-        CompatibilityFactProposalStateV1::Applied => (
-            CompatibilityFactProposalStateV1::Quarantined,
+        ProjectMemoryFactProposalStateV1::Applied => (
+            ProjectMemoryFactProposalStateV1::Quarantined,
             Some("legacy applied proposal lacks a verifiable canonical promotion"),
         ),
     }
@@ -688,8 +688,8 @@ fn compatibility_import_initial_state(
 
 pub(in crate::store::memory) async fn import_legacy_compatibility_fact_proposals_tx(
     transaction: &Transaction<'_>,
-    request: &CompatibilityFactProposalImportV1,
-) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1> {
+    request: &ProjectMemoryFactProposalImportV1,
+) -> FactCompatibilityResult<ProjectMemoryFactProposalImportReceiptV1> {
     let fixed_source_store_id = compatibility_source_store_id()?;
     if request.source_store_id() != &fixed_source_store_id {
         return Err(storage_message(
@@ -845,7 +845,7 @@ pub(in crate::store::memory) async fn import_legacy_compatibility_fact_proposals
                     "compatibility proposal is missing after legacy import",
                 )
             })?;
-        if proposal.state() == CompatibilityFactProposalStateV1::Quarantined {
+        if proposal.state() == ProjectMemoryFactProposalStateV1::Quarantined {
             quarantined_count = quarantined_count.saturating_add(1);
         } else {
             imported_count = imported_count.saturating_add(1);
@@ -867,7 +867,7 @@ pub(in crate::store::memory) async fn import_legacy_compatibility_fact_proposals
         now,
     )
     .await?;
-    CompatibilityFactProposalImportReceiptV1::new(
+    ProjectMemoryFactProposalImportReceiptV1::new(
         request.owner().clone(),
         request.source_store_id().clone(),
         request.sidecar_digest().clone(),

@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_store::{
-    CompatibilityFactTargetV1, FactCompatibilityResult, FactCompatibilityStoreError,
+    ProjectMemoryFactTargetV1, FactCompatibilityResult, FactCompatibilityStoreError,
     FactStoreError, FactStoreResult,
 };
 
@@ -185,13 +185,13 @@ pub(super) async fn compatibility_record_operation_receipt_tx(
 }
 
 pub(super) fn compatibility_target_digest(
-    target: &CompatibilityFactTargetV1,
+    target: &ProjectMemoryFactTargetV1,
 ) -> FactStoreResult<Value> {
     match target {
-        CompatibilityFactTargetV1::Canonical(target) => Ok(json!({
+        ProjectMemoryFactTargetV1::Canonical(target) => Ok(json!({
             "canonical_fact_id": target.fact_id().as_str(),
         })),
-        CompatibilityFactTargetV1::Legacy(query) => Ok(json!({
+        ProjectMemoryFactTargetV1::Legacy(query) => Ok(json!({
             "legacy_source_store_id": query.source_store_id().as_str(),
             "legacy_fact_id": query.legacy_fact_id(),
         })),

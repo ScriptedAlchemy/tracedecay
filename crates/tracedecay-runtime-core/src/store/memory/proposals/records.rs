@@ -16,32 +16,32 @@ use tracedecay_domain::{
     SanitizationReceiptV1,
 };
 use tracedecay_store::{
-    CompatibilityFactAddCommandV1, CompatibilityFactIdV1, CompatibilityFactMappingV1,
-    CompatibilityFactProposalPageV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1, FactCompatibilityResult,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1,
+    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, FactCompatibilityResult,
     FactStoreError, FactStoreResult,
 };
 const COMPATIBILITY_PROPOSAL_PAGE_LIMIT: usize = 1_000;
 
 pub(super) fn compatibility_proposal_state_label(
-    state: CompatibilityFactProposalStateV1,
+    state: ProjectMemoryFactProposalStateV1,
 ) -> &'static str {
     match state {
-        CompatibilityFactProposalStateV1::PendingApproval => "pending",
-        CompatibilityFactProposalStateV1::Applying => "applying",
-        CompatibilityFactProposalStateV1::Applied => "applied",
-        CompatibilityFactProposalStateV1::Rejected => "rejected",
-        CompatibilityFactProposalStateV1::Quarantined => "quarantined",
+        ProjectMemoryFactProposalStateV1::PendingApproval => "pending",
+        ProjectMemoryFactProposalStateV1::Applying => "applying",
+        ProjectMemoryFactProposalStateV1::Applied => "applied",
+        ProjectMemoryFactProposalStateV1::Rejected => "rejected",
+        ProjectMemoryFactProposalStateV1::Quarantined => "quarantined",
     }
 }
 
-fn compatibility_proposal_state(value: &str) -> FactStoreResult<CompatibilityFactProposalStateV1> {
+fn compatibility_proposal_state(value: &str) -> FactStoreResult<ProjectMemoryFactProposalStateV1> {
     match value {
-        "pending" => Ok(CompatibilityFactProposalStateV1::PendingApproval),
-        "applying" => Ok(CompatibilityFactProposalStateV1::Applying),
-        "applied" => Ok(CompatibilityFactProposalStateV1::Applied),
-        "rejected" => Ok(CompatibilityFactProposalStateV1::Rejected),
-        "quarantined" => Ok(CompatibilityFactProposalStateV1::Quarantined),
+        "pending" => Ok(ProjectMemoryFactProposalStateV1::PendingApproval),
+        "applying" => Ok(ProjectMemoryFactProposalStateV1::Applying),
+        "applied" => Ok(ProjectMemoryFactProposalStateV1::Applied),
+        "rejected" => Ok(ProjectMemoryFactProposalStateV1::Rejected),
+        "quarantined" => Ok(ProjectMemoryFactProposalStateV1::Quarantined),
         _ => Err(storage_message(
             COMPATIBILITY_READ_OPERATION,
             format!("unknown compatibility proposal state {value:?}"),
@@ -97,7 +97,7 @@ fn compatibility_proposal_optional_string(
 }
 
 pub(super) fn compatibility_proposal_request_value(
-    request: &CompatibilityFactAddCommandV1,
+    request: &ProjectMemoryFactAddCommandV1,
 ) -> Value {
     json!({
         "owner": request.owner(),
@@ -118,7 +118,7 @@ pub(super) fn compatibility_proposal_request_value(
 fn compatibility_proposal_request_from_value(
     owner: &FactOwnerV1,
     value: Value,
-) -> FactStoreResult<CompatibilityFactAddCommandV1> {
+) -> FactStoreResult<ProjectMemoryFactAddCommandV1> {
     let object = value.as_object().ok_or_else(|| {
         storage_message(
             COMPATIBILITY_READ_OPERATION,
@@ -204,7 +204,7 @@ fn compatibility_proposal_request_from_value(
         .map(ActorId::new)
         .transpose()
         .map_err(FactStoreError::from)?;
-    let request = CompatibilityFactAddCommandV1::new(
+    let request = ProjectMemoryFactAddCommandV1::new(
         owner.clone(),
         operation_id,
         content,
@@ -261,7 +261,7 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>> {
+) -> FactCompatibilityResult<Option<ProjectMemoryFactProposalRecordV1>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -313,7 +313,7 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
         )?,
     )?;
     let state = compatibility_proposal_state(&row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?)?;
-    let revision = CompatibilityFactProposalRevisionV1::new(
+    let revision = ProjectMemoryFactProposalRevisionV1::new(
         u64::try_from(row_i64(&row, 4, COMPATIBILITY_READ_OPERATION)?).map_err(|_| {
             storage_message(
                 COMPATIBILITY_READ_OPERATION,
@@ -338,7 +338,7 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
         .transpose()
         .map_err(FactStoreError::from)?;
     let applied_mapping = match (&state, &applied_fact_id) {
-        (CompatibilityFactProposalStateV1::Applied, Some(fact_id)) => Some(
+        (ProjectMemoryFactProposalStateV1::Applied, Some(fact_id)) => Some(
             compatibility_legacy_mapping_tx(transaction, owner, fact_id)
                 .await?
                 .ok_or_else(|| {
@@ -348,7 +348,7 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
                     )
                 })?,
         ),
-        (CompatibilityFactProposalStateV1::Applied, None) => {
+        (ProjectMemoryFactProposalStateV1::Applied, None) => {
             return Err(storage_message(
                 COMPATIBILITY_READ_OPERATION,
                 "applied compatibility proposal is missing its promoted fact",
@@ -365,8 +365,8 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
         (_, None) => None,
     };
     let mapping = match (applied_mapping, applied_fact_id.as_ref()) {
-        (Some(mapping), Some(fact_id)) => Some(CompatibilityFactMappingV1::new(
-            CompatibilityFactIdV1::new(owner.clone(), fact_id.clone())?,
+        (Some(mapping), Some(fact_id)) => Some(ProjectMemoryFactMappingV1::new(
+            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
             Some(mapping),
         )?),
         (None, None) => None,
@@ -378,7 +378,7 @@ pub(in crate::store::memory) async fn compatibility_proposal_record_tx(
             .into());
         }
     };
-    CompatibilityFactProposalRecordV1::new(
+    ProjectMemoryFactProposalRecordV1::new(
         stored_id,
         owner.clone(),
         revision,
@@ -397,17 +397,17 @@ pub(in crate::store::memory) async fn get_compatibility_fact_proposal_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     proposal_id: &ProvenanceId,
-) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>> {
+) -> FactCompatibilityResult<Option<ProjectMemoryFactProposalRecordV1>> {
     compatibility_proposal_record_tx(transaction, owner, proposal_id).await
 }
 
 pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    state: Option<CompatibilityFactProposalStateV1>,
+    state: Option<ProjectMemoryFactProposalStateV1>,
     after_proposal_id: Option<&ProvenanceId>,
     limit: usize,
-) -> FactCompatibilityResult<CompatibilityFactProposalPageV1> {
+) -> FactCompatibilityResult<ProjectMemoryFactProposalPageV1> {
     if limit == 0 || limit > COMPATIBILITY_PROPOSAL_PAGE_LIMIT {
         return Err(FactStoreError::InvalidQueryLimit {
             limit,
@@ -541,7 +541,7 @@ pub(in crate::store::memory) async fn list_compatibility_fact_proposals_tx(
                 })?,
         );
     }
-    CompatibilityFactProposalPageV1::new(
+    ProjectMemoryFactProposalPageV1::new(
         owner.clone(),
         proposals,
         has_more.then(|| ids.last().cloned()).flatten(),

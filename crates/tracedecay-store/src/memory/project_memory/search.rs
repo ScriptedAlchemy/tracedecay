@@ -6,10 +6,10 @@ use super::super::queries::{MAX_CURRENT_LIMIT, validate_limit};
 use super::super::{
     FactStoreError, FactStoreResult, MAX_COMPATIBILITY_REASON_BYTES, validate_owned_fact_id,
 };
-use super::{CompatibilityFactTargetV1, CompatibilityFactV1, validate_compatibility_entity};
+use super::{ProjectMemoryFactTargetV1, ProjectMemoryFactV1, validate_project_memory_entity};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CompatibilityFactSearchKindV1 {
+pub enum ProjectMemoryFactSearchKindV1 {
     Search,
     Probe,
     /// V1 co-occurrence expansion: resolve entities sharing a fact with the
@@ -23,11 +23,11 @@ pub enum CompatibilityFactSearchKindV1 {
     },
 }
 
-impl CompatibilityFactSearchKindV1 {
+impl ProjectMemoryFactSearchKindV1 {
     pub(in crate::memory) fn validate(&self) -> FactStoreResult<()> {
         match self {
             Self::Search | Self::Probe => {}
-            Self::Related { entity } => validate_compatibility_entity(entity)?,
+            Self::Related { entity } => validate_project_memory_entity(entity)?,
             Self::Reason { entities } => {
                 if entities.is_empty() || entities.len() > MAX_CURRENT_LIMIT {
                     return Err(FactStoreError::Contract(DomainError::NonCanonical {
@@ -36,7 +36,7 @@ impl CompatibilityFactSearchKindV1 {
                 }
                 let mut previous: Option<&String> = None;
                 for entity in entities {
-                    validate_compatibility_entity(entity)?;
+                    validate_project_memory_entity(entity)?;
                     if previous.is_some_and(|value| value >= entity) {
                         return Err(FactStoreError::Contract(DomainError::NonCanonical {
                             field: "compatibility fact reason entities",
@@ -52,13 +52,13 @@ impl CompatibilityFactSearchKindV1 {
 
 /// Optional deterministic constraints applied before compatibility ranking.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CompatibilityFactSearchFilterV1 {
+pub struct ProjectMemoryFactSearchFilterV1 {
     category: Option<FactCategoryV1>,
     min_trust: Option<Confidence>,
     threshold_millionths: Option<u32>,
 }
 
-impl CompatibilityFactSearchFilterV1 {
+impl ProjectMemoryFactSearchFilterV1 {
     pub fn new(
         category: Option<FactCategoryV1>,
         min_trust: Option<Confidence>,
@@ -92,13 +92,13 @@ impl CompatibilityFactSearchFilterV1 {
 /// Exclusive continuation token for score-descending compatibility retrieval.
 /// The fact ID breaks equal-score ties, so a page can resume deterministically.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactSearchCursorV1 {
+pub struct ProjectMemoryFactSearchCursorV1 {
     score_millionths: u32,
     updated_at: UtcMicros,
     fact_id: FactId,
 }
 
-impl CompatibilityFactSearchCursorV1 {
+impl ProjectMemoryFactSearchCursorV1 {
     pub fn new(
         score_millionths: u32,
         updated_at: UtcMicros,
@@ -133,7 +133,7 @@ impl CompatibilityFactSearchCursorV1 {
 /// One scored compatibility search result.  Scores are fixed-point millionths,
 /// avoiding non-deterministic floating point ordering at the transport edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactSearchScoresV1 {
+pub struct ProjectMemoryFactSearchScoresV1 {
     score_millionths: u32,
     fts_score_millionths: u32,
     jaccard_score_millionths: u32,
@@ -141,7 +141,7 @@ pub struct CompatibilityFactSearchScoresV1 {
     trust_score_millionths: u32,
 }
 
-impl CompatibilityFactSearchScoresV1 {
+impl ProjectMemoryFactSearchScoresV1 {
     pub fn new(
         score_millionths: u32,
         fts_score_millionths: u32,
@@ -190,16 +190,16 @@ impl CompatibilityFactSearchScoresV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactSearchHitV1 {
-    fact: CompatibilityFactV1,
-    scores: CompatibilityFactSearchScoresV1,
+pub struct ProjectMemoryFactSearchHitV1 {
+    fact: ProjectMemoryFactV1,
+    scores: ProjectMemoryFactSearchScoresV1,
     why: Option<String>,
 }
 
-impl CompatibilityFactSearchHitV1 {
+impl ProjectMemoryFactSearchHitV1 {
     pub fn new(
-        fact: CompatibilityFactV1,
-        scores: CompatibilityFactSearchScoresV1,
+        fact: ProjectMemoryFactV1,
+        scores: ProjectMemoryFactSearchScoresV1,
         why: Option<String>,
     ) -> FactStoreResult<Self> {
         if why.as_ref().is_some_and(|value| {
@@ -212,13 +212,13 @@ impl CompatibilityFactSearchHitV1 {
         Ok(Self { fact, scores, why })
     }
 
-    pub fn fact(&self) -> &CompatibilityFactV1 {
+    pub fn fact(&self) -> &ProjectMemoryFactV1 {
         &self.fact
     }
     pub fn score_millionths(&self) -> u32 {
         self.scores.score_millionths()
     }
-    pub fn scores(&self) -> CompatibilityFactSearchScoresV1 {
+    pub fn scores(&self) -> ProjectMemoryFactSearchScoresV1 {
         self.scores
     }
     pub fn why(&self) -> Option<&str> {
@@ -227,17 +227,17 @@ impl CompatibilityFactSearchHitV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactSearchPageV1 {
+pub struct ProjectMemoryFactSearchPageV1 {
     owner: FactOwnerV1,
-    hits: Vec<CompatibilityFactSearchHitV1>,
-    next_after: Option<CompatibilityFactSearchCursorV1>,
+    hits: Vec<ProjectMemoryFactSearchHitV1>,
+    next_after: Option<ProjectMemoryFactSearchCursorV1>,
 }
 
-impl CompatibilityFactSearchPageV1 {
+impl ProjectMemoryFactSearchPageV1 {
     pub fn new(
         owner: FactOwnerV1,
-        hits: Vec<CompatibilityFactSearchHitV1>,
-        next_after: Option<CompatibilityFactSearchCursorV1>,
+        hits: Vec<ProjectMemoryFactSearchHitV1>,
+        next_after: Option<ProjectMemoryFactSearchCursorV1>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         if hits.len() > MAX_CURRENT_LIMIT {
@@ -246,7 +246,7 @@ impl CompatibilityFactSearchPageV1 {
                 max: MAX_CURRENT_LIMIT,
             });
         }
-        let mut previous: Option<&CompatibilityFactSearchHitV1> = None;
+        let mut previous: Option<&ProjectMemoryFactSearchHitV1> = None;
         for hit in &hits {
             hit.fact().validate_for_owner(&owner)?;
             if previous.is_some_and(|value| {
@@ -296,23 +296,23 @@ impl CompatibilityFactSearchPageV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn hits(&self) -> &[CompatibilityFactSearchHitV1] {
+    pub fn hits(&self) -> &[ProjectMemoryFactSearchHitV1] {
         &self.hits
     }
-    pub fn next_after(&self) -> Option<&CompatibilityFactSearchCursorV1> {
+    pub fn next_after(&self) -> Option<&ProjectMemoryFactSearchCursorV1> {
         self.next_after.as_ref()
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactContradictionQueryV1 {
+pub struct ProjectMemoryFactContradictionQueryV1 {
     owner: FactOwnerV1,
     category: Option<FactCategoryV1>,
     threshold_millionths: u32,
     limit: usize,
 }
 
-impl CompatibilityFactContradictionQueryV1 {
+impl ProjectMemoryFactContradictionQueryV1 {
     pub fn new(
         owner: FactOwnerV1,
         category: Option<FactCategoryV1>,
@@ -349,16 +349,16 @@ impl CompatibilityFactContradictionQueryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactContradictionV1 {
-    existing: CompatibilityFactV1,
+pub struct ProjectMemoryFactContradictionV1 {
+    existing: ProjectMemoryFactV1,
     new_content: String,
     score_millionths: u32,
     why: Option<String>,
 }
 
-impl CompatibilityFactContradictionV1 {
+impl ProjectMemoryFactContradictionV1 {
     pub fn new(
-        existing: CompatibilityFactV1,
+        existing: ProjectMemoryFactV1,
         new_content: String,
         score_millionths: u32,
         why: Option<String>,
@@ -383,7 +383,7 @@ impl CompatibilityFactContradictionV1 {
         })
     }
 
-    pub fn existing(&self) -> &CompatibilityFactV1 {
+    pub fn existing(&self) -> &ProjectMemoryFactV1 {
         &self.existing
     }
     pub fn new_content(&self) -> &str {
@@ -398,15 +398,15 @@ impl CompatibilityFactContradictionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactContradictionPageV1 {
+pub struct ProjectMemoryFactContradictionPageV1 {
     owner: FactOwnerV1,
-    contradictions: Vec<CompatibilityFactContradictionV1>,
+    contradictions: Vec<ProjectMemoryFactContradictionV1>,
 }
 
-impl CompatibilityFactContradictionPageV1 {
+impl ProjectMemoryFactContradictionPageV1 {
     pub fn new(
         owner: FactOwnerV1,
-        contradictions: Vec<CompatibilityFactContradictionV1>,
+        contradictions: Vec<ProjectMemoryFactContradictionV1>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         if contradictions.len() > MAX_CURRENT_LIMIT {
@@ -429,24 +429,24 @@ impl CompatibilityFactContradictionPageV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn contradictions(&self) -> &[CompatibilityFactContradictionV1] {
+    pub fn contradictions(&self) -> &[ProjectMemoryFactContradictionV1] {
         &self.contradictions
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactRetrievalCommandV1 {
+pub struct ProjectMemoryFactRetrievalCommandV1 {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
-    targets: Vec<CompatibilityFactTargetV1>,
+    targets: Vec<ProjectMemoryFactTargetV1>,
     recall: bool,
 }
 
-impl CompatibilityFactRetrievalCommandV1 {
+impl ProjectMemoryFactRetrievalCommandV1 {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,
-        targets: Vec<CompatibilityFactTargetV1>,
+        targets: Vec<ProjectMemoryFactTargetV1>,
         recall: bool,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -474,7 +474,7 @@ impl CompatibilityFactRetrievalCommandV1 {
     pub fn operation_id(&self) -> &ProvenanceId {
         &self.operation_id
     }
-    pub fn targets(&self) -> &[CompatibilityFactTargetV1] {
+    pub fn targets(&self) -> &[ProjectMemoryFactTargetV1] {
         &self.targets
     }
     pub fn recall(&self) -> bool {

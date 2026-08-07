@@ -15,9 +15,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{ActorId, LocatorDigest, ProvenanceId};
 use tracedecay_store::{
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalLegacyRecordV1,
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalStateV1, FactCompatibilityStore,
+    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalLegacyRecordV1,
+    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalStateV1, FactCompatibilityStore,
 };
 
 use super::config_error;
@@ -276,7 +276,7 @@ pub async fn import_legacy_fact_proposals<A: FactCompatibilityStore>(
         let Ok(command) = with_automation_run_id(command, &legacy.run_id) else {
             continue;
         };
-        let record = CompatibilityFactProposalLegacyRecordV1::new(
+        let record = ProjectMemoryFactProposalLegacyRecordV1::new(
             legacy_proposal_id,
             import_state(legacy.state),
             command,
@@ -285,7 +285,7 @@ pub async fn import_legacy_fact_proposals<A: FactCompatibilityStore>(
         imported.push(record);
     }
     for records in imported.chunks(MAX_LEGACY_IMPORT_RECORDS) {
-        let request = CompatibilityFactProposalImportV1::new(
+        let request = ProjectMemoryFactProposalImportV1::new(
             memory.owner().clone(),
             memory.compatibility_scope().source_store_id().clone(),
             sidecar_digest.clone(),
@@ -596,19 +596,19 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
         .await
         .map_err(memory_error)?
         .ok_or_else(|| config_error(format!("fact proposal '{proposal_id}' not found")))?;
-    if current.state() == CompatibilityFactProposalStateV1::Applied {
+    if current.state() == ProjectMemoryFactProposalStateV1::Applied {
         return Ok(FactProposalApplyResult {
             record: render_authority_record(dashboard_root, &current).await,
             newly_promoted: false,
         });
     }
-    if current.state() != CompatibilityFactProposalStateV1::PendingApproval {
+    if current.state() != ProjectMemoryFactProposalStateV1::PendingApproval {
         return Err(config_error(format!(
             "fact proposal '{proposal_id}' is not pending approval"
         )));
     }
     let reviewer_actor = proposal_actor("automation:proposal-review")?;
-    let request = CompatibilityFactProposalPromotionV1::new(
+    let request = ProjectMemoryFactProposalPromotionV1::new(
         memory.owner().clone(),
         proposal_id,
         current.revision(),
@@ -646,7 +646,7 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
         record,
         newly_promoted: matches!(
             promotion.disposition(),
-            CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted
+            ProjectMemoryFactProposalPromotionDispositionV1::NewlyPromoted
         ),
     })
 }
@@ -665,10 +665,10 @@ pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
         .await
         .map_err(memory_error)?
         .ok_or_else(|| config_error(format!("fact proposal '{proposal_id}' not found")))?;
-    if current.state() == CompatibilityFactProposalStateV1::Rejected {
+    if current.state() == ProjectMemoryFactProposalStateV1::Rejected {
         return Ok(render_authority_record(dashboard_root, &current).await);
     }
-    if current.state() != CompatibilityFactProposalStateV1::PendingApproval {
+    if current.state() != ProjectMemoryFactProposalStateV1::PendingApproval {
         return Err(config_error(format!(
             "fact proposal '{proposal_id}' is not pending approval"
         )));
@@ -706,7 +706,7 @@ pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
 
 async fn project_authoritative_record(
     dashboard_root: &Path,
-    proposal: &CompatibilityFactProposalRecordV1,
+    proposal: &ProjectMemoryFactProposalRecordV1,
     metadata: ProjectionMetadata<'_>,
 ) -> Result<FactProposalRecord> {
     let lock = fact_proposal_store_lock(dashboard_root);
@@ -735,7 +735,7 @@ async fn project_authoritative_record(
 
 async fn render_authority_record(
     dashboard_root: &Path,
-    proposal: &CompatibilityFactProposalRecordV1,
+    proposal: &ProjectMemoryFactProposalRecordV1,
 ) -> FactProposalRecord {
     let projection = load_fact_proposal_store(dashboard_root)
         .await
@@ -748,13 +748,13 @@ async fn render_authority_record(
 }
 
 fn render_authority_record_sync(
-    proposal: &CompatibilityFactProposalRecordV1,
+    proposal: &ProjectMemoryFactProposalRecordV1,
 ) -> FactProposalRecord {
     record_from_authority(proposal, None, ProjectionMetadata::read_only())
 }
 
 fn record_from_authority(
-    proposal: &CompatibilityFactProposalRecordV1,
+    proposal: &ProjectMemoryFactProposalRecordV1,
     previous: Option<&FactProposalRecord>,
     metadata: ProjectionMetadata<'_>,
 ) -> FactProposalRecord {
@@ -833,7 +833,7 @@ fn rejected_projection(
 }
 
 fn add_request_from_command(
-    command: &tracedecay_store::CompatibilityFactAddCommandV1,
+    command: &tracedecay_store::ProjectMemoryFactAddCommandV1,
 ) -> AddFactRequest {
     AddFactRequest {
         content: command.content().to_string(),
@@ -846,28 +846,28 @@ fn add_request_from_command(
     }
 }
 
-const fn compatibility_state(state: FactProposalState) -> CompatibilityFactProposalStateV1 {
+const fn compatibility_state(state: FactProposalState) -> ProjectMemoryFactProposalStateV1 {
     match state {
         FactProposalState::PendingApproval | FactProposalState::Applying => {
-            CompatibilityFactProposalStateV1::PendingApproval
+            ProjectMemoryFactProposalStateV1::PendingApproval
         }
-        FactProposalState::Applied => CompatibilityFactProposalStateV1::Applied,
-        FactProposalState::Rejected => CompatibilityFactProposalStateV1::Rejected,
-        FactProposalState::Quarantined => CompatibilityFactProposalStateV1::Quarantined,
+        FactProposalState::Applied => ProjectMemoryFactProposalStateV1::Applied,
+        FactProposalState::Rejected => ProjectMemoryFactProposalStateV1::Rejected,
+        FactProposalState::Quarantined => ProjectMemoryFactProposalStateV1::Quarantined,
     }
 }
 
-const fn import_state(state: FactProposalState) -> CompatibilityFactProposalStateV1 {
+const fn import_state(state: FactProposalState) -> ProjectMemoryFactProposalStateV1 {
     compatibility_state(state)
 }
 
-const fn display_state(state: CompatibilityFactProposalStateV1) -> FactProposalState {
+const fn display_state(state: ProjectMemoryFactProposalStateV1) -> FactProposalState {
     match state {
-        CompatibilityFactProposalStateV1::PendingApproval
-        | CompatibilityFactProposalStateV1::Applying => FactProposalState::PendingApproval,
-        CompatibilityFactProposalStateV1::Applied => FactProposalState::Applied,
-        CompatibilityFactProposalStateV1::Rejected => FactProposalState::Rejected,
-        CompatibilityFactProposalStateV1::Quarantined => FactProposalState::Quarantined,
+        ProjectMemoryFactProposalStateV1::PendingApproval
+        | ProjectMemoryFactProposalStateV1::Applying => FactProposalState::PendingApproval,
+        ProjectMemoryFactProposalStateV1::Applied => FactProposalState::Applied,
+        ProjectMemoryFactProposalStateV1::Rejected => FactProposalState::Rejected,
+        ProjectMemoryFactProposalStateV1::Quarantined => FactProposalState::Quarantined,
     }
 }
 

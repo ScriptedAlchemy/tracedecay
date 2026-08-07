@@ -9,8 +9,8 @@ use serde_json::json;
 
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    CompatibilityFactRepairVectorV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1, FactCompatibilityResult,
+    ProjectMemoryFactRepairVectorV1, ProjectMemoryFeedbackRepairProgressV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1, FactCompatibilityResult,
     FactStoreError, FactStoreResult,
 };
 
@@ -40,7 +40,7 @@ pub(crate) const COMPATIBILITY_REPAIR_BANK_BATCH: i64 = 32;
 
 /// True when a repair pass filled either per-pass batch cap, so backlog may
 /// remain behind the cap. Only the store computes this — it owns the caps — so
-/// the daemon scheduler can consume [`CompatibilityMemoryRepairStatsV1::saturated`]
+/// the daemon scheduler can consume [`ProjectMemoryMemoryRepairStatsV1::saturated`]
 /// without depending on these store-internal constants.
 fn compatibility_repair_batches_saturated(
     missing_vectors_repaired: u64,
@@ -54,7 +54,7 @@ pub(super) async fn compatibility_repair_vector_for_fact_tx(
     db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    operation: &CompatibilityFactRepairVectorV1,
+    operation: &ProjectMemoryFactRepairVectorV1,
     now: UtcMicros,
 ) -> FactStoreResult<FactId> {
     let _evidence =
@@ -95,7 +95,7 @@ pub(super) async fn compatibility_repair_vector_for_fact_tx(
 }
 
 pub(super) fn compatibility_repair_request_digest(
-    request: &CompatibilityMemoryRepairCommandV1,
+    request: &ProjectMemoryMemoryRepairCommandV1,
 ) -> FactStoreResult<String> {
     compatibility_digest(json!({
         "owner": request.owner(),
@@ -106,8 +106,8 @@ pub(super) fn compatibility_repair_request_digest(
 pub(super) async fn repair_compatibility_memory_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityMemoryRepairCommandV1,
-) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1> {
+    request: &ProjectMemoryMemoryRepairCommandV1,
+) -> FactCompatibilityResult<ProjectMemoryMemoryRepairStatsV1> {
     let request_digest = compatibility_repair_request_digest(request)?;
     if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
         transaction,
@@ -122,7 +122,7 @@ pub(super) async fn repair_compatibility_memory_tx(
             compatibility_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?;
         let banks_rebuilt = compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?;
         return Ok(
-            CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
+            ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
                 .with_saturated(compatibility_repair_batches_saturated(
                     missing_vectors_repaired,
                     banks_rebuilt,
@@ -157,7 +157,7 @@ pub(super) async fn repair_compatibility_memory_tx(
     )
     .await?;
     Ok(
-        CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
+        ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
             .with_saturated(compatibility_repair_batches_saturated(
                 missing_vectors_repaired,
                 banks_rebuilt,
@@ -586,7 +586,7 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
 pub(super) async fn compatibility_feedback_history_repair_progress_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactCompatibilityResult<CompatibilityFeedbackRepairProgressV1> {
+) -> FactCompatibilityResult<ProjectMemoryFeedbackRepairProgressV1> {
     let key = OwnerKey::new(owner)?;
     let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
@@ -603,7 +603,7 @@ pub(super) async fn compatibility_feedback_history_repair_progress_tx(
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
     else {
-        return Ok(CompatibilityFeedbackRepairProgressV1::NotRequired);
+        return Ok(ProjectMemoryFeedbackRepairProgressV1::NotRequired);
     };
     if row_string(&row, 0, COMPATIBILITY_READ_OPERATION)? != key.json {
         return Err(FactStoreError::OwnerMismatch.into());
@@ -624,11 +624,11 @@ pub(super) async fn compatibility_feedback_history_repair_progress_tx(
         .into());
     }
     match row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?.as_str() {
-        "pending" => Ok(CompatibilityFeedbackRepairProgressV1::Incomplete {
+        "pending" => Ok(ProjectMemoryFeedbackRepairProgressV1::Incomplete {
             processed: 0,
             remaining: Some(frontier.saturating_sub(cursor)),
         }),
-        "complete" => Ok(CompatibilityFeedbackRepairProgressV1::Complete { processed: 0 }),
+        "complete" => Ok(ProjectMemoryFeedbackRepairProgressV1::Complete { processed: 0 }),
         _ => Err(storage_message(
             COMPATIBILITY_READ_OPERATION,
             "feedback repair progress has an unsupported phase",

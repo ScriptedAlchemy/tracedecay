@@ -40,7 +40,7 @@ pub(crate) use status::handle_user_memory_tool;
 #[cfg(test)]
 use serde_json::json;
 #[cfg(test)]
-use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
+use tracedecay_store::ProjectMemoryFeedbackRepairProgressV1;
 
 #[cfg(test)]
 use crate::memory::types::{AddFactRequest, MemoryCategory};
@@ -229,8 +229,8 @@ async fn refresh_target_memory_digest(
 mod tests {
     use super::*;
     use tracedecay_store::{
-        CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1,
-        CompatibilityFactSearchKindV1, CompatibilityFactSearchQuery, FactStoreError,
+        ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
+        ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, FactStoreError,
     };
 
     /// The deadline problem produced by the central memory dispatch bound
@@ -265,13 +265,13 @@ mod tests {
     fn cursor_search_query(
         owner: FactOwnerV1,
         query: &str,
-        after: Option<CompatibilityFactSearchCursorV1>,
-    ) -> std::result::Result<CompatibilityFactSearchQuery, FactStoreError> {
-        CompatibilityFactSearchQuery::with_filter(
+        after: Option<ProjectMemoryFactSearchCursorV1>,
+    ) -> std::result::Result<ProjectMemoryFactSearchQuery, FactStoreError> {
+        ProjectMemoryFactSearchQuery::with_filter(
             owner,
-            CompatibilityFactSearchKindV1::Search,
+            ProjectMemoryFactSearchKindV1::Search,
             Some(query.to_owned()),
-            CompatibilityFactSearchFilterV1::new(None, None, None)?,
+            ProjectMemoryFactSearchFilterV1::new(None, None, None)?,
             after,
             1,
         )
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn incomplete_feedback_history_repair_is_explicit() {
         assert_eq!(
-            feedback_history_repair_payload(CompatibilityFeedbackRepairProgressV1::Incomplete {
+            feedback_history_repair_payload(ProjectMemoryFeedbackRepairProgressV1::Incomplete {
                 processed: 1,
                 remaining: Some(2),
             }),

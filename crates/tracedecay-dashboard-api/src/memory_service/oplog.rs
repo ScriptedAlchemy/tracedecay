@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use super::super::DashboardState;
 use super::facts::target_legacy_fact_id;
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_store::CompatibilityDashboardOplogDetailsV1;
+use tracedecay_store::ProjectMemoryDashboardOplogDetailsV1;
 
 pub async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
     let bounded_limit = usize::try_from(limit.clamp(1, 300)).unwrap_or(300);
@@ -22,13 +22,13 @@ pub async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
                 .iter()
                 .map(|entry| {
                     let detail = match &entry.details {
-                        CompatibilityDashboardOplogDetailsV1::Available { summary } => {
+                        ProjectMemoryDashboardOplogDetailsV1::Available { summary } => {
                             json!({ "summary": summary })
                         }
-                        CompatibilityDashboardOplogDetailsV1::Redacted => {
+                        ProjectMemoryDashboardOplogDetailsV1::Redacted => {
                             json!({ "redacted": true })
                         }
-                        CompatibilityDashboardOplogDetailsV1::Unknown => {
+                        ProjectMemoryDashboardOplogDetailsV1::Unknown => {
                             json!({ "availability": "unknown" })
                         }
                     };

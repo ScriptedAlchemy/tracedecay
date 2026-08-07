@@ -30,7 +30,7 @@ fn live_command(
     run_id: &str,
     proposal_id: &str,
     content: &str,
-) -> tracedecay_store::CompatibilityFactAddCommandV1 {
+) -> tracedecay_store::ProjectMemoryFactAddCommandV1 {
     automation_fact_proposal_add_command(owner, request(content), run_id, proposal_id, None)
         .unwrap()
 }
@@ -61,7 +61,7 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
     assert_eq!(first.revision(), replay.revision());
     assert_eq!(
         first.state(),
-        CompatibilityFactProposalStateV1::PendingApproval
+        ProjectMemoryFactProposalStateV1::PendingApproval
     );
 
     let listed = list_fact_proposals(&memory, temp.path(), None, 10)
@@ -80,7 +80,7 @@ async fn authority_submission_replays_once_and_rejection_is_cas_bound() {
         )
         .await
         .unwrap();
-    assert_eq!(rejected.state(), CompatibilityFactProposalStateV1::Rejected);
+    assert_eq!(rejected.state(), ProjectMemoryFactProposalStateV1::Rejected);
     assert!(
         memory
             .reject_compatibility_fact_proposal(
@@ -211,7 +211,7 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
         .unwrap();
     let promoted = memory
         .promote_compatibility_fact_proposal_with_disposition(
-            CompatibilityFactProposalPromotionV1::new(
+            ProjectMemoryFactProposalPromotionV1::new(
                 owner.clone(),
                 proposal_id.clone(),
                 submitted.revision(),
@@ -223,17 +223,17 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
         .unwrap();
     assert_eq!(
         promoted.disposition(),
-        CompatibilityFactProposalPromotionDispositionV1::NewlyPromoted
+        ProjectMemoryFactProposalPromotionDispositionV1::NewlyPromoted
     );
     assert_eq!(
         promoted.proposal().state(),
-        CompatibilityFactProposalStateV1::Applied
+        ProjectMemoryFactProposalStateV1::Applied
     );
     assert!(promoted.proposal().applied_fact_id().is_some());
 
     let replayed = memory
         .promote_compatibility_fact_proposal_with_disposition(
-            CompatibilityFactProposalPromotionV1::new(
+            ProjectMemoryFactProposalPromotionV1::new(
                 owner.clone(),
                 proposal_id.clone(),
                 submitted.revision(),
@@ -245,13 +245,13 @@ async fn authority_promotion_commits_one_canonical_fact_and_rejects_stale_cas() 
         .unwrap();
     assert_eq!(
         replayed.disposition(),
-        CompatibilityFactProposalPromotionDispositionV1::AlreadyPromoted
+        ProjectMemoryFactProposalPromotionDispositionV1::AlreadyPromoted
     );
 
     assert!(
         memory
             .promote_compatibility_fact_proposal_with_disposition(
-                CompatibilityFactProposalPromotionV1::new(
+                ProjectMemoryFactProposalPromotionV1::new(
                     owner.clone(),
                     proposal_id.clone(),
                     submitted.revision(),

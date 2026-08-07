@@ -9,13 +9,13 @@ use super::facts::{
     dashboard_overview, fact_matches_query, fact_summary_json, target_legacy_fact_id,
 };
 use tracedecay_store::{
-    CompatibilityDashboardEntityV1, CompatibilityFactProjectionV1, CompatibilityFactTargetV1,
+    ProjectMemoryDashboardEntityV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
 };
 
 /// Resolves a fact target to its legacy numeric id, accepting either a legacy
 /// query target or a canonical target (mapped through `canonical_to_legacy`).
 fn link_legacy_fact_id(
-    target: &CompatibilityFactTargetV1,
+    target: &ProjectMemoryFactTargetV1,
     canonical_to_legacy: &HashMap<String, i64>,
 ) -> Option<i64> {
     if let Some(legacy) = target_legacy_fact_id(target) {
@@ -91,7 +91,7 @@ pub async fn graph_payload(
         category_counts.insert(category, json!(count + 1));
     }
 
-    let entity_by_id: HashMap<i64, &CompatibilityDashboardEntityV1> = overview
+    let entity_by_id: HashMap<i64, &ProjectMemoryDashboardEntityV1> = overview
         .entities
         .iter()
         .map(|entity| (entity.target.legacy_entity_id(), entity))
@@ -102,10 +102,10 @@ pub async fn graph_payload(
         .facts
         .iter()
         .filter_map(|summary| match &summary.fact {
-            CompatibilityFactProjectionV1::Available(fact) => {
+            ProjectMemoryFactProjectionV1::Available(fact) => {
                 Some((fact.fact_id().as_str().to_owned(), fact.legacy_fact_id()?))
             }
-            CompatibilityFactProjectionV1::Unavailable(_) => None,
+            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
         })
         .collect();
     let fact_ids: HashSet<i64> = fact_ids.into_iter().collect();

@@ -5,8 +5,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CompatibilityFactSearchCursorV1, CompatibilityFactSearchFilterV1,
-    CompatibilityFactSearchKindV1, CompatibilityFactTargetV1, FactStoreError, FactStoreResult,
+    ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactTargetV1, FactStoreError, FactStoreResult,
     MAX_COMPATIBILITY_SEARCH_BYTES, StoredFactV1, validate_owned_fact_id,
 };
 
@@ -435,12 +435,12 @@ pub(super) fn validate_limit(limit: usize, max: usize) -> FactStoreResult<()> {
 /// derived at the application boundary from sanitized content; storage never
 /// accepts a raw proposal payload for this read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactContentDigestQueryV1 {
+pub struct ProjectMemoryFactContentDigestQueryV1 {
     owner: FactOwnerV1,
     content_digest: LocatorDigest,
 }
 
-impl CompatibilityFactContentDigestQueryV1 {
+impl ProjectMemoryFactContentDigestQueryV1 {
     pub fn new(owner: FactOwnerV1, content_digest: LocatorDigest) -> FactStoreResult<Self> {
         owner.validate()?;
         content_digest.validate()?;
@@ -462,28 +462,28 @@ impl CompatibilityFactContentDigestQueryV1 {
 /// Bounded request for search, probe, related, or reason retrieval.  Search
 /// results must use deterministic score/fact-ID ordering in the response DTO.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactSearchQuery {
+pub struct ProjectMemoryFactSearchQuery {
     owner: FactOwnerV1,
-    kind: CompatibilityFactSearchKindV1,
+    kind: ProjectMemoryFactSearchKindV1,
     query: Option<String>,
-    filter: CompatibilityFactSearchFilterV1,
-    after: Option<CompatibilityFactSearchCursorV1>,
+    filter: ProjectMemoryFactSearchFilterV1,
+    after: Option<ProjectMemoryFactSearchCursorV1>,
     limit: usize,
 }
 
-impl CompatibilityFactSearchQuery {
+impl ProjectMemoryFactSearchQuery {
     pub fn new(
         owner: FactOwnerV1,
-        kind: CompatibilityFactSearchKindV1,
+        kind: ProjectMemoryFactSearchKindV1,
         query: Option<String>,
-        after: Option<CompatibilityFactSearchCursorV1>,
+        after: Option<ProjectMemoryFactSearchCursorV1>,
         limit: usize,
     ) -> FactStoreResult<Self> {
         Self::with_filter(
             owner,
             kind,
             query,
-            CompatibilityFactSearchFilterV1::default(),
+            ProjectMemoryFactSearchFilterV1::default(),
             after,
             limit,
         )
@@ -491,10 +491,10 @@ impl CompatibilityFactSearchQuery {
 
     pub fn with_filter(
         owner: FactOwnerV1,
-        kind: CompatibilityFactSearchKindV1,
+        kind: ProjectMemoryFactSearchKindV1,
         query: Option<String>,
-        filter: CompatibilityFactSearchFilterV1,
-        after: Option<CompatibilityFactSearchCursorV1>,
+        filter: ProjectMemoryFactSearchFilterV1,
+        after: Option<ProjectMemoryFactSearchCursorV1>,
         limit: usize,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -507,7 +507,7 @@ impl CompatibilityFactSearchQuery {
             }
         } else if matches!(
             &kind,
-            CompatibilityFactSearchKindV1::Search | CompatibilityFactSearchKindV1::Probe
+            ProjectMemoryFactSearchKindV1::Search | ProjectMemoryFactSearchKindV1::Probe
         ) {
             return Err(FactStoreError::Contract(DomainError::Empty {
                 field: "compatibility fact search query",
@@ -530,16 +530,16 @@ impl CompatibilityFactSearchQuery {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn kind(&self) -> CompatibilityFactSearchKindV1 {
+    pub fn kind(&self) -> ProjectMemoryFactSearchKindV1 {
         self.kind.clone()
     }
     pub fn query(&self) -> Option<&str> {
         self.query.as_deref()
     }
-    pub fn filter(&self) -> &CompatibilityFactSearchFilterV1 {
+    pub fn filter(&self) -> &ProjectMemoryFactSearchFilterV1 {
         &self.filter
     }
-    pub fn after(&self) -> Option<&CompatibilityFactSearchCursorV1> {
+    pub fn after(&self) -> Option<&ProjectMemoryFactSearchCursorV1> {
         self.after.as_ref()
     }
     pub fn limit(&self) -> usize {
@@ -549,7 +549,7 @@ impl CompatibilityFactSearchQuery {
 
 /// Deterministic compatibility list filters without exposing raw SQL fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactListQueryV1 {
+pub struct ProjectMemoryFactListQueryV1 {
     owner: FactOwnerV1,
     category: Option<FactCategoryV1>,
     min_trust: Option<Confidence>,
@@ -557,7 +557,7 @@ pub struct CompatibilityFactListQueryV1 {
     limit: usize,
 }
 
-impl CompatibilityFactListQueryV1 {
+impl ProjectMemoryFactListQueryV1 {
     pub fn new(
         owner: FactOwnerV1,
         category: Option<FactCategoryV1>,
@@ -597,15 +597,15 @@ impl CompatibilityFactListQueryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactHistoryQueryV1 {
-    target: CompatibilityFactTargetV1,
+pub struct ProjectMemoryFactHistoryQueryV1 {
+    target: ProjectMemoryFactTargetV1,
     after: Option<FactLineageCursor>,
     limit: usize,
 }
 
-impl CompatibilityFactHistoryQueryV1 {
+impl ProjectMemoryFactHistoryQueryV1 {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: ProjectMemoryFactTargetV1,
         after: Option<FactLineageCursor>,
         limit: usize,
     ) -> FactStoreResult<Self> {
@@ -617,7 +617,7 @@ impl CompatibilityFactHistoryQueryV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
         &self.target
     }
     pub fn after(&self) -> Option<&FactLineageCursor> {
@@ -629,15 +629,15 @@ impl CompatibilityFactHistoryQueryV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompatibilityFactFeedbackHistoryQueryV1 {
-    target: CompatibilityFactTargetV1,
+pub struct ProjectMemoryFactFeedbackHistoryQueryV1 {
+    target: ProjectMemoryFactTargetV1,
     after: Option<FactLineageCursor>,
     limit: usize,
 }
 
-impl CompatibilityFactFeedbackHistoryQueryV1 {
+impl ProjectMemoryFactFeedbackHistoryQueryV1 {
     pub fn new(
-        target: CompatibilityFactTargetV1,
+        target: ProjectMemoryFactTargetV1,
         after: Option<FactLineageCursor>,
         limit: usize,
     ) -> FactStoreResult<Self> {
@@ -649,7 +649,7 @@ impl CompatibilityFactFeedbackHistoryQueryV1 {
         })
     }
 
-    pub fn target(&self) -> &CompatibilityFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
         &self.target
     }
     pub fn after(&self) -> Option<&FactLineageCursor> {

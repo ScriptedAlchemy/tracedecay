@@ -22,9 +22,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_store::{
-    CompatibilityFactAvailabilityV1, CompatibilityFactHistoryQueryV1, CompatibilityFactIdV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactTargetV1, FactCompatibilityStore,
+    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalStateV1, ProjectMemoryFactTargetV1, FactCompatibilityStore,
 };
 
 use super::backend::AgentTaskKind;
@@ -396,7 +396,7 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
     loop {
         let page = application
             .list_compatibility_fact_proposals(
-                Some(CompatibilityFactProposalStateV1::Applied),
+                Some(ProjectMemoryFactProposalStateV1::Applied),
                 after_proposal_id.clone(),
                 FACT_OUTCOME_PAGE_LIMIT,
             )
@@ -411,8 +411,8 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
                     proposal.proposal_id().as_str()
                 ))
             })?;
-            let target = CompatibilityFactTargetV1::Canonical(
-                CompatibilityFactIdV1::new(proposal.owner().clone(), canonical_fact_id.clone())
+            let target = ProjectMemoryFactTargetV1::Canonical(
+                ProjectMemoryFactIdV1::new(proposal.owner().clone(), canonical_fact_id.clone())
                     .map_err(|error| {
                         config_error(format!(
                             "invalid canonical fact id for proposal '{}': {error}",
@@ -445,11 +445,11 @@ pub async fn compute_fact_outcomes<A: FactCompatibilityStore>(
 }
 
 fn fact_outcome_input(
-    proposal: &CompatibilityFactProposalRecordV1,
-    projection: Option<&CompatibilityFactProjectionV1>,
+    proposal: &ProjectMemoryFactProposalRecordV1,
+    projection: Option<&ProjectMemoryFactProjectionV1>,
     applied_at: i64,
 ) -> Result<Option<FactOutcomeInput>> {
-    if proposal.state() != CompatibilityFactProposalStateV1::Applied {
+    if proposal.state() != ProjectMemoryFactProposalStateV1::Applied {
         return Err(config_error(format!(
             "fact outcome requested for non-applied proposal '{}'",
             proposal.proposal_id().as_str()
@@ -462,7 +462,7 @@ fn fact_outcome_input(
         ))
     })?;
     let telemetry = match projection {
-        Some(CompatibilityFactProjectionV1::Available(fact)) => {
+        Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
             let telemetry = fact.telemetry();
             Some(FactOutcomeTelemetry {
                 retrieval_count: outcome_count(telemetry.retrieval_count(), "retrieval count")?,
@@ -474,11 +474,11 @@ fn fact_outcome_input(
                     .map(|timestamp| timestamp.0 / 1_000_000),
             })
         }
-        Some(CompatibilityFactProjectionV1::Unavailable(unavailable)) => {
+        Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
             match unavailable.availability() {
-                CompatibilityFactAvailabilityV1::Deleted => None,
-                CompatibilityFactAvailabilityV1::Quarantined
-                | CompatibilityFactAvailabilityV1::Unavailable => return Ok(None),
+                ProjectMemoryFactAvailabilityV1::Deleted => None,
+                ProjectMemoryFactAvailabilityV1::Quarantined
+                | ProjectMemoryFactAvailabilityV1::Unavailable => return Ok(None),
             }
         }
         None => {
@@ -507,10 +507,10 @@ fn fact_outcome_input(
 /// promotion timestamp, which remains available after payload deletion.
 async fn applied_at_from_lineage<A: FactCompatibilityStore>(
     application: &MemoryApplication<A>,
-    target: &CompatibilityFactTargetV1,
-    proposal: &CompatibilityFactProposalRecordV1,
+    target: &ProjectMemoryFactTargetV1,
+    proposal: &ProjectMemoryFactProposalRecordV1,
 ) -> Result<i64> {
-    let query = CompatibilityFactHistoryQueryV1::new(target.clone(), None, 1).map_err(|error| {
+    let query = ProjectMemoryFactHistoryQueryV1::new(target.clone(), None, 1).map_err(|error| {
         config_error(format!(
             "build outcome lineage query for proposal '{}': {error}",
             proposal.proposal_id().as_str()

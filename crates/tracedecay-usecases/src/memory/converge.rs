@@ -14,7 +14,7 @@
 use tracedecay_application::{
     DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1, converge_derived_memory,
 };
-use tracedecay_store::{CompatibilityFeedbackRepairProgressV1, FactCompatibilityStore};
+use tracedecay_store::{ProjectMemoryFeedbackRepairProgressV1, FactCompatibilityStore};
 
 use super::MemoryApplication;
 use super::context::MemoryOperationContext;
@@ -25,19 +25,19 @@ pub use tracedecay_application::{
 };
 
 const fn feedback_history_repair(
-    progress: CompatibilityFeedbackRepairProgressV1,
+    progress: ProjectMemoryFeedbackRepairProgressV1,
 ) -> DerivedMemoryFeedbackHistoryRepairV1 {
     match progress {
-        CompatibilityFeedbackRepairProgressV1::Unknown => {
+        ProjectMemoryFeedbackRepairProgressV1::Unknown => {
             DerivedMemoryFeedbackHistoryRepairV1::Unknown
         }
-        CompatibilityFeedbackRepairProgressV1::NotRequired => {
+        ProjectMemoryFeedbackRepairProgressV1::NotRequired => {
             DerivedMemoryFeedbackHistoryRepairV1::NotRequired
         }
-        CompatibilityFeedbackRepairProgressV1::Complete { processed } => {
+        ProjectMemoryFeedbackRepairProgressV1::Complete { processed } => {
             DerivedMemoryFeedbackHistoryRepairV1::Complete { processed }
         }
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
+        ProjectMemoryFeedbackRepairProgressV1::Incomplete {
             processed,
             remaining,
         } => DerivedMemoryFeedbackHistoryRepairV1::Incomplete {
@@ -92,7 +92,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 #[cfg(test)]
 mod tests {
     use tracedecay_application::DerivedMemoryFeedbackHistoryRepairV1;
-    use tracedecay_store::CompatibilityFeedbackRepairProgressV1;
+    use tracedecay_store::ProjectMemoryFeedbackRepairProgressV1;
 
     use super::feedback_history_repair;
 
@@ -100,19 +100,19 @@ mod tests {
     fn feedback_history_repair_projection_retains_each_authoritative_state() {
         let cases = [
             (
-                CompatibilityFeedbackRepairProgressV1::Unknown,
+                ProjectMemoryFeedbackRepairProgressV1::Unknown,
                 DerivedMemoryFeedbackHistoryRepairV1::Unknown,
             ),
             (
-                CompatibilityFeedbackRepairProgressV1::NotRequired,
+                ProjectMemoryFeedbackRepairProgressV1::NotRequired,
                 DerivedMemoryFeedbackHistoryRepairV1::NotRequired,
             ),
             (
-                CompatibilityFeedbackRepairProgressV1::Complete { processed: 2 },
+                ProjectMemoryFeedbackRepairProgressV1::Complete { processed: 2 },
                 DerivedMemoryFeedbackHistoryRepairV1::Complete { processed: 2 },
             ),
             (
-                CompatibilityFeedbackRepairProgressV1::Incomplete {
+                ProjectMemoryFeedbackRepairProgressV1::Incomplete {
                     processed: 3,
                     remaining: Some(7),
                 },

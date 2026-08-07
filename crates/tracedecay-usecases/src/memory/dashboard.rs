@@ -2,18 +2,18 @@
 
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
-    CompatibilityDashboardFactDetailQueryV1, CompatibilityDashboardFactDetailV1,
-    CompatibilityDashboardMemoryOverviewQueryV1, CompatibilityDashboardMemoryOverviewV1,
-    CompatibilityDashboardOplogEntryV1, CompatibilityDashboardOplogQueryV1,
-    CompatibilityDashboardVectorPointV1, CompatibilityDashboardVectorPointsQueryV1,
-    CompatibilityFactAddAliasV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactLinkV1, CompatibilityFactMergeCommandV1, CompatibilityFactMergeEntitiesV1,
-    CompatibilityFactMergeOutcomeV1, CompatibilityFactNormalizeTagsV1,
-    CompatibilityFactRepairVectorV1, CompatibilityLegacyEntityTargetV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, FactCompatibilityStore,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryFactAddAliasV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeEntitiesV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactNormalizeTagsV1,
+    ProjectMemoryFactRepairVectorV1, ProjectMemoryLegacyEntityTargetV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, FactCompatibilityStore,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
@@ -36,11 +36,11 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         &self,
         fact_limit: usize,
         graph_limit: usize,
-    ) -> Result<CompatibilityDashboardMemoryOverviewV1, MemoryApplicationError> {
+    ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, MemoryApplicationError> {
         let overview = self
             .authority
             .dashboard_compatibility_memory_overview(
-                CompatibilityDashboardMemoryOverviewQueryV1::new(
+                ProjectMemoryDashboardMemoryOverviewQueryV1::new(
                     self.owner.clone(),
                     fact_limit,
                     graph_limit,
@@ -76,11 +76,11 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     pub async fn dashboard_fact_detail_v1(
         &self,
         fact_id: i64,
-    ) -> Result<Option<CompatibilityDashboardFactDetailV1>, MemoryApplicationError> {
+    ) -> Result<Option<ProjectMemoryDashboardFactDetailV1>, MemoryApplicationError> {
         let target = self.legacy_compatibility_target(fact_id)?;
         let detail = self
             .authority
-            .dashboard_compatibility_fact_detail(CompatibilityDashboardFactDetailQueryV1::new(
+            .dashboard_compatibility_fact_detail(ProjectMemoryDashboardFactDetailQueryV1::new(
                 target.clone(),
             )?)
             .await?;
@@ -109,8 +109,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         &self,
         fact_id: i64,
         limit: usize,
-    ) -> Result<CompatibilityFactFeedbackHistoryV1, MemoryApplicationError> {
-        self.get_compatibility_feedback_history(CompatibilityFactFeedbackHistoryQueryV1::new(
+    ) -> Result<ProjectMemoryFactFeedbackHistoryV1, MemoryApplicationError> {
+        self.get_compatibility_feedback_history(ProjectMemoryFactFeedbackHistoryQueryV1::new(
             self.legacy_compatibility_target(fact_id)?,
             None,
             limit,
@@ -121,7 +121,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     /// Typed dashboard status including feedback-history repair progress.
     pub async fn dashboard_memory_status_v1(
         &self,
-    ) -> Result<CompatibilityMemoryStatusV1, MemoryApplicationError> {
+    ) -> Result<ProjectMemoryMemoryStatusV1, MemoryApplicationError> {
         self.compatibility_memory_status().await
     }
 
@@ -131,10 +131,10 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         &self,
         search: Option<String>,
         limit: usize,
-    ) -> Result<Vec<CompatibilityDashboardVectorPointV1>, MemoryApplicationError> {
+    ) -> Result<Vec<ProjectMemoryDashboardVectorPointV1>, MemoryApplicationError> {
         let points = self
             .authority
-            .dashboard_compatibility_vector_points(CompatibilityDashboardVectorPointsQueryV1::new(
+            .dashboard_compatibility_vector_points(ProjectMemoryDashboardVectorPointsQueryV1::new(
                 self.owner.clone(),
                 search,
                 limit,
@@ -155,10 +155,10 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     pub async fn dashboard_oplog_v1(
         &self,
         limit: usize,
-    ) -> Result<Vec<CompatibilityDashboardOplogEntryV1>, MemoryApplicationError> {
+    ) -> Result<Vec<ProjectMemoryDashboardOplogEntryV1>, MemoryApplicationError> {
         let entries = self
             .authority
-            .dashboard_compatibility_memory_oplog(CompatibilityDashboardOplogQueryV1::new(
+            .dashboard_compatibility_memory_oplog(ProjectMemoryDashboardOplogQueryV1::new(
                 self.owner.clone(),
                 limit,
             )?)
@@ -180,8 +180,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     pub async fn dashboard_curation_v1(
         &self,
-        request: CompatibilityFactCurationBatchV1,
-    ) -> Result<CompatibilityFactCurationReceiptV1, MemoryApplicationError> {
+        request: ProjectMemoryFactCurationBatchV1,
+    ) -> Result<ProjectMemoryFactCurationReceiptV1, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
         let receipt = self
             .authority
@@ -213,7 +213,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             .map(|operation| self.dashboard_curation_operation(operation))
             .collect::<Result<Vec<_>, _>>()?;
         let receipt = self
-            .dashboard_curation_v1(CompatibilityFactCurationBatchV1::new(
+            .dashboard_curation_v1(ProjectMemoryFactCurationBatchV1::new(
                 self.owner.clone(),
                 context.operation_id().clone(),
                 context.actor().cloned(),
@@ -246,7 +246,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     fn dashboard_curation_operation(
         &self,
         operation: MemoryGroomingOperation,
-    ) -> Result<CompatibilityFactCurationOperationV1, MemoryApplicationError> {
+    ) -> Result<ProjectMemoryFactCurationOperationV1, MemoryApplicationError> {
         let fact_targets = |fact_ids: Vec<i64>| {
             fact_ids
                 .into_iter()
@@ -264,8 +264,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 tags,
                 evidence_fact_ids,
                 confidence: value,
-            } => Ok(CompatibilityFactCurationOperationV1::NormalizeTags(
-                CompatibilityFactNormalizeTagsV1::new(
+            } => Ok(ProjectMemoryFactCurationOperationV1::NormalizeTags(
+                ProjectMemoryFactNormalizeTagsV1::new(
                     self.legacy_compatibility_target(fact_id)?,
                     sanitize_curation_texts(tags, "dashboard curation tags")?,
                     fact_targets(evidence_fact_ids)?,
@@ -277,13 +277,13 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 loser_entity_ids,
                 evidence_fact_ids,
                 confidence: value,
-            } => Ok(CompatibilityFactCurationOperationV1::MergeEntities(
-                CompatibilityFactMergeEntitiesV1::new(
-                    CompatibilityLegacyEntityTargetV1::new(self.owner.clone(), winner_entity_id)?,
+            } => Ok(ProjectMemoryFactCurationOperationV1::MergeEntities(
+                ProjectMemoryFactMergeEntitiesV1::new(
+                    ProjectMemoryLegacyEntityTargetV1::new(self.owner.clone(), winner_entity_id)?,
                     loser_entity_ids
                         .into_iter()
                         .map(|entity_id| {
-                            CompatibilityLegacyEntityTargetV1::new(self.owner.clone(), entity_id)
+                            ProjectMemoryLegacyEntityTargetV1::new(self.owner.clone(), entity_id)
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                     fact_targets(evidence_fact_ids)?,
@@ -295,9 +295,9 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 alias,
                 evidence_fact_ids,
                 confidence: value,
-            } => Ok(CompatibilityFactCurationOperationV1::AddAlias(
-                CompatibilityFactAddAliasV1::new(
-                    CompatibilityLegacyEntityTargetV1::new(self.owner.clone(), entity_id)?,
+            } => Ok(ProjectMemoryFactCurationOperationV1::AddAlias(
+                ProjectMemoryFactAddAliasV1::new(
+                    ProjectMemoryLegacyEntityTargetV1::new(self.owner.clone(), entity_id)?,
                     sanitize_curation_text(alias, "dashboard curation alias")?,
                     fact_targets(evidence_fact_ids)?,
                     confidence(value)?,
@@ -311,8 +311,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 confidence: value,
                 source,
                 metadata,
-            } => Ok(CompatibilityFactCurationOperationV1::LinkFacts(
-                CompatibilityFactLinkV1::new(
+            } => Ok(ProjectMemoryFactCurationOperationV1::LinkFacts(
+                ProjectMemoryFactLinkV1::new(
                     self.legacy_compatibility_target(source_fact_id)?,
                     self.legacy_compatibility_target(target_fact_id)?,
                     compatibility_relation(relation),
@@ -326,8 +326,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 fact_id,
                 evidence_fact_ids,
                 confidence: value,
-            } => Ok(CompatibilityFactCurationOperationV1::RepairVector(
-                CompatibilityFactRepairVectorV1::new(
+            } => Ok(ProjectMemoryFactCurationOperationV1::RepairVector(
+                ProjectMemoryFactRepairVectorV1::new(
                     self.legacy_compatibility_target(fact_id)?,
                     fact_targets(evidence_fact_ids)?,
                     confidence(value)?,
@@ -338,8 +338,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
 
     pub async fn dashboard_merge_facts_v1(
         &self,
-        request: CompatibilityFactMergeCommandV1,
-    ) -> Result<CompatibilityFactMergeOutcomeV1, MemoryApplicationError> {
+        request: ProjectMemoryFactMergeCommandV1,
+    ) -> Result<ProjectMemoryFactMergeOutcomeV1, MemoryApplicationError> {
         self.ensure_owner(request.owner())?;
         let outcome = self.authority.merge_compatibility_facts(request).await?;
         if outcome.owner() != &self.owner {
@@ -359,7 +359,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         loser_ids: Vec<i64>,
         merged_content: Option<String>,
         context: MemoryOperationContext,
-    ) -> Result<CompatibilityFactMergeOutcomeV1, MemoryApplicationError> {
+    ) -> Result<ProjectMemoryFactMergeOutcomeV1, MemoryApplicationError> {
         let merged_content = match merged_content {
             Some(content) => {
                 if detect_secret_like(content.trim()).is_some() {
@@ -378,7 +378,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             .into_iter()
             .map(|fact_id| self.legacy_compatibility_target(fact_id))
             .collect::<Result<Vec<_>, _>>()?;
-        self.dashboard_merge_facts_v1(CompatibilityFactMergeCommandV1::new(
+        self.dashboard_merge_facts_v1(ProjectMemoryFactMergeCommandV1::new(
             self.owner.clone(),
             context.operation_id().clone(),
             self.legacy_compatibility_target(winner_id)?,
@@ -394,9 +394,9 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     pub async fn dashboard_repair_v1(
         &self,
         context: MemoryOperationContext,
-    ) -> Result<CompatibilityMemoryRepairStatsV1, MemoryApplicationError> {
+    ) -> Result<ProjectMemoryMemoryRepairStatsV1, MemoryApplicationError> {
         self.authority
-            .repair_compatibility_memory(CompatibilityMemoryRepairCommandV1::new(
+            .repair_compatibility_memory(ProjectMemoryMemoryRepairCommandV1::new(
                 self.owner.clone(),
                 context.operation_id().clone(),
                 context.actor().cloned(),

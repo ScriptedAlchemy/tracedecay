@@ -8,28 +8,28 @@ use tracedecay_domain::{
     ActorId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
 use tracedecay_store::{
-    CompatibilityDashboardFactDetailQueryV1, CompatibilityDashboardFactDetailV1,
-    CompatibilityDashboardMemoryOverviewQueryV1, CompatibilityDashboardMemoryOverviewV1,
-    CompatibilityDashboardOplogEntryV1, CompatibilityDashboardOplogQueryV1,
-    CompatibilityDashboardVectorPointV1, CompatibilityDashboardVectorPointsQueryV1,
-    CompatibilityFactAddCommandV1, CompatibilityFactAddOutcomeV1,
-    CompatibilityFactContentDigestQueryV1, CompatibilityFactContradictionPageV1,
-    CompatibilityFactContradictionQueryV1, CompatibilityFactCurationBatchV1,
-    CompatibilityFactCurationReceiptV1, CompatibilityFactFeedbackCommandV1,
-    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
-    CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
-    CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
-    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
-    CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
-    CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
-    CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
-    CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
+    ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
+    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
+    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalImportReceiptV1,
+    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
+    ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
     FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
@@ -355,8 +355,8 @@ impl FactProposalStore for DatabaseFactStore<'_> {
 impl FactCompatibilityStore for DatabaseFactStore<'_> {
     async fn list_compatibility_facts(
         &self,
-        query: CompatibilityFactListQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactPageV1> {
+        query: ProjectMemoryFactListQueryV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactPageV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { list_compatibility_facts_tx(transaction, &query).await })
         })
@@ -365,8 +365,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn search_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+        query: ProjectMemoryFactSearchQuery,
+    ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { search_compatibility_facts_tx(transaction, &query).await })
         })
@@ -375,8 +375,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn probe_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+        query: ProjectMemoryFactSearchQuery,
+    ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { probe_compatibility_facts_tx(transaction, &query).await })
         })
@@ -385,8 +385,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn related_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+        query: ProjectMemoryFactSearchQuery,
+    ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { related_compatibility_facts_tx(transaction, &query).await })
         })
@@ -395,8 +395,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn reason_compatibility_facts(
         &self,
-        query: CompatibilityFactSearchQuery,
-    ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1> {
+        query: ProjectMemoryFactSearchQuery,
+    ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { reason_compatibility_facts_tx(transaction, &query).await })
         })
@@ -405,8 +405,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn find_compatibility_contradictions(
         &self,
-        query: CompatibilityFactContradictionQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactContradictionPageV1> {
+        query: ProjectMemoryFactContradictionQueryV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactContradictionPageV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { find_compatibility_contradictions_tx(transaction, &query).await })
         })
@@ -415,8 +415,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn get_compatibility_fact(
         &self,
-        target: CompatibilityFactTargetV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
+        target: ProjectMemoryFactTargetV1,
+    ) -> FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { get_compatibility_fact_tx(transaction, &target).await })
         })
@@ -425,8 +425,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn compatibility_fact_history(
         &self,
-        query: CompatibilityFactHistoryQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactHistoryV1> {
+        query: ProjectMemoryFactHistoryQueryV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactHistoryV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { compatibility_fact_history_tx(transaction, &query).await })
         })
@@ -436,7 +436,7 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
     async fn compatibility_memory_status(
         &self,
         owner: FactOwnerV1,
-    ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1> {
+    ) -> FactCompatibilityResult<ProjectMemoryMemoryStatusV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move {
                 let feedback_repair =
@@ -449,8 +449,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn inspect_compatibility_fact(
         &self,
-        target: CompatibilityFactTargetV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>> {
+        target: ProjectMemoryFactTargetV1,
+    ) -> FactCompatibilityResult<Option<ProjectMemoryFactInspectionV1>> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move { inspect_compatibility_fact_tx(transaction, &target).await })
         })
@@ -459,8 +459,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn add_compatibility_fact(
         &self,
-        request: CompatibilityFactAddCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1> {
+        request: ProjectMemoryFactAddCommandV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactAddOutcomeV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(async move { add_compatibility_fact_tx(&db, transaction, &request).await })
@@ -470,8 +470,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn update_compatibility_fact(
         &self,
-        request: CompatibilityFactUpdateCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1> {
+        request: ProjectMemoryFactUpdateCommandV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactUpdateOutcomeV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(async move { update_compatibility_fact_tx(&db, transaction, &request).await })
@@ -481,8 +481,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn remove_compatibility_fact(
         &self,
-        request: CompatibilityFactRemoveCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1> {
+        request: ProjectMemoryFactRemoveCommandV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactRemoveOutcomeV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(async move { remove_compatibility_fact_tx(&db, transaction, &request).await })
@@ -492,8 +492,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn record_compatibility_fact_feedback(
         &self,
-        request: CompatibilityFactFeedbackCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1> {
+        request: ProjectMemoryFactFeedbackCommandV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactFeedbackOutcomeV1> {
         self.compatibility_write(move |transaction| {
             Box::pin(
                 async move { record_compatibility_fact_feedback_tx(transaction, &request).await },
@@ -504,8 +504,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn compatibility_fact_feedback_history(
         &self,
-        query: CompatibilityFactFeedbackHistoryQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1> {
+        query: ProjectMemoryFactFeedbackHistoryQueryV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactFeedbackHistoryV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move {
                 let feedback_repair = compatibility_feedback_history_repair_progress_tx(
@@ -521,8 +521,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn find_compatibility_fact_by_content_digest(
         &self,
-        query: CompatibilityFactContentDigestQueryV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>> {
+        query: ProjectMemoryFactContentDigestQueryV1,
+    ) -> FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move {
                 find_compatibility_fact_by_content_digest_tx(transaction, &query).await
@@ -533,8 +533,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn apply_compatibility_fact_curation(
         &self,
-        request: CompatibilityFactCurationBatchV1,
-    ) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1> {
+        request: ProjectMemoryFactCurationBatchV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactCurationReceiptV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(async move {
@@ -546,8 +546,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn merge_compatibility_facts(
         &self,
-        request: CompatibilityFactMergeCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1> {
+        request: ProjectMemoryFactMergeCommandV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactMergeOutcomeV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(async move { merge_compatibility_facts_tx(&db, transaction, &request).await })
@@ -557,8 +557,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn repair_compatibility_memory(
         &self,
-        request: CompatibilityMemoryRepairCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1> {
+        request: ProjectMemoryMemoryRepairCommandV1,
+    ) -> FactCompatibilityResult<ProjectMemoryMemoryRepairStatsV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(
@@ -570,8 +570,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn dashboard_compatibility_memory_overview(
         &self,
-        query: CompatibilityDashboardMemoryOverviewQueryV1,
-    ) -> FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1> {
+        query: ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ) -> FactCompatibilityResult<ProjectMemoryDashboardMemoryOverviewV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move {
                 dashboard_compatibility_memory_overview_tx(transaction, &query).await
@@ -582,8 +582,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn dashboard_compatibility_fact_detail(
         &self,
-        query: CompatibilityDashboardFactDetailQueryV1,
-    ) -> FactCompatibilityResult<Option<CompatibilityDashboardFactDetailV1>> {
+        query: ProjectMemoryDashboardFactDetailQueryV1,
+    ) -> FactCompatibilityResult<Option<ProjectMemoryDashboardFactDetailV1>> {
         self.compatibility_read(move |transaction| {
             Box::pin(
                 async move { dashboard_compatibility_fact_detail_tx(transaction, &query).await },
@@ -594,8 +594,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn dashboard_compatibility_vector_points(
         &self,
-        query: CompatibilityDashboardVectorPointsQueryV1,
-    ) -> FactCompatibilityResult<Vec<CompatibilityDashboardVectorPointV1>> {
+        query: ProjectMemoryDashboardVectorPointsQueryV1,
+    ) -> FactCompatibilityResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
         self.compatibility_read(move |transaction| {
             Box::pin(
                 async move { dashboard_compatibility_vector_points_tx(transaction, &query).await },
@@ -606,8 +606,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn dashboard_compatibility_memory_oplog(
         &self,
-        query: CompatibilityDashboardOplogQueryV1,
-    ) -> FactCompatibilityResult<Vec<CompatibilityDashboardOplogEntryV1>> {
+        query: ProjectMemoryDashboardOplogQueryV1,
+    ) -> FactCompatibilityResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
         self.compatibility_read(move |transaction| {
             Box::pin(
                 async move { dashboard_compatibility_memory_oplog_tx(transaction, &query).await },
@@ -618,8 +618,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn record_compatibility_fact_retrieval(
         &self,
-        request: CompatibilityFactRetrievalCommandV1,
-    ) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>> {
+        request: ProjectMemoryFactRetrievalCommandV1,
+    ) -> FactCompatibilityResult<Vec<ProjectMemoryFactProjectionV1>> {
         self.compatibility_write(move |transaction| {
             Box::pin(
                 async move { record_compatibility_fact_retrieval_tx(transaction, &request).await },
@@ -631,9 +631,9 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
     async fn submit_compatibility_fact_proposal(
         &self,
         proposal_id: ProvenanceId,
-        request: CompatibilityFactAddCommandV1,
+        request: ProjectMemoryFactAddCommandV1,
         submitter: Option<ActorId>,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+    ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1> {
         self.compatibility_write(move |transaction| {
             Box::pin(async move {
                 submit_compatibility_fact_proposal_tx(
@@ -652,7 +652,7 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         &self,
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-    ) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>> {
+    ) -> FactCompatibilityResult<Option<ProjectMemoryFactProposalRecordV1>> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move {
                 get_compatibility_fact_proposal_tx(transaction, &owner, &proposal_id).await
@@ -664,10 +664,10 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
     async fn list_compatibility_fact_proposals(
         &self,
         owner: FactOwnerV1,
-        state: Option<CompatibilityFactProposalStateV1>,
+        state: Option<ProjectMemoryFactProposalStateV1>,
         after_proposal_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalPageV1> {
+    ) -> FactCompatibilityResult<ProjectMemoryFactProposalPageV1> {
         self.compatibility_read(move |transaction| {
             Box::pin(async move {
                 list_compatibility_fact_proposals_tx(
@@ -699,10 +699,10 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         &self,
         owner: FactOwnerV1,
         proposal_id: ProvenanceId,
-        expected_revision: CompatibilityFactProposalRevisionV1,
+        expected_revision: ProjectMemoryFactProposalRevisionV1,
         reviewer: ActorId,
         reason: String,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+    ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1> {
         self.compatibility_write(move |transaction| {
             Box::pin(async move {
                 reject_compatibility_fact_proposal_tx(
@@ -721,8 +721,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn import_legacy_compatibility_fact_proposals(
         &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1> {
+        request: ProjectMemoryFactProposalImportV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactProposalImportReceiptV1> {
         self.compatibility_write(move |transaction| {
             Box::pin(async move {
                 import_legacy_compatibility_fact_proposals_tx(transaction, &request).await
@@ -733,8 +733,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn promote_compatibility_fact_proposal(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1> {
+        request: ProjectMemoryFactProposalPromotionV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(async move {
@@ -746,8 +746,8 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
 
     async fn promote_compatibility_fact_proposal_with_disposition(
         &self,
-        request: CompatibilityFactProposalPromotionV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1> {
+        request: ProjectMemoryFactProposalPromotionV1,
+    ) -> FactCompatibilityResult<ProjectMemoryFactProposalPromotionResultV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
             Box::pin(async move {
@@ -866,111 +866,111 @@ impl FactProposalStore for ProjectFactStore<'_> {
 impl FactCompatibilityStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
         fn list_compatibility_facts(
-            query: CompatibilityFactListQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactPageV1>;
+            query: ProjectMemoryFactListQueryV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactPageV1>;
         fn search_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+            query: ProjectMemoryFactSearchQuery,
+        ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1>;
         fn probe_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+            query: ProjectMemoryFactSearchQuery,
+        ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1>;
         fn related_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+            query: ProjectMemoryFactSearchQuery,
+        ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1>;
         fn reason_compatibility_facts(
-            query: CompatibilityFactSearchQuery,
-        ) -> FactCompatibilityResult<CompatibilityFactSearchPageV1>;
+            query: ProjectMemoryFactSearchQuery,
+        ) -> FactCompatibilityResult<ProjectMemoryFactSearchPageV1>;
         fn find_compatibility_contradictions(
-            query: CompatibilityFactContradictionQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactContradictionPageV1>;
+            query: ProjectMemoryFactContradictionQueryV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactContradictionPageV1>;
         fn get_compatibility_fact(
-            target: CompatibilityFactTargetV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>;
+            target: ProjectMemoryFactTargetV1,
+        ) -> FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>>;
         fn compatibility_fact_history(
-            query: CompatibilityFactHistoryQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactHistoryV1>;
+            query: ProjectMemoryFactHistoryQueryV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactHistoryV1>;
         fn compatibility_memory_status(
             owner: FactOwnerV1,
-        ) -> FactCompatibilityResult<CompatibilityMemoryStatusV1>;
+        ) -> FactCompatibilityResult<ProjectMemoryMemoryStatusV1>;
         fn inspect_compatibility_fact(
-            target: CompatibilityFactTargetV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactInspectionV1>>;
+            target: ProjectMemoryFactTargetV1,
+        ) -> FactCompatibilityResult<Option<ProjectMemoryFactInspectionV1>>;
         fn add_compatibility_fact(
-            request: CompatibilityFactAddCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactAddOutcomeV1>;
+            request: ProjectMemoryFactAddCommandV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactAddOutcomeV1>;
         fn update_compatibility_fact(
-            request: CompatibilityFactUpdateCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactUpdateOutcomeV1>;
+            request: ProjectMemoryFactUpdateCommandV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactUpdateOutcomeV1>;
         fn remove_compatibility_fact(
-            request: CompatibilityFactRemoveCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactRemoveOutcomeV1>;
+            request: ProjectMemoryFactRemoveCommandV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactRemoveOutcomeV1>;
         fn record_compatibility_fact_feedback(
-            request: CompatibilityFactFeedbackCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactFeedbackOutcomeV1>;
+            request: ProjectMemoryFactFeedbackCommandV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactFeedbackOutcomeV1>;
         fn compatibility_fact_feedback_history(
-            query: CompatibilityFactFeedbackHistoryQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityFactFeedbackHistoryV1>;
+            query: ProjectMemoryFactFeedbackHistoryQueryV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactFeedbackHistoryV1>;
         fn find_compatibility_fact_by_content_digest(
-            query: CompatibilityFactContentDigestQueryV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactProjectionV1>>;
+            query: ProjectMemoryFactContentDigestQueryV1,
+        ) -> FactCompatibilityResult<Option<ProjectMemoryFactProjectionV1>>;
         fn apply_compatibility_fact_curation(
-            request: CompatibilityFactCurationBatchV1,
-        ) -> FactCompatibilityResult<CompatibilityFactCurationReceiptV1>;
+            request: ProjectMemoryFactCurationBatchV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactCurationReceiptV1>;
         fn merge_compatibility_facts(
-            request: CompatibilityFactMergeCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1>;
+            request: ProjectMemoryFactMergeCommandV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactMergeOutcomeV1>;
         fn repair_compatibility_memory(
-            request: CompatibilityMemoryRepairCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>;
+            request: ProjectMemoryMemoryRepairCommandV1,
+        ) -> FactCompatibilityResult<ProjectMemoryMemoryRepairStatsV1>;
         fn dashboard_compatibility_memory_overview(
-            query: CompatibilityDashboardMemoryOverviewQueryV1,
-        ) -> FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1>;
+            query: ProjectMemoryDashboardMemoryOverviewQueryV1,
+        ) -> FactCompatibilityResult<ProjectMemoryDashboardMemoryOverviewV1>;
         fn dashboard_compatibility_fact_detail(
-            query: CompatibilityDashboardFactDetailQueryV1,
-        ) -> FactCompatibilityResult<Option<CompatibilityDashboardFactDetailV1>>;
+            query: ProjectMemoryDashboardFactDetailQueryV1,
+        ) -> FactCompatibilityResult<Option<ProjectMemoryDashboardFactDetailV1>>;
         fn dashboard_compatibility_vector_points(
-            query: CompatibilityDashboardVectorPointsQueryV1,
-        ) -> FactCompatibilityResult<Vec<CompatibilityDashboardVectorPointV1>>;
+            query: ProjectMemoryDashboardVectorPointsQueryV1,
+        ) -> FactCompatibilityResult<Vec<ProjectMemoryDashboardVectorPointV1>>;
         fn dashboard_compatibility_memory_oplog(
-            query: CompatibilityDashboardOplogQueryV1,
-        ) -> FactCompatibilityResult<Vec<CompatibilityDashboardOplogEntryV1>>;
+            query: ProjectMemoryDashboardOplogQueryV1,
+        ) -> FactCompatibilityResult<Vec<ProjectMemoryDashboardOplogEntryV1>>;
         fn record_compatibility_fact_retrieval(
-            request: CompatibilityFactRetrievalCommandV1,
-        ) -> FactCompatibilityResult<Vec<CompatibilityFactProjectionV1>>;
+            request: ProjectMemoryFactRetrievalCommandV1,
+        ) -> FactCompatibilityResult<Vec<ProjectMemoryFactProjectionV1>>;
         fn submit_compatibility_fact_proposal(
             proposal_id: ProvenanceId,
-            request: CompatibilityFactAddCommandV1,
+            request: ProjectMemoryFactAddCommandV1,
             submitter: Option<ActorId>,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
+        ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>;
         fn get_compatibility_fact_proposal(
             owner: FactOwnerV1,
             proposal_id: ProvenanceId,
-        ) -> FactCompatibilityResult<Option<CompatibilityFactProposalRecordV1>>;
+        ) -> FactCompatibilityResult<Option<ProjectMemoryFactProposalRecordV1>>;
         fn list_compatibility_fact_proposals(
             owner: FactOwnerV1,
-            state: Option<CompatibilityFactProposalStateV1>,
+            state: Option<ProjectMemoryFactProposalStateV1>,
             after_proposal_id: Option<ProvenanceId>,
             limit: usize,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalPageV1>;
+        ) -> FactCompatibilityResult<ProjectMemoryFactProposalPageV1>;
         fn count_pending_compatibility_fact_proposals(
             owner: FactOwnerV1,
         ) -> FactCompatibilityResult<u64>;
         fn reject_compatibility_fact_proposal(
             owner: FactOwnerV1,
             proposal_id: ProvenanceId,
-            expected_revision: CompatibilityFactProposalRevisionV1,
+            expected_revision: ProjectMemoryFactProposalRevisionV1,
             reviewer: ActorId,
             reason: String,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
+        ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>;
         fn import_legacy_compatibility_fact_proposals(
-            request: CompatibilityFactProposalImportV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>;
+            request: ProjectMemoryFactProposalImportV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactProposalImportReceiptV1>;
         fn promote_compatibility_fact_proposal(
-            request: CompatibilityFactProposalPromotionV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
+            request: ProjectMemoryFactProposalPromotionV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>;
         fn promote_compatibility_fact_proposal_with_disposition(
-            request: CompatibilityFactProposalPromotionV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalPromotionResultV1>;
+            request: ProjectMemoryFactProposalPromotionV1,
+        ) -> FactCompatibilityResult<ProjectMemoryFactProposalPromotionResultV1>;
     }
 }
 

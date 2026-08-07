@@ -8,7 +8,7 @@ use tracedecay_runtime_core::memory::types::{AddFactRequest, UpdateFactRequest};
 use tracedecay_runtime_core::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
-use tracedecay_store::CompatibilityRelationProvenanceV1;
+use tracedecay_store::ProjectMemoryRelationProvenanceV1;
 
 use super::error::MemoryApplicationError;
 
@@ -145,14 +145,14 @@ pub(super) fn sanitize_curation_texts(
 
 pub(super) fn sanitize_curation_metadata(
     value: serde_json::Value,
-) -> Result<CompatibilityRelationProvenanceV1, MemoryApplicationError> {
+) -> Result<ProjectMemoryRelationProvenanceV1, MemoryApplicationError> {
     match sanitize_memory_fact_payload(value).map_err(|_| {
         MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "dashboard curation metadata privacy sanitizer",
         }
     })? {
         MemoryFactSanitizationV1::Durable { payload, receipt } => {
-            CompatibilityRelationProvenanceV1::new(payload, receipt)
+            ProjectMemoryRelationProvenanceV1::new(payload, receipt)
                 .map_err(MemoryApplicationError::Store)
         }
         MemoryFactSanitizationV1::Quarantined => {

@@ -27,9 +27,9 @@ use tracedecay_domain::{
     FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, UtcMicros,
 };
 use tracedecay_store::{
-    CompatibilityFactIdV1, CompatibilityFactLinkV1, CompatibilityFactMappingV1,
-    CompatibilityFactNormalizeTagsV1, CompatibilityFactRelationV1, CompatibilityFactTargetV1,
-    CompatibilityRelationProvenanceV1, FactStoreError, FactStoreResult, FactWriteBatch,
+    ProjectMemoryFactIdV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1,
+    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRelationV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryRelationProvenanceV1, FactStoreError, FactStoreResult, FactWriteBatch,
     StoredFactV1,
 };
 
@@ -40,27 +40,27 @@ struct LegacyRelationProvenanceErrorV1 {
     source: serde_json::Error,
 }
 
-pub(super) fn compatibility_relation_label(relation: CompatibilityFactRelationV1) -> &'static str {
+pub(super) fn compatibility_relation_label(relation: ProjectMemoryFactRelationV1) -> &'static str {
     match relation {
-        CompatibilityFactRelationV1::Supports => "supports",
-        CompatibilityFactRelationV1::Contradicts => "contradicts",
-        CompatibilityFactRelationV1::Supersedes => "supersedes",
-        CompatibilityFactRelationV1::DerivedFrom => "derived_from",
+        ProjectMemoryFactRelationV1::Supports => "supports",
+        ProjectMemoryFactRelationV1::Contradicts => "contradicts",
+        ProjectMemoryFactRelationV1::Supersedes => "supersedes",
+        ProjectMemoryFactRelationV1::DerivedFrom => "derived_from",
     }
 }
 
 fn compatibility_relations_conflict(
-    left: CompatibilityFactRelationV1,
-    right: CompatibilityFactRelationV1,
+    left: ProjectMemoryFactRelationV1,
+    right: ProjectMemoryFactRelationV1,
 ) -> bool {
     matches!(
         (left, right),
         (
-            CompatibilityFactRelationV1::Supports,
-            CompatibilityFactRelationV1::Contradicts
+            ProjectMemoryFactRelationV1::Supports,
+            ProjectMemoryFactRelationV1::Contradicts
         ) | (
-            CompatibilityFactRelationV1::Contradicts,
-            CompatibilityFactRelationV1::Supports
+            ProjectMemoryFactRelationV1::Contradicts,
+            ProjectMemoryFactRelationV1::Supports
         )
     )
 }
@@ -83,8 +83,8 @@ fn compatibility_normalize_tags(tags: &[String]) -> Vec<String> {
 
 pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
     transaction: &Transaction<'_>,
-    target: &CompatibilityFactTargetV1,
-) -> FactStoreResult<(FactId, StoredFactV1, CompatibilityFactMappingV1)> {
+    target: &ProjectMemoryFactTargetV1,
+) -> FactStoreResult<(FactId, StoredFactV1, ProjectMemoryFactMappingV1)> {
     let fact_id = resolve_compatibility_target_tx(transaction, target)
         .await?
         .ok_or_else(|| {
@@ -106,8 +106,8 @@ pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
         return Err(FactStoreError::PayloadAccessMismatch);
     }
     let mapping = compatibility_required_mapping_tx(transaction, target.owner(), &fact_id).await?;
-    let mapping = CompatibilityFactMappingV1::new(
-        CompatibilityFactIdV1::new(target.owner().clone(), fact_id.clone())?,
+    let mapping = ProjectMemoryFactMappingV1::new(
+        ProjectMemoryFactIdV1::new(target.owner().clone(), fact_id.clone())?,
         Some(mapping),
     )?;
     Ok((fact_id, fact, mapping))
@@ -116,7 +116,7 @@ pub(in crate::store::memory) async fn compatibility_available_curation_fact_tx(
 pub(in crate::store::memory) async fn compatibility_curation_evidence_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    evidence: &[CompatibilityFactTargetV1],
+    evidence: &[ProjectMemoryFactTargetV1],
 ) -> FactStoreResult<Vec<FactId>> {
     let mut ids = Vec::with_capacity(evidence.len());
     let mut seen = BTreeSet::new();
@@ -207,7 +207,7 @@ pub(super) async fn compatibility_curation_mappings_from_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     ids: &[FactId],
-) -> FactStoreResult<Vec<CompatibilityFactMappingV1>> {
+) -> FactStoreResult<Vec<ProjectMemoryFactMappingV1>> {
     let mut mappings = Vec::with_capacity(ids.len());
     let mut seen = BTreeSet::new();
     for fact_id in ids {
@@ -215,8 +215,8 @@ pub(super) async fn compatibility_curation_mappings_from_ids_tx(
             continue;
         }
         let legacy_mapping = compatibility_required_mapping_tx(transaction, owner, fact_id).await?;
-        mappings.push(CompatibilityFactMappingV1::new(
-            CompatibilityFactIdV1::new(owner.clone(), fact_id.clone())?,
+        mappings.push(ProjectMemoryFactMappingV1::new(
+            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
             Some(legacy_mapping),
         )?);
     }
@@ -225,12 +225,12 @@ pub(super) async fn compatibility_curation_mappings_from_ids_tx(
 
 pub(super) async fn compatibility_sanitized_relation_provenance(
     metadata: &Value,
-) -> FactStoreResult<CompatibilityRelationProvenanceV1> {
+) -> FactStoreResult<ProjectMemoryRelationProvenanceV1> {
     match sanitize_memory_fact_payload(metadata.clone())
         .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
     {
         MemoryFactSanitizationV1::Durable { payload, receipt } => {
-            CompatibilityRelationProvenanceV1::new(payload, receipt)
+            ProjectMemoryRelationProvenanceV1::new(payload, receipt)
         }
         MemoryFactSanitizationV1::Quarantined => Err(storage_message(
             COMPATIBILITY_WRITE_OPERATION,
@@ -241,7 +241,7 @@ pub(super) async fn compatibility_sanitized_relation_provenance(
 
 pub(super) async fn compatibility_legacy_relation_provenance(
     value: &Value,
-) -> FactStoreResult<CompatibilityRelationProvenanceV1> {
+) -> FactStoreResult<ProjectMemoryRelationProvenanceV1> {
     if value.get("metadata").is_some() || value.get("sanitization_receipt").is_some() {
         return serde_json::from_value(value.clone()).map_err(|source| {
             storage_error(
@@ -258,10 +258,10 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
     transaction: &Transaction<'_>,
     source_legacy_fact_id: i64,
     target_legacy_fact_id: i64,
-    relation: CompatibilityFactRelationV1,
+    relation: ProjectMemoryFactRelationV1,
     confidence: Confidence,
     source_label: &str,
-    provenance: &CompatibilityRelationProvenanceV1,
+    provenance: &ProjectMemoryRelationProvenanceV1,
     timestamp: i64,
 ) -> FactStoreResult<()> {
     verify_memory_fact_sanitization(provenance.metadata(), provenance.sanitization_receipt())
@@ -280,10 +280,10 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
         .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
     {
         let stored = match row_string(&row, 0, COMPATIBILITY_WRITE_OPERATION)?.as_str() {
-            "supports" => CompatibilityFactRelationV1::Supports,
-            "contradicts" => CompatibilityFactRelationV1::Contradicts,
-            "supersedes" => CompatibilityFactRelationV1::Supersedes,
-            "derived_from" => CompatibilityFactRelationV1::DerivedFrom,
+            "supports" => ProjectMemoryFactRelationV1::Supports,
+            "contradicts" => ProjectMemoryFactRelationV1::Contradicts,
+            "supersedes" => ProjectMemoryFactRelationV1::Supersedes,
+            "derived_from" => ProjectMemoryFactRelationV1::DerivedFrom,
             _ => {
                 return Err(storage_message(
                     COMPATIBILITY_WRITE_OPERATION,
@@ -328,7 +328,7 @@ pub(super) async fn compatibility_link_facts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
-    operation: &CompatibilityFactLinkV1,
+    operation: &ProjectMemoryFactLinkV1,
     now: UtcMicros,
 ) -> FactStoreResult<(Vec<FactId>, Option<FactEventId>)> {
     verify_memory_fact_sanitization(
@@ -389,13 +389,13 @@ pub(super) async fn compatibility_link_facts_tx(
         .await
         .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
     let event_id = match operation.relation() {
-        CompatibilityFactRelationV1::Supports | CompatibilityFactRelationV1::DerivedFrom => None,
-        CompatibilityFactRelationV1::Contradicts | CompatibilityFactRelationV1::Supersedes => {
+        ProjectMemoryFactRelationV1::Supports | ProjectMemoryFactRelationV1::DerivedFrom => None,
+        ProjectMemoryFactRelationV1::Contradicts | ProjectMemoryFactRelationV1::Supersedes => {
             let action = match operation.relation() {
-                CompatibilityFactRelationV1::Contradicts => FactCurationActionV1::ContradictedBy {
+                ProjectMemoryFactRelationV1::Contradicts => FactCurationActionV1::ContradictedBy {
                     fact_id: target_fact_id.clone(),
                 },
-                CompatibilityFactRelationV1::Supersedes => FactCurationActionV1::SupersededBy {
+                ProjectMemoryFactRelationV1::Supersedes => FactCurationActionV1::SupersededBy {
                     fact_id: target_fact_id.clone(),
                 },
                 _ => unreachable!("handled typed relation variants above"),
@@ -497,7 +497,7 @@ pub(super) async fn compatibility_normalize_tags_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
-    operation: &CompatibilityFactNormalizeTagsV1,
+    operation: &ProjectMemoryFactNormalizeTagsV1,
     now: UtcMicros,
 ) -> FactStoreResult<FactId> {
     let evidence =
