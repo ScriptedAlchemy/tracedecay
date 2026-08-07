@@ -248,6 +248,29 @@ impl RegisteredGlobalDb {
             )
             .await
             .map_err(|error| storage(BEGIN_REFRESH, error))?;
+        // Summary availability is generation-bound: the candidate inherits the
+        // active generation's rows exactly like the summary-publication
+        // route's generation builder, otherwise activating this refresh would
+        // silently drop every published summary from generation-bound reads.
+        transaction
+            .execute(
+                "INSERT INTO session_summary_availability (
+                    session_id, generation, summary_id, availability,
+                    source_horizon_json, reason, checked_at
+                 )
+                 SELECT session_id, ?2, summary_id, availability,
+                        source_horizon_json, reason, ?3
+                 FROM session_summary_availability
+                 WHERE session_id = ?1 AND generation = ?4",
+                params![
+                    request.session_id().as_str(),
+                    generation_i64(candidate_generation, BEGIN_REFRESH)?,
+                    accepted_at.0,
+                    generation_i64(active_generation, BEGIN_REFRESH)?,
+                ],
+            )
+            .await
+            .map_err(|error| storage(BEGIN_REFRESH, error))?;
         transaction
             .execute(
                 "INSERT INTO session_refresh_bindings (
