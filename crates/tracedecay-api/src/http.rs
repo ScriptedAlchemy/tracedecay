@@ -103,6 +103,11 @@ pub enum HttpApplicationOperation {
     GitHunks,
     GitPreview,
     GitApply,
+    NativeIntegrationStackSnapshot,
+    NativeIntegrationPreflight,
+    NativeIntegrationApply,
+    NativeIntegrationStatus,
+    NativeIntegrationCancel,
     FeedbackDiagnostics,
     FeedbackGet,
     FeedbackExpand,
@@ -168,6 +173,7 @@ pub enum HttpApplicationOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOwnerKind {
     Git,
+    NativeIntegration,
     Feedback,
     CallableCode,
     Primitive,
@@ -176,7 +182,7 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 66] = [
+    pub const ALL: [Self; 71] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -184,6 +190,11 @@ impl HttpApplicationOperation {
         Self::GitHunks,
         Self::GitPreview,
         Self::GitApply,
+        Self::NativeIntegrationStackSnapshot,
+        Self::NativeIntegrationPreflight,
+        Self::NativeIntegrationApply,
+        Self::NativeIntegrationStatus,
+        Self::NativeIntegrationCancel,
         Self::FeedbackDiagnostics,
         Self::FeedbackGet,
         Self::FeedbackExpand,
@@ -268,6 +279,11 @@ impl HttpApplicationOperation {
             Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
+            Self::NativeIntegrationStackSnapshot => "stack_snapshot",
+            Self::NativeIntegrationPreflight => "preflight_native_integration",
+            Self::NativeIntegrationApply => "apply_native_integration",
+            Self::NativeIntegrationStatus => "native_integration_status",
+            Self::NativeIntegrationCancel => "cancel_native_integration",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
@@ -339,6 +355,11 @@ impl HttpApplicationOperation {
             | Self::GitHunks
             | Self::GitPreview
             | Self::GitApply => HttpApplicationOwnerKind::Git,
+            Self::NativeIntegrationStackSnapshot
+            | Self::NativeIntegrationPreflight
+            | Self::NativeIntegrationApply
+            | Self::NativeIntegrationStatus
+            | Self::NativeIntegrationCancel => HttpApplicationOwnerKind::NativeIntegration,
             Self::FeedbackDiagnostics
             | Self::FeedbackGet
             | Self::FeedbackExpand
@@ -432,7 +453,16 @@ impl HttpApplicationOperation {
     /// Git preview/apply remain in the shared operation family but are
     /// intentionally exposed through CLI/MCP mutation bindings only.
     pub const fn is_http_exposed(self) -> bool {
-        !matches!(self, Self::GitPreview | Self::GitApply)
+        !matches!(
+            self,
+            Self::GitPreview
+                | Self::GitApply
+                | Self::NativeIntegrationStackSnapshot
+                | Self::NativeIntegrationPreflight
+                | Self::NativeIntegrationApply
+                | Self::NativeIntegrationStatus
+                | Self::NativeIntegrationCancel
+        )
     }
 
     pub fn route_path(self) -> String {
@@ -445,6 +475,9 @@ impl HttpApplicationOperation {
                         .strip_prefix("git_")
                         .expect("Git HTTP operation names use the git_ prefix")
                 )
+            }
+            operation if operation.owner_kind() == HttpApplicationOwnerKind::NativeIntegration => {
+                format!("/native-integration/{}", operation.as_str())
             }
             Self::AffectedTests => "/tests/affected".to_owned(),
             Self::TestResults => "/tests/results".to_owned(),
@@ -941,6 +974,16 @@ where
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
         HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
+        // The Plan 36 native-integration journey has no HTTP binding, so no
+        // parser can mount it here. Apply is an authoritative native mutation
+        // and this transport has no fallback mutation path: an operation that
+        // reached this arm is indistinguishable from an unauthorized one.
+        HttpApplicationOwnerKind::NativeIntegration => {
+            return application_problem_response(adapter_problem(
+                request.request_id,
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+            ));
+        }
     };
     invocation.await.into_http_response()
 }
