@@ -11,7 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 
 /// The one schema shape this binary creates and accepts. It is an identity
 /// stamp, not a ladder rung: a store at any other version is refused.
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
@@ -271,6 +271,18 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
     super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
+    conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create graph publication schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
+    conn.execute_batch(tracedecay_rusqlite_runtime::repository::SEMANTIC_VECTOR_STAGING_SCHEMA)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create semantic vector staging schema: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
     set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
@@ -302,14 +314,14 @@ async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
 }
 
 fn unsupported_schema_version(current: u32) -> TraceDecayError {
-    TraceDecayError::Database {
-        message: format!(
+    TraceDecayError::reset_required(
+        "graph store",
+        format!(
             "database schema v{current} is not the v{SCHEMA_VERSION} shape this binary creates; \
              this store was created by an incompatible binary and cannot be upgraded in place. \
              Remove the store directory and let this binary create a fresh one."
         ),
-        operation: "ensure_schema_current".to_string(),
-    }
+    )
 }
 
 /// Verifies an opened store carries the schema this binary creates, creating it

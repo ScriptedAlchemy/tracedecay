@@ -39,6 +39,10 @@ impl RuntimeRequestProbeV1 for Probe {
     fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
         None
     }
+
+    fn try_begin_commit(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]

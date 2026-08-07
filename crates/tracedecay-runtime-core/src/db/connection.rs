@@ -79,6 +79,10 @@ impl RuntimeRequestProbeV1 for DatabaseCheckpointProbe {
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
         None
     }
+
+    fn try_begin_commit(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

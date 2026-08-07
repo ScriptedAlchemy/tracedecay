@@ -143,7 +143,7 @@ async fn an_empty_database_is_created_at_the_supported_schema_version() {
 /// remedy instead of upgrading in place.
 #[tokio::test]
 async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
-    for stamped in [1_u32, 18, 24, SCHEMA_VERSION + 1] {
+    for stamped in [1_u32, 18, 24, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
         let (conn, _dir) = create_schema_db().await;
         set_user_version(&conn, stamped).await;
 
@@ -151,6 +151,12 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
             .await
             .expect_err("a store at another version must be refused");
         let message = error.to_string();
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _reason)| authority),
+            Some("graph store")
+        );
         assert!(
             message.contains("created by an incompatible binary"),
             "v{stamped} refusal must name the cause: {message}"
@@ -159,7 +165,50 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
             message.contains("Remove the store directory"),
             "v{stamped} refusal must name the fresh-start remedy: {message}"
         );
+        assert_eq!(
+            get_user_version(&conn).await,
+            stamped,
+            "refusal must never rewrite an incompatible schema stamp"
+        );
     }
+}
+
+#[tokio::test]
+async fn the_former_v26_shape_is_refused_without_mutation() {
+    let (conn, _dir) = create_raw_db().await;
+    conn.execute_batch(
+        "CREATE TABLE graph_publication_replay_v1 (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            shard_id TEXT NOT NULL,
+            namespace TEXT NOT NULL,
+            projection TEXT NOT NULL,
+            generation TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            input_digest TEXT NOT NULL,
+            dependency_generation_closure_digest TEXT NOT NULL,
+            direct_dependency_bytes INTEGER NOT NULL,
+            expected_recovered_digest TEXT NOT NULL,
+            canonical_replay_source_digest TEXT NOT NULL,
+            canonical_replay_source BLOB NOT NULL
+        ) STRICT;",
+    )
+    .await
+    .unwrap();
+    set_user_version(&conn, 26).await;
+
+    let error = ensure_schema_current_connection(&conn)
+        .await
+        .expect_err("the superseded v26 shape must not be admitted as v27");
+    assert_eq!(
+        error
+            .reset_required_context()
+            .map(|(authority, _reason)| authority),
+        Some("graph store")
+    );
+
+    assert_eq!(get_user_version(&conn).await, 26);
+    assert!(table_exists(&conn, "graph_publication_replay_v1").await);
+    assert!(!column_exists(&conn, "graph_publication_replay_v1", "expected_prior_head").await);
 }
 
 /// Creation is atomic: an interrupted create leaves neither DDL nor a version
@@ -191,8 +240,8 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
 }
 
 /// The creation DDL installs the whole final shape in one transaction: graph,
-/// holographic memory, memory V2 lineage, the V22/V23 compatibility
-/// projections, evidence assembly, and external sources.
+/// holographic memory, memory lineage/current projections, evidence assembly,
+/// external sources, and relational graph publication authority.
 #[tokio::test]
 async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     let (conn, _dir) = create_schema_db().await;
@@ -220,6 +269,32 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         assert!(table_exists(&conn, table).await, "missing table {table}");
     }
 
+    conn.execute(
+        "INSERT INTO graph_publication_replay_v1 (
+            shard_id, namespace, projection, generation, idempotency_key,
+            input_digest, dependency_generation_closure_digest,
+            direct_dependency_bytes, expected_recovered_digest,
+            canonical_replay_source_digest, canonical_replay_source
+         ) VALUES (
+            'project-fixture', 'project', 'code', 'generation-1', 'publish-1',
+            'sha256:input', 'sha256:dependencies', 2, 'sha256:recovered',
+            'sha256:source', x'01'
+         )",
+        (),
+    )
+    .await
+    .expect("fresh project schema must accept relational graph replay state");
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT length(canonical_replay_source)
+             FROM graph_publication_replay_v1
+             WHERE generation = 'generation-1'",
+        )
+        .await,
+        1
+    );
+
     // Columns the retired v20/v21 upgrades used to add are born with the table.
     assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
@@ -242,7 +317,7 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         );
     }
 
-    // The proposal projection is born at its V22 shape.
+    // The proposal projection is born with final transition-denial behavior.
     assert_eq!(
         scalar_i64(
             &conn,

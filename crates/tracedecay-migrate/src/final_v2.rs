@@ -3,13 +3,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_runtime_core::db::migrations::SCHEMA_VERSION as RUNTIME_PROJECT_SCHEMA_VERSION;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 pub const V0067_RELEASE_TAG: &str = "v0.0.67";
 pub const V0067_RELEASE_COMMIT: &str = "b3eace523cedeaa8e2d1c8d3f7a669167ec6858d";
 pub const LAST_RELEASED_SCHEMA_ID: &str = "tracedecay.release.v0.0.67";
 pub const FINAL_V2_SCHEMA_ID: &str = "tracedecay.storage.final-v2";
-pub const FINAL_PROJECT_SCHEMA_VERSION: u32 = 25;
+/// The final project-store shape is exactly the shape the runtime authority
+/// creates and accepts; aliasing the constant makes version drift between the
+/// migration contract and the store runtime structurally impossible.
+pub const FINAL_PROJECT_SCHEMA_VERSION: u32 = RUNTIME_PROJECT_SCHEMA_VERSION;
 pub const FINAL_LCM_SCHEMA_VERSION: u32 = 8;
 pub const FINAL_STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const FINAL_REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
@@ -1143,6 +1147,8 @@ pub enum MigrationContractError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection};
+    use tracedecay_runtime_core::db::migrations::{create_schema_connection, migrate_connection};
     use tracedecay_store::{
         BrainId, CodeShardScopeV1, LocatorDigest, ProjectId, RepositoryId, StoreAuthorityEpochV1,
         StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId,
@@ -1277,5 +1283,25 @@ mod tests {
             evidence.recognize_v0067(),
             Err(MigrationContractError::SourceSchemaMismatch)
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_store_is_stamped_and_admitted_at_the_final_project_schema() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let conn = TestConnection::open(&directory.path().join("graph.db"));
+        create_schema_connection(&conn).await.unwrap();
+
+        let mut rows = conn.query("PRAGMA user_version", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let stamped: i64 = row.get(0).unwrap();
+        assert_eq!(
+            stamped,
+            i64::from(FINAL_PROJECT_SCHEMA_VERSION),
+            "fresh store must be stamped with the migration contract's final project schema"
+        );
+
+        migrate_connection(&conn)
+            .await
+            .expect("fresh store at the final project schema must be admitted");
     }
 }
