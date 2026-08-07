@@ -63,6 +63,13 @@ pub(super) async fn handle_multi_root(
                 message: error.to_string(),
             })?,
     };
+    // The MCP transport injects its protocol request id for cooperative
+    // cancellation; the typed multi-root requests deny unknown fields and
+    // never consume it (the protocol id already arrives as a parameter).
+    let mut body = body;
+    if let Some(map) = body.as_object_mut() {
+        map.remove("__mcp_request_id");
+    }
     let invocation = match operation {
         MultiRootApplicationOperation::ScopeSetRead => {
             let Ok(request) = serde_json::from_value::<MultiRootScopeSetReadRequestV1>(body) else {
@@ -290,4 +297,64 @@ fn result_contract(operation: MultiRootApplicationOperation) -> Result<ResultCon
     ResultContractRef::new(schema, 1).map_err(|error| TraceDecayError::Config {
         message: error.to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::handle_multi_root;
+
+    fn problem_code(result: &crate::mcp::tools::ToolResult) -> String {
+        let text = result.value["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        payload["application"]["problem"]["code"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn transport_request_id_is_stripped_before_typed_deserialization() {
+        let body = json!({
+            "scope_set_id": "tool-sweep-scope-set.v1",
+            "__mcp_request_id": "request.mcp.fixture",
+        });
+
+        let result = handle_multi_root(
+            "tracedecay_multi_root_scope_set_read",
+            body,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The injected transport id must not fail typed deserialization; the
+        // request reaches the daemon-owner gate and reports its absence.
+        assert_eq!(problem_code(&result), "multi_root.daemon_unavailable");
+    }
+
+    #[tokio::test]
+    async fn genuinely_unknown_fields_still_reject_as_invalid_request() {
+        let body = json!({
+            "scope_set_id": "tool-sweep-scope-set.v1",
+            "unexpected_field": true,
+        });
+
+        let result = handle_multi_root(
+            "tracedecay_multi_root_scope_set_read",
+            body,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(problem_code(&result), "multi_root.invalid_request");
+    }
 }
