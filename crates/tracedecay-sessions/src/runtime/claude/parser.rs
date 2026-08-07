@@ -22,8 +22,8 @@ use super::frames::{
 };
 use super::record_metadata::{SessionAccumulator, accumulate_session_facts, session_metadata};
 use super::source_records::{
-    ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record, reasoning_from_line,
-    record_cwd, structured_marker_from_line, system_hook_message_from_line,
+    ClaudeRecordContext, ClaudeRecordDisposition, map_sanitized_claude_record_cached,
+    reasoning_from_line, record_cwd, structured_marker_from_line, system_hook_message_from_line,
 };
 use super::{ClaudeSource, PROVIDER, claude_subagent_identity};
 
@@ -65,7 +65,8 @@ pub(super) fn fold_scanned_frames(
             raw_tool_event_ids: frame.raw_tool_event_ids(),
             raw_hook_tool_use_id: frame.raw_hook_tool_use_id(),
         };
-        let mut message = match map_sanitized_claude_record(record, &context) {
+        let mut message =
+            match map_sanitized_claude_record_cached(record, &context, &source.project_matchers) {
             ClaudeRecordDisposition::Message { message, .. } => Some(*message),
             ClaudeRecordDisposition::NonConversational => {
                 let owned_native = envelope_native_content(record);
@@ -129,6 +130,7 @@ pub(super) fn fold_scanned_frames(
             sanitized_session_cwd.as_deref(),
             subagent.as_ref(),
             &accumulator,
+            Some(&source.project_matchers),
         ))
         .ok(),
         parent_session_id: subagent.as_ref().map(|info| info.parent_session_id.clone()),

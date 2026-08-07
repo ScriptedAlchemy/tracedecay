@@ -6,7 +6,8 @@ use serde_json::{Map, Value};
 use crate::host_ports::parse_timestamp;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    TranscriptLocation, append_location_metadata, append_tool_calls_metadata,
+    ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
+    append_location_metadata, append_location_metadata_cached, append_tool_calls_metadata,
     append_tool_event_metadata, append_usage_metadata, preview_truncated,
 };
 
@@ -412,20 +413,37 @@ fn render_scalar(value: &Value) -> String {
         .map_or_else(|| value.to_string(), str::to_string)
 }
 
+/// Dispatch location metadata through the source-lifetime worktree cache when
+/// the caller has one (batch transcript parses), falling back to the uncached
+/// per-call resolution for single-record paths (observation projection).
+pub(super) fn append_claude_location_metadata(
+    map: &mut Map<String, Value>,
+    keys: TranscriptLocationMetadataKeys,
+    location: TranscriptLocation<'_>,
+    worktree_cache: Option<&ProjectRootMatcherCache>,
+) {
+    match worktree_cache {
+        Some(cache) => append_location_metadata_cached(map, keys, location, cache),
+        None => append_location_metadata(map, keys, location),
+    }
+}
+
 pub(super) fn session_metadata(
     sanitized_session_cwd: Option<&Path>,
     subagent: Option<&ClaudeSubagentInfo>,
     accumulator: &SessionAccumulator,
+    worktree_cache: Option<&ProjectRootMatcherCache>,
 ) -> Value {
     let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("claude_transcript".to_string()),
     );
-    append_location_metadata(
+    append_claude_location_metadata(
         &mut metadata,
         CLAUDE_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(sanitized_session_cwd, "transcript_session"),
+        worktree_cache,
     );
 
     // Subagent spawn provenance (from the sibling agent-<id>.meta.json and the
@@ -477,6 +495,7 @@ pub(super) fn message_metadata(
     content: &Value,
     sanitized_session_cwd: Option<&Path>,
     accumulator: &mut SessionAccumulator,
+    worktree_cache: Option<&ProjectRootMatcherCache>,
 ) -> Value {
     let mut metadata = Map::new();
     metadata.insert(
@@ -490,10 +509,11 @@ pub(super) fn message_metadata(
     } else {
         (sanitized_session_cwd, "transcript_session")
     };
-    append_location_metadata(
+    append_claude_location_metadata(
         &mut metadata,
         CLAUDE_MESSAGE_LOCATION_KEYS,
         TranscriptLocation::new(location_cwd, location_provenance),
+        worktree_cache,
     );
     if let Some(branch) = record
         .get("gitBranch")

@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocationMetadataKeys,
+    TranscriptScopeMatcher,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -111,6 +112,7 @@ pub const CWD_PROBE_LINES: usize = 8;
 pub struct ClaudeSource {
     projects_dir: PathBuf,
     user_scope: Option<UserClaudeScope>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 struct UserClaudeScope {
@@ -131,6 +133,7 @@ impl ClaudeSource {
         Self {
             projects_dir: home.join(".claude").join("projects"),
             user_scope: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -208,18 +211,31 @@ impl ClaudeSource {
                     .as_ref()
                     .and_then(|info| transcript_cwd(&info.parent_transcript_path))
             });
-        let scope_matcher = TranscriptScopeMatcher::for_scope(
+        let scope_matcher = TranscriptScopeMatcher::for_scope_cached(
             project_root,
             self.user_scope
                 .as_ref()
                 .map(|scope| scope.registered_roots.as_slice()),
+            &self.project_matchers,
         );
+        // Membership is decided for every frame before any frame is retained
+        // or excluded: an `Unknown` (timed-out git identity) must defer the
+        // whole scan so no cursor or skip range is persisted for it, and the
+        // next sweep retries the identity lookup.
+        for frame in &scan.frames {
+            let record = frame.scope_value();
+            let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
+            if scope_matcher.membership(line_cwd.as_deref()) == ProjectMembership::Unknown {
+                return None;
+            }
+        }
         let mut retained = Vec::with_capacity(scan.frames.len());
         let mut excluded = Vec::new();
         for frame in scan.frames.drain(..) {
             let record = frame.scope_value();
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            let include = scope_matcher.accepts(line_cwd.as_deref());
+            let include =
+                scope_matcher.membership(line_cwd.as_deref()) == ProjectMembership::Match;
             if include {
                 retained.push(frame);
             } else {

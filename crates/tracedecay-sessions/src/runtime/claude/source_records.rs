@@ -7,7 +7,9 @@ use tracedecay_domain::{
 
 use crate::host_ports::parse_timestamp;
 use crate::runtime::SessionMessageRecord;
-use crate::runtime::shared::{content_storage_text_and_tools, preview_truncated};
+use crate::runtime::shared::{
+    ProjectRootMatcherCache, content_storage_text_and_tools, preview_truncated,
+};
 use crate::runtime::source::{RawJsonlFrame, RawJsonlFrameReader, SessionDraft};
 use tracedecay_runtime_core::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_claude_record_v1};
 
@@ -48,8 +50,27 @@ pub fn map_sanitized_claude_record(
     record: &Value,
     context: &ClaudeRecordContext<'_>,
 ) -> ClaudeRecordDisposition {
+    map_sanitized_claude_record_with(record, context, None)
+}
+
+/// [`map_sanitized_claude_record`] with cwd worktree resolution routed through
+/// a source-lifetime cache, so batch transcript parses do not re-run git
+/// discovery once per message row for the same cwd.
+pub fn map_sanitized_claude_record_cached(
+    record: &Value,
+    context: &ClaudeRecordContext<'_>,
+    worktree_cache: &ProjectRootMatcherCache,
+) -> ClaudeRecordDisposition {
+    map_sanitized_claude_record_with(record, context, Some(worktree_cache))
+}
+
+fn map_sanitized_claude_record_with(
+    record: &Value,
+    context: &ClaudeRecordContext<'_>,
+    worktree_cache: Option<&ProjectRootMatcherCache>,
+) -> ClaudeRecordDisposition {
     if let Ok(envelope) = serde_json::from_value::<CanonicalObservationEnvelopeV1>(record.clone()) {
-        return map_canonical_claude_record(&envelope, context);
+        return map_canonical_claude_record(&envelope, context, worktree_cache);
     }
     let Ok(offset) = i64::try_from(context.offset) else {
         return ClaudeRecordDisposition::NonConversational;
@@ -66,6 +87,7 @@ pub fn map_sanitized_claude_record(
         offset,
         context.session_cwd,
         &mut accumulator,
+        worktree_cache,
     ) else {
         return ClaudeRecordDisposition::NonConversational;
     };
@@ -195,6 +217,7 @@ pub(super) fn message_from_line(
     offset: i64,
     session_cwd: Option<&Path>,
     accumulator: &mut SessionAccumulator,
+    worktree_cache: Option<&ProjectRootMatcherCache>,
 ) -> Option<SessionMessageRecord> {
     let kind = record.get("type").and_then(Value::as_str)?;
     if kind != "user" && kind != "assistant" {
@@ -268,6 +291,7 @@ pub(super) fn message_from_line(
             content,
             session_cwd,
             accumulator,
+            worktree_cache,
         ))
         .ok(),
     })

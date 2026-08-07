@@ -250,6 +250,7 @@ fn subagent_provider_metadata_is_sanitized_before_persistence() {
         None,
         Some(&info),
         &SessionAccumulator::default(),
+        None,
     ))
     .unwrap();
 
@@ -496,7 +497,7 @@ fn thinking_blocks_are_split_from_the_visible_message_row() {
     let path = Path::new("/tmp/sess.jsonl");
 
     let mut accumulator = SessionAccumulator::default();
-    let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator)
+    let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator, None)
         .expect("assistant message row");
     assert_eq!(message.message_id, "msg_1");
     assert_eq!(message.kind.as_deref(), Some("message"));
@@ -993,4 +994,123 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
     )));
     let rendered = serde_json::to_string(parsed.value()).unwrap();
     assert!(!rendered.contains("\"type\":\"tool_use\""));
+}
+
+static UNKNOWN_PATH_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn retrying_identity(
+    path: &Path,
+) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
+    use std::sync::atomic::Ordering;
+    let root = path
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+        .unwrap_or(path);
+    if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
+        return tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown;
+    }
+    tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Resolved(
+        tracedecay_runtime_core::worktree::GitRepoIdentity {
+            worktree_root: root.to_path_buf(),
+            common_dir: root.join(".git"),
+        },
+    )
+}
+
+#[test]
+fn claude_message_metadata_reuses_worktree_for_repeated_cwd() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let project_root = temp.path().join("repo");
+    let nested_cwd = project_root.join("packages/app");
+    std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&project_root)
+        .status()
+        .expect("git init");
+    assert!(status.success());
+
+    let cache = crate::runtime::shared::ProjectRootMatcherCache::default();
+    let record = json!({
+        "type": "user",
+        "sessionId": "sess",
+        "cwd": nested_cwd,
+        "message": {"role": "user", "content": "hello"}
+    });
+    let path = Path::new("/tmp/sess.jsonl");
+
+    let mut accumulator = SessionAccumulator::default();
+    let first = message_from_line(
+        &record,
+        "sess",
+        path,
+        10,
+        Some(&nested_cwd),
+        &mut accumulator,
+        Some(&cache),
+    )
+    .expect("first message");
+    let first_metadata: serde_json::Value =
+        serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
+    let first_worktree = first_metadata["claude_message_worktree"].clone();
+    assert!(first_worktree.is_string());
+
+    std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
+        .expect("hide git metadata after first lookup");
+
+    let second = message_from_line(
+        &record,
+        "sess",
+        path,
+        20,
+        Some(&nested_cwd),
+        &mut accumulator,
+        Some(&cache),
+    )
+    .expect("second message");
+    let second_metadata: serde_json::Value =
+        serde_json::from_str(second.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(second_metadata["claude_message_worktree"], first_worktree);
+}
+
+#[test]
+fn claude_unknown_membership_retries_without_advancing_cursor() {
+    use std::sync::atomic::Ordering;
+    UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let project_root = temp.path().join("repo");
+    let nested_cwd = project_root.join("packages/app");
+    std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+    let transcript = temp.path().join("retry.jsonl");
+    std::fs::write(
+        &transcript,
+        format!(
+            "{}\n",
+            json!({
+                "type": "user",
+                "sessionId": "retry",
+                "cwd": nested_cwd,
+                "message": {"role": "user", "content": "retry me"}
+            })
+        ),
+    )
+    .expect("write transcript");
+    let mut source = ClaudeSource::with_home(temp.path());
+    source.project_matchers =
+        crate::runtime::shared::ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
+
+    let previous = StoredCursor::default();
+    assert!(
+        source
+            .parse_new(&transcript, previous, &project_root, None)
+            .is_none(),
+        "unknown membership must abort before a new cursor can be persisted"
+    );
+
+    let retried = source
+        .parse_new(&transcript, previous, &project_root, None)
+        .expect("unknown membership must be resolved again on retry");
+    assert_eq!(retried.messages.len(), 1);
+    assert!(retried.new_cursor.position > previous.position);
+    assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
 }

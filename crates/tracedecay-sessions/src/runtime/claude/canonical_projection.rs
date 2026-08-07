@@ -8,12 +8,13 @@ use tracedecay_domain::{
 
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    TranscriptLocation, append_location_metadata, content_storage_text_and_tools,
+    ProjectRootMatcherCache, TranscriptLocation, content_storage_text_and_tools,
 };
 use crate::runtime::source::SessionDraft;
 
 use super::record_metadata::{
-    SessionAccumulator, append_git_operation_metadata, model_fallback_row, pr_link_row,
+    SessionAccumulator, append_claude_location_metadata, append_git_operation_metadata,
+    model_fallback_row, pr_link_row,
 };
 use super::source_records::{
     ClaudeRecordContext, ClaudeRecordDisposition, retain_unchanged_tool_event_ids,
@@ -24,6 +25,7 @@ use super::{CLAUDE_MESSAGE_LOCATION_KEYS, PROVIDER};
 pub(super) fn map_canonical_claude_record(
     envelope: &CanonicalObservationEnvelopeV1,
     context: &ClaudeRecordContext<'_>,
+    worktree_cache: Option<&ProjectRootMatcherCache>,
 ) -> ClaudeRecordDisposition {
     if envelope.validate().is_err() {
         return ClaudeRecordDisposition::NonConversational;
@@ -152,7 +154,7 @@ pub(super) fn map_canonical_claude_record(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let mut metadata = canonical_message_metadata_from_facts(envelope, context);
+    let mut metadata = canonical_message_metadata_from_facts(envelope, context, worktree_cache);
     metadata.insert(
         "source_generation".to_string(),
         Value::from(context.file_generation),
@@ -243,6 +245,7 @@ fn map_canonical_marker_row(
 fn canonical_message_metadata_from_facts(
     envelope: &CanonicalObservationEnvelopeV1,
     context: &ClaudeRecordContext<'_>,
+    worktree_cache: Option<&ProjectRootMatcherCache>,
 ) -> Map<String, Value> {
     let mut metadata = Map::new();
     metadata.insert(
@@ -278,10 +281,11 @@ fn canonical_message_metadata_from_facts(
     } else {
         "transcript_session"
     };
-    append_location_metadata(
+    append_claude_location_metadata(
         &mut metadata,
         CLAUDE_MESSAGE_LOCATION_KEYS,
         TranscriptLocation::new(location_cwd.as_deref(), location_provenance),
+        worktree_cache,
     );
 
     let mut tool_events = Vec::new();
