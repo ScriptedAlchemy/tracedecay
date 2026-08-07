@@ -25,7 +25,9 @@ async fn wait_for_project_server_retirement(mut completion: tokio::sync::watch::
 }
 
 impl StoreAdministration {
-    pub(super) async fn track_project_server_retirement(
+    // pub(crate): project_server_lifecycle registers retirements from outside
+    // branch_admin when a project server shuts down.
+    pub(crate) async fn track_project_server_retirement(
         &self,
         owner: StoreOwnerKey,
         task: tokio::task::JoinHandle<()>,
