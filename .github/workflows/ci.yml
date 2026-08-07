@@ -550,3 +550,47 @@ jobs:
           TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
           HERMES_UPSTREAM_DIR: ${{ runner.temp }}/hermes-upstream
         run: scripts/hermes_stock_integration.sh
+
+  host-stock-integration:
+    name: Claude Code + OpenCode integration (stock)
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Stock host pins — the installed bundle must keep working against these
+      # exact host releases. Bump deliberately after rerunning
+      # scripts/claude_stock_integration.sh and
+      # scripts/opencode_stock_integration.sh against the new versions locally.
+      CLAUDE_CODE_VERSION: 2.1.224
+      OPENCODE_VERSION: 1.18.4
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-host-stock-integration-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Build tracedecay binary
+        run: cargo build --bin tracedecay --locked
+
+      - name: Install stock Claude Code and OpenCode at pinned versions
+        run: |
+          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
+          claude --version
+          opencode --version
+
+      - name: Run stock Claude Code integration checks
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/claude_stock_integration.sh
+
+      - name: Run stock OpenCode integration checks
+        env:
+          TRACEDECAY_BIN: ${{ github.workspace }}/target/debug/tracedecay
+        run: scripts/opencode_stock_integration.sh
