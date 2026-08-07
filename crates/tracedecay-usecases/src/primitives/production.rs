@@ -1571,10 +1571,20 @@ impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
     }
 }
 
+/// Derives symbol-graph cursor snapshots from the code index's *current*
+/// published generation.
+///
+/// The generation is resolved per call rather than captured when the runtime
+/// mounts. A cached watermark would give two different graph states one cursor
+/// identity, so a cursor minted before a publication would keep verifying
+/// against the rows that replaced it — the page-set would change underneath the
+/// caller with nothing in the answer saying so.
 pub struct ProjectSymbolGraphCursorSnapshotAuthority {
     key: SignedCursorKeyRefV1,
     configuration_digest: ManifestDigest,
-    watermark: u64,
+    project_root: PathBuf,
+    scope: ResolvedScope,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
 }
 
 fn symbol_graph_snapshot_failure(
@@ -1590,85 +1600,143 @@ fn symbol_graph_snapshot_failure(
 }
 
 impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuthority {
-    fn snapshot(
-        &self,
-        context: &RequestContext,
-        lane: &str,
+    fn snapshot<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
         _observed_at: UtcMicros,
-    ) -> Result<TemporalExecutionSnapshot, tracedecay_application::retrieval::PrimitiveFailure>
-    {
-        // The snapshot identity is what a cursor is verified against on the
-        // next request, so it is derived from the authorization and lane that
-        // must still hold at resume time. A per-request correlation id would
-        // both fail the digest binding and make every resume a different
-        // request.
-        let request_digest = canonical_sha256(&(
-            "tracedecay.symbol-graph.cursor.v1",
-            context.actor(),
-            context.grant().revision,
-            &context.grant().digest,
-            &context.grant().issuer,
-            &context.grant().allowed_capabilities,
-            &context.grant().allowed_use_cases,
-            context.grant().disclosure,
-            lane,
-        ))
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.request",
-                "could not derive the symbol-graph cursor request digest",
-            )
-        })?;
-        let request = TemporalSnapshotRequest::new(
-            SessionId::new("session.daemon.primitive").map_err(|_| {
-                symbol_graph_snapshot_failure(
-                    "application.symbol-graph.session",
-                    "could not mint primitive session id",
-                )
-            })?,
-            context.scope().scope_digest.as_str(),
-            request_digest.as_str(),
-            context.grant().digest.as_str(),
-            TemporalModeV1::Current,
-            RetrievalGrainV1::Occurrence,
-        )
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.snapshot",
-                "could not build temporal snapshot request",
-            )
-        })?;
-        TemporalExecutionSnapshot::new_authorized(
-            request,
-            TemporalWatermarks {
-                generation: 1,
-                source: self.watermark,
-                projection: self.watermark,
-                index: self.watermark,
-                summary: self.watermark,
-            },
-            KernelVersions {
-                schema: 1,
-                ranking: 1,
-                configuration_digest: BindingDigest::new(
-                    "configuration_digest",
-                    self.configuration_digest.as_str(),
-                )
+    ) -> super::concrete::SymbolGraphCursorSnapshotFuture<'a> {
+        Box::pin(async move {
+            let graph_identity = self
+                .code_index
+                .current_identity(self.project_root.clone(), None)
+                .await
                 .map_err(|_| {
                     symbol_graph_snapshot_failure(
-                        "application.symbol-graph.configuration",
-                        "invalid configuration digest",
+                        "application.symbol-graph.identity",
+                        "could not read the current symbol-graph identity",
+                    )
+                })?
+                .admit_for_scope(&self.scope)
+                .map_err(|_| {
+                    symbol_graph_snapshot_failure(
+                        "application.symbol-graph.scope",
+                        "the current symbol-graph identity did not match the admitted scope",
+                    )
+                })?;
+            // Every component of the published generation's address folds into
+            // the identity, so any republication — even one that leaves the
+            // generation sequence alone — produces a different snapshot and
+            // therefore refuses cursors minted before it.
+            //
+            // Where each part is bound decides how a refusal is *typed*, and
+            // the cursor codec checks the request binding before the
+            // watermarks. Binding the generation into the request digest would
+            // therefore report an ordinary publication as a wrong request —
+            // indistinguishable from a forged cursor — so the generation rides
+            // the watermarks (a mismatch there is already typed stale) and only
+            // the finer content digests ride the configuration binding, which
+            // is checked last and so speaks only for a republication that left
+            // the generation sequence unmoved.
+            let graph_snapshot_digest = canonical_sha256(&(
+                "tracedecay.symbol-graph.snapshot.v1",
+                graph_identity.head_commit_id.as_str(),
+                graph_identity.code_generation_id.as_str(),
+                graph_identity.snapshot_digest.as_str(),
+                graph_identity.invalidation_digest.as_str(),
+                graph_identity.snapshot_content_digest.as_str(),
+            ))
+            .map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.identity",
+                    "could not derive the current symbol-graph snapshot digest",
+                )
+            })?;
+            // The snapshot identity is what a cursor is verified against on the
+            // next request, so it is derived from the authorization and lane that
+            // must still hold at resume time. A per-request correlation id would
+            // both fail the digest binding and make every resume a different
+            // request.
+            let request_digest = canonical_sha256(&(
+                "tracedecay.symbol-graph.cursor.v1",
+                context.actor(),
+                context.grant().revision,
+                &context.grant().digest,
+                &context.grant().issuer,
+                &context.grant().allowed_capabilities,
+                &context.grant().allowed_use_cases,
+                context.grant().disclosure,
+                lane,
+            ))
+            .map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.request",
+                    "could not derive the symbol-graph cursor request digest",
+                )
+            })?;
+            let request = TemporalSnapshotRequest::new(
+                SessionId::new("session.daemon.primitive").map_err(|_| {
+                    symbol_graph_snapshot_failure(
+                        "application.symbol-graph.session",
+                        "could not mint primitive session id",
                     )
                 })?,
-            },
-            Some(self.key.clone()),
-            ValidatedAuthorization::Authorized,
-        )
-        .map_err(|_| {
-            symbol_graph_snapshot_failure(
-                "application.symbol-graph.snapshot",
-                "could not authorize temporal snapshot",
+                context.scope().scope_digest.as_str(),
+                request_digest.as_str(),
+                context.grant().digest.as_str(),
+                TemporalModeV1::Current,
+                RetrievalGrainV1::Occurrence,
             )
+            .map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.snapshot",
+                    "could not build temporal snapshot request",
+                )
+            })?;
+            let watermark = graph_identity.generation.max(1);
+            TemporalExecutionSnapshot::new_authorized(
+                request,
+                TemporalWatermarks {
+                    generation: 1,
+                    source: watermark,
+                    projection: watermark,
+                    index: watermark,
+                    summary: watermark,
+                },
+                KernelVersions {
+                    schema: 1,
+                    ranking: 1,
+                    configuration_digest: BindingDigest::new(
+                        "configuration_digest",
+                        canonical_sha256(&(
+                            "tracedecay.symbol-graph.cursor-configuration.v1",
+                            self.configuration_digest.as_str(),
+                            graph_snapshot_digest.as_str(),
+                        ))
+                        .map_err(|_| {
+                            symbol_graph_snapshot_failure(
+                                "application.symbol-graph.configuration",
+                                "could not bind the symbol-graph snapshot configuration",
+                            )
+                        })?
+                        .as_str(),
+                    )
+                    .map_err(|_| {
+                        symbol_graph_snapshot_failure(
+                            "application.symbol-graph.configuration",
+                            "invalid configuration digest",
+                        )
+                    })?,
+                },
+                Some(self.key.clone()),
+                ValidatedAuthorization::Authorized,
+            )
+            .map_err(|_| {
+                symbol_graph_snapshot_failure(
+                    "application.symbol-graph.snapshot",
+                    "could not authorize temporal snapshot",
+                )
+            })
         })
     }
 }
@@ -2185,22 +2253,17 @@ pub async fn open_production_primitive_runtime(
                 field: "application primitive session cursor authenticator",
             })?,
     );
-    // The watermark is part of every symbol-graph cursor's snapshot identity.
-    // Substituting a plausible count for a failed read would make two
-    // different graph states share one identity, so an unreadable store
-    // refuses to open the runtime rather than mint ambiguous cursors.
-    let watermark = graph
-        .get_stats()
-        .await
-        .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "application primitive symbol-graph cursor watermark",
-        })?
-        .node_count
-        .max(1);
+    // The published generation is part of every symbol-graph cursor's snapshot
+    // identity, and it is read per request rather than captured here: a value
+    // frozen at mount would let two different graph states share one cursor
+    // identity, which is precisely the silent page-set change cursors exist to
+    // rule out.
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
         key: key.clone(),
         configuration_digest: configuration_digest.clone(),
-        watermark,
+        project_root: project_root.clone(),
+        scope: scope.clone(),
+        code_index: Arc::clone(&code_index),
     });
     let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
         AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
@@ -2687,12 +2750,93 @@ mod affected_tests_tests {
         .expect("context")
     }
 
+    /// Stands in for the daemon-owned code index, publishing whichever
+    /// generation the test has most recently made current.
+    struct PublishedCodeIndexIdentity {
+        scope: ResolvedScope,
+        published: Mutex<(CodeGenerationId, ManifestDigest)>,
+    }
+
+    impl PublishedCodeIndexIdentity {
+        fn publish(&self, generation: &str, snapshot: char) {
+            *self.published.lock().expect("published") = (
+                CodeGenerationId::new(generation).expect("generation"),
+                digest(snapshot),
+            );
+        }
+    }
+
+    impl LspCodeIndexProjectionIdentityPort for PublishedCodeIndexIdentity {
+        fn current_identity(
+            &self,
+            _project_root: PathBuf,
+            _document_relative_path: Option<String>,
+        ) -> tracedecay_lsp::LspRuntimeFuture<
+            Result<
+                crate::lsp_runtime::LspCodeIndexProjectionIdentity,
+                tracedecay_lsp::LspRuntimeFailure,
+            >,
+        > {
+            let (code_generation_id, snapshot_digest) =
+                self.published.lock().expect("published").clone();
+            let identity = crate::lsp_runtime::LspCodeIndexProjectionIdentity {
+                project: self.scope.project_id.clone(),
+                repository: self.scope.repository_id.clone(),
+                worktree: Some(self.scope.worktree_id.clone()),
+                reference: self.scope.reference.clone(),
+                source_revision: Some(
+                    tracedecay_domain::CommitId::new("a".repeat(40)).expect("commit"),
+                ),
+                code_generation_id,
+                snapshot_digest,
+                invalidation_digest: digest('e'),
+                snapshot_content_digest: content('f'),
+                document_content_digest: None,
+            };
+            Box::pin(async move { Ok(identity) })
+        }
+    }
+
+    fn symbol_graph_scope() -> ResolvedScope {
+        ResolvedScope::new(
+            ProjectId::new("project.symbol-graph").expect("project"),
+            RepositoryId::new("repository.symbol-graph").expect("repository"),
+            WorktreeId::new("worktree.symbol-graph").expect("worktree"),
+            Some(RefId::new("refs/heads/symbol-graph").expect("reference")),
+        )
+        .expect("scope")
+    }
+
+    fn symbol_graph_cursor_authority(
+        key: SignedCursorKeyRefV1,
+    ) -> (
+        Arc<PublishedCodeIndexIdentity>,
+        ProjectSymbolGraphCursorSnapshotAuthority,
+    ) {
+        let scope = symbol_graph_scope();
+        let code_index = Arc::new(PublishedCodeIndexIdentity {
+            scope: scope.clone(),
+            published: Mutex::new((
+                CodeGenerationId::new("generation.symbol-graph.code.11").expect("generation"),
+                digest('d'),
+            )),
+        });
+        let authority = ProjectSymbolGraphCursorSnapshotAuthority {
+            key,
+            configuration_digest: digest('c'),
+            project_root: PathBuf::from("/symbol-graph"),
+            scope,
+            code_index: Arc::clone(&code_index) as Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        };
+        (code_index, authority)
+    }
+
     /// Production never mints a `sha256:`-prefixed request id, so a snapshot
     /// bound to one could not be built, and a snapshot bound to the
     /// correlation id could never be resumed by the next request. Both
     /// contexts here carry ids minted by the real production surfaces.
-    #[test]
-    fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
+    #[tokio::test]
+    async fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
         let key = SignedCursorKeyRefV1 {
             key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key"),
             version: SessionCursorVersionV1::new(1).expect("version"),
@@ -2700,14 +2844,9 @@ mod affected_tests_tests {
         let authenticator = Arc::new(
             InMemoryCursorAuthenticator::new(key.clone(), vec![9_u8; 32]).expect("authenticator"),
         );
-        let adapter = AuthenticatedSymbolGraphCursorAdapter::new(
-            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
-                key,
-                configuration_digest: digest('c'),
-                watermark: 11,
-            }),
-            authenticator,
-        );
+        let (_code_index, snapshots) = symbol_graph_cursor_authority(key);
+        let adapter =
+            AuthenticatedSymbolGraphCursorAdapter::new(Arc::new(snapshots), authenticator);
 
         let issuing = symbol_graph_context(
             crate::request_identity::mcp_connection_request_id(
@@ -2729,20 +2868,95 @@ mod affected_tests_tests {
         );
 
         let observed_at = now_observed();
+        let claim = adapter
+            .claim_page(&issuing, "search", None, observed_at)
+            .await
+            .expect("a production request must be able to claim a page");
         let cursor = adapter
-            .issue_cursor(&issuing, "search", 3, 8, observed_at)
-            .expect("a production request must be able to issue a page cursor");
+            .finish_page(&issuing, "search", &claim, 3, 8, true, observed_at)
+            .await
+            .expect("a production request must be able to issue a page cursor")
+            .expect("a page with more to serve mints a continuation");
         assert_eq!(
             adapter
-                .resume_offset(&resuming, "search", &cursor, observed_at)
-                .expect("the next production request must resume the page"),
+                .claim_page(&resuming, "search", Some(&cursor), observed_at)
+                .await
+                .expect("the next production request must resume the page")
+                .offset(),
             3
         );
         assert!(
             adapter
-                .resume_offset(&resuming, "callers", &cursor, observed_at)
+                .claim_page(&resuming, "callers", Some(&cursor), observed_at)
+                .await
                 .is_err(),
             "a cursor must not resume into another lane"
+        );
+    }
+
+    /// The whole point of resolving the generation per request: once the code
+    /// index publishes a new generation, a cursor minted under the old one is
+    /// refused rather than quietly indexing into the replacement's rows.
+    #[tokio::test]
+    async fn a_cursor_minted_before_a_publication_does_not_resume_after_it() {
+        let key = SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key"),
+            version: SessionCursorVersionV1::new(1).expect("version"),
+        };
+        let authenticator = Arc::new(
+            InMemoryCursorAuthenticator::new(key.clone(), vec![9_u8; 32]).expect("authenticator"),
+        );
+        let (code_index, snapshots) = symbol_graph_cursor_authority(key);
+        let adapter =
+            AuthenticatedSymbolGraphCursorAdapter::new(Arc::new(snapshots), authenticator);
+        let context = symbol_graph_context(
+            crate::request_identity::mint_global_request_id(
+                crate::request_identity::GlobalRequestSurface::McpFallback,
+            )
+            .expect("mcp fallback request id"),
+        );
+
+        let observed_at = now_observed();
+        let claim = adapter
+            .claim_page(&context, "search", None, observed_at)
+            .await
+            .expect("claim page");
+        let cursor = adapter
+            .finish_page(&context, "search", &claim, 3, 8, true, observed_at)
+            .await
+            .expect("finish page")
+            .expect("continuation");
+        assert_eq!(
+            adapter
+                .claim_page(&context, "search", Some(&cursor), observed_at)
+                .await
+                .expect("the unchanged generation still resumes")
+                .offset(),
+            3
+        );
+
+        code_index.publish("generation.symbol-graph.code.12", 'd');
+        let failure = adapter
+            .claim_page(&context, "search", Some(&cursor), observed_at)
+            .await
+            .expect_err("a superseded generation must refuse the cursor");
+        assert_eq!(
+            failure.kind,
+            tracedecay_application::retrieval::PrimitiveFailureKind::Stale,
+            "a cursor from a superseded generation is stale, not a different page"
+        );
+
+        // A re-index of the same commit republishes under the same generation
+        // sequence with different content. The rows behind the cursor are still
+        // gone, so the cursor must still be refused — the sequence is not the
+        // whole identity.
+        code_index.publish("generation.symbol-graph.code.11", '9');
+        assert!(
+            adapter
+                .claim_page(&context, "search", Some(&cursor), observed_at)
+                .await
+                .is_err(),
+            "a republication at the same sequence must not serve the old page-set"
         );
     }
 

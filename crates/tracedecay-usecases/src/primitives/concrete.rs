@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_application::retrieval::{
@@ -11,7 +13,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::UtcMicros;
 
-use super::symbol_graph::SymbolGraphCursorPort;
+use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
 use crate::context::read_modes::{LineRange, ReadMode};
 use crate::context::source_read::{SourceReadRequest, read_source};
 use crate::tracedecay::TraceDecay;
@@ -122,13 +124,20 @@ fn source_read_failed(observed_at: UtcMicros) -> SourceReadPortOutcome {
 /// Supplies the existing query snapshot identity used by the authenticated
 /// temporal cursor codec. Implementations must derive the snapshot from the
 /// current request scope, grant/access binding, lane, and graph watermark.
+pub type SymbolGraphCursorSnapshotFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<TemporalExecutionSnapshot, PrimitiveFailure>> + Send + 'a>>;
+
 pub trait SymbolGraphCursorSnapshotAuthority: Send + Sync {
-    fn snapshot(
-        &self,
-        context: &RequestContext,
-        lane: &str,
+    /// Reads the identity that is live *now*. Resolving the current generation
+    /// is an authority read rather than a cached field, so the returned
+    /// snapshot changes the moment the code index publishes a new generation —
+    /// which is what makes a cursor minted under the old one refuse to verify.
+    fn snapshot<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
         observed_at: UtcMicros,
-    ) -> Result<TemporalExecutionSnapshot, PrimitiveFailure>;
+    ) -> SymbolGraphCursorSnapshotFuture<'a>;
 }
 
 /// Bridges symbol-graph paging to the existing authenticated query cursor.
@@ -155,54 +164,92 @@ where
     S: SymbolGraphCursorSnapshotAuthority + ?Sized,
     A: SessionCursorAuthenticator + Send + Sync + ?Sized,
 {
-    fn resume_offset(
-        &self,
-        context: &RequestContext,
-        lane: &str,
-        cursor: &OpaqueCursor,
+    fn claim_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        cursor: Option<&'a OpaqueCursor>,
         observed_at: UtcMicros,
-    ) -> Result<usize, PrimitiveFailure> {
-        reauthorize_cursor_context(context, observed_at)?;
-        let snapshot = self.snapshots.snapshot(context, lane, observed_at)?;
-        validate_cursor_snapshot(context, &snapshot)?;
-        let sort_key = verify_cursor(cursor.as_str(), &snapshot, self.authenticator.as_ref())
-            .map_err(cursor_verification_failure)?;
-        if sort_key.stable_id != lane
-            || sort_key.normalized_score_micros
-                > u64::try_from(sort_key.knowledge_at_micros).unwrap_or_default()
-        {
-            return Err(invalid_cursor());
-        }
-        usize::try_from(sort_key.normalized_score_micros).map_err(|_| invalid_cursor())
+    ) -> SymbolGraphCursorFuture<'a, SymbolGraphPageClaim> {
+        Box::pin(async move {
+            reauthorize_cursor_context(context, observed_at)?;
+            let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
+            validate_cursor_snapshot(context, &snapshot)?;
+            let offset = match cursor {
+                // Verification is against the snapshot just read, so a cursor
+                // minted under a superseded generation cannot resolve to an
+                // offset here at all: it fails as stale rather than silently
+                // indexing into a different generation's result set.
+                Some(cursor) => {
+                    let sort_key =
+                        verify_cursor(cursor.as_str(), &snapshot, self.authenticator.as_ref())
+                            .map_err(cursor_verification_failure)?;
+                    if sort_key.stable_id != lane
+                        || sort_key.normalized_score_micros
+                            > u64::try_from(sort_key.knowledge_at_micros).unwrap_or_default()
+                    {
+                        return Err(invalid_cursor());
+                    }
+                    usize::try_from(sort_key.normalized_score_micros)
+                        .map_err(|_| invalid_cursor())?
+                }
+                None => 0,
+            };
+            Ok(SymbolGraphPageClaim { snapshot, offset })
+        })
     }
 
-    fn issue_cursor(
-        &self,
-        context: &RequestContext,
-        lane: &str,
+    fn finish_page<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        lane: &'a str,
+        claim: &'a SymbolGraphPageClaim,
         next_offset: usize,
         total: usize,
+        has_more: bool,
         observed_at: UtcMicros,
-    ) -> Result<OpaqueCursor, PrimitiveFailure> {
-        reauthorize_cursor_context(context, observed_at)?;
-        if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
-            return Err(invalid_cursor());
-        }
-        let snapshot = self.snapshots.snapshot(context, lane, observed_at)?;
-        validate_cursor_snapshot(context, &snapshot)?;
-        let sort_key = StableSortKey {
-            normalized_score_micros: u64::try_from(next_offset).map_err(|_| invalid_cursor())?,
-            knowledge_at_micros: i64::try_from(total).map_err(|_| invalid_cursor())?,
-            stable_id: lane.to_owned(),
-        };
-        let encoded = encode_cursor(&snapshot, &sort_key, self.authenticator.as_ref())
-            .map_err(cursor_issue_failure)?;
-        OpaqueCursor::new(encoded).map_err(|_| {
-            primitive_failure(
-                PrimitiveFailureKind::Unavailable,
-                "application.symbol-graph.cursor-too-large",
-                "the authenticated cursor exceeded the application cursor bound",
-            )
+    ) -> SymbolGraphCursorFuture<'a, Option<OpaqueCursor>> {
+        Box::pin(async move {
+            reauthorize_cursor_context(context, observed_at)?;
+            if next_offset > total || lane.is_empty() || lane.chars().any(char::is_control) {
+                return Err(invalid_cursor());
+            }
+            let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
+            validate_cursor_snapshot(context, &snapshot)?;
+            // The rows were gathered against `claim.snapshot`. If the live
+            // identity has moved since, the page in hand belongs to a
+            // generation that is no longer being served, so the caller is told
+            // it is stale instead of being handed a page-set that silently
+            // spans two generations.
+            if snapshot != claim.snapshot {
+                return Err(primitive_failure(
+                    PrimitiveFailureKind::Stale,
+                    "application.symbol-graph.generation-changed",
+                    "the symbol-graph generation changed while the page was read",
+                ));
+            }
+            if !has_more {
+                return Ok(None);
+            }
+            let sort_key = StableSortKey {
+                normalized_score_micros: u64::try_from(next_offset)
+                    .map_err(|_| invalid_cursor())?,
+                knowledge_at_micros: i64::try_from(total).map_err(|_| invalid_cursor())?,
+                stable_id: lane.to_owned(),
+            };
+            // Minted against the claim rather than the freshly read snapshot:
+            // the continuation names the generation the page-set came from.
+            let encoded = encode_cursor(&claim.snapshot, &sort_key, self.authenticator.as_ref())
+                .map_err(cursor_issue_failure)?;
+            OpaqueCursor::new(encoded)
+                .map_err(|_| {
+                    primitive_failure(
+                        PrimitiveFailureKind::Unavailable,
+                        "application.symbol-graph.cursor-too-large",
+                        "the authenticated cursor exceeded the application cursor bound",
+                    )
+                })
+                .map(Some)
         })
     }
 }
@@ -322,6 +369,7 @@ mod tests {
 
     use super::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
     use crate::primitives::SymbolGraphCursorPort;
+    use tracedecay_application::retrieval::PrimitiveFailureKind;
     use tracedecay_temporal_query::ports::{
         BindingDigest, InMemoryCursorAuthenticator, KernelVersions, TemporalExecutionSnapshot,
         TemporalSnapshotRequest, TemporalWatermarks,
@@ -335,19 +383,46 @@ mod tests {
     }
 
     impl SymbolGraphCursorSnapshotAuthority for FixedSnapshotAuthority {
-        fn snapshot(
-            &self,
-            _context: &RequestContext,
-            _lane: &str,
+        fn snapshot<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _lane: &'a str,
             _observed_at: UtcMicros,
-        ) -> Result<TemporalExecutionSnapshot, tracedecay_application::retrieval::PrimitiveFailure>
-        {
-            Ok(self.snapshot.clone())
+        ) -> super::SymbolGraphCursorSnapshotFuture<'a> {
+            let snapshot = self.snapshot.clone();
+            Box::pin(async move { Ok(snapshot) })
         }
     }
 
-    #[test]
-    fn authenticated_cursor_rechecks_query_snapshot_bindings() {
+    /// A generation that advances between the claim and the page's completion.
+    /// The first read reports the generation the rows were gathered under; every
+    /// later read reports its successor, which is exactly the shape of a
+    /// publication landing mid-request.
+    struct AdvancingSnapshotAuthority {
+        claimed: TemporalExecutionSnapshot,
+        superseded: TemporalExecutionSnapshot,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SymbolGraphCursorSnapshotAuthority for AdvancingSnapshotAuthority {
+        fn snapshot<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _lane: &'a str,
+            _observed_at: UtcMicros,
+        ) -> super::SymbolGraphCursorSnapshotFuture<'a> {
+            let first = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let snapshot = if first {
+                self.claimed.clone()
+            } else {
+                self.superseded.clone()
+            };
+            Box::pin(async move { Ok(snapshot) })
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_cursor_rechecks_query_snapshot_bindings() {
         let (scope, context, _) = application_context("symbol-graph");
         let key = SignedCursorKeyRefV1 {
             key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key id"),
@@ -365,14 +440,31 @@ mod tests {
             Arc::clone(&authenticator),
         );
 
+        let claim = adapter
+            .claim_page(&context, "search", None, NOW)
+            .await
+            .expect("claim page");
+        assert_eq!(claim.offset(), 0, "a first page starts at the beginning");
         let cursor = adapter
-            .issue_cursor(&context, "search", 3, 8, NOW)
-            .expect("issue cursor");
+            .finish_page(&context, "search", &claim, 3, 8, true, NOW)
+            .await
+            .expect("finish page")
+            .expect("a page with more to serve mints a continuation");
         assert_eq!(
             adapter
-                .resume_offset(&context, "search", &cursor, NOW)
-                .expect("resume cursor"),
+                .claim_page(&context, "search", Some(&cursor), NOW)
+                .await
+                .expect("resume cursor")
+                .offset(),
             3
+        );
+        assert!(
+            adapter
+                .finish_page(&context, "search", &claim, 8, 8, false, NOW)
+                .await
+                .expect("finish page")
+                .is_none(),
+            "an exhausted page must not mint a continuation"
         );
 
         let changed_snapshots = FixedSnapshotAuthority {
@@ -392,16 +484,53 @@ mod tests {
         );
         assert!(
             changed
-                .resume_offset(&context, "search", &cursor, NOW)
+                .claim_page(&context, "search", Some(&cursor), NOW)
+                .await
                 .is_err()
         );
         let (_, other_context, _) =
             application_context_for_project("symbol-graph", "project.retrieval-primitives.other");
         assert!(
             adapter
-                .resume_offset(&other_context, "search", &cursor, NOW)
+                .claim_page(&other_context, "search", Some(&cursor), NOW)
+                .await
                 .is_err()
         );
+    }
+
+    /// A page whose generation is superseded after the claim but before the
+    /// page completes must be refused as stale. Serving it would hand back rows
+    /// from one generation under a continuation naming another, which is the
+    /// silently-different page-set this two-phase claim exists to prevent.
+    #[tokio::test]
+    async fn a_page_whose_generation_moved_mid_read_is_stale_not_served() {
+        let (scope, context, _) = application_context("symbol-graph");
+        let key = SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key id"),
+            version: SessionCursorVersionV1::new(1).expect("key version"),
+        };
+        let authenticator = Arc::new(
+            InMemoryCursorAuthenticator::new(key.clone(), vec![7_u8; 32]).expect("authenticator"),
+        );
+        let adapter = AuthenticatedSymbolGraphCursorAdapter::new(
+            Arc::new(AdvancingSnapshotAuthority {
+                claimed: cursor_snapshot(&scope, &context, key.clone(), 11),
+                superseded: cursor_snapshot(&scope, &context, key, 12),
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            authenticator,
+        );
+
+        let claim = adapter
+            .claim_page(&context, "search", None, NOW)
+            .await
+            .expect("claim page");
+        let failure = adapter
+            .finish_page(&context, "search", &claim, 3, 8, true, NOW)
+            .await
+            .expect_err("a superseded generation must refuse the page");
+        assert_eq!(failure.kind, PrimitiveFailureKind::Stale);
+        assert_eq!(failure.code, "application.symbol-graph.generation-changed");
     }
 
     fn cursor_snapshot(

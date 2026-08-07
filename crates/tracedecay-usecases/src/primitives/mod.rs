@@ -9,6 +9,7 @@ pub mod symbol_graph;
 
 pub use concrete::{
     AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshotAuthority,
+    SymbolGraphCursorSnapshotFuture,
 };
 pub use grep_analysis::{
     ProductionGrepAnalysisOperationsV1, TraceDecayAstGrepAuthorityV1,
@@ -33,4 +34,7 @@ pub use runtime::{
     SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1,
     StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult, open_primitive_project_runtime,
 };
-pub use symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
+pub use symbol_graph::{
+    CanonicalSymbolGraphAdapter, SymbolGraphCursorFuture, SymbolGraphCursorPort,
+    SymbolGraphPageClaim,
+};
