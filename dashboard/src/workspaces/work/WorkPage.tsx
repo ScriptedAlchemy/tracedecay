@@ -1,4 +1,4 @@
-import type { WorkProjectionSnapshotV1 } from '../../contracts/index.ts';
+import type { WorkAttemptListV1, WorkProjectionSnapshotV1 } from '../../contracts/index.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Corners, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { type DashboardScope, useScope } from '../../data/scope/store.ts';
@@ -20,7 +20,9 @@ import {
   useWorkProjection,
 } from './views/WorkProjectionSwitcher.tsx';
 import { WorkTimelineView } from './views/WorkTimelineView.tsx';
+import { WorkTopologyView } from './views/WorkTopologyView.tsx';
 import { WorkWorkloadView } from './views/WorkWorkloadView.tsx';
+import type { WorkResult } from './workApi.ts';
 
 /**
  * Work — channel thirteen.
@@ -32,13 +34,14 @@ import { WorkWorkloadView } from './views/WorkWorkloadView.tsx';
  * refuses is reported as the refusal it was. Execution belongs to the Workflow
  * runtime, which has its own workspace — this channel is the task graph.
  *
- * Five projections over ONE snapshot. The switcher moves the camera and the
+ * Six projections over ONE snapshot. The switcher moves the camera and the
  * snapshot does not change underneath it, which is what makes the plan 11
  * mandate hold: a task selected in any projection stays selected in all of
  * them, because the selection lives in the address and no projection owns it.
  *
  * Three reads feed the page, and each is issued where it is drawn rather than
- * on every visit: the snapshot always, the attempt list under the timeline, and
+ * on every visit: the snapshot always, the attempt list under the timeline
+ * and the topology lens, and
  * the work-product graph under any of the four projections beside the board.
  * The graph read is what made effort, concurrency and churn measurable; wall
  * clock and observed execution order survive it as stated absences.
@@ -80,6 +83,7 @@ function WorkProjectionView({
   kind,
   snapshot,
   attempts,
+  attemptList,
   graph,
   selected,
   onSelect,
@@ -87,6 +91,10 @@ function WorkProjectionView({
   kind: WorkProjectionKind;
   snapshot: WorkProjectionSnapshotV1;
   attempts: WorkAttemptReading;
+  /** The raw attempt-list result, for the topology lens: its placement
+   * derivations walk the attempts' execution envelopes, which the derived
+   * reading deliberately does not restate. */
+  attemptList: WorkResult<WorkAttemptListV1> | undefined;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
@@ -121,6 +129,15 @@ function WorkProjectionView({
           onSelect={onSelect}
         />
       );
+    case 'topology':
+      return (
+        <WorkTopologyView
+          snapshot={snapshot}
+          attemptList={attemptList}
+          selected={selected}
+          onSelect={onSelect}
+        />
+      );
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -133,9 +150,10 @@ export function WorkPage() {
   const [selected, setSelected] = useSelectedTask();
   const [projection, setProjection] = useWorkProjection();
   const snapshot = useWorkSnapshot();
-  // The execution record belongs to the timeline, so the attempt list is read
-  // when that projection is the camera and not on every visit to the page.
-  const attempts = useWorkAttempts(projection === 'timeline');
+  // The execution record belongs to the timeline and the topology lens, so
+  // the attempt list is read when one of those projections is the camera and
+  // not on every visit to the page.
+  const attempts = useWorkAttempts(projection === 'timeline' || projection === 'topology');
   const attemptReading = workAttemptReading(attempts.data);
   // The work-product graph feeds all four projections beside the board and
   // nothing on the board itself, so it is read when the camera is on one of
@@ -232,6 +250,7 @@ export function WorkPage() {
                 kind={projection}
                 snapshot={value}
                 attempts={attemptReading}
+                attemptList={attempts.data}
                 graph={graphReading}
                 selected={selected}
                 onSelect={setSelected}

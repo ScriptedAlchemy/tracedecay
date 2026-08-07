@@ -273,6 +273,7 @@ describe('the projection switcher', () => {
       'Timeline',
       'Causal',
       'Workload',
+      'Topology',
     ]);
     expect(within(tablist).getByRole('tab', { selected: true }).textContent).toBe('Board');
   });
@@ -290,7 +291,7 @@ describe('the projection switcher', () => {
     await user.keyboard('{End}');
     await waitFor(() =>
       expect(
-        screen.getByRole('tab', { name: 'Workload' }).getAttribute('aria-selected'),
+        screen.getByRole('tab', { name: 'Topology' }).getAttribute('aria-selected'),
       ).toBe('true'),
     );
   });
@@ -451,6 +452,7 @@ describe('every attempt-shaped projection', () => {
   it.each([
     ['Timeline', 'timeline'],
     ['Causal', 'causal'],
+    ['Topology', 'topology'],
   ])('%s states the measurements it could not take', async (name, view) => {
     const { container } = renderPage(`/work?view=${view}`);
     await waitFor(() =>
@@ -508,6 +510,7 @@ describe('every attempt-shaped projection', () => {
     ['Timeline', 'timeline'],
     ['Causal', 'causal'],
     ['Workload', 'workload'],
+    ['Topology', 'topology'],
   ])('%s gives every task control a reachable target', async (name, view) => {
     const { container } = renderPage(`/work?view=${view}`);
     await waitFor(() =>
@@ -765,6 +768,150 @@ describe('the execution record', () => {
 
   it('resolves every ARIA reference it makes while the record is drawn', async () => {
     const container = await openTimeline();
+    expect(danglingReferences(container)).toEqual([]);
+  });
+});
+
+/**
+ * The execution-topology lens, over the same mounted attempt read.
+ *
+ * Plan 11's full lens decodes `ExecutionTopologyViewV1`; this build's
+ * generated catalog does not carry it. The lens therefore draws exactly what
+ * the attempt page proves — the executor weave and the worktree lanes of
+ * `execution_placement`, pinned to the verified topology generation — and
+ * must state the other three dimensions as typed schema absences that never
+ * disappear. Every assertion here reads real wire data parsed by the same
+ * generated schema the model tests prove the fixture against.
+ */
+describe('the execution-topology lens', () => {
+  async function openTopology() {
+    const page = renderPage('/work?view=topology');
+    await waitFor(() =>
+      expect(page.container.querySelector('[data-work-view="topology"]')).not.toBeNull(),
+    );
+    return page.container;
+  }
+
+  it('pins the verified topology generation the page was read under', async () => {
+    const container = await openTopology();
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-work-topology-generation="generation-7"]'),
+      ).not.toBeNull(),
+    );
+  });
+
+  it('threads the weave by executor identity and names the diversion onto the fallback', async () => {
+    const container = await openTopology();
+    await waitFor(() => expect(container.querySelector('[data-work-executors]')).not.toBeNull());
+
+    // Two executors: the primary carried two attempts, the fallback took one.
+    const threads = container.querySelectorAll('[data-work-executor]');
+    expect(
+      Array.from(threads).map((thread) => thread.getAttribute('data-work-executor')),
+    ).toEqual(['codex/route-primary', 'claude/route-fallback']);
+    expect(threads[0]?.getAttribute('data-work-attempts')).toBe('2');
+    expect(threads[1]?.getAttribute('data-work-attempts')).toBe('1');
+    // The diversion is said on the thread that received it.
+    expect(within(threads[1] as HTMLElement).getByText(/1 diverted here by fallback/)).toBeTruthy();
+    // Every mark is hollow: the field says so structurally.
+    expect(container.querySelector('[data-work-span="hollow"]')).not.toBeNull();
+  });
+
+  it('pins each worktree lane to its exact repository, ref, and commit identities', async () => {
+    const container = await openTopology();
+    await waitFor(() => expect(container.querySelector('[data-work-worktree]')).not.toBeNull());
+
+    const lane = container.querySelector<HTMLElement>('[data-work-worktree="worktree"]');
+    expect(lane).not.toBeNull();
+    expect(within(lane as HTMLElement).getByText(/\/w\/main/)).toBeTruthy();
+    expect(within(lane as HTMLElement).getByText(/repository/)).toBeTruthy();
+    const pin = lane?.querySelector('[data-work-commit="commit-1"]');
+    expect(pin?.getAttribute('data-work-ref')).toBe('none');
+    // A null ref is printed as the recorded absence it is, never a guessed branch.
+    expect(within(lane as HTMLElement).getByText(/no ref recorded/)).toBeTruthy();
+  });
+
+  it('states the three undecodable dimensions as schema absences that never disappear', async () => {
+    const container = await openTopology();
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-topology-dimensions="4"]')).not.toBeNull(),
+    );
+
+    for (const dimension of ['branch_topology', 'review_topology', 'integration_strategy']) {
+      const row = container.querySelector<HTMLElement>(`[data-work-dimension="${dimension}"]`);
+      expect(row).not.toBeNull();
+      expect(within(row as HTMLElement).getByText('Unsupported schema')).toBeTruthy();
+      expect(within(row as HTMLElement).getByText(/ExecutionTopologyViewV1/)).toBeTruthy();
+    }
+    // The readable dimension states its source rather than just passing.
+    const placement = container.querySelector<HTMLElement>(
+      '[data-work-dimension="execution_placement"]',
+    );
+    expect(within(placement as HTMLElement).getByText(/mounted attempt list/)).toBeTruthy();
+  });
+
+  it('draws a refused attempt read as a refusal, never as an empty weave', async () => {
+    serveWork({ status: 503, body: { kind: 'problem', value: { problem: {} } } });
+    const container = await openTopology();
+
+    expect(container.querySelector('[data-work-executors]')).toBeNull();
+    expect(container.querySelector('[data-work-worktree]')).toBeNull();
+    // The daemon's own reason, on the weave and on the lanes.
+    const absences = container.querySelectorAll('[data-work-channel="absent"]');
+    expect(absences.length).toBeGreaterThan(0);
+    expect(
+      Array.from(absences).some((absence) =>
+        (absence.textContent ?? '').includes('the Work runtime is unavailable'),
+      ),
+    ).toBe(true);
+  });
+
+  it('draws an authorized empty page as a statement, not a failed render', async () => {
+    serveWork({
+      status: 200,
+      body: workEnvelope(workAttemptList([]), 'binding.http.work.list_attempts'),
+    });
+    const container = await openTopology();
+
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-reading="empty"]')).not.toBeNull(),
+    );
+    // Empty is still pinned: the generation identity arrived with the page.
+    expect(
+      container.querySelector('[data-work-topology-generation="generation-7"]'),
+    ).not.toBeNull();
+  });
+
+  it('selects a task on a landing and keeps that selection when the camera moves', async () => {
+    const container = await openTopology();
+    const user = userEvent.setup();
+    await waitFor(() => expect(container.querySelector('[data-work-executors]')).not.toBeNull());
+
+    // 'middle' carries attempts, so it lands on the primary thread.
+    const landing = container.querySelector<HTMLElement>(
+      '[data-work-executors] [data-work-task="middle"]',
+    );
+    expect(landing).not.toBeNull();
+    await user.click(landing as HTMLElement);
+    await waitFor(() =>
+      expect(landing?.getAttribute('aria-pressed')).toBe('true'),
+    );
+
+    // The canonical selection survives the camera move to the board.
+    await user.click(screen.getByRole('tab', { name: 'Board' }));
+    await waitFor(() =>
+      expect(
+        container.querySelector(
+          '[data-work-task="middle"][aria-pressed="true"], [data-work-task="middle"][data-selected]',
+        ),
+      ).not.toBeNull(),
+    );
+  });
+
+  it('resolves every ARIA reference it makes while the lens is drawn', async () => {
+    const container = await openTopology();
+    await waitFor(() => expect(container.querySelector('[data-work-executors]')).not.toBeNull());
     expect(danglingReferences(container)).toEqual([]);
   });
 });

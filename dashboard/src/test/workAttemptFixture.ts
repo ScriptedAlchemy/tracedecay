@@ -72,6 +72,17 @@ export interface WorkAttemptSpec {
   readonly cancellation?: WorkCancellationStateV1;
   /** Omit for a plain success; `null` for an attempt that has not terminated. */
   readonly terminal?: WorkTerminalEvidenceV1 | null;
+  /** Where the execution envelope pinned this attempt. Every field defaults to
+   * the fixture's single-worktree placement; the topology lens tests override
+   * them to spread attempts across worktrees and refs. */
+  readonly placement?: {
+    readonly worktreeId?: string;
+    readonly worktreeRoot?: string;
+    readonly repositoryId?: string;
+    readonly commit?: string;
+    /** Omit for the fixture default of `null` (no ref recorded). */
+    readonly reference?: string | null;
+  };
 }
 
 export function workTerminal(outcome: WorkTerminalEvidenceV1['outcome'], observedAt: number) {
@@ -88,17 +99,17 @@ export function workAttempt(spec: WorkAttemptSpec) {
     execution: {
       attempt_identity: identity,
       cancellation_generation: 0,
-      commit: 'commit-1',
+      commit: spec.placement?.commit ?? 'commit-1',
       effect_state: 'observational',
       execution_snapshot: EXECUTION_SNAPSHOT,
       instructions: 'run the task',
       operation: 'operation.work.start_attempt',
       project_id: 'project',
       projection_binding: BINDING,
-      reference: null,
-      repository_id: 'repository',
-      worktree_id: 'worktree',
-      worktree_root: '/w/main',
+      reference: spec.placement?.reference ?? null,
+      repository_id: spec.placement?.repositoryId ?? 'repository',
+      worktree_id: spec.placement?.worktreeId ?? 'worktree',
+      worktree_root: spec.placement?.worktreeRoot ?? '/w/main',
     },
     identity,
     lease: { epoch: 1, lease_id: `lease-${spec.attemptId}` },

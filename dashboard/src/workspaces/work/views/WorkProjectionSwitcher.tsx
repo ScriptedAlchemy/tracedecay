@@ -21,7 +21,13 @@ import { cn } from '../../../ui/cn.ts';
  * so there is no fetch to make an arrow key expensive.
  */
 
-export type WorkProjectionKind = 'board' | 'dag' | 'timeline' | 'causal' | 'workload';
+export type WorkProjectionKind =
+  | 'board'
+  | 'dag'
+  | 'timeline'
+  | 'causal'
+  | 'workload'
+  | 'topology';
 
 export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = [
   'board',
@@ -29,6 +35,7 @@ export const WORK_PROJECTIONS: readonly WorkProjectionKind[] = [
   'timeline',
   'causal',
   'workload',
+  'topology',
 ];
 
 /** The query parameter that positions the camera, so a projection survives a
@@ -47,6 +54,8 @@ export function projectionLabel(kind: WorkProjectionKind): string {
       return 'Causal';
     case 'workload':
       return 'Workload';
+    case 'topology':
+      return 'Topology';
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -68,6 +77,8 @@ export function projectionNote(kind: WorkProjectionKind): string {
       return 'declared dependencies read against the evidence at both ends';
     case 'workload':
       return 'runs as regions, sized by the tasks they touched';
+    case 'topology':
+      return 'attempts placed onto executors and worktrees, under one verified topology generation';
     default: {
       const unhandled: never = kind;
       return unhandled;
@@ -81,6 +92,7 @@ function asProjection(value: string | null): WorkProjectionKind {
     case 'timeline':
     case 'causal':
     case 'workload':
+    case 'topology':
       return value;
     // An unreadable or absent parameter opens the board. The board is the
     // projection whose every channel this build can measure, so it is the one
