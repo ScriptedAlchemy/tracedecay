@@ -200,15 +200,59 @@ impl RetainedProjectGraphRuntimeV1 {
             GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         );
+        // Observe cancellation and the deadline before touching the
+        // publication authority: a registry torn down by lifecycle shutdown
+        // must answer typed cancellation, not storage unavailability.
+        match probe.interruption() {
+            Some(RuntimeInterruptionV1::Cancelled) => return Err(GraphDbError::Cancelled),
+            Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                return Err(GraphDbError::DeadlineExceeded);
+            }
+            None => {}
+        }
         let mut storage = self
             .project_database
             .graph_publication_storage()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        // The verified-head CAS inside `publish_verified` is its own
+        // irreversible durable commit; the journal append above already
+        // consumes this flow's first at-most-once commit grant, so the
+        // publish phase gets a second arbitration context (same shape as the
+        // sealed code-generation publish closure below).
+        let publish_cancellation_identity = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!(
+                "graph-publish-commit:{identity}"
+            ))
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            generation: 2,
+        };
+        let publish_deadline_identity = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!(
+                "graph-publish-commit-deadline:{identity}"
+            ))
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let publish_probe = GraphPublicationProbeV1 {
+            request_cancellation: Arc::clone(&request_cancellation),
+            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+            deadline_at,
+            cancellation: publish_cancellation_identity.clone(),
+            deadline: publish_deadline_identity.clone(),
+            commit_started: AtomicBool::new(false),
+        };
+        let publish_control = RuntimeRequestControlV1 {
+            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            deadline: publish_deadline_identity,
+            cancellation: publish_cancellation_identity,
+        };
+        let publish_context =
+            GraphPublicationOperationContextV1::new(&publish_control, &publish_probe)
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         match storage
             .replay(&publication_key, &context)
             .map_err(map_publication_error)?
         {
-            GraphPublicationReplayLookupV1::Active(_) => {
+            GraphPublicationReplayLookupV1::Active(journaled) => {
                 let head = storage
                     .verified_head(&relational_projection, &context)
                     .map_err(map_publication_error)?;
@@ -223,6 +267,15 @@ impl RetainedProjectGraphRuntimeV1 {
                         &relational_projection,
                     );
                 }
+                // A newer publication already won the verified head, so this
+                // journaled replay is superseded history: republishing it is a
+                // stale conflict, never a resumable interruption.
+                if head
+                    .as_ref()
+                    .is_some_and(|head| head.sequence > journaled.sequence)
+                {
+                    return Err(GraphDbError::Conflict);
+                }
                 // The replay is journaled but the verified head never advanced
                 // to it: an earlier publish was interrupted between the journal
                 // append and the head CAS. `publish_verified` is idempotent
@@ -233,7 +286,7 @@ impl RetainedProjectGraphRuntimeV1 {
                 let publication = self.graph_registry.publish_verified(
                     registration(),
                     &mut storage,
-                    &context,
+                    &publish_context,
                     &publication_key,
                 )?;
                 return Ok(publication.snapshot);
@@ -283,7 +336,7 @@ impl RetainedProjectGraphRuntimeV1 {
         let publication = self.graph_registry.publish_verified(
             registration(),
             &mut storage,
-            &context,
+            &publish_context,
             &replay.key,
         )?;
         Ok(publication.snapshot)

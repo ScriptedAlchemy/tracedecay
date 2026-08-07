@@ -249,6 +249,35 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
     ));
 }
 
+/// The first-ever publish of a fresh projection drives two irreversible
+/// durable commits — the relational journal append and the verified-head
+/// CAS — each of which must hold its own at-most-once commit grant. Routing
+/// both through one arbitration context let the append consume the grant, so
+/// the CAS was refused on every first publish and surfaced as infrastructure
+/// unavailability ("relational graph publication authority is unavailable").
+#[tokio::test]
+async fn first_publish_of_a_fresh_projection_installs_the_verified_head() {
+    let fixture = ContractFixture::new("first-publish").await;
+    let project_id = project_id("first-publish");
+    let (_, sessions, _) = fixture.bind(&project_id).await;
+    let projection = projection("first-publish");
+    let manifest = manifest(&projection, "first-publish", "1");
+    let port = sessions
+        .project_graph_runtime()
+        .expect("bound project graph runtime")
+        .as_ref();
+
+    let published = publish_through_trait(port, &manifest, key("first-publish"), false)
+        .expect("first publish must journal the replay and install the verified head");
+    assert_eq!(published.generation(), &manifest.generation);
+
+    let head = snapshot_through_trait(port, &projection)
+        .expect("verified snapshot read after the first publish")
+        .expect("verified head must be visible after the first publish");
+    assert_eq!(head.generation(), &manifest.generation);
+    assert_eq!(head.verified_head(), published.verified_head());
+}
+
 /// A projection that has never published a verified head is a typed empty
 /// start (`Ok(None)`), not an unavailability error. Treating it as retryable
 /// unavailability wedged fresh projects in an endless ingest retry loop.
