@@ -138,9 +138,7 @@ impl From<GraphDbError> for WorkTopologyError {
     fn from(error: GraphDbError) -> Self {
         match error {
             GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => {
-                Self::BudgetExhausted
-            }
+            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => Self::BudgetExhausted,
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Corrupt { message }
             | GraphDbError::ResetRequired { message }
@@ -227,11 +225,7 @@ pub fn build_work_topology_manifest_checked(
     for task in tasks.values() {
         for dependency in task.dependencies() {
             check()?;
-            relations.push(dependency_relation(
-                &identity,
-                task.task_id(),
-                dependency,
-            )?);
+            relations.push(dependency_relation(&identity, task.task_id(), dependency)?);
         }
     }
     let generation = work_topology_generation_id(projection, projector_revision)?;
@@ -280,9 +274,8 @@ impl WorkTopologyStore {
         let projection = WorkTopologyProjectionV1::from_events(events)?;
         let revision =
             GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())?;
-        let identity = work_topology_projection_identity(work_topology_namespace(
-            &projection.authority,
-        )?)?;
+        let identity =
+            work_topology_projection_identity(work_topology_namespace(&projection.authority)?)?;
         let manifest =
             build_work_topology_manifest_checked(identity, &projection, &revision, check)?;
         let idempotency_key = work_topology_idempotency_key(&projection, &revision)?;
@@ -313,6 +306,18 @@ impl WorkTopologyStore {
         })
     }
 
+    /// The verified graph generation this topology snapshot is published
+    /// under. Reads bound to this generation become stale when a newer
+    /// generation is published.
+    pub const fn generation(&self) -> &GraphGenerationId {
+        &self.generation
+    }
+
+    /// The number of tasks in the verified topology.
+    pub fn task_count(&self) -> usize {
+        self.task_ids.len()
+    }
+
     pub fn projection(
         &self,
         task_id: &TaskId,
@@ -321,8 +326,7 @@ impl WorkTopologyStore {
         task_id
             .validate()
             .map_err(|error| WorkTopologyError::Contract(error.to_string()))?;
-        let reference =
-            GraphEntityRef::new(self.projection.clone(), task_entity_id(task_id)?);
+        let reference = GraphEntityRef::new(self.projection.clone(), task_entity_id(task_id)?);
         let Some(entity) = self.snapshot.entity(&reference, cancellation)? else {
             return Ok(None);
         };
@@ -402,11 +406,10 @@ impl WorkTopologyStore {
                 .map(|(task_id, _)| task_id.clone())
                 .collect::<Vec<_>>();
             if ready.is_empty() {
-                let task = remaining
-                    .keys()
-                    .next()
-                    .cloned()
-                    .ok_or_else(|| WorkTopologyError::Corrupt("missing cycle node".to_owned()))?;
+                let task =
+                    remaining.keys().next().cloned().ok_or_else(|| {
+                        WorkTopologyError::Corrupt("missing cycle node".to_owned())
+                    })?;
                 return Err(WorkTopologyError::DependencyCycle(task));
             }
             for task_id in ready {
@@ -427,12 +430,7 @@ impl WorkTopologyStore {
     ) -> Result<Vec<TaskId>, WorkTopologyError> {
         let projections = self.read_all(Arc::clone(&cancellation))?;
         let mut memo = BTreeMap::new();
-        longest_dependency_path(
-            task_id,
-            &projections,
-            &mut memo,
-            cancellation.as_ref(),
-        )
+        longest_dependency_path(task_id, &projections, &mut memo, cancellation.as_ref())
     }
 
     fn read_all(
@@ -513,8 +511,7 @@ fn longest_dependency_path(
     let mut best = Vec::new();
     if let Some(projection) = projections.get(task_id) {
         for dependency in projection.dependencies() {
-            let candidate =
-                longest_dependency_path(dependency, projections, memo, cancellation)?;
+            let candidate = longest_dependency_path(dependency, projections, memo, cancellation)?;
             if candidate.len() > best.len() || (candidate.len() == best.len() && candidate < best) {
                 best = candidate;
             }

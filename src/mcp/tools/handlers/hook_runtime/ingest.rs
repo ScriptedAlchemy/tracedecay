@@ -295,6 +295,7 @@ fn cursor_compact_skipped(reason: impl Into<String>) -> Value {
         "reason": reason.into(),
         "summary_nodes_created": 0,
         "summary_node_ids": [],
+        "relation_projection_status": "not_applicable",
     })
 }
 

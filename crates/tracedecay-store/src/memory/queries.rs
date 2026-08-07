@@ -5,9 +5,9 @@ use tracedecay_domain::{
 };
 
 use super::{
+    FactStoreError, FactStoreResult, MAX_COMPATIBILITY_SEARCH_BYTES,
     ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
-    ProjectMemoryFactSearchKindV1, ProjectMemoryFactTargetV1, FactStoreError, FactStoreResult,
-    MAX_COMPATIBILITY_SEARCH_BYTES, StoredFactV1, validate_owned_fact_id,
+    ProjectMemoryFactSearchKindV1, ProjectMemoryFactTargetV1, StoredFactV1, validate_owned_fact_id,
 };
 
 pub(super) const MAX_CURRENT_LIMIT: usize = 1_000;

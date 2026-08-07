@@ -10,12 +10,12 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::{Confidence, FactCategoryV1, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
-    ProjectMemoryFactContradictionV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1,
+    FactCompatibilityResult, FactStoreError, FactStoreResult, ProjectMemoryFactContradictionPageV1,
+    ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactContradictionV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
     ProjectMemoryFactSearchHitV1, ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactSearchScoresV1, ProjectMemoryFactV1,
-    FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 
 use super::crud::{list_compatibility_facts_tx, load_current_fact_tx};
@@ -420,9 +420,11 @@ pub(super) async fn related_compatibility_facts_tx(
             "SELECT DISTINCT entities.entity_id
              FROM memory_entities AS entities
              JOIN memory_fact_entities AS links ON links.entity_id = entities.entity_id
-             JOIN memory_v2_legacy_map AS mappings ON mappings.legacy_fact_id = links.fact_id
+             JOIN memory_facts AS projections ON projections.fact_id = links.fact_id
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = projections.canonical_fact_id
              WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3 AND mappings.source_store_id = ?4
+               AND mappings.owner_json = ?3 AND ?4 = 'legacy-memory-v1'
                AND (
                     entities.normalized_name = ?5
                     OR (
@@ -480,9 +482,11 @@ pub(super) async fn related_compatibility_facts_tx(
          FROM memory_fact_entities AS source_links
          JOIN memory_fact_entities AS co_links ON co_links.fact_id = source_links.fact_id
          JOIN memory_entities AS co_entities ON co_entities.entity_id = co_links.entity_id
-         JOIN memory_v2_legacy_map AS mappings ON mappings.legacy_fact_id = source_links.fact_id
+         JOIN memory_facts AS projections ON projections.fact_id = source_links.fact_id
+         JOIN memory_v2_facts AS mappings
+           ON mappings.fact_id = projections.canonical_fact_id
          WHERE mappings.owner_kind = ? AND mappings.project_id = ?
-           AND mappings.owner_json = ? AND mappings.source_store_id = ?
+           AND mappings.owner_json = ? AND ? = 'legacy-memory-v1'
            AND source_links.entity_id IN ({placeholders})
            AND co_links.entity_id NOT IN ({placeholders})
          ORDER BY co_entities.name ASC, co_entities.entity_id ASC
@@ -530,11 +534,12 @@ pub(super) async fn related_compatibility_facts_tx(
                 .query(
                     "SELECT mappings.fact_id
                      FROM memory_fact_entities AS links
-                     JOIN memory_v2_legacy_map AS mappings ON mappings.legacy_fact_id = links.fact_id
                      JOIN memory_facts AS legacy_facts ON legacy_facts.fact_id = links.fact_id
+                     JOIN memory_v2_facts AS mappings
+                       ON mappings.fact_id = legacy_facts.canonical_fact_id
                      WHERE links.entity_id = ?1
                        AND mappings.owner_kind = ?2 AND mappings.project_id = ?3
-                       AND mappings.owner_json = ?4 AND mappings.source_store_id = ?5
+                       AND mappings.owner_json = ?4 AND ?5 = 'legacy-memory-v1'
                        AND legacy_facts.category = ?6 AND legacy_facts.trust_score >= ?7
                      ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC LIMIT ?8",
                     params![
@@ -553,11 +558,12 @@ pub(super) async fn related_compatibility_facts_tx(
                 .query(
                     "SELECT mappings.fact_id
                      FROM memory_fact_entities AS links
-                     JOIN memory_v2_legacy_map AS mappings ON mappings.legacy_fact_id = links.fact_id
                      JOIN memory_facts AS legacy_facts ON legacy_facts.fact_id = links.fact_id
+                     JOIN memory_v2_facts AS mappings
+                       ON mappings.fact_id = legacy_facts.canonical_fact_id
                      WHERE links.entity_id = ?1
                        AND mappings.owner_kind = ?2 AND mappings.project_id = ?3
-                       AND mappings.owner_json = ?4 AND mappings.source_store_id = ?5
+                       AND mappings.owner_json = ?4 AND ?5 = 'legacy-memory-v1'
                        AND legacy_facts.trust_score >= ?6
                      ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC LIMIT ?7",
                     params![

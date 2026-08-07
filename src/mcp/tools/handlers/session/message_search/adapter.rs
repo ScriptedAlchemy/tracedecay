@@ -11,7 +11,8 @@ use super::super::sessions_for::render_message_search_md;
 use super::contract::{
     SessionRetrievalCommand, SessionRetrievalFilters, SessionRetrievalNextActionView,
     SessionRetrievalPageView, SessionRetrievalProjectSelector, SessionRetrievalServiceOutcome,
-    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalSweepOutcome,
+    SessionRetrievalSweepPort, SessionRetrievalSweepRootView, SessionRetrievalUnavailable,
     SessionTemporalMetadataView,
 };
 use crate::application::session::{
@@ -532,13 +533,180 @@ fn retrieval_command(
     )
 }
 
-fn deferred_all_registered_payload(request: &MessageSearchRequest<'_>) -> Result<Value> {
+const fn service_outcome_label(outcome: &SessionRetrievalServiceOutcome) -> &'static str {
+    match outcome {
+        SessionRetrievalServiceOutcome::Complete { .. } => "complete",
+        SessionRetrievalServiceOutcome::CompleteZero { .. } => "complete_zero",
+        SessionRetrievalServiceOutcome::Stale { .. } => "stale",
+        SessionRetrievalServiceOutcome::Partial { .. } => "partial",
+        SessionRetrievalServiceOutcome::WrongScope => "wrong_scope",
+        SessionRetrievalServiceOutcome::Locked => "locked",
+        SessionRetrievalServiceOutcome::Redacted => "redacted",
+        SessionRetrievalServiceOutcome::Deleted => "deleted",
+        SessionRetrievalServiceOutcome::Denied => "denied",
+        SessionRetrievalServiceOutcome::Unavailable(_) => "unavailable",
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
+            "cursor_manifest_limit_exceeded"
+        }
+        SessionRetrievalServiceOutcome::BudgetExhausted => "budget_exhausted",
+        SessionRetrievalServiceOutcome::Cancelled => "cancelled",
+    }
+}
+
+const fn freshness_label(freshness: SessionDataFreshness) -> &'static str {
+    match freshness {
+        SessionDataFreshness::Fresh => "fresh",
+        SessionDataFreshness::Stored { .. } => "stored",
+        SessionDataFreshness::Partial { .. } => "partial",
+    }
+}
+
+struct SweptResult {
+    project_id: String,
+    root: String,
+    result: SessionMessageSearchResult,
+}
+
+fn sweep_root_entry(view: &SessionRetrievalSweepRootView) -> Value {
+    let mut map = Map::new();
+    map.insert("project_id".to_string(), json!(view.project_id));
+    map.insert("root".to_string(), json!(view.root));
+    map.insert(
+        "status".to_string(),
+        json!(service_outcome_label(&view.outcome)),
+    );
+    match &view.outcome {
+        SessionRetrievalServiceOutcome::Complete { page, freshness } => {
+            map.insert("count".to_string(), json!(page.results.len()));
+            map.insert("freshness".to_string(), json!(freshness_label(*freshness)));
+        }
+        SessionRetrievalServiceOutcome::CompleteZero { freshness, .. }
+        | SessionRetrievalServiceOutcome::Stale { freshness, .. } => {
+            map.insert("count".to_string(), json!(0));
+            map.insert("freshness".to_string(), json!(freshness_label(*freshness)));
+        }
+        SessionRetrievalServiceOutcome::Partial {
+            page,
+            freshness,
+            omitted,
+        } => {
+            map.insert("count".to_string(), json!(page.results.len()));
+            map.insert("freshness".to_string(), json!(freshness_label(*freshness)));
+            map.insert("omitted".to_string(), json!(omitted));
+        }
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
+            map.insert("reason".to_string(), json!(unavailable.reason.as_str()));
+        }
+        _ => {}
+    }
+    Value::Object(map)
+}
+
+/// Deterministic merge order for swept results: newest message first, then
+/// score, then registered project identity, then message identity. Every key
+/// is total, so equal pages always merge identically.
+fn merged_sweep_order(a: &SweptResult, b: &SweptResult) -> std::cmp::Ordering {
+    b.result
+        .message
+        .timestamp
+        .cmp(&a.result.message.timestamp)
+        .then_with(|| b.result.score.total_cmp(&a.result.score))
+        .then_with(|| a.project_id.cmp(&b.project_id))
+        .then_with(|| {
+            a.result
+                .message
+                .message_id
+                .cmp(&b.result.message.message_id)
+        })
+}
+
+fn swept_result_value(swept: SweptResult) -> Result<Value> {
+    if !swept.result.score.is_finite() {
+        return Err(TraceDecayError::Config {
+            message: "session retrieval result score must be finite".to_string(),
+        });
+    }
+    let mut value = serde_json::to_value(&swept.result)?;
+    let map = payload_object_mut(&mut value)?;
+    map.insert("project_id".to_string(), Value::String(swept.project_id));
+    map.insert("root".to_string(), Value::String(swept.root));
+    Ok(value)
+}
+
+fn render_sweep_outcome(
+    request: &MessageSearchRequest<'_>,
+    outcome: SessionRetrievalSweepOutcome,
+) -> Result<Value> {
+    let mut payload = base_message_search_payload(request)?;
+    payload_object_mut(&mut payload)?.insert("project_scope".to_string(), json!("all_registered"));
+    match outcome {
+        SessionRetrievalSweepOutcome::Complete {
+            roots,
+            skipped,
+            registry_truncated,
+        } => {
+            let root_entries = roots.iter().map(sweep_root_entry).collect::<Vec<_>>();
+            let mut merged = Vec::new();
+            for view in roots {
+                let page = match view.outcome {
+                    SessionRetrievalServiceOutcome::Complete { page, .. }
+                    | SessionRetrievalServiceOutcome::Partial { page, .. } => page,
+                    _ => continue,
+                };
+                merged.extend(page.results.into_iter().map(|result| SweptResult {
+                    project_id: view.project_id.clone(),
+                    root: view.root.clone(),
+                    result,
+                }));
+            }
+            merged.sort_by(merged_sweep_order);
+            merged.truncate(request.limit);
+            let results = merged
+                .into_iter()
+                .map(swept_result_value)
+                .collect::<Result<Vec<_>>>()?;
+            let map = payload_object_mut(&mut payload)?;
+            if !results.is_empty() {
+                map.insert("outcome".to_string(), json!("complete"));
+            }
+            map.insert("count".to_string(), json!(results.len()));
+            map.insert("results".to_string(), Value::Array(results));
+            map.insert(
+                "searched_project_count".to_string(),
+                json!(root_entries.len()),
+            );
+            map.insert("skipped_project_count".to_string(), json!(skipped.len()));
+            map.insert("roots".to_string(), json!(root_entries));
+            map.insert("skipped".to_string(), serde_json::to_value(skipped)?);
+            map.insert("registry_truncated".to_string(), json!(registry_truncated));
+        }
+        SessionRetrievalSweepOutcome::WrongScope => {
+            apply_typed_error(
+                &mut payload,
+                "wrong_scope",
+                "session_retrieval_sweep_wrong_scope",
+                "the registered-project sweep serves only selector-free project-store commands",
+            )?;
+        }
+        SessionRetrievalSweepOutcome::RegistryUnavailable => {
+            apply_typed_error(
+                &mut payload,
+                "unavailable",
+                "session_retrieval_registry_unavailable",
+                "the project registry authority is unavailable",
+            )?;
+        }
+    }
+    Ok(payload)
+}
+
+fn sweep_unmounted_payload(request: &MessageSearchRequest<'_>) -> Result<Value> {
     let mut payload = base_message_search_payload(request)?;
     apply_typed_error(
         &mut payload,
-        "deferred",
-        "session_retrieval_multi_root_deferred",
-        "multi-root session retrieval is not implemented",
+        "unavailable",
+        "session_retrieval_sweep_unavailable",
+        "the registered-project sweep authority is not mounted on this server",
     )?;
     payload_object_mut(&mut payload)?.insert("project_scope".to_string(), json!("all_registered"));
     Ok(payload)
@@ -655,6 +823,7 @@ pub(crate) async fn handle_message_search_with_service(
     store_scope: SessionRetrievalStoreScope,
     args: Value,
     service: Option<&dyn SessionRetrievalServicePort>,
+    sweep: Option<&dyn SessionRetrievalSweepPort>,
 ) -> Result<ToolResult> {
     let request = parse_message_search_request(&args)?;
     let project_selector = project_selector(&args)?;
@@ -671,14 +840,35 @@ pub(crate) async fn handle_message_search_with_service(
                 "project_scope cannot be combined with project_id, project_path, or project_selector",
             ));
         }
-        let payload = deferred_all_registered_payload(&request)?;
+        if matches!(store_scope, SessionRetrievalStoreScope::Profile) {
+            return Err(argument_error(
+                "project_scope=all_registered requires project session storage",
+            ));
+        }
+        if request.cursor.is_some() {
+            return Err(argument_error(
+                "project_scope=all_registered cannot resume a single-root cursor",
+            ));
+        }
+        if request.catch_up {
+            return Err(argument_error(
+                "catch_up refresh is a single-root operation and cannot be combined with project_scope=all_registered",
+            ));
+        }
+        let payload = match sweep {
+            Some(sweep) => {
+                let command =
+                    retrieval_command(&request, SessionRetrievalStoreScope::Project, None)?;
+                render_sweep_outcome(&request, sweep.execute_registered(command).await)?
+            }
+            None => sweep_unmounted_payload(&request)?,
+        };
         let markdown = render_temporal_message_search_md(&payload)?;
-        return Ok(tool_json_with_md(
-            project_root,
-            &args,
-            &payload,
-            move || markdown,
-        ));
+        let semantic_error = payload.get("error").is_some_and(|error| !error.is_null());
+        return Ok(
+            tool_json_with_md(project_root, &args, &payload, move || markdown)
+                .with_semantic_error(semantic_error),
+        );
     }
     if matches!(store_scope, SessionRetrievalStoreScope::Profile) && project_selector.is_some() {
         return Err(argument_error(

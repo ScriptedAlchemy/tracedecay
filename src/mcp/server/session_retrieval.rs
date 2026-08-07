@@ -1049,7 +1049,14 @@ impl DaemonSessionRetrievalService {
             session_id: command.session_id().as_str().to_string(),
             target,
         };
-        let rendered = executor.render_lcm_describe(request).await;
+        let rendered = executor
+            .render_lcm_describe(
+                request,
+                result
+                    .as_ref()
+                    .map(|result| result.snapshot.request().execution_control()),
+            )
+            .await;
         let description = match rendered {
             Ok(description) => description,
             Err(error) => return describe_execution_error(error, self.empty_temporal()),
@@ -1245,7 +1252,13 @@ impl DaemonSessionRetrievalService {
             source_offset,
             source_limit: command.source_limit(),
         };
-        let rendered = executor.render_lcm_expand(request, canonical_content).await;
+        let rendered = executor
+            .render_lcm_expand(
+                request,
+                canonical_content,
+                result.snapshot.request().execution_control(),
+            )
+            .await;
         let mut expansion = match rendered {
             Ok(expansion) => expansion,
             Err(error) => return expand_execution_error(error, self.empty_temporal()),
@@ -1701,6 +1714,10 @@ async fn registered_session(
         parent_tool_use_id: row.get(12).ok(),
     })
 }
+
+mod sweep;
+
+pub(crate) use sweep::DaemonSessionRetrievalSweep;
 
 #[cfg(test)]
 mod stored_refresh_tests;

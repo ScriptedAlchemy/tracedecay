@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::migrate::profile_backup::{
-    create_complete_profile_backup, rehearse_complete_profile_backup,
+    ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
     set_rehearsal_publication_fault_for_test,
 };
 use tracedecay::storage::{
@@ -16,6 +16,26 @@ struct ReleasedProfileFixture {
     project: PathBuf,
     project_id: &'static str,
     source_store: PathBuf,
+}
+
+fn write_profile_identity(profile: &Path, brain_id: &str, profile_id: &str) {
+    let path = profile.join("profile-identity.json");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "brain_id": brain_id,
+            "profile_id": profile_id,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
@@ -43,10 +63,10 @@ fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
         "user-memory.db-shm",
         "enrollment.json",
         "config.toml",
-        "profile-identity.json",
     ] {
         fs::write(profile.join(name), format!("released fixture: {name}")).unwrap();
     }
+    write_profile_identity(&profile, "brain.release", "profile.release");
     fs::create_dir(profile.join("migration-inventory")).unwrap();
     fs::write(
         profile.join("migration-inventory/released.json"),
@@ -144,6 +164,10 @@ fn released_copy_rehearsal_rebinds_store_and_preserves_identity() {
     assert_eq!(read_bytes(&restore, "user-memory.db"), expected_memory);
     assert_eq!(read_bytes(&restore, "user-sessions.db"), expected_lcm);
     assert_eq!(read_bytes(&restore, "config.toml"), expected_config);
+    // Database sidecars are folded into snapshot artifacts, never restored
+    // as standalone files.
+    assert!(!restore.join("user-memory.db-wal").exists());
+    assert!(!restore.join("global.db-shm").exists());
 }
 
 #[test]
@@ -156,7 +180,11 @@ fn released_copy_rehearsal_recovers_owned_interrupted_staging() {
     set_rehearsal_publication_fault_for_test("before_rename");
 
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-    assert!(error.contains("injected rehearsal publication fault"));
+    assert!(
+        error
+            .to_string()
+            .contains("injected rehearsal publication fault")
+    );
     assert!(staging.join(".tracedecay-profile-rehearsal.json").is_file());
 
     rehearse_complete_profile_backup(&backup, &restore).unwrap();
@@ -194,7 +222,8 @@ fn released_copy_rehearsal_rejects_missing_store_manifest() {
 
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
     assert!(
-        error.contains("missing required store_manifest.json"),
+        matches!(&error, ProfileBackupError::CorruptBackup { message }
+            if message.contains("missing required store_manifest.json")),
         "unexpected error: {error}"
     );
     assert!(!restore.exists());
@@ -209,7 +238,11 @@ fn released_copy_rehearsal_resumes_after_rename_before_marker_removal() {
     set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
 
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-    assert!(error.contains("injected rehearsal publication fault"));
+    assert!(
+        error
+            .to_string()
+            .contains("injected rehearsal publication fault")
+    );
     assert!(restore.join(".tracedecay-profile-rehearsal.json").is_file());
 
     set_rehearsal_publication_fault_for_test("");
@@ -237,7 +270,8 @@ fn marked_publication_recovery_rejects_tampered_durable_bytes() {
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
 
     assert!(
-        error.contains("checksum mismatch"),
+        matches!(&error, ProfileBackupError::CorruptBackup { message }
+            if message.contains("checksum mismatch")),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker).unwrap(), expected_marker);
@@ -262,7 +296,8 @@ fn marked_publication_recovery_rejects_partially_durable_restore() {
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
 
     assert!(
-        error.contains("user-sessions.db"),
+        matches!(&error, ProfileBackupError::CorruptBackup { message }
+            if message.contains("user-sessions.db")),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker).unwrap(), expected_marker);
@@ -290,7 +325,8 @@ fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
 
     assert!(
-        error.contains("rebound backup manifest"),
+        matches!(&error, ProfileBackupError::CorruptBackup { message }
+            if message.contains("rebound backup manifest")),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker).unwrap(), expected_marker);
@@ -315,17 +351,16 @@ fn released_copy_rehearsal_rejects_same_id_from_another_backup_root() {
 
     let foreign_temp = TempDir::new().unwrap();
     let foreign_fixture = seed_released_profile(&foreign_temp);
-    fs::write(
-        foreign_fixture.profile.join("profile-identity.json"),
-        b"foreign profile identity",
-    )
-    .unwrap();
+    write_profile_identity(&foreign_fixture.profile, "brain.foreign", "profile.foreign");
     let foreign_backup = create_backup(&foreign_temp, &foreign_fixture);
 
     let error = rehearse_complete_profile_backup(&foreign_backup, &restore).unwrap_err();
 
+    // The recovery invariant: an interrupted publication owned by a different
+    // rehearsal is a typed conflict, never finished or cleared collaterally.
     assert!(
-        error.contains("belongs to another restore attempt"),
+        matches!(&error, ProfileBackupError::PartialRestoreConflict { message }
+            if message.contains("belongs to another restore attempt")),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker_path).unwrap(), expected_marker);

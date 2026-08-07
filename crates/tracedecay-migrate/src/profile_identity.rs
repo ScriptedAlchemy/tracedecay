@@ -37,6 +37,21 @@ impl LocalProfileIdentityAuthorityV1 {
     }
 }
 
+/// Reads the exact final profile identity record, failing when it is absent.
+///
+/// Backup and restore verification require the persisted identity; unlike
+/// [`load_or_create`] this never mints a new one.
+pub(crate) fn read_required(profile_root: &Path) -> Result<(BrainId, UserProfileId)> {
+    let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
+    let record = read_existing_record(&path)?.ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "required {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing",
+            path.display()
+        ),
+    })?;
+    Ok((record.brain_id, record.profile_id))
+}
+
 pub(crate) fn load_or_create(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
     let profile_root = canonical_identity_path(profile_root)?;
     let root_existed = profile_root.exists();

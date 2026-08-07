@@ -966,17 +966,11 @@ fn check_binary(dc: &mut DoctorCounters) {
 /// The watcher lives in the daemon; its per-project state is only in-process, so
 /// this section sources telemetry the read-only way: recent `git_watch_*` events
 /// from the daemon log (systemd journal on Linux, launchd err-log on macOS). It
-/// reports whether the watcher is active vs degraded (mtime-poll fallback) per
-/// project. Absent telemetry is reported as info, not a failure — the watcher is
-/// a best-effort freshness aid backed by the on-read/hook sync paths.
+/// reports whether an explicitly enabled project watcher is active or using
+/// bounded scheduler reconciliation. Absent telemetry is reported as info, not
+/// a failure — activation comes from each project's pinned configuration.
 fn check_watcher(dc: &mut DoctorCounters) {
     eprintln!("\n\x1b[1mWatcher\x1b[0m");
-
-    let config = crate::config::SyncConfig::default().with_env_overrides();
-    if !config.auto_watch {
-        dc.info("Git-metadata watcher disabled (`sync.auto_watch = false`)");
-        return;
-    }
 
     if !crate::daemon::daemon_reachable() {
         dc.info("Daemon not running — watcher inactive; sync happens on hook/read events");
@@ -999,7 +993,7 @@ fn check_watcher(dc: &mut DoctorCounters) {
                 "git_watch_degraded" => {
                     degraded += 1;
                     dc.warn(&format!(
-                        "{project}: degraded (mtime-poll fallback){}",
+                        "{project}: degraded (bounded scheduler-reconciliation fallback){}",
                         ev.detail.map(|d| format!(" — {d}")).unwrap_or_default()
                     ));
                 }

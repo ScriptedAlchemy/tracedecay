@@ -86,12 +86,10 @@ fn store(projection: &GitTopologyProjectionV1) -> GitTopologyProjectionStore {
     let identity =
         git_topology_projection_identity(GraphNamespace::new("git-topology-test").expect("ns"))
             .expect("projection");
-    let revision =
-        GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-            .expect("revision");
-    let manifest =
-        build_git_topology_manifest_checked(identity, projection, &revision, &|| Ok(()))
-            .expect("manifest");
+    let revision = GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+        .expect("revision");
+    let manifest = build_git_topology_manifest_checked(identity, projection, &revision, &|| Ok(()))
+        .expect("manifest");
     let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled))
         .expect("verified snapshot");
     GitTopologyProjectionStore::from_verified_snapshot(snapshot, projection).expect("store")
@@ -131,9 +129,8 @@ fn immutable_git_topology_traverses_merges_and_rewrites_refs_by_generation() {
     let identity =
         git_topology_projection_identity(GraphNamespace::new("git-topology-test").expect("ns"))
             .expect("projection");
-    let revision =
-        GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-            .expect("revision");
+    let revision = GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+        .expect("revision");
     let original_manifest =
         build_git_topology_manifest_checked(identity.clone(), &original, &revision, &|| Ok(()))
             .expect("original");
@@ -198,19 +195,15 @@ fn verified_store_rejects_a_stale_generation_binding() {
     let identity =
         git_topology_projection_identity(GraphNamespace::new("git-topology-test").expect("ns"))
             .expect("projection");
-    let revision =
-        GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-            .expect("revision");
-    let manifest =
-        build_git_topology_manifest_checked(identity, &original, &revision, &|| Ok(()))
-            .expect("manifest");
+    let revision = GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+        .expect("revision");
+    let manifest = build_git_topology_manifest_checked(identity, &original, &revision, &|| Ok(()))
+        .expect("manifest");
     let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled))
         .expect("verified snapshot");
 
     assert!(matches!(
         GitTopologyProjectionStore::from_verified_snapshot(snapshot, &rewritten),
-        Err(
-            tracedecay_code_index::git_projection::GitTopologyProjectionError::GenerationMismatch
-        )
+        Err(tracedecay_code_index::git_projection::GitTopologyProjectionError::GenerationMismatch)
     ));
 }

@@ -21,12 +21,13 @@ use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
     CancelWorkAttemptCommand, CreateWorkCommand, GenerateProposalRequest, GeneratedWorkProposal,
     ReplanDependenciesCommand, ResumeWorkAttemptsCommand, ReviewProposalRequestV1,
-    StartWorkAttemptCommand, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    StartWorkAttemptCommand, WorkAttemptListRequestV1, WorkAttemptListV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 14] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 15] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -88,6 +89,11 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 14] = [
         "resume_attempts",
         "capability.work.resume_attempts",
         "use-case.work.resume_attempts",
+    ),
+    (
+        "list_attempts",
+        "capability.work.list_attempts",
+        "use-case.work.list_attempts",
     ),
 ];
 
@@ -163,6 +169,11 @@ pub fn work_executable_binding_registry()
             "resume_attempts",
             "/application/work/resume-attempts",
             EffectClass::Administrative,
+        )?,
+        available::<WorkAttemptListRequestV1, WorkAttemptListV1>(
+            "list_attempts",
+            "/application/work/list-attempts",
+            EffectClass::Read,
         )?,
     ];
     ExecutableBindingRegistryV1::new(bindings)

@@ -1,0 +1,40 @@
+diff a/src/mcp/tools/handlers/lcm_tool_entry.rs b/src/mcp/tools/handlers/lcm_tool_entry.rs	(rejected hunks)
+@@ -43,6 +43,28 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
+     retained_session_db: Option<&Arc<RegisteredGlobalDb>>,
+     _registry_db: Option<&RegisteredGlobalDb>,
+     retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
++) -> Result<crate::mcp::tools::ToolResult> {
++    handle_user_lcm_tool_with_db_and_controls(
++        tool_name,
++        args,
++        profile_root,
++        retained_session_db,
++        retrieval_service,
++        None,
++        None,
++    )
++    .await
++}
++
++#[allow(clippy::too_many_arguments)]
++pub(crate) async fn handle_user_lcm_tool_with_db_and_controls(
++    tool_name: &str,
++    args: Value,
++    profile_root: &Path,
++    retained_session_db: Option<&Arc<RegisteredGlobalDb>>,
++    retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
++    deadline: Option<&tracedecay_application::Deadline>,
++    cancellation: Option<&tracedecay_application::CancellationSignal>,
+ ) -> Result<crate::mcp::tools::ToolResult> {
+     if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
+         return Err(TraceDecayError::Config {
+@@ -78,7 +100,8 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
+     }
+     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
+     let context =
+-        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service);
++        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service)
++            .with_effect_controls(deadline, cancellation);
+     let operation =
+         RetainedSurfaceOperation::from_name(tool_name).ok_or_else(|| TraceDecayError::Config {
+             message: format!("unknown user-scoped LCM tool: {tool_name}"),

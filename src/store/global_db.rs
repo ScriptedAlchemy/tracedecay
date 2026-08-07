@@ -133,8 +133,7 @@ where
                 expected_offset,
                 next_offset,
             } => {
-                self
-                    .db()
+                self.db()
                     .persist_transcript_batch_result(
                         &session,
                         &messages,

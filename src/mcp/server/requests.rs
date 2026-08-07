@@ -919,11 +919,13 @@ impl McpServer {
                 application_cancellation,
                 code_index_publication_identity: self.code_index_publication_identity.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
+                code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
                 source_edit_executor: self.source_edit_executor.get().cloned(),
                 source_edit_reconciliation_executor: self
                     .source_edit_reconciliation_executor
                     .get()
                     .cloned(),
+                source_edit_rollback_executor: self.source_edit_rollback_executor.get().cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
                 session_sync_service: session_sync_service.as_deref(),
@@ -945,6 +947,7 @@ impl McpServer {
                     self.project_session_retrieval_service.as_deref(),
                     self.user_session_retrieval_service.as_deref(),
                 )
+                .with_retrieval_sweep(self.session_retrieval_sweep.as_deref())
                 .with_lcm_authorities(
                     self.project_lcm_authority.as_deref(),
                     self.user_lcm_authority.as_deref(),
@@ -1818,6 +1821,7 @@ mod git_read_control_tests {
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
             "tracedecay_source_edit_reconcile",
+            "tracedecay_source_edit_rollback",
         ] {
             assert!(is_source_edit_tool(tool_name));
             assert!(tool_supports_live_cancellation(tool_name));

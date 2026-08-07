@@ -1,12 +1,7 @@
 use std::path::Path;
 
-use serde_json::Value as JsonValue;
-
 use tracedecay_domain::SessionId;
-use tracedecay_runtime_core::db::engine::{
-    Executor, IntoParams, QueryExecutor, Rows, Value, params,
-};
-use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows, params};
 use tracedecay_sessions::runtime::{
     SessionMessageRecord,
     lcm::{
@@ -15,32 +10,21 @@ use tracedecay_sessions::runtime::{
         LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters, LcmGrepOutcome,
         LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
         LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
-        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
-        LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
-        LcmSummarySourceMessage, LcmSummarySourceRange, compression,
-        dag::{self, LcmSummaryPublicationPort},
-        gc, payload, query, raw,
+        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus,
+        LcmSummaryExpansion, compression, dag, gc, payload, query, raw,
         types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
     },
 };
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::{
-    PendingCodexCompactionSummary, RegisteredGlobalDb,
+    RegisteredGlobalDb,
     registered::RegisteredGlobalDbWriterConnection,
     session_temporal::{
         seed_session_relation_projection, store::execution_control_graph_cancellation,
     },
     session_temporal_operations,
 };
-
-const CODEX_COMPACTION_SUMMARY_PROMPT: &str = concat!(
-    "Summarize the visible transcript messages that Codex compacted. ",
-    "Preserve durable user intent, implementation decisions, file/module names, ",
-    "unresolved tasks, and verification status. Return only the summary text."
-);
-const CODEX_COMPACTION_RELATION_LIMIT: usize = 4_096;
-const CODEX_COMPACTION_CANDIDATE_SCAN_LIMIT: usize = 4_096;
 
 fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
     control.checkpoint().map_err(|error| match error {
@@ -81,121 +65,6 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql).await
     }
-}
-
-async fn codex_compaction_summary_request_for_node(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-    session_id: &str,
-) -> Result<Option<LcmSummaryRequest>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT r.store_id, r.role, COALESCE(r.content, r.snippet_text, '')
-             FROM lcm_summary_sources s
-             JOIN lcm_raw_messages r
-               ON s.source_kind = 'raw_message'
-              AND CAST(s.source_id AS INTEGER) = r.store_id
-             WHERE s.node_id = ?1
-               AND r.provider = 'codex'
-               AND r.session_id = ?2
-             ORDER BY s.ordinal",
-            params![node_id, session_id],
-        )
-        .await?;
-    let mut source_messages = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let role: String = row.get(1)?;
-        let content: String = row.get(2)?;
-        source_messages.push(LcmSummarySourceMessage {
-            store_id,
-            role,
-            content,
-        });
-    }
-    let (Some(first), Some(last)) = (source_messages.first(), source_messages.last()) else {
-        return Ok(None);
-    };
-    Ok(Some(LcmSummaryRequest {
-        provider: "codex".to_string(),
-        session_id: session_id.to_string(),
-        focus_topic: Some("Codex context compaction".to_string()),
-        prompt: CODEX_COMPACTION_SUMMARY_PROMPT.to_string(),
-        source_range: LcmSummarySourceRange {
-            from_store_id: first.store_id,
-            to_store_id: last.store_id,
-        },
-        source_messages,
-        extraction_request: None,
-    }))
-}
-
-async fn codex_compaction_summary_draft(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> Result<LcmSummaryNodeDraft, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, conversation_id, session_id, depth, summary_text,
-                    summary_token_count, source_token_count, source_time_start,
-                    source_time_end, expand_hint, metadata_json
-             FROM lcm_summary_nodes
-             WHERE node_id = ?1",
-            params![node_id],
-        )
-        .await?;
-    let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
-    let source_refs = summary_source_refs(conn, node_id).await?;
-    Ok(LcmSummaryNodeDraft {
-        provider: row.get(0)?,
-        conversation_id: row.get(1)?,
-        session_id: row.get(2)?,
-        depth: row.get(3)?,
-        summary_text: row.get(4)?,
-        summary_token_count: row.get(5)?,
-        source_token_count: row.get(6)?,
-        source_time_start: row.get(7)?,
-        source_time_end: row.get(8)?,
-        expand_hint: row.get(9)?,
-        metadata_json: row.get(10)?,
-        source_refs,
-    })
-}
-
-async fn summary_source_refs(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> Result<Vec<LcmSourceRef>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id = ?1
-             ORDER BY ordinal",
-            params![node_id],
-        )
-        .await?;
-    let mut refs = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_kind: String = row.get(0)?;
-        let source_id: String = row.get(1)?;
-        match source_kind.as_str() {
-            "raw_message" => refs.push(LcmSourceRef::RawMessage {
-                store_id: source_id.parse().map_err(|error| {
-                    LcmError::Db(format!(
-                        "invalid raw message source id '{source_id}': {error}"
-                    ))
-                })?,
-            }),
-            "summary_node" => refs.push(LcmSourceRef::SummaryNode { node_id: source_id }),
-            _ => {
-                return Err(LcmError::Db(format!(
-                    "invalid summary source kind '{source_kind}'"
-                )));
-            }
-        }
-    }
-    Ok(refs)
 }
 
 impl RegisteredGlobalDb {
@@ -336,190 +205,6 @@ impl RegisteredGlobalDb {
         .await
     }
 
-    /// Returns Codex compaction summary nodes that still need an auxiliary
-    /// Codex app-server summary.
-    pub async fn pending_codex_compaction_summary_requests(
-        &self,
-        session_id: Option<&str>,
-        limit: usize,
-        control: &ExecutionControl,
-    ) -> Result<Vec<PendingCodexCompactionSummary>, LcmError> {
-        check_execution(control)?;
-        let snapshot = self.read_snapshot().await?;
-        let requested_limit = limit.clamp(1, 100);
-        let candidate_limit = CODEX_COMPACTION_CANDIDATE_SCAN_LIMIT
-            .checked_add(1)
-            .ok_or_else(|| LcmError::Db("Codex compaction candidate bound overflowed".into()))?;
-        let mut sql = String::from(
-            "SELECT candidate.node_id, candidate.session_id
-             FROM lcm_summary_nodes AS candidate
-             WHERE candidate.provider = 'codex'
-               AND CASE
-                     WHEN json_valid(candidate.metadata_json) THEN
-                       json_extract(candidate.metadata_json, '$.source') =
-                         'codex_context_compacted'
-                       AND COALESCE(
-                             json_extract(
-                               candidate.metadata_json,
-                               '$.tracedecay_summary_source'
-                             ),
-                             ''
-                           ) <> 'codex_app_server'
-                     ELSE 0
-                   END = 1
-               AND EXISTS (
-                     SELECT 1
-                     FROM lcm_summary_sources AS source
-                     JOIN lcm_raw_messages AS raw
-                       ON source.source_kind = 'raw_message'
-                      AND CAST(source.source_id AS INTEGER) = raw.store_id
-                      AND raw.provider = candidate.provider
-                      AND raw.session_id = candidate.session_id
-                     WHERE source.node_id = candidate.node_id
-                   )",
-        );
-        let mut query_params = vec![Value::Integer(candidate_limit as i64)];
-        if let Some(session_id) = session_id {
-            sql.push_str(
-                " AND candidate.session_id = ?2
-                  ORDER BY candidate.depth DESC, candidate.created_at DESC, candidate.node_id
-                  LIMIT ?1",
-            );
-            query_params.push(Value::Text(session_id.to_string()));
-        } else {
-            sql.push_str(
-                " ORDER BY candidate.created_at DESC, candidate.depth DESC, candidate.node_id
-                  LIMIT ?1",
-            );
-        }
-
-        let mut rows = snapshot.query(&sql, query_params).await?;
-        let mut pending = Vec::new();
-        let mut candidates_scanned = 0_usize;
-        while let Some(row) = rows.next().await? {
-            check_execution(control)?;
-            candidates_scanned += 1;
-            if candidates_scanned > CODEX_COMPACTION_CANDIDATE_SCAN_LIMIT {
-                return Err(LcmError::Db(format!(
-                    "Codex compaction candidate scan exceeded {CODEX_COMPACTION_CANDIDATE_SCAN_LIMIT} summaries"
-                )));
-            }
-            let node_id: String = row.get(0)?;
-            let row_session_id: String = row.get(1)?;
-            let relation_session_id = SessionId::new(row_session_id.clone()).map_err(|error| {
-                LcmError::Db(format!(
-                    "invalid Codex compaction session identity '{row_session_id}': {error}"
-                ))
-            })?;
-            let (_, relations) = self
-                .active_session_summary_relations(
-                    &relation_session_id,
-                    std::slice::from_ref(&node_id),
-                    CODEX_COMPACTION_RELATION_LIMIT,
-                    execution_control_graph_cancellation(control),
-                )
-                .await
-                .map_err(|error| {
-                    LcmError::Db(format!("read native Codex compaction relations: {error}"))
-                })?;
-            check_execution(control)?;
-            let relation = relations.into_iter().next().ok_or_else(|| {
-                LcmError::Db(format!(
-                    "native Codex compaction relations omitted summary node '{node_id}'"
-                ))
-            })?;
-            if !relation.successor_summary_ids.is_empty() {
-                continue;
-            }
-            if let Some(request) =
-                codex_compaction_summary_request_for_node(&snapshot, &node_id, &row_session_id)
-                    .await?
-            {
-                pending.push(PendingCodexCompactionSummary { node_id, request });
-                if pending.len() == requested_limit {
-                    break;
-                }
-            }
-        }
-        Ok(pending)
-    }
-
-    /// Publishes a deterministic Codex auxiliary summary as an immutable
-    /// successor of the placeholder while preserving exact source lineage.
-    pub async fn publish_codex_compaction_summary_successor<F>(
-        &self,
-        node_id: &str,
-        summary_text: &str,
-        route: &str,
-        model: Option<&str>,
-        control: &ExecutionControl,
-        before_commit: F,
-    ) -> Result<LcmSummaryNode, LcmError>
-    where
-        F: FnOnce() -> Result<(), LcmError>,
-    {
-        check_execution(control)?;
-        let snapshot = self.read_snapshot().await?;
-        let mut draft = codex_compaction_summary_draft(&snapshot, node_id).await?;
-        if draft.provider != "codex" {
-            return Err(LcmError::SummaryNodeNotFound);
-        }
-        let mut metadata: serde_json::Map<String, JsonValue> = draft
-            .metadata_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<JsonValue>(raw).ok())
-            .and_then(|value| value.as_object().cloned())
-            .unwrap_or_default();
-        if metadata.get("source").and_then(JsonValue::as_str) != Some("codex_context_compacted") {
-            return Err(LcmError::SummaryNodeNotFound);
-        }
-        draft.summary_text = summary_text.trim().to_string();
-        draft.summary_token_count = i64::from(crate::estimate_tokens(&draft.summary_text));
-        metadata.insert(
-            "tracedecay_summary_source".to_string(),
-            JsonValue::String(route.to_string()),
-        );
-        if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
-            metadata.insert(
-                "codex_auxiliary_model".to_string(),
-                JsonValue::String(model.trim().to_string()),
-            );
-        }
-        draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
-        let draft = tracedecay_sessions::runtime::lcm::dag::sanitize_summary_draft(draft)?;
-        drop(snapshot);
-        check_execution(control)?;
-
-        let summary_hash = projected_content_hash(&draft.summary_text);
-        let mut successor_id = dag::summary_node_id(
-            &draft.provider,
-            &draft.session_id,
-            draft.depth,
-            &draft.source_refs,
-            &summary_hash,
-        );
-        if successor_id == node_id {
-            successor_id = format!(
-                "sum_{}",
-                projected_content_hash(&format!(
-                    "{node_id}\0{}",
-                    draft.metadata_json.as_deref().unwrap_or_default()
-                ))
-            );
-        }
-        self.lcm_publish_immutable_summary_guarded(
-            LcmImmutableSummaryPublication {
-                summary_id: successor_id,
-                predecessor_summary_id: Some(node_id.to_string()),
-                draft,
-            },
-            control,
-            before_commit,
-        )
-        .await
-        .map(|receipt| receipt.summary)
-    }
-
     /// Publishes one immutable summary and advances its native relation
     /// projection in the same controlled mutation journey.
     pub async fn lcm_publish_immutable_summary_guarded<F>(
@@ -578,15 +263,20 @@ impl RegisteredGlobalDb {
         Ok(receipt)
     }
 
-    pub async fn lcm_session_boundary(
+    pub async fn lcm_session_boundary_guarded<F>(
         &self,
         request: LcmSessionBoundaryRequest,
-    ) -> Result<LcmSessionBoundaryResponse, LcmError> {
+        before_commit: F,
+    ) -> Result<LcmSessionBoundaryResponse, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let response = compression::record_session_boundary(&transaction, request).await?;
+        before_commit()?;
         transaction.commit().await?;
         Ok(response)
     }
@@ -595,19 +285,8 @@ impl RegisteredGlobalDb {
         &self,
         request: LcmPreflightRequest,
     ) -> Result<LcmPreflightResponse, LcmError> {
-        let storage_root = self.lcm_storage_root()?;
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut payload_rollback =
-            payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        let response =
-            compression::preflight(&transaction, storage_root, request, &mut payload_rollback)
-                .await?;
-        transaction.commit().await?;
-        payload_rollback.disarm();
-        Ok(response)
+        let snapshot = self.read_snapshot().await?;
+        compression::preflight(&snapshot, request).await
     }
 
     pub async fn lcm_compress_guarded<F>(

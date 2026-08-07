@@ -198,7 +198,7 @@ async fn the_former_v26_shape_is_refused_without_mutation() {
 
     let error = ensure_schema_current_connection(&conn)
         .await
-        .expect_err("the superseded v26 shape must not be admitted as v27");
+        .expect_err("a superseded schema stamp must not be admitted as current");
     assert_eq!(
         error
             .reset_required_context()
@@ -295,11 +295,36 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         1
     );
 
-    // Columns the retired v20/v21 upgrades used to add are born with the table.
+    // Columns the retired upgrade installers used to add are born with the
+    // table, and the retired import/backfill surfaces never exist at all.
     assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
-    assert!(column_exists(&conn, "memory_v2_proposal_transitions", "origin").await);
-    assert!(column_exists(&conn, "memory_v2_backfill_progress", "cutover_receipt_json").await);
+    assert!(!column_exists(&conn, "memory_v2_proposal_transitions", "origin").await);
+    assert!(column_exists(&conn, "memory_facts", "canonical_fact_id").await);
+    for retired in [
+        "memory_v2_legacy_map",
+        "memory_v2_legacy_quarantine",
+        "memory_v2_backfill_progress",
+        "memory_v2_legacy_proposal_map",
+        "memory_v2_legacy_feedback_event_map",
+        "memory_v2_feedback_history_repair_progress",
+        "memory_v2_compatibility_operation_receipts",
+        "memory_v2_compatibility_banks",
+        "memory_v2_compatibility_bank_dirty",
+    ] {
+        assert!(
+            !table_exists(&conn, retired).await,
+            "retired table {retired} must not be created"
+        );
+    }
+    for table in [
+        "memory_v2_operation_receipts",
+        "memory_v2_feedback_history",
+        "memory_v2_banks",
+        "memory_v2_bank_dirty",
+    ] {
+        assert!(table_exists(&conn, table).await, "missing table {table}");
+    }
     for column in [
         "retrieval_count",
         "access_count",
@@ -317,16 +342,31 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         );
     }
 
-    // The proposal projection is born with final transition-denial behavior.
-    assert_eq!(
-        scalar_i64(
-            &conn,
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'trigger'
-               AND name = 'memory_v2_proposal_transitions_no_new_applying'",
+    // The proposal projection is born with final transition-denial behavior:
+    // no durable applying state can ever be recorded.
+    conn.execute(
+        "INSERT INTO memory_v2_proposals (
+            proposal_id, owner_kind, project_id, owner_json, idempotency_key,
+            request_digest, request_json, evidence_json, submitted_at
+         ) VALUES ('proposal.fixture', 'profile', '', '{\"kind\":\"profile\"}',
+                   'idempotency.fixture', 'digest.fixture', '{}', '{}', 1)",
+        (),
+    )
+    .await
+    .expect("fresh proposal schema must accept a pending submission");
+    let applying = conn
+        .execute(
+            "INSERT INTO memory_v2_proposal_transitions (
+                transition_id, proposal_id, owner_kind, project_id, previous_state,
+                current_state, transition_json, occurred_at
+             ) VALUES ('transition.fixture', 'proposal.fixture', 'profile', '',
+                       NULL, 'applying', '{}', 1)",
+            (),
         )
-        .await,
-        1
+        .await;
+    assert!(
+        applying.is_err(),
+        "a durable applying transition must be refused"
     );
     assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
 }

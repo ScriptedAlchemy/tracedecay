@@ -1,4 +1,4 @@
-//! Compatibility feedback-history repair, missing-vector repair, and dirty-bank rebuilds.
+//! Compatibility missing-vector repair and dirty-bank rebuilds.
 
 use crate::db::Database;
 use crate::memory::encoding::HolographicEncoder;
@@ -9,9 +9,8 @@ use serde_json::json;
 
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    ProjectMemoryFactRepairVectorV1, ProjectMemoryFeedbackRepairProgressV1,
-    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1, FactCompatibilityResult,
-    FactStoreError, FactStoreResult,
+    FactCompatibilityResult, FactStoreError, FactStoreResult, ProjectMemoryFactRepairVectorV1,
+    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
 };
 
 use super::crud::{
@@ -25,9 +24,8 @@ use super::envelope::{
     compatibility_record_operation_receipt_tx,
 };
 use super::primitives::{
-    COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
-    compatibility_legacy_timestamp, compatibility_now, compatibility_source_store_id,
-    nonnegative_u64, row_i64, row_string, storage_error, storage_message,
+    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp, compatibility_now,
+    compatibility_source_store_id, row_i64, row_string, storage_error, storage_message,
 };
 use super::projection::compatibility_required_mapping_tx;
 
@@ -176,9 +174,9 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
     let mut rows = transaction
         .query(
             "SELECT mappings.fact_id
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              JOIN memory_v2_current_facts AS current_facts
                ON current_facts.fact_id = mappings.fact_id
               AND current_facts.owner_kind = mappings.owner_kind
@@ -191,7 +189,7 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
                AND current_facts.payload_access = 'eligible'
                AND (
                     legacy_facts.hrr_vector IS NULL
@@ -299,18 +297,12 @@ async fn compatibility_mark_absent_banks_dirty_tx(
     now: UtcMicros,
 ) -> FactStoreResult<()> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            "SELECT COUNT(*) FROM memory_v2_compatibility_banks
+            "SELECT COUNT(*) FROM memory_v2_banks
              WHERE owner_kind = ?1 AND project_id = ?2
-               AND owner_json = ?3 AND source_store_id = ?4",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-            ],
+               AND owner_json = ?3",
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
@@ -356,15 +348,9 @@ async fn compatibility_mark_absent_banks_dirty_tx(
     }
     bank_names.push("all".to_owned());
     for bank_name in bank_names {
-        db.mark_memory_v2_compatibility_bank_dirty_in_transaction(
-            transaction,
-            owner,
-            &source_store_id,
-            &bank_name,
-            now,
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        db.mark_memory_v2_bank_dirty_in_transaction(transaction, owner, &bank_name, now)
+            .await
+            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
     }
     Ok(())
 }
@@ -375,20 +361,18 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
     owner: &FactOwnerV1,
 ) -> FactStoreResult<u64> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
             "SELECT bank_name, updated_at
-             FROM memory_v2_compatibility_bank_dirty
+             FROM memory_v2_bank_dirty
              WHERE owner_kind = ?1 AND project_id = ?2
-               AND owner_json = ?3 AND source_store_id = ?4
+               AND owner_json = ?3
              ORDER BY bank_name ASC
-             LIMIT ?5",
+             LIMIT ?4",
             params![
                 key.kind,
                 key.project_id.as_str(),
                 key.json.as_str(),
-                source_store_id.as_str(),
                 COMPATIBILITY_REPAIR_BANK_BATCH,
             ],
         )
@@ -423,9 +407,9 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
         let mut vectors = transaction
             .query(
                 "SELECT legacy_facts.fact_id, mappings.fact_id, legacy_facts.hrr_vector
-                 FROM memory_v2_legacy_map AS mappings
-                 JOIN memory_facts AS legacy_facts
-                   ON legacy_facts.fact_id = mappings.legacy_fact_id
+                 FROM memory_facts AS legacy_facts
+                 JOIN memory_v2_facts AS mappings
+                   ON mappings.fact_id = legacy_facts.canonical_fact_id
                  JOIN memory_v2_current_facts AS current_facts
                    ON current_facts.fact_id = mappings.fact_id
                   AND current_facts.owner_kind = mappings.owner_kind
@@ -436,20 +420,19 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
                   AND payloads.owner_kind = current_facts.owner_kind
                   AND payloads.project_id = current_facts.project_id
                  WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-                   AND mappings.owner_json = ?3 AND mappings.source_store_id = ?4
+                   AND mappings.owner_json = ?3
                    AND current_facts.payload_access = 'eligible'
                    AND legacy_facts.hrr_vector IS NOT NULL
                    AND legacy_facts.hrr_algebra = 'amari_fhrr'
-                   AND legacy_facts.hrr_dim = ?6
-                   AND legacy_facts.hrr_precision = ?7
-                   AND length(legacy_facts.hrr_vector) = ?8
-                   AND (?5 = 'all' OR legacy_facts.category = ?5)
+                   AND legacy_facts.hrr_dim = ?5
+                   AND legacy_facts.hrr_precision = ?6
+                   AND length(legacy_facts.hrr_vector) = ?7
+                   AND (?4 = 'all' OR legacy_facts.category = ?4)
                  ORDER BY legacy_facts.fact_id ASC",
                 params![
                     key.kind,
                     key.project_id.as_str(),
                     key.json.as_str(),
-                    source_store_id.as_str(),
                     bank_name.as_str(),
                     HolographicEncoder::DIMENSIONS as i64,
                     HolographicEncoder::HRR_PRECISION,
@@ -543,21 +526,15 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
             }
         }
         if decoded.is_empty() {
-            db.delete_memory_v2_compatibility_bank_in_transaction(
-                transaction,
-                owner,
-                &source_store_id,
-                bank_name.as_str(),
-            )
-            .await
-            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+            db.delete_memory_v2_bank_in_transaction(transaction, owner, bank_name.as_str())
+                .await
+                .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
         } else {
             let vector = HolographicEncoder::serialize(&compatibility_average_vectors(&decoded))
                 .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-            db.upsert_memory_v2_compatibility_bank_in_transaction(
+            db.upsert_memory_v2_bank_in_transaction(
                 transaction,
                 owner,
-                &source_store_id,
                 bank_name.as_str(),
                 &vector,
                 decoded.len() as u64,
@@ -567,10 +544,9 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
             .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
         }
         if db
-            .clear_memory_v2_compatibility_bank_dirty_in_transaction(
+            .clear_memory_v2_bank_dirty_in_transaction(
                 transaction,
                 owner,
-                &source_store_id,
                 bank_name.as_str(),
                 dirty_updated_at,
             )
@@ -581,58 +557,4 @@ pub(super) async fn compatibility_rebuild_dirty_banks_tx(
         }
     }
     Ok(rebuilt)
-}
-
-pub(super) async fn compatibility_feedback_history_repair_progress_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-) -> FactCompatibilityResult<ProjectMemoryFeedbackRepairProgressV1> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let mut rows = transaction
-        .query(
-            "SELECT owner_json, feedback_frontier, feedback_cursor, phase
-             FROM memory_v2_feedback_history_repair_progress
-             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
-            params![key.kind, key.project_id.as_str(), source_store_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
-    else {
-        return Ok(ProjectMemoryFeedbackRepairProgressV1::NotRequired);
-    };
-    if row_string(&row, 0, COMPATIBILITY_READ_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch.into());
-    }
-    let frontier = nonnegative_u64(
-        row_i64(&row, 1, COMPATIBILITY_READ_OPERATION)?,
-        "feedback repair frontier",
-    )?;
-    let cursor = nonnegative_u64(
-        row_i64(&row, 2, COMPATIBILITY_READ_OPERATION)?,
-        "feedback repair cursor",
-    )?;
-    if cursor > frontier {
-        return Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
-            "feedback repair cursor exceeds captured frontier",
-        )
-        .into());
-    }
-    match row_string(&row, 3, COMPATIBILITY_READ_OPERATION)?.as_str() {
-        "pending" => Ok(ProjectMemoryFeedbackRepairProgressV1::Incomplete {
-            processed: 0,
-            remaining: Some(frontier.saturating_sub(cursor)),
-        }),
-        "complete" => Ok(ProjectMemoryFeedbackRepairProgressV1::Complete { processed: 0 }),
-        _ => Err(storage_message(
-            COMPATIBILITY_READ_OPERATION,
-            "feedback repair progress has an unsupported phase",
-        )
-        .into()),
-    }
 }

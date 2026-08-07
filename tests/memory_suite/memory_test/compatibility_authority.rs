@@ -220,7 +220,7 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     assert_eq!(overview_b_before.hrr_coverage.len(), 1);
     assert_eq!(
         overview_b_before.hrr_coverage[0].state,
-        tracedecay_store::CompatibilityDashboardHrrStateV1::Ready
+        tracedecay_store::ProjectMemoryDashboardHrrStateV1::Ready
     );
 
     assert!(
@@ -268,7 +268,7 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     assert_eq!(overview_b_after.bank_count, 2);
     assert_eq!(
         overview_b_after.hrr_coverage[0].state,
-        tracedecay_store::CompatibilityDashboardHrrStateV1::Ready
+        tracedecay_store::ProjectMemoryDashboardHrrStateV1::Ready
     );
 }
 

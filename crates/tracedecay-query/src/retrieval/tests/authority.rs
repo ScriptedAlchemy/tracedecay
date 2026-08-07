@@ -1,14 +1,27 @@
 use std::sync::Arc;
 
 use tracedecay_domain::{
+<<<<<<< ours
+<<<<<<< ours
     CalibrationProfileId, ComponentRevision, EphemeralSanitizedQueryViewV1, PrincipalId,
     PublicRetrieverStatus, QueryMac, QueryNormalizationRevision, RepositoryId,
     RetrievalCursorKeyId, RetrieverKind, RetrieverOutcome, SanitizerRevision,
     ScoreDomainCalibrationV1, ScoreDomainId, TemporalModeV1,
+=======
+    CodeGenerationId, CodeSourceCursorBindingV1, ComponentRevision, EphemeralSanitizedQueryViewV1,
+    GitOidV1, PrincipalId, QueryMac, QueryNormalizationRevision, RefId, RepositoryId,
+    RetrievalCursorKeyId, RetrieverKind, RetrieverOutcome, SanitizerRevision, TemporalModeV1,
+>>>>>>> theirs
+=======
+    CodeGenerationId, CodeSourceCursorBindingV1, ComponentRevision, EphemeralSanitizedQueryViewV1,
+    GitOidV1, PrincipalId, QueryMac, QueryNormalizationRevision, RefId, RepositoryId,
+    RetrievalCursorKeyId, RetrieverKind, RetrieverOutcome, SanitizerRevision, TemporalModeV1,
+>>>>>>> theirs
 };
 
-use super::{batch, composition_lanes, id, no_caps, profile, request};
+use super::{batch, candidate, composition_lanes, id, no_caps, profile, request};
 use crate::retrieval::fusion::{QueryDigestAuthenticationError, RetrievalCursorKeyringV1};
+use crate::retrieval::{PreparedQueryBindingsV1, PreparedQueryErrorV1, PreparedQueryV1};
 use crate::retrieval::{QueryAuthorityErrorV1, QueryAuthorityV1};
 
 fn query_view() -> EphemeralSanitizedQueryViewV1 {
@@ -44,6 +57,69 @@ fn authority_with_keyring(keyring: RetrievalCursorKeyringV1) -> QueryAuthorityV1
     .expect("authority")
 }
 
+#[test]
+fn prepared_query_cursor_resumes_only_the_authenticated_generation_and_candidate_set() {
+    let generation = CodeGenerationId::new("generation.prepared-query.v1").expect("generation");
+    let bindings = PreparedQueryBindingsV1::new(
+        "code_index_branch_diff.v1",
+        tracedecay_domain::canonical_sha256(&"scope.prepared-query").expect("scope digest"),
+        generation.clone(),
+        tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+    )
+    .expect("bindings");
+    let items = vec!["first".to_owned(), "second".to_owned(), "third".to_owned()];
+    let first = PreparedQueryV1::prepare(Arc::new(authority()), request(), None)
+        .expect("prepare first page")
+        .paginate(
+            &bindings,
+            items.clone(),
+            1,
+            tracedecay_domain::UtcMicros(10),
+        )
+        .expect("first page");
+    let cursor = first.next_cursor.expect("continuation");
+    let resumed = PreparedQueryV1::prepare(Arc::new(authority()), request(), Some(&cursor))
+        .expect("authenticate continuation")
+        .paginate(
+            &bindings,
+            items.clone(),
+            1,
+            tracedecay_domain::UtcMicros(11),
+        )
+        .expect("resume page");
+    assert_eq!(resumed.items, ["second"]);
+
+    let changed_generation = PreparedQueryBindingsV1::new(
+        "code_index_branch_diff.v1",
+        tracedecay_domain::canonical_sha256(&"scope.prepared-query").expect("scope digest"),
+        CodeGenerationId::new("generation.prepared-query.v2").expect("changed generation"),
+        tracedecay_domain::canonical_sha256(&"query.prepared-query").expect("query digest"),
+    )
+    .expect("changed generation bindings");
+    assert_eq!(
+        PreparedQueryV1::prepare(Arc::new(authority()), request(), Some(&cursor))
+            .expect("authenticate continuation")
+            .paginate(
+                &changed_generation,
+                items.clone(),
+                1,
+                tracedecay_domain::UtcMicros(11),
+            ),
+        Err(PreparedQueryErrorV1::Stale)
+    );
+    assert_eq!(
+        PreparedQueryV1::prepare(Arc::new(authority()), request(), Some(&cursor))
+            .expect("authenticate continuation")
+            .paginate(
+                &bindings,
+                vec!["first".to_owned(), "changed".to_owned()],
+                1,
+                tracedecay_domain::UtcMicros(11),
+            ),
+        Err(PreparedQueryErrorV1::Stale)
+    );
+}
+
 fn empty_foreground_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInput> {
     composition_lanes(vec![
         (
@@ -61,6 +137,8 @@ fn empty_foreground_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInpu
     ])
 }
 
+<<<<<<< ours
+<<<<<<< ours
 fn federated_authority() -> QueryAuthorityV1 {
     let mut profile = profile();
     profile.calibrations = RetrieverKind::ALL_LANES
@@ -172,6 +250,83 @@ fn federated_authority_rejects_missing_or_duplicate_lanes() {
         authority.compose_federated(&request, &query, duplicate, 8, None),
         Err(QueryAuthorityErrorV1::LaneSetMismatch)
     );
+=======
+=======
+>>>>>>> theirs
+fn paged_foreground_lanes() -> Vec<crate::retrieval::fusion::CompositionLaneInput> {
+    composition_lanes(vec![
+        (
+            RetrieverKind::ExactLiteral,
+            RetrieverOutcome::Complete(batch(Vec::new(), "exact")),
+        ),
+        (
+            RetrieverKind::Lexical,
+            RetrieverOutcome::Complete(batch(
+                vec![
+                    candidate(RetrieverKind::Lexical, "first", 900_000, 0),
+                    candidate(RetrieverKind::Lexical, "second", 800_000, 1),
+                ],
+                "lexical",
+            )),
+        ),
+        (
+            RetrieverKind::Graph,
+            RetrieverOutcome::Complete(batch(Vec::new(), "graph")),
+        ),
+    ])
+}
+
+#[test]
+fn exact_code_source_binding_is_authenticated_with_the_query_cursor() {
+    let authority = authority();
+    let request = request();
+    let query = query_view();
+    let mut cursor = authority
+        .compose(&request, &query, paged_foreground_lanes(), 1, None)
+        .expect("compose first page")
+        .fallback
+        .cursor
+        .clone()
+        .expect("continuation cursor");
+    let binding = CodeSourceCursorBindingV1 {
+        reference: RefId::new("refs/heads/feature").expect("reference"),
+        commit: GitOidV1::new("1".repeat(40)).expect("commit"),
+        tree: GitOidV1::new("2".repeat(40)).expect("tree"),
+        generation: CodeGenerationId::new("generation.feature").expect("generation"),
+    };
+
+    authority
+        .bind_code_source_cursor(&mut cursor, binding.clone())
+        .expect("bind exact source");
+    authority
+        .verify_code_source_cursor(&cursor, &binding)
+        .expect("authenticated exact source");
+
+    let mut mismatches = Vec::new();
+    let mut changed = binding.clone();
+    changed.reference = RefId::new("refs/heads/other").expect("wrong reference");
+    mismatches.push(changed);
+    let mut changed = binding.clone();
+    changed.commit = GitOidV1::new("3".repeat(40)).expect("wrong commit");
+    mismatches.push(changed);
+    let mut changed = binding.clone();
+    changed.tree = GitOidV1::new("4".repeat(40)).expect("wrong tree");
+    mismatches.push(changed);
+    let mut changed = binding;
+    changed.generation = CodeGenerationId::new("generation.other").expect("wrong generation");
+    mismatches.push(changed);
+    for mismatch in mismatches {
+        assert!(matches!(
+            authority.verify_code_source_cursor(&cursor, &mismatch),
+            Err(QueryAuthorityErrorV1::Retrieval(
+                tracedecay_domain::RetrievalError::CursorSetMismatch
+            ))
+        ));
+    }
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
 }
 
 #[test]

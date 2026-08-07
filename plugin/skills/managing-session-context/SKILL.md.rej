@@ -1,0 +1,56 @@
+diff a/plugin/skills/managing-session-context/SKILL.md b/plugin/skills/managing-session-context/SKILL.md	(rejected hunks)
+@@ -98,9 +98,11 @@ active registered project's user-profile session store.
+    token knobs like `current-tokens`, `threshold-tokens`, `context-length`,
+    `reserve-tokens-floor`, `max-assembly-tokens`, `fresh-tail-count`): decide
+    *whether* compression should run before doing it. Read-only planning call.
+-2. **Compress → `tracedecay_lcm_compress`** (same core args plus
+-   `focus-topic`, `summarizer`, `expected-current-frontier-store-id` as an
+-   optimistic guard): advance the compression lifecycle. **Mutates** the store.
++2. **Compress → `tracedecay_lcm_compress`** (same identity/pressure args plus
++   `focus-topic` and `expected-current-frontier-store-id` as an optimistic
++   guard): ask the daemon to compress content already admitted through
++   canonical host ingestion. Do not send transcript messages or a
++   host-provided summary. **Mutates** the store.
+    Use `expected-current-frontier-store-id` to no-op safely if the frontier
+    moved under you.
+ 3. **Session boundary → `tracedecay_lcm_session_boundary`** (`provider`,
+@@ -108,10 +110,9 @@ active registered project's user-profile session store.
+    report that the host crossed a compression boundary. A mismatch between the
+    bound and old session skips carry-over and starts a short cooldown.
+ 4. **Doctor → `tracedecay_lcm_doctor`** (`provider`, `mode`:
+-   `diagnose`|`repair`|`retention`|`clean`|`gc`, `apply`, optional
+-   `session-id`): bounded diagnostics and safe repairs. `diagnose`/`retention`
+-   are read-only; `repair`/`clean`/`gc` **mutate only with `apply: true`** and
+-   are further gated by safety flags/env for clean and gc.
++   `diagnose`|`retention`, optional `session-id`): bounded, read-only
++   diagnostics. Doctor reports evidence and recommendations; it never repairs,
++   cleans, or garbage-collects storage.
+ 5. **Status → `tracedecay_lcm_status`** (optional `provider`, `session-id`,
+    `deep`): schema/message/summary/payload counts, token estimates, summary
+    depth distribution + compression ratio, payload byte totals, and GC status.
+@@ -121,17 +122,17 @@ active registered project's user-profile session store.
+ 
+ Preflight → (if it requests compression) compress → status to confirm the ratio
+ moved. On a real host session change, call session_boundary. If counts look
+-wrong (missing sessions, stale FTS, orphaned payloads) run doctor
+-`mode: "diagnose"` first, review, then repair/clean/gc with `apply: true` only
+-on explicit user intent.
++wrong (missing sessions, stale FTS, orphaned payloads), run Doctor
++`mode: "diagnose"` and review its evidence. Any separate operator remediation
++must use its own explicit authority; Doctor never applies it.
+ 
+ ## Guardrails
+ 
+-- Retrieval rungs above, `preflight`, `status`, and doctor
+-  `diagnose`/`retention` are read-only (grep/status may touch access counters).
+-  `compress`, `session_boundary`, and doctor `repair`/`clean`/`gc` + `apply`
+-  **mutate** durable session state — run them only with clear lifecycle or user
+-  intent, never speculatively during recall.
++- Retrieval rungs above, `preflight`, `status`, and every Doctor mode are
++  read-only (grep/status may touch access counters). `compress` and
++  `session_boundary` **mutate** durable session state through the daemon — run
++  them only with clear lifecycle or user intent, never speculatively during
++  recall.
+ - `provider` is required and `all` is rejected for the lifecycle tools; target
+   one provider at a time.
+ - For multi-step recall, dispatch scoped read-only subagents by session id, time

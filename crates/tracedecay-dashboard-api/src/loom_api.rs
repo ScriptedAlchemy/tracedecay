@@ -692,10 +692,7 @@ mod tests {
                 .find(|source| source.id == id)
                 .expect("Git source status");
             assert_eq!(source.authority, None);
-            assert_eq!(
-                source.required_authority,
-                Some(GIT_CORRELATION_AUTHORITY)
-            );
+            assert_eq!(source.required_authority, Some(GIT_CORRELATION_AUTHORITY));
             assert_eq!(source.state, DashboardDomainStateV1::Unknown);
         }
     }

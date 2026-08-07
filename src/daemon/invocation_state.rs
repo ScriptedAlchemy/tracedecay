@@ -79,6 +79,42 @@ impl Default for DaemonInvocationState {
 }
 
 impl DaemonInvocationState {
+    pub(super) async fn retire_remote_deleted_project(
+        &self,
+        project_id: &tracedecay_domain::ProjectId,
+        project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
+    ) -> Result<()> {
+        self.query_authority_provider.retire_project(project_id);
+        if !self
+            .code_index_schedulers
+            .retire_project_roots(project_roots)
+            .await
+        {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "code-index workers for remote-deleted project '{}' did not drain",
+                    project_id.as_str()
+                ),
+            });
+        }
+        if !self.service.expire_project(project_id, project_roots).await {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "invocation runtime owners for remote-deleted project '{}' did not drain",
+                    project_id.as_str()
+                ),
+            });
+        }
+        for root in project_roots {
+            // Upstream also unregistered the redundancy authority separately.
+            // At this tip `unregister_project_semantic_runtime` already drops
+            // the project's retained generation, redundancy state, and
+            // activation gate, so one call is the whole teardown.
+            crate::application::semantic_runtime::unregister_project_semantic_runtime(root);
+        }
+        Ok(())
+    }
+
     pub(super) fn configure_github_read_only_credentials(
         &self,
         identity: &profile_identity::LocalProfileIdentityAuthorityV1,
@@ -253,23 +289,21 @@ impl DaemonInvocationState {
             .zip(semantic_lifecycle)
             .zip(semantic_resources)
             .zip(code_index_scheduler::identity::worktree_id_for(project_root).ok())
-            .map(
-                |(((handle, lifecycle), resources), worktree_id)| {
-                    let graph = Arc::clone(&vector_graph);
-                    crate::application::semantic_runtime::production_saved_generation_schedule_hook(
-                        crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
-                            project_root: project_root.to_path_buf(),
-                            code_index_store_root: scoped_code_index_store_root.clone(),
-                            worktree_id,
-                            handle: handle.clone(),
-                            graph,
-                            lifecycle,
-                            resources,
-                            fair_scheduler: self.semantic_projection_scheduler.clone(),
-                        },
-                    )
-                },
-            );
+            .map(|(((handle, lifecycle), resources), worktree_id)| {
+                let graph = Arc::clone(&vector_graph);
+                crate::application::semantic_runtime::production_saved_generation_schedule_hook(
+                    crate::application::semantic_runtime::SavedGenerationScheduleHookParametersV1 {
+                        project_root: project_root.to_path_buf(),
+                        code_index_store_root: scoped_code_index_store_root.clone(),
+                        worktree_id,
+                        handle: handle.clone(),
+                        graph,
+                        lifecycle,
+                        resources,
+                        fair_scheduler: self.semantic_projection_scheduler.clone(),
+                    },
+                )
+            });
         self.code_index_schedulers
             .mount_worktree_with_graph_runtime(
                 project_id,
@@ -846,7 +880,14 @@ impl DaemonInvocationState {
         } else {
             None
         };
-        self.service
+        let lsp_frame_session = match &request.payload {
+            service::invocation::DaemonInvocationPayload::LspFrame { session, .. } => {
+                Some(session.clone())
+            }
+            _ => None,
+        };
+        let response = self
+            .service
             .invoke(
                 &self.lsp_session_registry,
                 request_project_path,
@@ -854,7 +895,20 @@ impl DaemonInvocationState {
                 git_service,
                 request,
             )
-            .await
+            .await;
+        // A client frame may have parsed a fenced workspace-folder change; the
+        // daemon settles it here because only this layer can resolve and
+        // authorize the next root set.
+        if let (Some(session), Some(project_path)) = (lsp_frame_session, request_project_path) {
+            settle_pending_lsp_workspace_mutation(
+                store_administration,
+                &self.service,
+                project_path,
+                &session,
+            )
+            .await;
+        }
+        response
     }
 }
 

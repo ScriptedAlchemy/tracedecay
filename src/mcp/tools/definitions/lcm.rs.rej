@@ -1,0 +1,128 @@
+diff a/src/mcp/tools/definitions/lcm.rs b/src/mcp/tools/definitions/lcm.rs	(rejected hunks)
+@@ -39,16 +39,16 @@ pub(super) fn def_lcm_status() -> ToolDefinition {
+ }
+ 
+ pub(super) fn def_lcm_doctor() -> ToolDefinition {
+-    def_rw(
++    def(
+         "tracedecay_lcm_doctor",
+         "LCM Doctor",
+-        "Run bounded LCM diagnostics, dry-run safe repairs, optionally apply safe FTS repairs or payload GC, and report retention candidates without payload body exposure.",
++        "Run bounded, read-only LCM health or retention diagnostics without payload body exposure.",
+         json!({
+             "type": "object",
+             "properties": {
+                 "provider": {
+                     "type": "string",
+-                    "description": "Specific provider id to inspect or repair. Required; 'all' is not accepted for this lifecycle tool."
++                    "description": "Specific provider id to inspect. Required; 'all' is not accepted."
+                 },
+                 "session_id": {
+                     "type": "string",
+@@ -56,38 +56,9 @@ pub(super) fn def_lcm_doctor() -> ToolDefinition {
+                 },
+                 "mode": {
+                     "type": "string",
+-                    "enum": ["diagnose", "repair", "retention", "clean", "gc"],
+-                    "description": "diagnose reports read-only health, repair plans or applies safe repairs, retention reports read-only retention candidates, clean reports or applies safe ignore/stateless/noise cleanup, gc previews or applies payload garbage collection."
+-                },
+-                "apply": {
+-                    "type": "boolean",
+-                    "description": "When mode=repair, mode=clean, or mode=gc, apply the requested action. Defaults to false for dry-run."
+-                },
+-                "doctor_clean_apply_enabled": {
+-                    "type": "boolean",
+-                    "description": "Safety gate for mode=clean + apply. Defaults to false unless LCM_DOCTOR_CLEAN_APPLY_ENABLED is set."
+-                },
+-                "lcm_gc_apply_enabled": {
+-                    "type": "boolean",
+-                    "description": "Safety gate for mode=gc + apply. Defaults to false unless LCM_GC_APPLY_ENABLED is set."
+-                },
+-                "gc_config": {
+-                    "type": "object",
+-                    "description": "Optional payload GC config overrides (grace_seconds, reap_missing_after, reap_missing_enabled, max_batch_size, backup_before_reap, interval_seconds, gc_enabled).",
+-                    "additionalProperties": false,
+-                    "properties": {
+-                        "grace_seconds": {"type": "integer", "minimum": 0},
+-                        "reap_missing_after": {"type": "integer", "minimum": 0},
+-                        "reap_missing_enabled": {"type": "boolean"},
+-                        "max_batch_size": {"type": "integer", "minimum": 1},
+-                        "backup_before_reap": {"type": "boolean"},
+-                        "interval_seconds": {"type": "integer", "minimum": 0},
+-                        "gc_enabled": {"type": "boolean"}
+-                    }
+-                },
+-                "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions that should be diagnosed as ignored cleanup candidates."),
+-                "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions that should be diagnosed as cleanup candidates."),
+-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to treat as storage-only noise.")
++                    "enum": ["diagnose", "retention"],
++                    "description": "diagnose reports health and retention reports retention candidates; both modes are read-only."
++                }
+             },
+             "required": ["provider"]
+         }),
+@@ -516,15 +487,6 @@ pub(super) fn def_lcm_preflight() -> ToolDefinition {
+                     "type": "string",
+                     "description": "Provider-local session id."
+                 },
+-                "messages": {
+-                    "type": "array",
+-                    "description": "Current active context messages to inspect before compression.",
+-                    "items": {"type": "object"}
+-                },
+-                "transcript_projection": {
+-                    "type": "boolean",
+-                    "description": "Host-integration flag: also upsert these stable-id messages into this project's searchable transcript projection. Intended for Hermes live turn ingestion when its state.db session lacks cwd provenance."
+-                },
+                 "current_tokens": {
+                     "type": "integer",
+                     "minimum": 0,
+@@ -585,7 +547,6 @@ pub(super) fn def_lcm_preflight() -> ToolDefinition {
+                 },
+                 "ignore_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for sessions to skip from active LCM ingest/compression."),
+                 "stateless_session_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for stateless sessions to replay without durable LCM storage."),
+-                "ignore_message_patterns": lcm_pattern_array_schema("Hermes-style glob patterns for low-value message content to keep in replay but skip from LCM storage.")
+             },
+             "required": ["provider", "session_id"]
+         }),
+@@ -596,7 +557,7 @@ pub(super) fn def_lcm_compress() -> ToolDefinition {
+     def_rw(
+         "tracedecay_lcm_compress",
+         "LCM Compress",
+-        "Operator/host-lifecycle tool: called by an agent host's own pre-compact or compaction hook, not by a model in response to a user request. Advances the LCM compression lifecycle in the active project store without invoking an auxiliary LLM.",
++        "Daemon-owned lifecycle operation that compresses already-ingested canonical session content. Host adapters provide identity and pressure hints, never raw transcript content.",
+         json!({
+             "type": "object",
+             "properties": {
+@@ -608,11 +569,6 @@ pub(super) fn def_lcm_compress() -> ToolDefinition {
+                     "type": "string",
+                     "description": "Provider-local session id."
+                 },
+-                "messages": {
+-                    "type": "array",
+-                    "description": "Current active context messages to ingest before compression.",
+-                    "items": {"type": "object"}
+-                },
+                 "current_tokens": {
+                     "type": "integer",
+                     "minimum": 0,
+@@ -682,19 +638,6 @@ pub(super) fn def_lcm_compress() -> ToolDefinition {
+                     "type": "integer",
+                     "minimum": 0,
+                     "description": "Optional token headroom reserved inside context_length; derives an assembly cap of context_length - reserve_tokens_floor."
+-                },
+-                "summarizer": {
+-                    "type": "object",
+-                    "description": "Runtime summarizer mode: provided or hermes_auxiliary.",
+-                    "properties": {
+-                        "mode": {
+-                            "type": "string",
+-                            "enum": ["provided", "hermes_auxiliary"]
+-                        },
+-                        "summary_text": {"type": "string"},
+-                        "route": {"type": "string"}
+-                    },
+-                    "required": ["mode"]
+                 }
+             },
+             "required": ["provider", "session_id"]

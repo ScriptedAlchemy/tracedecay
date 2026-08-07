@@ -35,7 +35,8 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, SessionRetrievalServicePort,
-    ToolCallRegistryOptions, ToolRegistryMode, default_catalog_discovery_authority,
+    SessionRetrievalSweepPort, ToolCallRegistryOptions, ToolRegistryMode,
+    default_catalog_discovery_authority,
     explore_call_budget, get_catalog_filtered_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
 };
@@ -183,6 +184,27 @@ pub(crate) struct SourceEditReconciliationInvocationV1 {
 pub(crate) type SourceEditReconciliationExecutor =
     Arc<dyn Fn(SourceEditReconciliationInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
 
+/// User-controlled identity of one completed source edit whose retained
+/// preimages the caller asks the daemon to restore.
+///
+/// Authority-bearing context and proof fields are deliberately absent: the
+/// daemon-owned executor constructs them from the current project admission.
+/// The preimage bytes never cross this boundary either — they stay in the
+/// server-side rollback record and the caller only names public digests.
+pub(crate) struct SourceEditRollbackInvocationV1 {
+    pub(crate) effect_id: tracedecay_application::EffectId,
+    pub(crate) original_idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(crate) idempotency_key: tracedecay_application::IdempotencyKey,
+    pub(crate) original_input_digest: tracedecay_domain::ManifestDigest,
+    pub(crate) expected_state: tracedecay_domain::ManifestDigest,
+    pub(crate) request_id: tracedecay_application::RequestId,
+    pub(crate) deadline: tracedecay_application::Deadline,
+    pub(crate) cancellation: tracedecay_application::CancellationSignal,
+}
+
+pub(crate) type SourceEditRollbackExecutor =
+    Arc<dyn Fn(SourceEditRollbackInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
+
 /// Concrete read bridge to a graph already mounted by the daemon. MCP project
 /// selectors retain the root graph type because routed handlers require the
 /// complete [`TraceDecay`] runtime.
@@ -282,6 +304,11 @@ pub struct McpServer {
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     project_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     user_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
+    /// Registered-project sweep authority for `project_scope=all_registered`
+    /// message search. Mounted only when this server holds the registry and a
+    /// durable profile identity; absent servers answer with a typed
+    /// unavailability instead of aliasing the active project store.
+    session_retrieval_sweep: Option<Arc<dyn SessionRetrievalSweepPort>>,
     project_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
     user_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
@@ -314,10 +341,13 @@ pub struct McpServer {
     code_index_publication_identity: Option<CodeIndexPublicationIdentityResolver>,
     /// Daemon-owned, authority-gated search bridge.
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
+    /// Daemon-owned exact sealed-generation branch comparison bridge.
+    code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
     source_edit_reconciliation_executor: tokio::sync::OnceCell<SourceEditReconciliationExecutor>,
+    source_edit_rollback_executor: tokio::sync::OnceCell<SourceEditRollbackExecutor>,
     /// Admission supplied by an authenticated daemon application route. It is
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
@@ -695,6 +725,7 @@ impl McpServer {
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
+            code_index_branch_diff_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
             project_routes,
@@ -841,6 +872,16 @@ impl McpServer {
                 },
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
+        let session_retrieval_sweep = registry_db
+            .as_ref()
+            .zip(profile_identity.as_ref())
+            .map(|(registry, identity)| {
+                Arc::new(DaemonSessionRetrievalSweep::new(
+                    Arc::clone(registry),
+                    Arc::clone(cg.store_runtime_registry()),
+                    identity.clone(),
+                )) as Arc<dyn SessionRetrievalSweepPort>
+            });
         let project_lcm_authority = project_session_retrieval_root
             .as_ref()
             .zip(registered_session_db.as_ref())
@@ -897,6 +938,7 @@ impl McpServer {
             session_sync_service,
             project_session_retrieval_service,
             user_session_retrieval_service,
+            session_retrieval_sweep,
             project_lcm_authority,
             user_lcm_authority,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
@@ -912,8 +954,10 @@ impl McpServer {
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
+            code_index_branch_diff_executor,
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
+            source_edit_rollback_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
             #[cfg(any(test, feature = "test-transport"))]
@@ -1083,6 +1127,18 @@ impl McpServer {
         executor: SourceEditReconciliationExecutor,
     ) -> std::result::Result<(), SourceEditReconciliationExecutor> {
         self.source_edit_reconciliation_executor
+            .set(executor)
+            .map_err(|error| match error {
+                tokio::sync::SetError::AlreadyInitializedError(executor)
+                | tokio::sync::SetError::InitializingError(executor) => executor,
+            })
+    }
+
+    pub(crate) fn install_source_edit_rollback_executor(
+        &self,
+        executor: SourceEditRollbackExecutor,
+    ) -> std::result::Result<(), SourceEditRollbackExecutor> {
+        self.source_edit_rollback_executor
             .set(executor)
             .map_err(|error| match error {
                 tokio::sync::SetError::AlreadyInitializedError(executor)

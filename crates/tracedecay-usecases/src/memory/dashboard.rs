@@ -2,18 +2,18 @@
 
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
-    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
-    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
-    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
-    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
-    ProjectMemoryFactAddAliasV1, ProjectMemoryFactCurationBatchV1,
-    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
-    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
-    ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeEntitiesV1,
-    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactNormalizeTagsV1,
-    ProjectMemoryFactRepairVectorV1, ProjectMemoryLegacyEntityTargetV1,
-    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, FactCompatibilityStore,
+    FactCompatibilityStore, ProjectMemoryDashboardFactDetailQueryV1,
+    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
+    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddAliasV1,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackHistoryQueryV1,
+    ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1,
+    ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactMergeOutcomeV1,
+    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRepairVectorV1,
+    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairCommandV1,
+    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;

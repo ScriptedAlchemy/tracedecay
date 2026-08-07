@@ -1,0 +1,9 @@
+diff a/src/mcp/tools/handlers/tool_definition_tests.rs b/src/mcp/tools/handlers/tool_definition_tests.rs	(rejected hunks)
+@@ -257,7 +257,6 @@ fn test_tool_definitions_have_annotations() {
+         "tracedecay_context_scout_claim",
+         "tracedecay_context_scout_delivery",
+         "tracedecay_context_scout_feedback",
+-        "tracedecay_lcm_doctor",
+         "tracedecay_lcm_preflight",
+         "tracedecay_lcm_compress",
+         "tracedecay_lcm_session_boundary",

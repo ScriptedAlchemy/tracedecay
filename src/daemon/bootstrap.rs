@@ -296,17 +296,21 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         sync_config.retention.clone(),
     )
     .await;
-    // Install the git-metadata watcher (design D3/D5). The daemon has no single
-    // project root, so it uses the default `[sync]` config plus env overrides.
-    // When `auto_watch` is off the watcher is inert. The watcher shares the
-    // engine's administration coordinator before it can spawn any writer.
-    let git_watcher = git_watch::GitWatcher::new_with_administration(
-        sync_config,
-        engine.store_administration.clone(),
+    // Install the daemon-wide git-metadata owner. Individual projects provide
+    // every watcher setting from the pinned configuration already held by
+    // their retained server; bootstrap never supplies activation authority.
+    let git_watcher = git_watch::GitWatcher::new_with_canonical_scheduler(
         maintenance.clone(),
+        engine.invocation.code_index_schedulers.clone(),
     );
-    if git_watcher.is_enabled() {
-        git_watcher.spawn(profile_database).await;
+    if matches!(
+        git_watcher.spawn().await,
+        git_watch::GitWatcherStart::ShuttingDown
+    ) {
+        log_daemon_event(
+            "git_watch_start_rejected",
+            &[("reason", "shutting_down".to_string())],
+        );
     }
     // PR-branch auto-tracking runs independently of the metadata watcher: it is
     // gated per-project on `sync.auto_track_pr_branches` (default off), so this

@@ -7,10 +7,9 @@ use crate::db::engine::params;
 
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::{
-    ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryMemoryAlgebraV1,
-    ProjectMemoryMemoryFeedbackFunnelV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1, FactCompatibilityResult,
-    FactStoreResult,
+    FactCompatibilityResult, FactStoreResult, ProjectMemoryFeedbackRepairProgressV1,
+    ProjectMemoryMemoryAlgebraV1, ProjectMemoryMemoryFeedbackFunnelV1,
+    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, ProjectMemoryProjectionStateV1,
 };
 
 use super::primitives::{
@@ -135,20 +134,14 @@ async fn compatibility_owner_has_dirty_banks_tx(
     owner: &FactOwnerV1,
 ) -> FactStoreResult<bool> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
             "SELECT 1
-             FROM memory_v2_compatibility_bank_dirty AS dirty
+             FROM memory_v2_bank_dirty AS dirty
              WHERE dirty.owner_kind = ?1 AND dirty.project_id = ?2
-               AND dirty.owner_json = ?3 AND dirty.source_store_id = ?4
+               AND dirty.owner_json = ?3
              LIMIT 1",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-            ],
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
@@ -162,7 +155,6 @@ async fn compatibility_owner_has_dirty_banks_tx(
 pub(super) async fn compatibility_memory_status_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    feedback_repair: ProjectMemoryFeedbackRepairProgressV1,
 ) -> FactCompatibilityResult<ProjectMemoryMemoryStatusV1> {
     let (
         fact_count,
@@ -181,10 +173,13 @@ pub(super) async fn compatibility_memory_status_tx(
     let mut entity_rows = transaction
         .query(
             "SELECT COUNT(DISTINCT relations.entity_id)
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_fact_entities AS relations ON relations.fact_id = mappings.legacy_fact_id
-             WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3 AND mappings.source_store_id = ?4",
+             FROM memory_facts AS projections
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = projections.canonical_fact_id
+             JOIN memory_fact_entities AS relations
+               ON relations.fact_id = projections.fact_id
+             WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
+               AND facts.owner_json = ?3 AND ?4 = 'legacy-memory-v1'",
             params![
                 key.kind,
                 key.project_id.as_str(),
@@ -210,19 +205,20 @@ pub(super) async fn compatibility_memory_status_tx(
     )?;
     let mut missing_rows = transaction
         .query(
-            "SELECT COUNT(*) FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts ON legacy_facts.fact_id = mappings.legacy_fact_id
+            "SELECT COUNT(*) FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = legacy_facts.canonical_fact_id
              JOIN memory_v2_current_facts AS current_facts
-               ON current_facts.fact_id = mappings.fact_id
-              AND current_facts.owner_kind = mappings.owner_kind
-              AND current_facts.project_id = mappings.project_id
+               ON current_facts.fact_id = facts.fact_id
+              AND current_facts.owner_kind = facts.owner_kind
+              AND current_facts.project_id = facts.project_id
              JOIN memory_v2_assertion_payloads AS payloads
                ON payloads.assertion_id = current_facts.active_assertion_id
               AND payloads.fact_id = current_facts.fact_id
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
-             WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3 AND mappings.source_store_id = ?4
+             WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
+               AND facts.owner_json = ?3 AND ?4 = 'legacy-memory-v1'
                AND current_facts.payload_access = 'eligible'
                AND (legacy_facts.hrr_vector IS NULL
                     OR legacy_facts.hrr_algebra <> 'amari_fhrr'
@@ -258,15 +254,10 @@ pub(super) async fn compatibility_memory_status_tx(
     let dirty_banks = compatibility_owner_has_dirty_banks_tx(transaction, owner).await?;
     let mut bank_rows = transaction
         .query(
-            "SELECT COUNT(*) FROM memory_v2_compatibility_banks AS banks
+            "SELECT COUNT(*) FROM memory_v2_banks AS banks
              WHERE banks.owner_kind = ?1 AND banks.project_id = ?2
-               AND banks.owner_json = ?3 AND banks.source_store_id = ?4",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str()
-            ],
+               AND banks.owner_json = ?3",
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
@@ -317,6 +308,8 @@ pub(super) async fn compatibility_memory_status_tx(
             feedback_total,
         ),
     )
-    .map(|status| status.with_feedback_history_repair(feedback_repair))
+    .map(|status| {
+        status.with_feedback_history_repair(ProjectMemoryFeedbackRepairProgressV1::NotRequired)
+    })
     .map_err(Into::into)
 }

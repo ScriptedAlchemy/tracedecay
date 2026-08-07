@@ -1,12 +1,12 @@
-//! V19 additive baseline schema installer.
+//! Exact final project-memory schema installer.
 
 use crate::errors::Result;
 
 use super::super::{MemoryV2Executor, db_error};
-use super::proposals::{install_v20_integrity_triggers, install_v21_current_projection_indexes};
+use super::final_authority::install_final_memory_support;
+use super::proposals::{install_current_projection_indexes, install_proposal_integrity_triggers};
 
-/// Installs only additive storage. Legacy data movement is daemon-authorized
-/// and deliberately absent from bare schema creation and database open.
+/// Installs the only accepted project-memory persisted shape.
 pub(in crate::db) async fn create_schema(
     conn: &impl MemoryV2Executor,
     operation: &str,
@@ -194,66 +194,6 @@ pub(in crate::db) async fn create_schema(
                 REFERENCES memory_v2_lineage_events(event_id, fact_id, owner_kind, project_id)
         );
 
-        CREATE TABLE IF NOT EXISTS memory_v2_legacy_map (
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
-            source_store_id TEXT NOT NULL,
-            legacy_fact_id INTEGER NOT NULL CHECK(legacy_fact_id > 0),
-            fact_id TEXT NOT NULL,
-            mapping_json TEXT NOT NULL CHECK(json_valid(mapping_json)),
-            PRIMARY KEY(owner_kind, project_id, source_store_id, legacy_fact_id),
-            UNIQUE(fact_id, owner_kind, project_id, source_store_id),
-            FOREIGN KEY(fact_id, owner_kind, project_id)
-                REFERENCES memory_v2_facts(fact_id, owner_kind, project_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_v2_legacy_quarantine (
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            source_store_id TEXT NOT NULL,
-            source_table TEXT NOT NULL CHECK(source_table IN (
-                'memory_facts', 'memory_feedback_events', 'memory_oplog'
-            )),
-            source_row_id INTEGER NOT NULL,
-            reason_code TEXT NOT NULL,
-            recorded_at INTEGER NOT NULL,
-            PRIMARY KEY(
-                owner_kind, project_id, source_store_id, source_table, source_row_id
-            )
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_v2_backfill_progress (
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            owner_json TEXT NOT NULL CHECK(json_valid(owner_json)),
-            source_store_id TEXT NOT NULL,
-            phase TEXT NOT NULL CHECK(phase IN (
-                'feedback', 'oplog', 'facts', 'awaiting_cutover', 'cutover_complete'
-            )),
-            feedback_frontier INTEGER NOT NULL CHECK(feedback_frontier >= 0),
-            oplog_frontier INTEGER NOT NULL CHECK(oplog_frontier >= 0),
-            fact_frontier INTEGER NOT NULL CHECK(fact_frontier >= 0),
-            feedback_cursor INTEGER NOT NULL DEFAULT 0 CHECK(feedback_cursor >= 0),
-            oplog_cursor INTEGER NOT NULL DEFAULT 0 CHECK(oplog_cursor >= 0),
-            fact_cursor INTEGER NOT NULL DEFAULT 0 CHECK(fact_cursor >= 0),
-            started_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            cutover_completed_at INTEGER,
-            cutover_receipt_json TEXT CHECK(
-                cutover_receipt_json IS NULL OR json_valid(cutover_receipt_json)
-            ),
-            PRIMARY KEY(owner_kind, project_id, source_store_id),
-            CHECK(
-                (phase = 'cutover_complete'
-                    AND cutover_completed_at IS NOT NULL
-                    AND cutover_receipt_json IS NOT NULL) OR
-                (phase <> 'cutover_complete'
-                    AND cutover_completed_at IS NULL
-                    AND cutover_receipt_json IS NULL)
-            )
-        );
-
         CREATE TABLE IF NOT EXISTS memory_v2_proposals (
             proposal_id TEXT NOT NULL,
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
@@ -280,11 +220,10 @@ pub(in crate::db) async fn create_schema(
             project_id TEXT NOT NULL,
             previous_state TEXT,
             current_state TEXT NOT NULL CHECK(current_state IN (
-                'pending', 'applying', 'applied', 'rejected'
+                'pending', 'applied', 'rejected', 'quarantined'
             )),
             reviewer_json TEXT CHECK(reviewer_json IS NULL OR json_valid(reviewer_json)),
             validation_json TEXT CHECK(validation_json IS NULL OR json_valid(validation_json)),
-            origin TEXT NOT NULL CHECK(origin IN ('runtime', 'legacy_import')),
             promoted_fact_id TEXT,
             promoted_assertion_id TEXT,
             promoted_event_id TEXT,
@@ -300,7 +239,7 @@ pub(in crate::db) async fn create_schema(
             FOREIGN KEY(promoted_event_id, promoted_fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_lineage_events(event_id, fact_id, owner_kind, project_id),
             CHECK(previous_state IS NULL OR previous_state IN (
-                'pending', 'applying', 'applied', 'rejected'
+                'pending', 'applied', 'rejected', 'quarantined'
             )),
             CHECK(
                 (current_state = 'applied'
@@ -317,9 +256,9 @@ pub(in crate::db) async fn create_schema(
             owner_kind TEXT NOT NULL,
             project_id TEXT NOT NULL,
             state TEXT NOT NULL CHECK(state IN (
-                'pending', 'applying', 'applied', 'rejected'
+                'pending', 'applied', 'rejected', 'quarantined'
             )),
-            revision INTEGER NOT NULL CHECK(revision >= 0),
+            revision INTEGER NOT NULL CHECK(revision >= 1),
             last_transition_id TEXT NOT NULL,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(proposal_id, owner_kind, project_id),
@@ -330,21 +269,6 @@ pub(in crate::db) async fn create_schema(
                     transition_id, proposal_id, owner_kind, project_id
                 )
         );
-        CREATE TABLE IF NOT EXISTS memory_v2_legacy_proposal_map (
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            source_store_id TEXT NOT NULL,
-            legacy_proposal_id TEXT NOT NULL,
-            proposal_id TEXT NOT NULL,
-            history_coverage TEXT NOT NULL CHECK(history_coverage IN ('complete', 'unknown')),
-            import_receipt_json TEXT NOT NULL CHECK(json_valid(import_receipt_json)),
-            imported_at INTEGER NOT NULL,
-            PRIMARY KEY(owner_kind, project_id, source_store_id, legacy_proposal_id),
-            UNIQUE(proposal_id, owner_kind, project_id, source_store_id),
-            FOREIGN KEY(proposal_id, owner_kind, project_id)
-                REFERENCES memory_v2_proposals(proposal_id, owner_kind, project_id)
-        );
-
         CREATE INDEX IF NOT EXISTS idx_memory_v2_assertions_fact
             ON memory_v2_assertions(fact_id, owner_kind, project_id, asserted_at);
         CREATE INDEX IF NOT EXISTS idx_memory_v2_events_fact
@@ -357,8 +281,6 @@ pub(in crate::db) async fn create_schema(
             ON memory_v2_current_facts(owner_kind, project_id, fact_id);
         CREATE INDEX IF NOT EXISTS idx_memory_v2_evidence_anchor
             ON memory_v2_evidence(anchor_id, owner_json);
-        CREATE INDEX IF NOT EXISTS idx_memory_v2_map_fact
-            ON memory_v2_legacy_map(fact_id, owner_kind, project_id);
         CREATE INDEX IF NOT EXISTS idx_memory_v2_proposal_list
             ON memory_v2_proposal_current(
                 owner_kind, project_id, state, updated_at, proposal_id
@@ -416,22 +338,6 @@ pub(in crate::db) async fn create_schema(
         BEFORE DELETE ON memory_v2_lineage_events BEGIN
             SELECT RAISE(ABORT, 'memory_v2 lineage events are immutable');
         END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_map_no_update
-        BEFORE UPDATE ON memory_v2_legacy_map BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 legacy mappings are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_map_no_delete
-        BEFORE DELETE ON memory_v2_legacy_map BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 legacy mappings are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_quarantine_no_update
-        BEFORE UPDATE ON memory_v2_legacy_quarantine BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 quarantine records are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_quarantine_no_delete
-        BEFORE DELETE ON memory_v2_legacy_quarantine BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 quarantine records are immutable');
-        END;
         CREATE TRIGGER IF NOT EXISTS memory_v2_proposals_no_update
         BEFORE UPDATE ON memory_v2_proposals BEGIN
             SELECT RAISE(ABORT, 'memory_v2 proposals are immutable');
@@ -447,14 +353,6 @@ pub(in crate::db) async fn create_schema(
         CREATE TRIGGER IF NOT EXISTS memory_v2_proposal_transitions_no_delete
         BEFORE DELETE ON memory_v2_proposal_transitions BEGIN
             SELECT RAISE(ABORT, 'memory_v2 proposal transitions are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_legacy_proposal_map_no_update
-        BEFORE UPDATE ON memory_v2_legacy_proposal_map BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 legacy proposal mappings are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_legacy_proposal_map_no_delete
-        BEFORE DELETE ON memory_v2_legacy_proposal_map BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 legacy proposal mappings are immutable');
         END;",
     )
     .await
@@ -544,7 +442,8 @@ pub(in crate::db) async fn create_schema(
     )
     .await
     .map_err(|error| db_error(operation, error))?;
-    install_v20_integrity_triggers(conn, operation).await?;
-    install_v21_current_projection_indexes(conn, operation).await?;
+    install_final_memory_support(conn, operation).await?;
+    install_proposal_integrity_triggers(conn, operation).await?;
+    install_current_projection_indexes(conn, operation).await?;
     Ok(())
 }

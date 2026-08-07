@@ -76,8 +76,7 @@ use tracedecay_tool_catalog::{
 
 use crate::application::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1, FeedbackOperationV1,
-    FeedbackOutcomeV1, FeedbackSourceEventV1, FeedbackRejectedArgumentV1,
-    FeedbackSseLifecycleV1,
+    FeedbackOutcomeV1, FeedbackRejectedArgumentV1, FeedbackSourceEventV1, FeedbackSseLifecycleV1,
 };
 use crate::application::operation_stream::{
     OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
@@ -1020,6 +1019,11 @@ async fn invoke_work_operation(
             ResumeAttempts,
             WorkAttemptRecoveryReportV1
         ),
+        WorkOperation::ListAttempts => core!(
+            tracedecay_application::WorkAttemptListRequestV1,
+            ListAttempts,
+            tracedecay_application::WorkAttemptListV1
+        ),
     }
 }
 
@@ -1642,7 +1646,9 @@ async fn emit_http_feedback_observation(
     }
 }
 
-fn feedback_sse_stream_event<T>(event: &StreamEvent<T>) -> Option<(FeedbackSseLifecycleV1, u32, bool)> {
+fn feedback_sse_stream_event<T>(
+    event: &StreamEvent<T>,
+) -> Option<(FeedbackSseLifecycleV1, u32, bool)> {
     match &event.kind {
         StreamEventKind::Item(_) => Some((FeedbackSseLifecycleV1::EventDelivered, 1, false)),
         StreamEventKind::Progress { .. } => None,
@@ -3389,12 +3395,10 @@ pub async fn execute_application_surface(
                             outcome: FeedbackOutcomeV1::Cancelled,
                         }
                     }
-                    DaemonInvocationError::TimedOut { .. } => {
-                        FeedbackSourceEventV1::Cancellation {
-                            operation: feedback_surface_operation(operation),
-                            outcome: FeedbackOutcomeV1::TimedOut,
-                        }
-                    }
+                    DaemonInvocationError::TimedOut { .. } => FeedbackSourceEventV1::Cancellation {
+                        operation: feedback_surface_operation(operation),
+                        outcome: FeedbackOutcomeV1::TimedOut,
+                    },
                     DaemonInvocationError::Unavailable => FeedbackSourceEventV1::Delivery {
                         operation: feedback_surface_operation(operation),
                         route: delivery_route,
@@ -3540,13 +3544,9 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         ApplicationSurfaceOperation::FeedbackGet => FeedbackOperationV1::FeedbackGet,
         ApplicationSurfaceOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
         ApplicationSurfaceOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
-        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => {
-            FeedbackOperationV1::FeedbackCycle
-        }
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle => FeedbackOperationV1::FeedbackCycle,
         ApplicationSurfaceOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
-        ApplicationSurfaceOperation::AffectedTests => {
-            FeedbackOperationV1::PrimitiveAffectedTests
-        }
+        ApplicationSurfaceOperation::AffectedTests => FeedbackOperationV1::PrimitiveAffectedTests,
         ApplicationSurfaceOperation::TestResults => FeedbackOperationV1::PrimitiveTestResults,
         ApplicationSurfaceOperation::GitStatus
         | ApplicationSurfaceOperation::GitDiff
@@ -3605,9 +3605,7 @@ fn feedback_surface_operation(operation: ApplicationSurfaceOperation) -> Feedbac
         | ApplicationSurfaceOperation::ContextScoutCancel
         | ApplicationSurfaceOperation::ContextScoutClaim
         | ApplicationSurfaceOperation::ContextScoutDelivery
-        | ApplicationSurfaceOperation::ContextScoutFeedback => {
-            FeedbackOperationV1::FeedbackCycle
-        }
+        | ApplicationSurfaceOperation::ContextScoutFeedback => FeedbackOperationV1::FeedbackCycle,
     }
 }
 

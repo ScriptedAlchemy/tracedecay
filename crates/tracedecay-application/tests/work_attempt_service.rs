@@ -319,17 +319,16 @@ impl WorkAttemptStoragePort for AttemptStore {
         limit: u32,
     ) -> Result<WorkAttemptListPageV1, WorkAttemptStorageError> {
         let inner = self.inner.lock().unwrap();
-        let start_ordinal =
-            start_after.map(|identity| attempt_key(authority, identity).1);
+        let start_ordinal = start_after.map(|identity| attempt_key(authority, identity).1);
         let mut pending = Vec::new();
         for ((row_authority, ordinal), payload) in inner.rows.iter() {
             if row_authority != authority {
                 continue;
             }
-            if let Some(start) = &start_ordinal {
-                if ordinal <= start {
-                    continue;
-                }
+            if let Some(start) = &start_ordinal
+                && ordinal <= start
+            {
+                continue;
             }
             pending.push(
                 serde_json::from_str::<WorkAttemptV1>(payload)

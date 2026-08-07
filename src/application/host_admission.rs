@@ -123,6 +123,26 @@ impl HostAdmissionTestRuntimeV1 {
         } else {
             (None, None)
         };
+        let relation_graphs =
+            crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry::default();
+        bind_test_session_relation_graph(
+            &relation_graphs,
+            profile_registered.as_ref(),
+            tracedecay_global_db::session_temporal::relations::SessionRelationScope::profile(
+                identity.profile_id().clone(),
+            ),
+        )?;
+        if let (Some(project_id), Some(project_registered)) =
+            (project_id.as_ref(), project_registered.as_deref())
+        {
+            bind_test_session_relation_graph(
+                &relation_graphs,
+                project_registered,
+                tracedecay_global_db::session_temporal::relations::SessionRelationScope::project(
+                    project_id.clone(),
+                ),
+            )?;
+        }
         validate_registered_authorities(
             identity.brain_id(),
             identity.profile_id(),
@@ -982,6 +1002,27 @@ impl HostAdmissionTestRuntimeV1 {
         }
         Ok((store_layout, project_database))
     }
+}
+
+fn bind_test_session_relation_graph(
+    registry: &crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
+    database: &RegisteredGlobalDb,
+    scope: tracedecay_global_db::session_temporal::relations::SessionRelationScope,
+) -> Result<()> {
+    let store_root = database
+        .db_path()
+        .parent()
+        .ok_or_else(|| TraceDecayError::Database {
+            operation: "bind host-admission test relation graph".to_owned(),
+            message: "registered session database has no storage root".to_owned(),
+        })?;
+    let graph = registry
+        .resolve_scope(&scope, store_root)
+        .map_err(|error| TraceDecayError::Database {
+            operation: "mount host-admission test relation graph".to_owned(),
+            message: error.to_string(),
+        })?;
+    database.bind_session_relation_graph(scope, graph)
 }
 
 fn canonical_session_domain_sha256(path: &Path) -> Result<[u8; 32]> {

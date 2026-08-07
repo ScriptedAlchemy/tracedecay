@@ -705,19 +705,19 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                 continue;
             }
             published_commits.push(CommitSessionRecord {
-                    commit_sha: sha,
-                    provider: row.provider.clone(),
-                    session_id: row.session_id.clone(),
-                    branch: Some(branch.to_string()),
-                    worktree: Some(worktree.clone()),
-                    committed_at,
-                    span_overlap_kind: SpanOverlapKind::WithinSpan,
-                    span_id: None,
-                    relation: CommitRelation::Observed,
-                    evidence: CommitEvidence::ReflogOverlap,
-                    confidence: 30,
-                    evidence_message_id: None,
-                });
+                commit_sha: sha,
+                provider: row.provider.clone(),
+                session_id: row.session_id.clone(),
+                branch: Some(branch.to_string()),
+                worktree: Some(worktree.clone()),
+                committed_at,
+                span_overlap_kind: SpanOverlapKind::WithinSpan,
+                span_id: None,
+                relation: CommitRelation::Observed,
+                evidence: CommitEvidence::ReflogOverlap,
+                confidence: 30,
+                evidence_message_id: None,
+            });
         }
     }
     if !opts.dry_run && (!published_spans.is_empty() || !published_commits.is_empty()) {

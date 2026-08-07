@@ -43,10 +43,10 @@ use tracedecay_domain::{
     RetentionClass, SanitizationReceiptV1, SanitizerDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
-    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactHistoryQueryV1,
-    ProjectMemoryFactHistoryV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactPageV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1, FactCommitOutcome, FactCommitReceipt,
-    FactCompatibilityResult, FactLineageQuery, FactStoreError, FactStoreResult, FactWriteBatch,
+    FactCommitOutcome, FactCommitReceipt, FactCompatibilityResult, FactLineageQuery,
+    FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactContentDigestQueryV1,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactListQueryV1,
+    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
 };
 pub(in crate::store::memory) async fn list_compatibility_facts_tx(
     transaction: &Transaction<'_>,
@@ -468,17 +468,10 @@ pub(in crate::store::memory) async fn compatibility_mark_owner_banks_dirty_tx(
     category: FactCategoryV1,
     updated_at: UtcMicros,
 ) -> FactStoreResult<()> {
-    let source_store_id = compatibility_source_store_id()?;
     for bank_name in ["all", compatibility_category_label(category)] {
-        db.mark_memory_v2_compatibility_bank_dirty_in_transaction(
-            transaction,
-            owner,
-            &source_store_id,
-            bank_name,
-            updated_at,
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
+        db.mark_memory_v2_bank_dirty_in_transaction(transaction, owner, bank_name, updated_at)
+            .await
+            .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
     }
     Ok(())
 }
@@ -603,7 +596,7 @@ pub(super) async fn compatibility_mirror_insert_tx(
         else {
             return Err(storage_message(
                 COMPATIBILITY_WRITE_OPERATION,
-                "compatibility mirror content is already bound to another owner or an unmigrated row",
+                "compatibility mirror content is already bound to another owner or canonical fact",
             ));
         };
         return Ok(CompatibilityMirrorInsertV1::Existing { fact_id });

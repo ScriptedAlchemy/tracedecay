@@ -286,7 +286,9 @@ fn handle_migrate_backup_profile(
                 created_at,
                 lifecycle,
             )
-            .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })
+            .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            })
         },
     )?;
     println!(
@@ -304,7 +306,9 @@ fn handle_migrate_rehearse_profile_backup(
         Path::new(&backup),
         Path::new(&restore),
     )
-    .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
+    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
     println!(
         "complete profile backup rehearsed: {} entries restored to {}",
         manifest.entries.len(),

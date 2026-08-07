@@ -78,19 +78,23 @@ fn stable_filesystem_identity(path: &Path) -> Result<Vec<u8>, BoundedBackfillInt
 
 #[cfg(windows)]
 fn stable_filesystem_identity(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
-    use std::os::windows::fs::MetadataExt as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
 
-    let metadata =
-        std::fs::metadata(path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    let volume = metadata
-        .volume_serial_number()
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
-    let index = metadata
-        .file_index()
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    // Directory handles need backup semantics; the identity itself comes from
+    // the stable GetFileInformationByHandle authority in runtime-core instead
+    // of the unstable `windows_by_handle` metadata surface. The identity byte
+    // layout (u32 volume + u64 index, little endian) is unchanged.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let information = tracedecay_runtime_core::windows_file::information(&directory)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let mut identity = b"windows-volume-index-v1\0".to_vec();
-    identity.extend_from_slice(&volume.to_le_bytes());
-    identity.extend_from_slice(&index.to_le_bytes());
+    identity.extend_from_slice(&information.volume_serial_number.to_le_bytes());
+    identity.extend_from_slice(&information.file_index.to_le_bytes());
     Ok(identity)
 }
 

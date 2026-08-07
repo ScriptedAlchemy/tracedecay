@@ -1905,9 +1905,9 @@ fn user_scoped_transcript_ingest_handshakes_projectless_from_filesystem_root_cwd
 }
 
 #[test]
-fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
-    // Mirrors scripts/hermes_stock_check.py: user-scoped sync_turn (cwd=/) then
-    // project-scoped lcm_grep must stay available without inventing project=/.
+fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
+    // A user-scoped read-only preflight from cwd=/ must not detach the
+    // independently mounted project-scoped LCM read authority.
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
@@ -2042,7 +2042,7 @@ fn hermes_stock_sync_turn_keeps_project_lcm_grep_available() {
         .unwrap_or(grep);
     assert!(
         payload.get("error").is_none(),
-        "stock Hermes regression: grep must remain available after sync_turn, got {payload}"
+        "Hermes regression: grep must remain available after preflight, got {payload}"
     );
     assert_ne!(
         payload.get("status").and_then(Value::as_str),

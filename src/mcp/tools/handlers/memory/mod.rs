@@ -229,8 +229,8 @@ async fn refresh_target_memory_digest(
 mod tests {
     use super::*;
     use tracedecay_store::{
-        ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
-        ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, FactStoreError,
+        FactStoreError, ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
+        ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery,
     };
 
     /// The deadline problem produced by the central memory dispatch bound

@@ -371,27 +371,51 @@ pub(super) async fn dispatch_git_tools(
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    // Every git handler below performs unbounded gix work — tree walks,
-    // revwalks, diffs, the branch-add index build — so a diverged or
-    // pathological ref would hang the request. The admission layer carries a
-    // dispatch deadline for exactly this (thirty seconds by default, see
-    // `dispatch_deadline_horizon_micros`); enforcing it here bounds every
-    // handler uniformly and reports exhaustion as the same typed semantic
-    // error the other git failures surface.
+    // Tree walks and revwalks still need a uniform dispatch deadline. Branch
+    // generation reads additionally carry this deadline into their bounded
+    // blocking/ref and daemon-generation executors, so timing out this future
+    // also tells the underlying operation to stop at its next checkpoint.
     let carried_deadline = options.application_deadline.as_ref();
     let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
 
     let handler = async {
         match tool_name {
-            "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args).await,
             "tracedecay_affected" => git::handle_affected(cg, args).await,
             "tracedecay_diff_context" => git::handle_diff_context(cg, args).await,
             "tracedecay_changelog" => git::handle_changelog(cg, args).await,
             "tracedecay_commit_context" => git::handle_commit_context(cg, args).await,
             "tracedecay_pr_context" => git::handle_pr_context(cg, args).await,
-            "tracedecay_branch_search" => git::handle_branch_search(cg, args).await,
-            "tracedecay_branch_diff" => git::handle_branch_diff(cg, args).await,
-            "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
+            "tracedecay_branch_search" => {
+                git::handle_branch_search(
+                    cg,
+                    args,
+                    options.code_index_search_executor.as_ref(),
+                    options.code_index_search_authority.as_ref(),
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                )
+                .await
+            }
+            "tracedecay_branch_diff" => {
+                git::handle_branch_diff(
+                    cg,
+                    args,
+                    options.code_index_branch_diff_executor.as_ref(),
+                    options.code_index_search_authority.as_ref(),
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                )
+                .await
+            }
+            "tracedecay_branch_list" => {
+                git::handle_branch_list(
+                    cg,
+                    args,
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                )
+                .await
+            }
             _ => Err(unknown_tool_error(tool_name)),
         }
     };
@@ -422,6 +446,7 @@ pub(super) async fn dispatch_edit_tools(
     let invocation = edit::SourceEditInvocationContext {
         executor: options.source_edit_executor.clone(),
         reconciliation_executor: options.source_edit_reconciliation_executor.clone(),
+        rollback_executor: options.source_edit_rollback_executor.clone(),
         request_id: options.application_request_id.clone(),
         deadline: options.application_deadline.clone(),
         cancellation: options.application_cancellation.clone(),
@@ -444,6 +469,9 @@ pub(super) async fn dispatch_edit_tools(
         "tracedecay_move_symbol" => edit::handle_move_symbol(cg, args, invocation.clone()).await,
         "tracedecay_rename_symbol" => {
             edit::handle_rename_symbol(cg, args, invocation.clone()).await
+        }
+        "tracedecay_source_edit_rollback" => {
+            edit::handle_source_edit_rollback(cg, args, invocation.clone()).await
         }
         "tracedecay_source_edit_reconcile" => {
             edit::handle_source_edit_reconcile(cg, args, invocation).await
@@ -604,6 +632,7 @@ pub(super) async fn execute_project_retained_application_tool(
                 session::message_search::SessionRetrievalStoreScope::Project,
                 request.arguments,
                 options.session_authorities.project_retrieval,
+                options.session_authorities.project_retrieval_sweep,
             ))
             .await
         }

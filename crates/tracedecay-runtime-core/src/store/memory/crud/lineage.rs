@@ -1,9 +1,10 @@
 //! Legacy mapping, lineage events, and current-projection publication.
 
 use super::super::primitives::{
-    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, identity_collision, parse_payload_access,
-    payload_access_label, requires_payload_purge, row_exists, row_exists_params, row_f64, row_i64,
-    row_optional_string, row_string, storage_error, storage_message, to_json,
+    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, compatibility_source_store_id, identity_collision,
+    parse_payload_access, payload_access_label, requires_payload_purge, row_exists,
+    row_exists_params, row_f64, row_i64, row_optional_string, row_string, storage_error,
+    storage_message, to_json,
 };
 use super::DEFAULT_TRUST;
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -59,6 +60,12 @@ pub(super) async fn insert_legacy_mapping(
     owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
 ) -> FactStoreResult<()> {
+    if mapping.source_store_id() != &compatibility_source_store_id()? {
+        return Err(storage_message(
+            COMMIT_OPERATION,
+            "canonical holographic projection requires the fixed compatibility source",
+        ));
+    }
     if legacy_mapping_exists(transaction, owner, mapping).await? {
         if legacy_mapping_matches(transaction, owner, mapping).await? {
             return Ok(());
@@ -68,43 +75,37 @@ pub(super) async fn insert_legacy_mapping(
             "legacy mapping identity collision",
         ));
     }
-    transaction
+    let changed = transaction
         .execute(
-            "INSERT INTO memory_v2_legacy_map(
-                owner_kind, project_id, owner_json, source_store_id,
-                legacy_fact_id, fact_id, mapping_json
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                owner.kind,
-                owner.project_id.as_str(),
-                owner.json.as_str(),
-                mapping.source_store_id().as_str(),
-                mapping.legacy_fact_id(),
-                mapping.fact_id().as_str(),
-                to_json(mapping, "serialize legacy fact mapping")?,
-            ],
+            "UPDATE memory_facts
+             SET canonical_fact_id = ?1
+             WHERE fact_id = ?2
+               AND (canonical_fact_id IS NULL OR canonical_fact_id = ?1)",
+            params![mapping.fact_id().as_str(), mapping.legacy_fact_id()],
         )
         .await
         .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+    if changed != 1 {
+        return Err(storage_message(
+            COMMIT_OPERATION,
+            "canonical fact projection row is missing or bound to another fact",
+        ));
+    }
     Ok(())
 }
 
 pub(super) async fn legacy_mapping_exists(
     transaction: &Transaction<'_>,
-    owner: &OwnerKey,
+    _owner: &OwnerKey,
     mapping: &LegacyFactMappingV1,
 ) -> FactStoreResult<bool> {
     row_exists_params(
         transaction,
-        "SELECT 1 FROM memory_v2_legacy_map
-         WHERE owner_kind = ?1 AND project_id = ?2
-           AND source_store_id = ?3 AND legacy_fact_id = ?4",
-        params![
-            owner.kind,
-            owner.project_id.as_str(),
-            mapping.source_store_id().as_str(),
-            mapping.legacy_fact_id(),
-        ],
+        "SELECT 1
+         FROM memory_facts
+         WHERE (fact_id = ?1 AND canonical_fact_id IS NOT NULL)
+            OR canonical_fact_id = ?2",
+        params![mapping.legacy_fact_id(), mapping.fact_id().as_str()],
     )
     .await
 }
@@ -116,14 +117,16 @@ pub(super) async fn legacy_mapping_matches(
 ) -> FactStoreResult<bool> {
     let mut rows = transaction
         .query(
-            "SELECT owner_json, fact_id FROM memory_v2_legacy_map
-             WHERE owner_kind = ?1 AND project_id = ?2
-               AND source_store_id = ?3 AND legacy_fact_id = ?4",
+            "SELECT facts.owner_json, projections.canonical_fact_id
+             FROM memory_facts AS projections
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = projections.canonical_fact_id
+             WHERE projections.fact_id = ?1
+               AND facts.owner_kind = ?2 AND facts.project_id = ?3",
             params![
+                mapping.legacy_fact_id(),
                 owner.kind,
                 owner.project_id.as_str(),
-                mapping.source_store_id().as_str(),
-                mapping.legacy_fact_id(),
             ],
         )
         .await
@@ -135,13 +138,8 @@ pub(super) async fn legacy_mapping_matches(
     else {
         return Ok(false);
     };
-    // A mapping's identity is (owner, source store, legacy fact) -> fact id;
-    // the query already keys on source store and legacy fact. Import
-    // attributes embedded in mapping_json (history coverage, migrated_at)
-    // legitimately differ between the compatibility write path and the
-    // backfill, so full-JSON equality would false-positive on a benign
-    // duplicate import. Genuine corruption (a different fact id or owner for
-    // the same legacy fact) is still caught here.
+    // The direct projection binding must resolve to the same canonical fact
+    // under the same owner. A different fact or owner is an identity conflict.
     Ok(row_string(&row, 0, QUERY_OPERATION)? == owner.json
         && row_string(&row, 1, QUERY_OPERATION)? == mapping.fact_id().as_str())
 }
@@ -485,16 +483,15 @@ pub(super) async fn publish_current_projection(
             )
             .await
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        // A live transition to a terminal payload access must erase the same
-        // free-text feedback surface as the canonical purge path
-        // (`purge_payload_rows`), so a deleted fact never retains
-        // API-reachable feedback source/note text.
+        // A live transition to terminal payload access must erase feedback
+        // free text so a deleted fact never retains API-reachable source/note
+        // data.
         transaction
             .execute(
                 "UPDATE memory_v2_feedback_history
                  SET source = NULL, note = NULL,
                      details_availability = CASE
-                         WHEN details_availability = 'available' THEN 'legacy_redacted'
+                         WHEN details_availability = 'available' THEN 'redacted'
                          ELSE details_availability
                      END
                  WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",

@@ -284,26 +284,12 @@ impl DashboardTestRuntimeV1 {
         observation: &tracedecay::sessions::git_correlation::SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64> {
-        let transaction = self.project_database.begin_write_transaction().await?;
-        let span_id =
-            tracedecay::sessions::git_correlation::record_span_observation_in_transaction(
-                &transaction,
-                observation,
-                merge_gap_secs,
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "record dashboard test git span".to_owned(),
-                message: error.to_string(),
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "commit dashboard test git span".to_owned(),
-                message: error.to_string(),
-            })?;
-        Ok(span_id)
+        dashboard::record_project_span_for_test(
+            self.project_database.as_ref(),
+            observation,
+            merge_gap_secs,
+        )
+        .await
     }
 
     pub(crate) async fn lcm_load_raw_message_for_test(

@@ -516,17 +516,6 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        _request: ProjectMemoryFactProposalImportV1,
-    ) -> Result<ProjectMemoryFactProposalImportReceiptV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-import");
-        Err(compatibility_fixture_error())
-    }
-
     async fn promote_compatibility_fact_proposal(
         &self,
         _request: ProjectMemoryFactProposalPromotionV1,

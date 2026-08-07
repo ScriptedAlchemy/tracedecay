@@ -611,6 +611,10 @@
       ],
       "type": "object"
     },
+    "AttemptId": {
+      "description": "Strongly typed canonical identity: `AttemptId`.",
+      "type": "string"
+    },
     "AuthorizedRoot": {
       "additionalProperties": false,
       "description": "One exact application scope paired with its registered physical locator.\n\nThe scope remains the identity authority. The locator is retained only so\na later read or restart can reopen the exact registered root without an\nactive-graph or CWD fallback.",
@@ -972,6 +976,34 @@
       ],
       "type": "object"
     },
+    "CancelWorkAttemptCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/AttemptId"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "request_id": {
+          "$ref": "#/$defs/WorkCancellationRequestId"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "attempt_id",
+        "request_id",
+        "occurred_at"
+      ],
+      "type": "object"
+    },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
         "note": {
@@ -1083,6 +1115,18 @@
         "coverage"
       ],
       "type": "object"
+    },
+    "CommitId": {
+      "description": "Strongly typed canonical identity: `CommitId`.",
+      "type": "string"
+    },
+    "ConfigurationRevisionId": {
+      "description": "Strongly typed canonical identity: `ConfigurationRevisionId`.",
+      "type": "string"
+    },
+    "ConfigurationSnapshotId": {
+      "description": "Strongly typed canonical identity: `ConfigurationSnapshotId`.",
+      "type": "string"
     },
     "CostsReadModelV1": {
       "properties": {
@@ -1205,6 +1249,10 @@
         "occurred_at"
       ],
       "type": "object"
+    },
+    "CredentialReferenceId": {
+      "description": "Strongly typed canonical identity: `CredentialReferenceId`.",
+      "type": "string"
     },
     "DashboardAuthorizationV1": {
       "description": "Authorization outcome for the read. On the loopback single-user dashboard a\nlegal local read is [`Self::Authorized`]; the other variants are retained so\nthe contract can express `unauthorized` (identity absent/expired), `denied`\n(known identity lacks permission), and `redacted` reads without a schema\nchange.",
@@ -9367,6 +9415,10 @@
       "description": "Strongly typed canonical identity: `ProposalId`.",
       "type": "string"
     },
+    "ProviderId": {
+      "description": "Strongly typed canonical identity: `ProviderId`.",
+      "type": "string"
+    },
     "ProviderUsageSummaryV1": {
       "properties": {
         "available": {
@@ -9600,6 +9652,18 @@
         "worktree_id",
         "reference",
         "scope_digest"
+      ],
+      "type": "object"
+    },
+    "ResumeWorkAttemptsCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "occurred_at"
       ],
       "type": "object"
     },
@@ -10588,6 +10652,66 @@
         "growth_bytes",
         "previous_observed_at",
         "current_observed_at"
+      ],
+      "type": "object"
+    },
+    "StartWorkAttemptCommand": {
+      "additionalProperties": false,
+      "description": "Starts one admitted provider attempt. Every field is a typed fact; there\nis no argv, environment entry, executable path, or shell string here. The\nprojection binding and admission facts are re-read from the canonical Work\nauthority, never trusted from the caller.",
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/AttemptId"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "effect_state": {
+          "$ref": "#/$defs/WorkEffectStateV1"
+        },
+        "execution_snapshot": {
+          "$ref": "#/$defs/WorkExecutionSnapshot"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "occurred_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "operation": {
+          "$ref": "#/$defs/WorkflowOperationRef"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "worktree_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "attempt_id",
+        "operation",
+        "execution_snapshot",
+        "worktree_root",
+        "reference",
+        "commit",
+        "instructions",
+        "effect_state",
+        "occurred_at"
       ],
       "type": "object"
     },
@@ -12168,6 +12292,414 @@
       ],
       "type": "object"
     },
+    "WorkApprovalPolicy": {
+      "enum": [
+        "never",
+        "on_request"
+      ],
+      "type": "string"
+    },
+    "WorkArtifactId": {
+      "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+      "type": "string"
+    },
+    "WorkArtifactRefV1": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "$ref": "#/$defs/WorkArtifactId"
+        },
+        "byte_length": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "digest",
+        "byte_length"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptIdentityV1": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/AttemptId"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptListCoverageV1": {
+      "description": "How much of the authorized attempt set one page covers.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Every attempt after the page start was returned; zero returned is the\nexplicit empty authorized result, not a concealment.",
+          "properties": {
+            "coverage": {
+              "const": "complete",
+              "type": "string"
+            },
+            "returned": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "coverage",
+            "returned"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The page cap was reached; `resume` continues under the same verified\ntopology generation.",
+          "properties": {
+            "coverage": {
+              "const": "capped",
+              "type": "string"
+            },
+            "remaining": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "resume": {
+              "$ref": "#/$defs/WorkAttemptListCursorV1"
+            },
+            "returned": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "coverage",
+            "returned",
+            "remaining",
+            "resume"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkAttemptListCursorV1": {
+      "additionalProperties": false,
+      "description": "Resume point for the next attempt-list page, bound to the exact verified\ntopology generation it was minted under.",
+      "properties": {
+        "generation": {
+          "description": "The verified topology generation the cursor was minted under.",
+          "type": "string"
+        },
+        "start_after": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1",
+          "description": "The last attempt identity the prior page returned."
+        }
+      },
+      "required": [
+        "generation",
+        "start_after"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptListRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkAttemptListCursorV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "page_size": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_size",
+        "cursor"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptListV1": {
+      "description": "One authority-scoped attempt-list read. Absence of any Work in scope is a\ntyped state, distinct from an authorized-but-empty page.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "No Work exists in this authority scope, so there is no attempt set to\npage. Concealed scopes never reach this state: they are refused as\nnot-found-or-not-authorized before any read.",
+          "properties": {
+            "state": {
+              "const": "absent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One page of durable attempts under the verified topology snapshot.",
+          "properties": {
+            "attempts": {
+              "items": {
+                "$ref": "#/$defs/WorkAttemptV1"
+              },
+              "type": "array"
+            },
+            "coverage": {
+              "$ref": "#/$defs/WorkAttemptListCoverageV1"
+            },
+            "state": {
+              "const": "listed",
+              "type": "string"
+            },
+            "topology": {
+              "$ref": "#/$defs/WorkAttemptTopologyBindingV1"
+            }
+          },
+          "required": [
+            "state",
+            "topology",
+            "attempts",
+            "coverage"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkAttemptProgressV1": {
+      "additionalProperties": false,
+      "properties": {
+        "completed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "completed",
+        "total"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptProjectionBindingV1": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_proposal": {
+          "$ref": "#/$defs/ProposalId",
+          "description": "Exact accepted proposal the attempt was admitted against. A superseded\nor cleared proposal is a different binding, not a compatible refresh."
+        },
+        "generation_id": {
+          "$ref": "#/$defs/ProjectionGenerationId"
+        },
+        "sequence": {
+          "$ref": "#/$defs/WorkProjectionSequenceV1"
+        },
+        "work_version": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation_id",
+        "sequence",
+        "work_version",
+        "accepted_proposal"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptRecoveryReportV1": {
+      "additionalProperties": false,
+      "description": "What resume-after-restart did to each open attempt.",
+      "properties": {
+        "cancelled": {
+          "description": "Attempts whose in-flight cancellation was completed during recovery.",
+          "items": {
+            "$ref": "#/$defs/WorkAttemptV1"
+          },
+          "type": "array"
+        },
+        "recovery_required": {
+          "description": "Attempts fenced onto a new epoch and now awaiting recovery execution.",
+          "items": {
+            "$ref": "#/$defs/WorkAttemptV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "recovery_required",
+        "cancelled"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptStateV1": {
+      "enum": [
+        "leased",
+        "running",
+        "cancellation_requested",
+        "cancellation_acknowledged",
+        "cancellation_escalated",
+        "recovery_required",
+        "succeeded",
+        "failed",
+        "timed_out",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "WorkAttemptStatusRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "$ref": "#/$defs/AttemptId"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptTopologyBindingV1": {
+      "additionalProperties": false,
+      "description": "The verified Work topology snapshot one attempt-list page was read under.",
+      "properties": {
+        "generation": {
+          "description": "The verified graph generation the topology snapshot is published under.",
+          "type": "string"
+        },
+        "task_count": {
+          "description": "The number of tasks in the verified topology.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "generation",
+        "task_count"
+      ],
+      "type": "object"
+    },
+    "WorkAttemptV1": {
+      "properties": {
+        "actual_route": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkProviderRouteV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/WorkArtifactRefV1"
+          },
+          "type": "array"
+        },
+        "cancellation": {
+          "$ref": "#/$defs/WorkCancellationStateV1"
+        },
+        "execution": {
+          "$ref": "#/$defs/WorkExecutionEnvelopeV1"
+        },
+        "identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "lease": {
+          "$ref": "#/$defs/WorkLeaseFenceV1"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkAttemptProgressV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projection_binding": {
+          "$ref": "#/$defs/WorkAttemptProjectionBindingV1"
+        },
+        "recovery": {
+          "$ref": "#/$defs/WorkRecoveryStateV1"
+        },
+        "requested_route": {
+          "$ref": "#/$defs/WorkProviderRouteV1"
+        },
+        "state": {
+          "$ref": "#/$defs/WorkAttemptStateV1"
+        },
+        "terminal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkTerminalEvidenceV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "identity",
+        "projection_binding",
+        "execution",
+        "lease",
+        "state",
+        "progress",
+        "artifacts",
+        "cancellation",
+        "recovery",
+        "requested_route",
+        "actual_route",
+        "terminal"
+      ],
+      "type": "object"
+    },
     "WorkAuthority": {
       "additionalProperties": false,
       "properties": {
@@ -12196,8 +12728,140 @@
       ],
       "type": "object"
     },
+    "WorkCancellationAcknowledgementV1": {
+      "additionalProperties": false,
+      "properties": {
+        "acknowledged_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "request": {
+          "$ref": "#/$defs/WorkCancellationRequestV1"
+        }
+      },
+      "required": [
+        "request",
+        "acknowledged_at"
+      ],
+      "type": "object"
+    },
+    "WorkCancellationEscalationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "acknowledgement": {
+          "$ref": "#/$defs/WorkCancellationAcknowledgementV1"
+        },
+        "escalated_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "acknowledgement",
+        "escalated_at"
+      ],
+      "type": "object"
+    },
+    "WorkCancellationRequestId": {
+      "description": "Strongly typed canonical identity: `WorkCancellationRequestId`.",
+      "type": "string"
+    },
+    "WorkCancellationRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/WorkCancellationRequestId"
+        },
+        "requested_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "request_id",
+        "requested_at"
+      ],
+      "type": "object"
+    },
+    "WorkCancellationStateV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "requested",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WorkCancellationRequestV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "acknowledged",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WorkCancellationAcknowledgementV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "escalated",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WorkCancellationEscalationV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "WorkCommandId": {
       "description": "Strongly typed canonical identity: `WorkCommandId`.",
+      "type": "string"
+    },
+    "WorkEffectStateV1": {
+      "description": "Effect semantics admitted for one provider attempt.",
+      "enum": [
+        "observational",
+        "intercepted",
+        "compound_non_repeatable"
+      ],
+      "type": "string"
+    },
+    "WorkEgressPolicy": {
+      "enum": [
+        "deny",
+        "allowlisted"
+      ],
       "type": "string"
     },
     "WorkEvidenceFrontierV1": {
@@ -12217,6 +12881,280 @@
       ],
       "type": "object"
     },
+    "WorkExecutableReference": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "executable_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "executable_id",
+        "artifact_digest"
+      ],
+      "type": "object"
+    },
+    "WorkExecutionEnvelopeV1": {
+      "additionalProperties": false,
+      "description": "Exact immutable provider admission attached to the durable Work attempt.\n\nCallers name typed route and scope facts, never argv, environment entries,\nor executable paths. The daemon resolves the registered executable only\nafter this envelope has been persisted and admitted to the canonical queue.",
+      "properties": {
+        "attempt_identity": {
+          "$ref": "#/$defs/WorkAttemptIdentityV1"
+        },
+        "cancellation_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "commit": {
+          "$ref": "#/$defs/CommitId"
+        },
+        "effect_state": {
+          "$ref": "#/$defs/WorkEffectStateV1"
+        },
+        "execution_snapshot": {
+          "$ref": "#/$defs/WorkExecutionSnapshot"
+        },
+        "instructions": {
+          "description": "Exact provider instructions admitted with this attempt. The adapter\ndelivers these bytes verbatim on the provider's typed input channel;\nthey are never interpolated into argv or an ambient prompt source.",
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/$defs/WorkflowOperationRef"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "projection_binding": {
+          "$ref": "#/$defs/WorkAttemptProjectionBindingV1"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository_id": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "worktree_id": {
+          "$ref": "#/$defs/WorktreeId"
+        },
+        "worktree_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt_identity",
+        "projection_binding",
+        "operation",
+        "execution_snapshot",
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "worktree_root",
+        "reference",
+        "commit",
+        "instructions",
+        "cancellation_generation",
+        "effect_state"
+      ],
+      "type": "object"
+    },
+    "WorkExecutionLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_concurrency": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_protocol_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_stderr_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_stdout_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_stdout_bytes",
+        "max_stderr_bytes",
+        "max_protocol_bytes",
+        "max_concurrency"
+      ],
+      "type": "object"
+    },
+    "WorkExecutionSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "approval": {
+          "$ref": "#/$defs/WorkApprovalPolicy"
+        },
+        "backend": {
+          "$ref": "#/$defs/WorkProviderBackendV1"
+        },
+        "configuration_revision_id": {
+          "$ref": "#/$defs/ConfigurationRevisionId"
+        },
+        "configuration_snapshot_id": {
+          "$ref": "#/$defs/ConfigurationSnapshotId"
+        },
+        "credential_references": {
+          "items": {
+            "$ref": "#/$defs/CredentialReferenceId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "deadline": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "effective_behavior_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "egress": {
+          "$ref": "#/$defs/WorkEgressPolicy"
+        },
+        "environment_allowlist": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "executable": {
+          "$ref": "#/$defs/WorkExecutableReference"
+        },
+        "fallback": {
+          "$ref": "#/$defs/WorkFallbackTopology"
+        },
+        "filesystem": {
+          "$ref": "#/$defs/WorkFilesystemPolicy"
+        },
+        "limits": {
+          "$ref": "#/$defs/WorkExecutionLimits"
+        },
+        "model": {
+          "type": "string"
+        },
+        "protocol": {
+          "$ref": "#/$defs/WorkProviderProtocol"
+        },
+        "resolution_provenance_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "route": {
+          "$ref": "#/$defs/WorkProviderRouteV1"
+        },
+        "sandbox": {
+          "$ref": "#/$defs/WorkSandboxPolicy"
+        },
+        "topology_policy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "configuration_revision_id",
+        "configuration_snapshot_id",
+        "effective_behavior_digest",
+        "resolution_provenance_digest",
+        "route",
+        "backend",
+        "protocol",
+        "model",
+        "executable",
+        "sandbox",
+        "approval",
+        "filesystem",
+        "egress",
+        "environment_allowlist",
+        "credential_references",
+        "limits",
+        "deadline",
+        "fallback",
+        "topology_policy_digest"
+      ],
+      "type": "object"
+    },
+    "WorkFallbackTopology": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "disabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "executable": {
+              "$ref": "#/$defs/WorkExecutableReference"
+            },
+            "kind": {
+              "const": "codex_cli",
+              "type": "string"
+            },
+            "route": {
+              "$ref": "#/$defs/WorkProviderRouteV1"
+            }
+          },
+          "required": [
+            "kind",
+            "route",
+            "executable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkFenceEpochV1": {
+      "format": "uint64",
+      "minimum": 0,
+      "title": "WorkFenceEpochV1",
+      "type": "integer"
+    },
+    "WorkFilesystemPolicy": {
+      "enum": [
+        "read_only",
+        "workspace_write"
+      ],
+      "type": "string"
+    },
     "WorkFrontierComparisonV1": {
       "description": "Recorded relation between the two supplied frontiers. `Incomparable` means\nat least one side was absent; it is not collapsed into agreement.",
       "enum": [
@@ -12224,6 +13162,26 @@
         "disagree",
         "incomparable"
       ],
+      "type": "string"
+    },
+    "WorkLeaseFenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "epoch": {
+          "$ref": "#/$defs/WorkFenceEpochV1"
+        },
+        "lease_id": {
+          "$ref": "#/$defs/WorkLeaseId"
+        }
+      },
+      "required": [
+        "lease_id",
+        "epoch"
+      ],
+      "type": "object"
+    },
+    "WorkLeaseId": {
+      "description": "Strongly typed canonical identity: `WorkLeaseId`.",
       "type": "string"
     },
     "WorkProjection": {
@@ -12661,6 +13619,238 @@
       ],
       "type": "string"
     },
+    "WorkProviderBackendV1": {
+      "description": "Provider protocol selected by the pinned Work configuration snapshot.",
+      "enum": [
+        "claude_code_cli",
+        "codex_app_server",
+        "codex_cli"
+      ],
+      "type": "string"
+    },
+    "WorkProviderProtocol": {
+      "enum": [
+        "claude_stream_json",
+        "codex_app_server_json_rpc",
+        "codex_exec_json"
+      ],
+      "type": "string"
+    },
+    "WorkProviderRouteId": {
+      "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+      "type": "string"
+    },
+    "WorkProviderRouteV1": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_id": {
+          "$ref": "#/$defs/ProviderId"
+        },
+        "route_id": {
+          "$ref": "#/$defs/WorkProviderRouteId"
+        }
+      },
+      "required": [
+        "provider_id",
+        "route_id"
+      ],
+      "type": "object"
+    },
+    "WorkRecoveryStateV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "fresh",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkArtifactRefV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source_attempt_id": {
+              "$ref": "#/$defs/AttemptId"
+            },
+            "state": {
+              "const": "resumed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "source_attempt_id",
+            "checkpoint"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/WorkRestartReasonV1"
+            },
+            "source_attempt_id": {
+              "$ref": "#/$defs/AttemptId"
+            },
+            "state": {
+              "const": "restarted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "source_attempt_id",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The attempt cannot continue and must be recovered. A first attempt\nlost before it ever resumed anything has no predecessor, so the source\nis absent rather than pointing at the attempt itself.",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/WorkRestartReasonV1"
+            },
+            "source_attempt_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AttemptId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "state": {
+              "const": "recovery_required",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "source_attempt_id",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkRestartReasonV1": {
+      "enum": [
+        "lease_lost",
+        "provider_unavailable",
+        "process_lost",
+        "checkpoint_rejected"
+      ],
+      "type": "string"
+    },
+    "WorkSandboxPolicy": {
+      "enum": [
+        "required"
+      ],
+      "type": "string"
+    },
+    "WorkTerminalEvidenceV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "evidence_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "outcome": {
+              "const": "succeeded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "evidence_digest",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "evidence_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "outcome": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "evidence_digest",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "evidence_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "outcome": {
+              "const": "timed_out",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "evidence_digest",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "evidence_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "outcome": {
+              "const": "cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "evidence_digest",
+            "observed_at"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkflowOperationRef": {
+      "description": "Strongly typed canonical identity: `WorkflowOperationRef`.",
+      "type": "string"
+    },
     "WorktreeId": {
       "description": "Strongly typed canonical identity: `WorktreeId`.",
       "type": "string"
@@ -12844,6 +14034,24 @@
     "work_attach_runtime_evidence_command": {
       "$ref": "#/$defs/AttachRuntimeEvidenceCommand"
     },
+    "work_attempt": {
+      "$ref": "#/$defs/WorkAttemptV1"
+    },
+    "work_attempt_list": {
+      "$ref": "#/$defs/WorkAttemptListV1"
+    },
+    "work_attempt_list_request": {
+      "$ref": "#/$defs/WorkAttemptListRequestV1"
+    },
+    "work_attempt_recovery_report": {
+      "$ref": "#/$defs/WorkAttemptRecoveryReportV1"
+    },
+    "work_attempt_status_request": {
+      "$ref": "#/$defs/WorkAttemptStatusRequestV1"
+    },
+    "work_cancel_attempt_command": {
+      "$ref": "#/$defs/CancelWorkAttemptCommand"
+    },
     "work_create_command": {
       "$ref": "#/$defs/CreateWorkCommand"
     },
@@ -12871,11 +14079,17 @@
     "work_replan_dependencies_command": {
       "$ref": "#/$defs/ReplanDependenciesCommand"
     },
+    "work_resume_attempts_command": {
+      "$ref": "#/$defs/ResumeWorkAttemptsCommand"
+    },
     "work_review_proposal_command": {
       "$ref": "#/$defs/ReviewProposalCommand"
     },
     "work_review_proposal_request": {
       "$ref": "#/$defs/ReviewProposalRequestV1"
+    },
+    "work_start_attempt_command": {
+      "$ref": "#/$defs/StartWorkAttemptCommand"
     }
   },
   "required": [
@@ -12938,6 +14152,14 @@
     "work_attach_runtime_evidence_command",
     "work_accept_task_command",
     "work_projection",
+    "work_start_attempt_command",
+    "work_attempt_status_request",
+    "work_cancel_attempt_command",
+    "work_resume_attempts_command",
+    "work_attempt",
+    "work_attempt_recovery_report",
+    "work_attempt_list_request",
+    "work_attempt_list",
     "multi_root_capability",
     "multi_root_scope_set_read_request",
     "multi_root_scope_set",

@@ -1,0 +1,13 @@
+diff a/src/mcp/tools/definitions.rs b/src/mcp/tools/definitions.rs	(rejected hunks)
+@@ -1061,8 +1061,9 @@ mod tests {
+             .find(|definition| definition.name == "tracedecay_lcm_doctor")
+             .unwrap();
+         let dispatch = &doctor.meta.as_ref().unwrap()["tracedecay/dispatch"];
+-        assert_eq!(dispatch["effect"], "administrative");
+-        assert_eq!(dispatch["availability"]["state"], "unavailable");
++        assert_eq!(dispatch["effect"], "read");
++        assert_eq!(dispatch["availability"]["state"], "available");
++        assert_eq!(dispatch["read_only"], true);
+         assert!(dispatch.get("receipt").is_none());
+         assert!(dispatch.get("reconciliation").is_none());
+     }

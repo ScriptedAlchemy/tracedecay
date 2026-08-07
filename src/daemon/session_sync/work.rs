@@ -765,11 +765,7 @@ impl SessionSyncProjectContext {
             let idempotency = git_topology_idempotency_key(&projection, &revision)
                 .map_err(|error| error.to_string())?;
             runtime
-                .publish_verified_manifest(
-                    &manifest,
-                    idempotency,
-                    Arc::clone(&worker_cancelled),
-                )
+                .publish_verified_manifest(&manifest, idempotency, Arc::clone(&worker_cancelled))
                 .map_err(|error| error.to_string())?;
             Ok(())
         });

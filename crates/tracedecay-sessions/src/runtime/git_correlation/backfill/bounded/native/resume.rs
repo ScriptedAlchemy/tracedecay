@@ -610,7 +610,7 @@ fn present_source_generation(
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     hasher.update(modified.as_secs().to_le_bytes());
     hasher.update(modified.subsec_nanos().to_le_bytes());
-    hash_file_identity(&mut hasher, metadata)?;
+    hash_file_identity(&mut hasher, path, metadata)?;
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
@@ -660,6 +660,7 @@ fn hash_path(_hasher: &mut Sha256, _path: &Path) {}
 #[cfg(unix)]
 fn hash_file_identity(
     hasher: &mut Sha256,
+    _path: &Path,
     metadata: &std::fs::Metadata,
 ) -> Result<(), BoundedBackfillInterruption> {
     use std::os::unix::fs::MetadataExt as _;
@@ -674,24 +675,26 @@ fn hash_file_identity(
 #[cfg(windows)]
 fn hash_file_identity(
     hasher: &mut Sha256,
-    metadata: &std::fs::Metadata,
+    path: &Path,
+    _metadata: &std::fs::Metadata,
 ) -> Result<(), BoundedBackfillInterruption> {
-    use std::os::windows::fs::MetadataExt as _;
-
-    let volume = metadata
-        .volume_serial_number()
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
-    let index = metadata
-        .file_index()
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
-    hasher.update(volume.to_le_bytes());
-    hasher.update(index.to_le_bytes());
+    // Identity comes from the stable GetFileInformationByHandle authority in
+    // runtime-core instead of the unstable `windows_by_handle` metadata
+    // surface. The hashed byte layout (u32 volume + u64 index, little endian)
+    // is unchanged.
+    let file =
+        std::fs::File::open(path).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    let information = tracedecay_runtime_core::windows_file::information(&file)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    hasher.update(information.volume_serial_number.to_le_bytes());
+    hasher.update(information.file_index.to_le_bytes());
     Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
 fn hash_file_identity(
     _hasher: &mut Sha256,
+    _path: &Path,
     _metadata: &std::fs::Metadata,
 ) -> Result<(), BoundedBackfillInterruption> {
     Err(BoundedBackfillInterruption::SourceUnavailable)

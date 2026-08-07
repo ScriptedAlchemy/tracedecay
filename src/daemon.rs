@@ -140,13 +140,15 @@ mod branch_admin;
 mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
+mod code_index_branch_diff;
+use code_index_branch_diff::code_index_branch_diff_executor;
 mod code_index_executor;
 use code_index_executor::code_index_search_executor;
+pub(crate) mod code_index_task_support;
 #[cfg(test)]
-use code_index_executor::{
-    code_index_scope_unavailable, code_index_search_display_binding,
-    code_index_search_hydration_budget, mcp_search_request_termination,
-};
+use code_index_executor::{code_index_search_display_binding, mcp_search_request_termination};
+#[cfg(test)]
+use code_index_task_support::{code_index_scope_unavailable, code_index_search_hydration_budget};
 pub(crate) mod code_index_scheduler;
 mod connection_serving;
 pub(crate) mod context_scout_lifecycle;
@@ -319,6 +321,8 @@ use project_server_lifecycle::{
     await_user_profile_host_admission_replay_for_identity, schedule_project_server_retirement,
     schedule_user_profile_host_admission_replay_for_identity, shutdown_project_servers,
 };
+pub(crate) mod lcm_effects;
+mod lcm_summarization;
 mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;

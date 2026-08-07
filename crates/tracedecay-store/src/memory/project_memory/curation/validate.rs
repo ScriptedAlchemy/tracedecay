@@ -2,7 +2,7 @@ use tracedecay_domain::{Confidence, DomainError, FactOwnerV1};
 
 use super::super::super::{FactStoreError, FactStoreResult};
 use super::super::ProjectMemoryFactTargetV1;
-use super::{ProjectMemoryLegacyEntityTargetV1, MAX_COMPATIBILITY_CURATION_TARGETS};
+use super::{MAX_COMPATIBILITY_CURATION_TARGETS, ProjectMemoryLegacyEntityTargetV1};
 
 pub(super) fn validate_curation_confidence(
     confidence: Confidence,

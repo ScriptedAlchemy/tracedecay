@@ -7,9 +7,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_domain::{
-    WorkflowDefinition, WorkflowStep, WorkflowStepId, canonical_sha256,
-};
+use tracedecay_domain::{WorkflowDefinition, WorkflowStep, WorkflowStepId, canonical_sha256};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
@@ -46,9 +44,7 @@ impl From<GraphDbError> for WorkflowTopologyError {
     fn from(error: GraphDbError) -> Self {
         match error {
             GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => {
-                Self::BudgetExhausted
-            }
+            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => Self::BudgetExhausted,
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Corrupt { message }
             | GraphDbError::ResetRequired { message }
@@ -137,11 +133,7 @@ pub fn build_workflow_topology_manifest_checked(
     for step in &steps {
         for predecessor in &step.predecessors {
             check()?;
-            relations.push(precedes_relation(
-                &identity,
-                predecessor,
-                &step.step_id,
-            )?);
+            relations.push(precedes_relation(&identity, predecessor, &step.step_id)?);
         }
     }
     let source_digest = canonical_sha256(&(
@@ -439,6 +431,5 @@ fn stable_identity(kind: &str, value: &str) -> String {
 }
 
 fn serialize(value: &impl Serialize) -> Result<Vec<u8>, WorkflowTopologyError> {
-    serde_json::to_vec(value)
-        .map_err(|error| WorkflowTopologyError::Contract(error.to_string()))
+    serde_json::to_vec(value).map_err(|error| WorkflowTopologyError::Contract(error.to_string()))
 }

@@ -606,11 +606,10 @@ fn current_read_omits_fact_without_active_assertion() {
                     project_id TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                  );
-                 CREATE TABLE memory_v2_legacy_map (
-                    fact_id TEXT NOT NULL,
-                    owner_kind TEXT NOT NULL,
-                    project_id TEXT NOT NULL,
-                    mapping_json TEXT NOT NULL
+                 CREATE TABLE memory_facts (
+                    fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_fact_id TEXT UNIQUE,
+                    created_at INTEGER NOT NULL DEFAULT 0
                  );",
         )
         .unwrap();

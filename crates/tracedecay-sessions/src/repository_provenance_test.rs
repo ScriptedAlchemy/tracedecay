@@ -27,7 +27,7 @@ impl GitFixture {
     }
 
     fn git(&self, args: &[&str]) -> Output {
-        let output = Command::new(crate::git::git_program())
+        let output = Command::new(tracedecay_runtime_core::git::git_program())
             .args(args)
             .current_dir(self.path())
             .output()
@@ -158,7 +158,7 @@ fn conflicted_index_is_explicit_without_a_status_probe() {
     fixture.commit("side");
     fixture.git(&["checkout", "-q", "main"]);
     fixture.commit("main");
-    let merge = Command::new(crate::git::git_program())
+    let merge = Command::new(tracedecay_runtime_core::git::git_program())
         .args(["merge", "--no-edit", "side"])
         .current_dir(fixture.path())
         .output()
@@ -285,7 +285,7 @@ fn remote_credentials_are_removed_before_identity_hashing() {
 #[test]
 fn bare_repository_is_typed_unsupported() {
     let root = TempDir::new().unwrap();
-    let output = Command::new(crate::git::git_program())
+    let output = Command::new(tracedecay_runtime_core::git::git_program())
         .args(["init", "--bare", "-q"])
         .current_dir(root.path())
         .output()
@@ -347,8 +347,8 @@ fn admission_context_is_deterministic_separated_and_path_private() {
     let alternate_root = TempDir::new().unwrap();
     let common_dir = TempDir::new().unwrap();
     let project = ProjectId::new("project.provenance-admission").unwrap();
-    let marker = crate::storage::RepositoryIdentityMarker {
-        schema_version: crate::storage::REPOSITORY_IDENTITY_SCHEMA_VERSION,
+    let marker = tracedecay_runtime_core::storage::RepositoryIdentityMarker {
+        schema_version: tracedecay_runtime_core::storage::REPOSITORY_IDENTITY_SCHEMA_VERSION,
         project_id: project.as_str().to_owned(),
         git_common_dir: common_dir.path().to_string_lossy().to_string(),
     };
@@ -379,7 +379,7 @@ fn admission_context_is_deterministic_separated_and_path_private() {
     assert_ne!(first.worktree_id, alternate_worktree.worktree_id);
 
     let other_project = ProjectId::new("project.provenance-other").unwrap();
-    let other_marker = crate::storage::RepositoryIdentityMarker {
+    let other_marker = tracedecay_runtime_core::storage::RepositoryIdentityMarker {
         project_id: other_project.as_str().to_owned(),
         ..marker.clone()
     };
@@ -420,6 +420,37 @@ fn admission_context_is_deterministic_separated_and_path_private() {
             &other_marker,
         )
         .is_none()
+    );
+}
+
+#[test]
+fn admission_capture_cache_reuses_exact_watermark_and_invalidates_on_index_change() {
+    let fixture = GitFixture::new();
+    fixture.commit("base");
+    let context = RepositoryProvenanceAdmissionContext::new(
+        fixture.path().to_path_buf(),
+        ProjectId::new("project.capture-cache").unwrap(),
+        RepositoryId::new("repository.capture-cache").unwrap(),
+        Some(WorktreeId::new("worktree.capture-cache").unwrap()),
+        PRIVACY_DOMAIN_SALT,
+    );
+
+    let cold_snapshot = context.capture_snapshot(UtcMicros(100));
+    let warm_snapshot = context.capture_snapshot(UtcMicros(200));
+    let cold = cold_snapshot.availability().value().unwrap();
+    let warm = warm_snapshot.availability().value().unwrap();
+    assert_eq!(cold.capture_id(), warm.capture_id());
+    assert_eq!(warm.captured_at(), UtcMicros(100));
+
+    fs::write(fixture.path().join("tracked.txt"), "staged").unwrap();
+    fixture.git(&["add", "--", "tracked.txt"]);
+    let changed_snapshot = context.capture_snapshot(UtcMicros(300));
+    let changed = changed_snapshot.availability().value().unwrap();
+    assert_ne!(cold.capture_id(), changed.capture_id());
+    assert_eq!(changed.captured_at(), UtcMicros(300));
+    assert_eq!(
+        changed.evidence().dirty_state(),
+        &EvidenceAvailabilityV1::Unknown
     );
 }
 
@@ -581,18 +612,25 @@ fn removed_checkout_yields_typed_absence_without_ambient_head() {
 }
 
 fn git_dir_fingerprint(root: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
-    let mut entries = BTreeMap::new();
-    for entry in walkdir::WalkDir::new(root.join(".git")).sort_by_file_name() {
-        let entry = entry.unwrap();
-        if !entry.file_type().is_file() {
-            continue;
+    fn visit(directory: &Path, entries: &mut BTreeMap<PathBuf, (u64, std::time::SystemTime)>) {
+        let mut children = fs::read_dir(directory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        children.sort_by_key(std::fs::DirEntry::file_name);
+        for child in children {
+            let file_type = child.file_type().unwrap();
+            if file_type.is_dir() {
+                visit(&child.path(), entries);
+            } else if file_type.is_file() {
+                let metadata = child.metadata().unwrap();
+                entries.insert(child.path(), (metadata.len(), metadata.modified().unwrap()));
+            }
         }
-        let metadata = entry.metadata().unwrap();
-        entries.insert(
-            entry.path().to_path_buf(),
-            (metadata.len(), metadata.modified().unwrap()),
-        );
     }
+
+    let mut entries = BTreeMap::new();
+    visit(&root.join(".git"), &mut entries);
     entries
 }
 
@@ -624,7 +662,7 @@ fn defunct_checkout_capture_never_falls_back_to_an_ambient_parent_repository() {
     let child = parent.path().join("child");
     fs::create_dir_all(&child).unwrap();
     let git = |args: &[&str]| {
-        let output = Command::new(crate::git::git_program())
+        let output = Command::new(tracedecay_runtime_core::git::git_program())
             .args(args)
             .current_dir(&child)
             .output()

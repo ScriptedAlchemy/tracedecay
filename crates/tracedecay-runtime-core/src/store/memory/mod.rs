@@ -8,32 +8,31 @@ use tracedecay_domain::{
     ActorId, FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
 };
 use tracedecay_store::{
-    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
-    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
-    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
-    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
-    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
-    ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactCurationBatchV1,
-    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackCommandV1,
-    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
-    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
-    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
-    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalImportReceiptV1,
-    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalPageV1,
-    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
-    ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
-    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
-    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1,
-    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
-    FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
+    FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery, FactCurrentResponseV1,
+    FactLineageQuery, FactLineageResponseV1, FactProposalStore, FactProposalStoreError, FactStore,
+    FactStoreResult, FactWriteBatch, LegacyFactQuery, ProjectMemoryDashboardFactDetailQueryV1,
+    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
+    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
+    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddCommandV1,
+    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContentDigestQueryV1,
+    ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackHistoryQueryV1,
+    ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactFeedbackOutcomeV1,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
+    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionResultV1,
+    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
+    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchPageV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryMemoryRepairCommandV1,
+    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryMemoryStatusV1, PromoteFactProposal,
+    PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use crud::{
@@ -58,10 +57,10 @@ use primitives::{QUERY_OPERATION, authority_storage_error, storage_error};
 use projection::resolve_legacy_fact_tx;
 use proposals::{
     count_pending_compatibility_fact_proposals_tx, get_compatibility_fact_proposal_tx,
-    import_legacy_compatibility_fact_proposals_tx, list_compatibility_fact_proposals_tx,
-    reject_compatibility_fact_proposal_tx, submit_compatibility_fact_proposal_tx,
+    list_compatibility_fact_proposals_tx, reject_compatibility_fact_proposal_tx,
+    submit_compatibility_fact_proposal_tx,
 };
-use repair::{compatibility_feedback_history_repair_progress_tx, repair_compatibility_memory_tx};
+use repair::repair_compatibility_memory_tx;
 use search::{
     find_compatibility_contradictions_tx, probe_compatibility_facts_tx,
     reason_compatibility_facts_tx, record_compatibility_fact_retrieval_tx,
@@ -438,11 +437,7 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         owner: FactOwnerV1,
     ) -> FactCompatibilityResult<ProjectMemoryMemoryStatusV1> {
         self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                let feedback_repair =
-                    compatibility_feedback_history_repair_progress_tx(transaction, &owner).await?;
-                compatibility_memory_status_tx(transaction, &owner, feedback_repair).await
-            })
+            Box::pin(async move { compatibility_memory_status_tx(transaction, &owner).await })
         })
         .await
     }
@@ -507,14 +502,9 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         query: ProjectMemoryFactFeedbackHistoryQueryV1,
     ) -> FactCompatibilityResult<ProjectMemoryFactFeedbackHistoryV1> {
         self.compatibility_read(move |transaction| {
-            Box::pin(async move {
-                let feedback_repair = compatibility_feedback_history_repair_progress_tx(
-                    transaction,
-                    query.target().owner(),
-                )
-                .await?;
-                compatibility_fact_feedback_history_tx(transaction, &query, feedback_repair).await
-            })
+            Box::pin(
+                async move { compatibility_fact_feedback_history_tx(transaction, &query).await },
+            )
         })
         .await
     }
@@ -714,18 +704,6 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
                     &reason,
                 )
                 .await
-            })
-        })
-        .await
-    }
-
-    async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: ProjectMemoryFactProposalImportV1,
-    ) -> FactCompatibilityResult<ProjectMemoryFactProposalImportReceiptV1> {
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move {
-                import_legacy_compatibility_fact_proposals_tx(transaction, &request).await
             })
         })
         .await
@@ -962,9 +940,6 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
             reviewer: ActorId,
             reason: String,
         ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>;
-        fn import_legacy_compatibility_fact_proposals(
-            request: ProjectMemoryFactProposalImportV1,
-        ) -> FactCompatibilityResult<ProjectMemoryFactProposalImportReceiptV1>;
         fn promote_compatibility_fact_proposal(
             request: ProjectMemoryFactProposalPromotionV1,
         ) -> FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>;

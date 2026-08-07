@@ -11,6 +11,7 @@ mod automation_cli;
 mod cli;
 mod commands;
 mod cost_cmd;
+mod git_cmd;
 mod global;
 mod hook_capture_cmd;
 mod hook_cmd;
@@ -626,7 +627,8 @@ impl CommandFamily {
             | Commands::Bench { .. }
             | Commands::Gain { .. }
             | Commands::Monitor => Self::Diagnostics,
-            Commands::Sessions { .. }
+            Commands::Git { .. }
+            | Commands::Sessions { .. }
             | Commands::Analytics { .. }
             | Commands::Automation { .. } => Self::Knowledge,
         }
@@ -1294,6 +1296,9 @@ async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::
 
 async fn dispatch_knowledge_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
+        Commands::Git { action } => {
+            git_cmd::handle_git_action(action).await?;
+        }
         Commands::Sessions { action } => {
             sessions_cmd::handle_sessions_action(action).await?;
         }
@@ -1329,7 +1334,9 @@ impl CommandStartupPolicy {
             // Tool calls are the documented MCP fallback and must remain a local,
             // latency-bounded protocol path. Unrelated counter uploads or agent
             // maintenance belong on interactive commands and daemon background work.
-            Commands::Tool { .. } | Commands::Workflow { .. } => Self::SkipAll,
+            Commands::Tool { .. } | Commands::Workflow { .. } | Commands::Git { .. } => {
+                Self::SkipAll
+            }
             // Explicit lifecycle/maintenance commands manage their own work.
             // Serve is also latency-sensitive: clients impose a 30 s MCP
             // initialize timeout, so no implicit startup work belongs there.

@@ -31,6 +31,11 @@ pub struct CodeIndexSearchAuthorityV1 {
 pub struct CodeIndexSearchRequestV1 {
     pub project_root: PathBuf,
     pub query: String,
+    /// Exact Git commit whose published code generation must answer. `None`
+    /// selects the current admitted generation.
+    pub source_revision: Option<tracedecay_domain::GitOidV1>,
+    pub source_tree: Option<tracedecay_domain::GitOidV1>,
+    pub source_reference: Option<tracedecay_domain::RefId>,
     pub limit: usize,
     pub cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub mode: CodeIndexSearchModeV1,
@@ -68,6 +73,7 @@ pub enum CodeIndexSearchUnavailableReasonV1 {
     GenerationUnverified,
     SemanticUnavailable,
     InvalidRequest,
+    CorruptionResetRequired,
     Internal,
 }
 
@@ -83,6 +89,7 @@ impl CodeIndexSearchUnavailableReasonV1 {
             Self::GenerationUnverified => "generation_unverified",
             Self::SemanticUnavailable => "semantic_unavailable",
             Self::InvalidRequest => "invalid_request",
+            Self::CorruptionResetRequired => "index_corruption_reset_required",
             Self::Internal => "search_failed",
         }
     }
@@ -282,6 +289,106 @@ pub type CodeIndexSearchFuture =
 /// fail capability-closed instead of substituting the legacy graph search.
 pub type CodeIndexSearchExecutor =
     Arc<dyn Fn(CodeIndexSearchRequestV1) -> CodeIndexSearchFuture + Send + Sync + 'static>;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct CodeIndexBranchSymbolV1 {
+    pub symbol_identity: tracedecay_domain::SymbolIdentityDigest,
+    pub symbol_occurrence_id: tracedecay_domain::SymbolOccurrenceId,
+    pub file_identity: tracedecay_domain::FileIdentityDigest,
+    pub file_occurrence_id: tracedecay_domain::FileOccurrenceId,
+    pub qualified_name: String,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub content_digest: String,
+}
+
+pub const CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1: usize = 256;
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexBranchDiffRequestV1 {
+    pub project_root: PathBuf,
+    pub base_reference: tracedecay_domain::RefId,
+    pub base_revision: tracedecay_domain::GitOidV1,
+    pub head_reference: tracedecay_domain::RefId,
+    pub head_revision: tracedecay_domain::GitOidV1,
+    pub base_tree: tracedecay_domain::GitOidV1,
+    pub head_tree: tracedecay_domain::GitOidV1,
+    pub file_filter: Option<String>,
+    pub kind_filter: Option<String>,
+    pub limit: usize,
+    pub cursor: Option<String>,
+    pub authority: Option<CodeIndexSearchAuthorityV1>,
+    pub deadline: Option<tracedecay_application::Deadline>,
+    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexBranchDiffPartialReasonV1 {
+    ResultLimit,
+}
+
+impl CodeIndexBranchDiffPartialReasonV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ResultLimit => "result_limit",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum CodeIndexBranchChangeV1 {
+    Added {
+        symbol: CodeIndexBranchSymbolV1,
+    },
+    Removed {
+        symbol: CodeIndexBranchSymbolV1,
+    },
+    Changed {
+        base: CodeIndexBranchSymbolV1,
+        head: CodeIndexBranchSymbolV1,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffCompletedV1 {
+    pub base_generation: String,
+    pub head_generation: String,
+    pub total_changes: usize,
+    pub changes: Vec<CodeIndexBranchChangeV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffPartialV1 {
+    pub base_generation: String,
+    pub head_generation: String,
+    pub reason: CodeIndexBranchDiffPartialReasonV1,
+    pub total_changes: usize,
+    pub changes: Vec<CodeIndexBranchChangeV1>,
+    pub next_cursor: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffUnavailableV1 {
+    pub base_generation: Option<String>,
+    pub head_generation: Option<String>,
+    pub reason: CodeIndexSearchUnavailableReasonV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexBranchDiffOutcomeV1 {
+    Complete(CodeIndexBranchDiffCompletedV1),
+    Partial(CodeIndexBranchDiffPartialV1),
+    Unavailable(CodeIndexBranchDiffUnavailableV1),
+}
+
+pub type CodeIndexBranchDiffFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = CodeIndexBranchDiffOutcomeV1> + Send + 'static>,
+>;
+
+pub type CodeIndexBranchDiffExecutor =
+    Arc<dyn Fn(CodeIndexBranchDiffRequestV1) -> CodeIndexBranchDiffFuture + Send + Sync + 'static>;
 
 #[cfg(test)]
 mod tests {

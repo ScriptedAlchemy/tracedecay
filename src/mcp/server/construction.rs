@@ -67,6 +67,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
+    pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
@@ -167,6 +168,7 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
@@ -245,6 +247,7 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             project_routes,
@@ -301,6 +304,7 @@ impl McpServerConstructionContext {
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             project_routes,
@@ -333,6 +337,14 @@ impl McpServerConstructionContext {
         executor: super::CodeIndexSearchExecutor,
     ) -> Self {
         self.code_index_search_executor = Some(executor);
+        self
+    }
+
+    pub(crate) fn with_code_index_branch_diff_executor(
+        mut self,
+        executor: super::CodeIndexBranchDiffExecutor,
+    ) -> Self {
+        self.code_index_branch_diff_executor = Some(executor);
         self
     }
 
@@ -450,7 +462,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn direct_context_installs_only_the_explicit_search_executor() {
+    async fn direct_context_installs_only_explicit_code_index_executors() {
         let _pin = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().expect("project");
         let git_init = Command::new("git")
@@ -485,9 +497,24 @@ mod tests {
                 )
             })
         });
+        let branch_diff_executor: crate::mcp::server::CodeIndexBranchDiffExecutor = Arc::new(
+            |_| {
+                Box::pin(async {
+                    crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexBranchDiffUnavailableV1 {
+                            base_generation: None,
+                            head_generation: None,
+                            reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                        },
+                    )
+                })
+            },
+        );
         let context = McpServerConstructionContext::direct(cg, None)
-            .with_code_index_search_executor(executor);
+            .with_code_index_search_executor(executor)
+            .with_code_index_branch_diff_executor(branch_diff_executor);
         assert!(context.code_index_search_executor.is_some());
+        assert!(context.code_index_branch_diff_executor.is_some());
         assert!(
             context.code_index_search_authority.is_none(),
             "installing an executor must not fabricate route admission"

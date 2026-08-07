@@ -46,22 +46,6 @@ fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSea
     }
 }
 
-fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
-    let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    if encoded.len() > 4_096 {
-        return Err(TraceDecayError::Config {
-            message: "cursor exceeds its bounded authenticated envelope".to_owned(),
-        });
-    }
-    let cursor: tracedecay_domain::RetrievalCursor = serde_json::from_str(encoded)?;
-    cursor.validate().map_err(|_| TraceDecayError::Config {
-        message: "cursor is not a valid authenticated retrieval continuation".to_owned(),
-    })?;
-    Ok(Some(cursor))
-}
-
 async fn execute_code_index_search(
     executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     request: crate::mcp::server::CodeIndexSearchRequestV1,
@@ -240,7 +224,7 @@ pub(super) async fn handle_search(
             })?;
 
     let semantic_mode = semantic_search_mode(&args)?;
-    let cursor = retrieval_cursor(&args)?;
+    let cursor = support::retrieval_cursor(&args)?;
     let include_graph_node_ids = render::wants_json(&args);
     let limit = args
         .get("limit")
@@ -257,6 +241,9 @@ pub(super) async fn handle_search(
         crate::mcp::server::CodeIndexSearchRequestV1 {
             project_root: cg.project_root().to_path_buf(),
             query: query.to_owned(),
+            source_revision: None,
+            source_tree: None,
+            source_reference: None,
             limit,
             cursor,
             mode: semantic_mode,
@@ -1908,6 +1895,9 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_revision: None,
+                source_tree: None,
+                source_reference: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
@@ -1937,6 +1927,9 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_revision: None,
+                source_tree: None,
+                source_reference: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,

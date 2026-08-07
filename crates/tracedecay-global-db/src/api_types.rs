@@ -1,4 +1,3 @@
-use tracedecay_sessions::runtime::lcm::LcmSummaryRequest;
 use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 /// Total savings + call count for a project (or all projects when `project` is None).
@@ -109,12 +108,6 @@ pub struct AnalyticsEventQuery {
     /// Exclusive row-id cursor used by bounded reverse-chronological scans.
     pub before_id: Option<i64>,
     pub limit: usize,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PendingCodexCompactionSummary {
-    pub node_id: String,
-    pub request: LcmSummaryRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

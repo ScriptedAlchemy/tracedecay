@@ -1,0 +1,1054 @@
+diff a/crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py b/crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py	(rejected hunks)
+@@ -395,13 +395,6 @@ _REGISTERED_TOOL_NAMES = set()
+ _CONTEXT_TOOL_NAMES = set()
+ _HOST_FORWARDS_MESSAGES = None
+ 
+-# Auxiliary task key for pre-compaction extraction. Upgraded to the
+-# plugin-registered "lcm_extraction" task when the host supports
+-# ctx.register_auxiliary_task (users can then pin its model under
+-# auxiliary.lcm_extraction); otherwise hermes' generic "extraction"
+-# defaults apply.
+-_EXTRACTION_TASK = {"key": "extraction"}
+-
+ def _active_memory_provider(ctx=None):
+     """The memory.provider configured for this profile, if any."""
+     config = getattr(ctx, "config", None) if ctx is not None else None
+@@ -1200,18 +1193,9 @@ PLUGIN_CONFIG_FIELDS = {
+     "reserve_tokens_floor": ("", "Tokens reserved below the context window when deriving the assembly cap."),
+     "summary_fan_in": ("", "Summary nodes condensed per parent (default 4)."),
+     "incremental_max_depth": ("", "Maximum condensation depth (default 1)."),
+-    "summary_model": ("", "Primary auxiliary model for LCM summaries."),
+-    "summary_fallback_models": ("", "Comma-separated fallback models for LCM summaries."),
+-    "summary_timeout_ms": ("", "Auxiliary summary timeout in milliseconds."),
+-    "summary_circuit_breaker_failure_threshold": ("", "Failures before a summary route is cooled down (default 2)."),
+-    "summary_circuit_breaker_cooldown_seconds": ("", "Cooldown seconds for a tripped summary route (default 300)."),
+-    "custom_instructions": ("", "Extra instructions appended to the LCM summary prompt."),
+     "expansion_model": ("", "Model used for lcm_expand_query synthesis."),
+     "expansion_context_tokens": ("", "Expanded-context budget for lcm_expand_query (default 32000)."),
+     "expansion_timeout_ms": ("", "lcm_expand_query synthesis timeout in milliseconds."),
+-    "extraction_enabled": ("", "Run pre-compaction decision/insight extraction."),
+-    "extraction_model": ("", "Model used for pre-compaction extraction."),
+-    "extraction_output_path": ("", "Extraction output path surfaced in the extraction contract."),
+     "ignore_session_patterns": ("", "Comma-separated session-id patterns LCM ignores."),
+     "stateless_session_patterns": ("", "Comma-separated session-id patterns treated as stateless."),
+     "ignore_message_patterns": ("", "Comma-separated message patterns excluded from ingest."),
+@@ -1548,103 +1532,6 @@ def _hermes_yaml_compression_threshold(default, hermes_home=None):
+     except Exception:
+         return default
+ 
+-def _hermes_yaml_auxiliary_compression_timeout_ms(default, hermes_home=None):
+-    # Port of hermes-lcm config._hermes_auxiliary_compression_timeout_ms:
+-    # read auxiliary.compression.timeout (seconds) from config.yaml and expose
+-    # it in milliseconds for LCM summary timeout parity.
+-    home = (
+-        hermes_home
+-        or os.path.join(os.path.expanduser("~"), ".hermes")
+-    )
+-    cfg_path = Path(home) / "config.yaml"
+-    try:
+-        text = cfg_path.read_text()
+-    except Exception:
+-        return default
+-    try:
+-        import yaml
+-    except Exception:
+-        yaml = None
+-    try:
+-        if yaml is not None:
+-            cfg = yaml.safe_load(text) or {}
+-            auxiliary = cfg.get("auxiliary") or {}
+-            compression = auxiliary.get("compression") or {}
+-            value = compression.get("timeout")
+-            if value is None:
+-                return default
+-            return int(float(value) * 1000)
+-
+-        in_auxiliary = False
+-        in_compression = False
+-        auxiliary_indent = None
+-        compression_indent = None
+-        for raw_line in text.splitlines():
+-            line = raw_line.split('#', 1)[0].rstrip()
+-            if not line.strip():
+-                continue
+-            indent = len(line) - len(line.lstrip(" \t"))
+-            stripped = line.strip()
+-            if indent == 0:
+-                in_auxiliary = stripped == "auxiliary:"
+-                in_compression = False
+-                auxiliary_indent = None
+-                compression_indent = None
+-                continue
+-            if not in_auxiliary:
+-                continue
+-            if auxiliary_indent is None:
+-                auxiliary_indent = indent
+-            if indent == auxiliary_indent:
+-                if stripped == "compression:":
+-                    in_compression = True
+-                    compression_indent = None
+-                    continue
+-                in_compression = False
+-                compression_indent = None
+-                continue
+-            if not in_compression:
+-                continue
+-            if compression_indent is None:
+-                compression_indent = indent
+-            if indent != compression_indent or ":" not in stripped:
+-                continue
+-            key, raw_value = stripped.split(":", 1)
+-            if key == "timeout":
+-                return int(float(raw_value.strip().strip("'\"")) * 1000)
+-        return default
+-    except Exception:
+-        return default
+-
+-def _lcm_summary_timeout_ms(config, hermes_home=None):
+-    raw = os.environ.get("LCM_SUMMARY_TIMEOUT_MS")
+-    if raw is not None:
+-        try:
+-            return int(raw)
+-        except (TypeError, ValueError):
+-            pass
+-    configured = _configured_int(config, "summary_timeout_ms")
+-    if configured is not None:
+-        return configured
+-    return _hermes_yaml_auxiliary_compression_timeout_ms(60000, hermes_home=hermes_home)
+-
+-def _summary_circuit_breaker_settings(config):
+-    threshold = _lcm_clamped_int_setting(
+-        config,
+-        "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+-        "summary_circuit_breaker_failure_threshold",
+-        default=2,
+-        minimum=1,
+-    )
+-    cooldown = _lcm_clamped_int_setting(
+-        config,
+-        "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS",
+-        "summary_circuit_breaker_cooldown_seconds",
+-        default=300,
+-        minimum=0,
+-    )
+-    return threshold, cooldown
+-
+ def _lcm_context_threshold(config, hermes_home=None):
+     raw = os.environ.get("LCM_CONTEXT_THRESHOLD")
+     if raw is not None:
+@@ -1743,25 +1630,6 @@ def _lcm_config_args(config, hermes_home=None, runtime_context_length=None) -> d
+     return {key: value for key, value in args.items() if value is not None}
+ 
+ 
+-def _lcm_gc_config_args(config):
+-    gc_config = {}
+-    for env_key, name, default in (
+-        ("LCM_PAYLOAD_GC_GRACE_SECONDS", "grace_seconds", None),
+-        ("LCM_PAYLOAD_REAP_MISSING_METADATA_AFTER_SECONDS", "reap_missing_after", None),
+-        ("LCM_PAYLOAD_REAP_MISSING_METADATA_ENABLED", "reap_missing_enabled", None),
+-        ("LCM_PAYLOAD_GC_MAX_BATCH_SIZE", "max_batch_size", None),
+-        ("LCM_PAYLOAD_GC_BACKUP_BEFORE_REAP", "backup_before_reap", None),
+-        ("LCM_PAYLOAD_GC_INTERVAL_SECONDS", "interval_seconds", None),
+-        ("LCM_PAYLOAD_GC_ENABLED", "gc_enabled", None),
+-    ):
+-        if name.endswith("enabled") or name == "backup_before_reap":
+-            value = _lcm_bool_setting(config, env_key, name, default=default)
+-        else:
+-            value = _lcm_int_setting(config, env_key, name, default=default)
+-        if value is not None:
+-            gc_config[name] = value
+-    return {"gc_config": gc_config} if gc_config else {}
+-
+ def _lcm_expansion_model(config):
+     value = _lcm_str_setting(config, "LCM_EXPANSION_MODEL", "expansion_model", default="")
+     return str(value or "").strip()
+@@ -1797,58 +1665,12 @@ def _lcm_expansion_context_tokens(config):
+ def _lcm_expansion_timeout_ms(config):
+     return _lcm_expansion_settings(config)["timeout_ms"]
+ 
+-def _lcm_extraction_settings(config):
+-    return {
+-        "enabled": bool(
+-            _lcm_bool_setting(
+-                config,
+-                "LCM_EXTRACTION_ENABLED",
+-                "extraction_enabled",
+-                default=False,
+-            )
+-        ),
+-        "model": str(
+-            _lcm_str_setting(config, "LCM_EXTRACTION_MODEL", "extraction_model", default="") or ""
+-        ).strip(),
+-        "output_path": str(
+-            _lcm_str_setting(
+-                config,
+-                "LCM_EXTRACTION_OUTPUT_PATH",
+-                "extraction_output_path",
+-                default="",
+-            )
+-            or ""
+-        ).strip(),
+-    }
+-
+-def _lcm_extraction_enabled(config):
+-    return _lcm_extraction_settings(config)["enabled"]
+-
+-def _lcm_extraction_model(config):
+-    return _lcm_extraction_settings(config)["model"]
+-
+-def _lcm_extraction_output_path(config):
+-    return _lcm_extraction_settings(config)["output_path"]
+-
+ def _apply_lcm_option_overrides(args: dict, kwargs: dict, keys) -> None:
+     for key in keys:
+         if key in kwargs and kwargs[key] is not None:
+             args[key] = kwargs.pop(key)
+ 
+ REASONING_TAGS = ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD")
+-FALLBACK_MARKER = "[deterministic compression fallback]"
+-RETRY_WORTHY_AUXILIARY_ERRORS = (
+-    "context length",
+-    "maximum context",
+-    "max context",
+-    "token limit",
+-    "too many tokens",
+-    "prompt is too long",
+-    "input too long",
+-    "request too large",
+-    "timed out",
+-    "timeout",
+-)
+ 
+ def _strip_reasoning(text: str) -> str:
+     output = text or ""
+@@ -1909,23 +1731,6 @@ def _message_content(message) -> str:
+             return "\n\n".join(parts)
+     return "" if content is None else str(content)
+ 
+-def _summary_source_messages(source_messages):
+-    normalized = []
+-    for message in source_messages or []:
+-        if not isinstance(message, dict):
+-            normalized.append({"role": "user", "content": str(message)})
+-            continue
+-        entry = {
+-            "role": message.get("role") or "user",
+-            "content": _message_content(message),
+-        }
+-        if message.get("tool_calls"):
+-            entry["tool_calls"] = message["tool_calls"]
+-        if message.get("tool_call_id"):
+-            entry["tool_call_id"] = message["tool_call_id"]
+-        normalized.append(entry)
+-    return normalized
+-
+ _TOKEN_ENCODER = None
+ _TOKEN_ENCODER_CHECKED = False
+ 
+@@ -2001,285 +1806,10 @@ def _truncate_serialized_content(content):
+         return content[:2000] + "\n...[truncated]...\n" + content[-800:]
+     return content
+ 
+-def _serialize_summary_messages(messages):
+-    # Mirrors hermes-lcm engine._serialize_messages: labeled per-role text with
+-    # matched tool-call enrichment and long-content truncation. Redaction and
+-    # externalization stay in the Rust ingest pipeline.
+-    parts = []
+-    matched_tool_ids = _matched_tool_call_ids(messages)
+-    for message in messages or []:
+-        if not isinstance(message, dict):
+-            parts.append(f"[USER]: {message}")
+-            continue
+-        role = str(message.get("role") or "unknown")
+-        content = _message_content(message)
+-        if role == "tool":
+-            tool_id = str(message.get("tool_call_id") or "").strip()
+-            parts.append(f"[TOOL RESULT {tool_id}]: {_truncate_serialized_content(content)}")
+-            continue
+-        if role == "assistant":
+-            tool_calls = message.get("tool_calls") or []
+-            matched_tool_calls = [
+-                tool_call
+-                for tool_call in tool_calls
+-                if not _summary_tool_call_id(tool_call)
+-                or _summary_tool_call_id(tool_call) in matched_tool_ids
+-            ]
+-            content = _truncate_serialized_content(content)
+-            if matched_tool_calls:
+-                tool_call_parts = []
+-                for tool_call in matched_tool_calls:
+-                    if isinstance(tool_call, dict):
+-                        function = tool_call.get("function") or {}
+-                        name = function.get("name") or "?"
+-                        arguments = _tool_call_arguments_text(function.get("arguments"))
+-                        if len(arguments) > 500:
+-                            arguments = arguments[:400] + "..."
+-                        tool_call_parts.append(f"  {name}({arguments})")
+-                content += "\n[Tool calls:\n" + "\n".join(tool_call_parts) + "\n]"
+-            parts.append(f"[ASSISTANT]: {content}")
+-            continue
+-        parts.append(f"[{role.upper()}]: {_truncate_serialized_content(content)}")
+-    return "\n\n".join(parts)
+-
+-def _normalized_focus_topic(focus_topic, max_chars=160):
+-    normalized = " ".join(str(focus_topic or "").split())
+-    if len(normalized) <= max_chars:
+-        return normalized
+-    return normalized[: max(0, max_chars - 1)].rstrip() + "…"
+-
+-def _build_l1_focus_brief(focus_topic):
+-    topic = _normalized_focus_topic(focus_topic)
+-    if not topic:
+-        return ""
+-    return (
+-        "Focus brief:\n"
+-        f"Primary focus: {topic}\n"
+-        "Preserve concrete decisions, constraints, files, commands, identifiers, and current state for this focus.\n"
+-        "Spend roughly 60-70% of the summary budget on the focus when relevant.\n"
+-        "Do not discard unrelated blockers or active tasks just because they are off-focus.\n"
+-    )
+-
+-def _build_l2_focus_brief(focus_topic):
+-    topic = _normalized_focus_topic(focus_topic)
+-    if not topic:
+-        return ""
+-    return (
+-        "Focus brief:\n"
+-        f"Primary focus: {topic}\n"
+-        "Prefer bullets that preserve decisions, blockers, files, commands, identifiers, and current state for this focus.\n"
+-        "Keep other active tasks only when they are current blockers or handoff state.\n"
+-    )
+-
+-_L1_DEPTH_GUIDANCE = {
+-    0: "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values.",
+-    1: "Distill into arc-level outcomes: what evolved, what was decided, current state. Drop per-turn detail.",
+-    2: "Capture durable narrative: decisions in effect, completed milestones, timeline. Drop process detail.",
+-}
+-
+-def _build_l1_prompt(text, token_budget, depth, focus_topic="", custom_instructions=""):
+-    guidance = _L1_DEPTH_GUIDANCE.get(depth, _L1_DEPTH_GUIDANCE[2])
+-    focus_guidance = _build_l1_focus_brief(focus_topic)
+-    custom_block = ""
+-    if custom_instructions:
+-        custom_block = f"\nAdditional instructions:\n{custom_instructions}\n"
+-    return f"""Summarize this conversation segment for future turns.
+-{guidance}
+-Remove repetition and conversational filler.
+-End with: "Expand for details about: <what was compressed>"
+-{focus_guidance}{custom_block}
+-
+-Target ~{token_budget} tokens.
+-
+-CONTENT:
+-{text}"""
+-
+-def _build_l2_prompt(text, token_budget, focus_topic="", custom_instructions=""):
+-    focus_guidance = _build_l2_focus_brief(focus_topic)
+-    custom_block = ""
+-    if custom_instructions:
+-        custom_block = f"\nAdditional instructions:\n{custom_instructions}\n"
+-    return f"""Compress this into bullet points. Maximum {token_budget} tokens.
+-Keep only: decisions made, files changed, errors hit, current state.
+-Drop all reasoning, alternatives considered, and process detail.
+-{focus_guidance}{custom_block}
+-
+-CONTENT:
+-{text}"""
+-
+ # Conservative allowlist mirroring hermes-lcm model_routing._PROVIDER_PREFIXES:
+ # many registry provider IDs double as OpenRouter model namespaces, so only
+ # explicit entries (plus non-canonical named custom providers) split into
+ # provider/model routes.
+-_LCM_PROVIDER_ROUTE_PREFIXES = frozenset({"cerebras"})
+-
+-def _provider_route_is_resolvable(provider):
+-    provider = str(provider or "").strip().lower()
+-    if not provider:
+-        return False
+-    if provider.startswith("custom:"):
+-        provider = provider.split(":", 1)[1].strip()
+-        if not provider:
+-            return False
+-    try:
+-        from hermes_cli.auth import PROVIDER_REGISTRY
+-        if provider in PROVIDER_REGISTRY:
+-            return provider in _LCM_PROVIDER_ROUTE_PREFIXES
+-    except Exception:
+-        pass
+-    try:
+-        from hermes_cli.runtime_provider import _get_named_custom_provider
+-        if _get_named_custom_provider(provider):
+-            return True
+-    except Exception:
+-        pass
+-    return False
+-
+-def _parse_lcm_model_override(value):
+-    model = str(value or "").strip()
+-    if not model:
+-        return None, ""
+-    provider, separator, rest = model.partition("/")
+-    provider = provider.strip().lower()
+-    rest = rest.strip()
+-    route_provider = provider
+-    if provider.startswith("custom:"):
+-        route_provider = provider.split(":", 1)[1].strip()
+-    if separator and rest and route_provider and _provider_route_is_resolvable(route_provider):
+-        return route_provider, rest
+-    return None, model
+-
+-def _apply_lcm_model_route(call_kwargs, model):
+-    # Mirrors hermes-lcm model_routing.apply_lcm_model_route.
+-    provider, routed_model = _parse_lcm_model_override(model)
+-    if provider:
+-        call_kwargs["provider"] = provider
+-    if routed_model:
+-        call_kwargs["model"] = routed_model
+-
+-def _deterministic_truncation(messages, limit: int = 2048) -> str:
+-    lines = []
+-    for message in messages or []:
+-        if isinstance(message, dict):
+-            role = message.get("role") or "user"
+-            content = _message_content(message)
+-        else:
+-            role = "user"
+-            content = str(message)
+-        if content:
+-            lines.append(f"{role}: {content}")
+-    text = "\n".join(lines).strip()
+-    if not text:
+-        text = "No auxiliary summary was available."
+-    max_prefix = max(0, limit - len(FALLBACK_MARKER) - 2)
+-    return f"{text[:max_prefix].rstrip()}\n\n{FALLBACK_MARKER}"
+-
+-def _auxiliary_error_classification(error) -> str:
+-    message = str(error or "").lower()
+-    if any(pattern in message for pattern in RETRY_WORTHY_AUXILIARY_ERRORS):
+-        return "retry_worthy"
+-    return "permanent"
+-
+-def _auxiliary_retry_limit(kwargs) -> int:
+-    try:
+-        limit = int(kwargs.pop("max_auxiliary_attempts", 2) or 2)
+-    except Exception:
+-        limit = 2
+-    return min(max(limit, 1), 8)
+-
+-def _next_smaller_source_limit(source_messages, current_limit=None):
+-    source_count = len(source_messages or [])
+-    if source_count <= 1:
+-        return None
+-    next_limit = max(1, source_count // 2)
+-    if current_limit is not None:
+-        try:
+-            next_limit = min(next_limit, int(current_limit))
+-        except Exception:
+-            pass
+-    if next_limit >= source_count:
+-        next_limit = source_count - 1
+-    return max(1, next_limit)
+-
+-def _normalize_extraction_items(text):
+-    cleaned = str(text or "").strip()
+-    if not cleaned:
+-        return []
+-    items = []
+-    for line in cleaned.splitlines():
+-        stripped = line.strip()
+-        if not stripped:
+-            continue
+-        if stripped.startswith(("- ", "* ")):
+-            stripped = stripped[2:].strip()
+-        items.append(stripped)
+-    if not items:
+-        items = [cleaned]
+-    return items
+-
+-def _extraction_route_payload(route, extraction_result):
+-    if extraction_result is None:
+-        return route
+-    # Route-envelope contract with Rust extraction.rs:
+-    # keys are `route` and `pre_compaction_extraction`.
+-    payload = {"pre_compaction_extraction": extraction_result}
+-    if route:
+-        payload["route"] = route
+-    return json.dumps(payload, ensure_ascii=False)
+-
+-def _with_auxiliary_metadata(
+-    result,
+-    *,
+-    attempts,
+-    retry_status=None,
+-    error_classification=None,
+-    fallback_used=False,
+-):
+-    if not isinstance(result, dict):
+-        result = {}
+-    if attempts or retry_status is not None or error_classification is not None or fallback_used:
+-        result.setdefault("auxiliary_attempts", attempts)
+-    if retry_status is not None:
+-        result.setdefault("auxiliary_retry_status", retry_status)
+-    if error_classification is not None:
+-        result.setdefault("auxiliary_error_classification", error_classification)
+-    if fallback_used:
+-        result["fallback_used"] = True
+-    return result
+-
+-def _auxiliary_error_result(first, *, attempts, retry_status, error_classification, error):
+-    result = {}
+-    if isinstance(first, dict):
+-        for key in (
+-            "summary_nodes_created",
+-            "summary_nodes",
+-            "replay_messages",
+-            "replay_token_estimate",
+-            "replay_over_budget",
+-            "context_recovery_hint",
+-            "frontier",
+-            "summary_request",
+-        ):
+-            if key in first:
+-                result[key] = first[key]
+-    result.setdefault("summary_nodes_created", 0)
+-    result.setdefault("summary_nodes", [])
+-    result.setdefault("replay_messages", [])
+-    result.setdefault("frontier", {"current_frontier_store_id": None, "maintenance_debt": []})
+-    result["status"] = "error"
+-    result["reason"] = (
+-        "auxiliary_summary_permanent_failure"
+-        if error_classification == "permanent"
+-        else "auxiliary_summary_retry_exhausted"
+-    )
+-    result["error"] = str(error)
+-    return _with_auxiliary_metadata(
+-        result,
+-        attempts=attempts,
+-        retry_status=retry_status,
+-        error_classification=error_classification,
+-    )
+-
+ def _replay_message_list(value):
+     """Validate a replay_messages payload as an OpenAI-format message list.
+ 
+@@ -2723,10 +2253,6 @@ class TraceDecayContextEngine(ContextEngine):
+             _configured_project_root(self.config),
+             self.hermes_home,
+         )
+-        # Auxiliary-route circuit breakers are process-global on purpose:
+-        # a broken summary model is broken for every session.
+-        self._route_failures = {}
+-        self._cooldown_until = {}
+ 
+     def __deepcopy__(self, memo):
+         """Create an agent-local engine without copying locks or live agents."""
+@@ -2737,10 +2263,6 @@ class TraceDecayContextEngine(ContextEngine):
+         memo[id(self)] = clone
+         clone.config = copy.deepcopy(self.config, memo)
+         clone.project_root = self.project_root
+-        # Auxiliary-route circuit breakers intentionally remain process-wide.
+-        clone._route_failures = self._route_failures
+-        clone._cooldown_until = self._cooldown_until
+-
+         with self._state_lock:
+             clone.active_session_id = self.active_session_id
+             for key, state in self._session_states.items():
+@@ -3120,7 +2642,6 @@ class TraceDecayContextEngine(ContextEngine):
+ 
+     def status(self, session_id=None, **kwargs):
+         args = self._tool_args(session_id)
+-        args.update(_lcm_gc_config_args(self.config))
+         args = _lcm_store_args(args, kwargs.get("project_root") or self.project_root)
+         return call_tracedecay_json(
+             "tracedecay_lcm_status",
+@@ -3135,12 +2656,6 @@ class TraceDecayContextEngine(ContextEngine):
+         last_result = self.last_compress_result
+         if not isinstance(last_result, dict):
+             last_result = {"status": "never_ran"}
+-        now = time.time()
+-        route_cooldowns = {
+-            route: max(0, int(deadline - now))
+-            for route, deadline in self._cooldown_until.items()
+-            if deadline > now
+-        }
+         return {
+             "engine": self.name,
+             "session_id": self.active_session_id,
+@@ -3151,9 +2666,6 @@ class TraceDecayContextEngine(ContextEngine):
+             "context_engine_tool_names": sorted(
+                 schema["name"] for schema in self.get_tool_schemas()
+             ),
+-            "route_failures": dict(self._route_failures),
+-            "cooldown_routes": sorted(self._cooldown_until.keys()),
+-            "route_cooldowns": route_cooldowns,
+             "last_compress_result": last_result,
+             "awaiting_real_usage_after_compression": (
+                 isinstance(self.last_compress_result, dict)
+@@ -3247,8 +2759,6 @@ class TraceDecayContextEngine(ContextEngine):
+             tool_args.setdefault("provider", STANDARD_HERMES_LCM_PROVIDER)
+         if tracedecay_name == "tracedecay_lcm_compress" and self.project_root:
+             tool_args.setdefault("response_handle_project_root", self.project_root)
+-        if native_name in ("lcm_status", "lcm_doctor"):
+-            tool_args.update(_lcm_gc_config_args(self.config))
+         if self.active_session_id:
+             tool_args.setdefault("session_id", self.active_session_id)
+         tool_args = _lcm_store_args(
+@@ -3307,309 +2817,6 @@ class TraceDecayContextEngine(ContextEngine):
+             synthesis_kwargs["expansion_timeout"] = _lcm_expansion_timeout_ms(self.config) / 1000
+         return _synthesize_expand_query_payload(retrieval, agent=synthesis_agent, **synthesis_kwargs)
+ 
+-    def _auxiliary_routes(self, summary_request=None, **kwargs):
+-        routes = (
+-            kwargs.get("routes")
+-            or kwargs.get("auxiliary_routes")
+-            or (summary_request or {}).get("routes")
+-        )
+-        if isinstance(routes, dict):
+-            routes = [routes]
+-        defaults = {}
+-        for key in ("model", "temperature", "max_tokens", "timeout"):
+-            if kwargs.get(key) is not None:
+-                defaults[key] = kwargs[key]
+-        if "timeout" not in defaults:
+-            timeout_ms = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home)
+-            if timeout_ms:
+-                defaults["timeout"] = timeout_ms / 1000
+-        if not routes:
+-            if defaults.get("model") is not None:
+-                routes = [{}]
+-            else:
+-                # Mirror hermes-lcm escalation._summary_model_chain: the
+-                # configured summary_model plus summary_fallback_models form
+-                # the default route chain, falling back to one task-default
+-                # route when nothing is configured.
+-                primary = str(
+-                    _lcm_str_setting(self.config, "LCM_SUMMARY_MODEL", "summary_model", default="") or ""
+-                )
+-                fallbacks = _lcm_list_setting(
+-                    self.config,
+-                    "LCM_SUMMARY_FALLBACK_MODELS",
+-                    "summary_fallback_models",
+-                    default=[],
+-                )
+-                chain = []
+-                for model in [primary, *(fallbacks or [])]:
+-                    normalized_model = str(model or "").strip()
+-                    if normalized_model not in chain:
+-                        chain.append(normalized_model)
+-                if not chain:
+-                    chain.append("")
+-                routes = [{"model": model} if model else {} for model in chain]
+-        normalized = []
+-        for route in routes:
+-            if not isinstance(route, dict):
+-                route = {"model": str(route)}
+-            normalized.append({**defaults, **route})
+-        return normalized
+-
+-    def _call_auxiliary_summary(self, prompt, messages, **kwargs):
+-        client = _resolve_auxiliary_client(getattr(self, "agent", None))
+-        summary_request = kwargs.get("summary_request")
+-        allow_retry_signal = bool(kwargs.pop("allow_retry_signal", False))
+-        accepts_result = kwargs.pop("accepts_result", None)
+-        route_kwargs = dict(kwargs)
+-        route_kwargs.pop("summary_request", None)
+-        routes = self._auxiliary_routes(summary_request, **route_kwargs)
+-        breaker_threshold, breaker_cooldown_seconds = _summary_circuit_breaker_settings(self.config)
+-        last_error = None
+-        last_classification = None
+-        rejected_text = None
+-        rejected_route = None
+-        rejected_model = None
+-        if client is None or not callable(getattr(client, "call_llm", None)):
+-            last_error = RuntimeError("Hermes auxiliary_client.call_llm is unavailable")
+-        else:
+-            now = time.time()
+-            for route in routes:
+-                route_name = route.get("route") or route.get("name") or route.get("model") or "default"
+-                route_key = str(route_name)
+-                if self._cooldown_until.get(route_key, 0) > now:
+-                    continue
+-                call_kwargs = {
+-                    "task": "compression",
+-                    # Hermes escalation sends the full prompt (guidance plus
+-                    # serialized CONTENT block) as a single user message.
+-                    "messages": [{"role": "user", "content": prompt}],
+-                    "temperature": route.get("temperature", 0.3),
+-                    "max_tokens": route.get("max_tokens", 2048),
+-                    "timeout": route.get("timeout", 60),
+-                }
+-                _apply_lcm_model_route(call_kwargs, route.get("model"))
+-                try:
+-                    response = client.call_llm(**call_kwargs)
+-                    text = _strip_reasoning(_llm_response_text(response))
+-                    if not text:
+-                        raise RuntimeError("Hermes auxiliary summary was empty")
+-                    if accepts_result is not None and not accepts_result(text):
+-                        rejected_text = text
+-                        rejected_route = route_key
+-                        rejected_model = route.get("model")
+-                        failures = self._route_failures.get(route_key, 0) + 1
+-                        self._route_failures[route_key] = failures
+-                        if failures >= breaker_threshold:
+-                            self._cooldown_until[route_key] = (
+-                                time.time() + breaker_cooldown_seconds
+-                            )
+-                        continue
+-                    self._route_failures.pop(route_key, None)
+-                    self._cooldown_until.pop(route_key, None)
+-                    return {
+-                        "status": "ok",
+-                        "text": text,
+-                        "route": route_key,
+-                        "model": route.get("model"),
+-                    }
+-                except Exception as exc:
+-                    last_error = exc
+-                    last_classification = _auxiliary_error_classification(exc)
+-                    failures = self._route_failures.get(route_key, 0) + 1
+-                    self._route_failures[route_key] = failures
+-                    if failures >= breaker_threshold:
+-                        self._cooldown_until[route_key] = (
+-                            time.time() + breaker_cooldown_seconds
+-                        )
+-        if rejected_text is not None:
+-            return {
+-                "status": "rejected",
+-                "text": rejected_text,
+-                "route": rejected_route,
+-                "model": rejected_model,
+-                "error": "Hermes auxiliary summary was not smaller than source",
+-                "error_classification": "non_compressing_summary",
+-            }
+-        if last_error is not None:
+-            last_classification = last_classification or _auxiliary_error_classification(last_error)
+-            if allow_retry_signal and last_classification == "retry_worthy":
+-                return {
+-                    "status": "retry",
+-                    "error": str(last_error),
+-                    "error_classification": last_classification,
+-                }
+-            if allow_retry_signal and last_classification == "permanent":
+-                return {
+-                    "status": "error",
+-                    "error": str(last_error),
+-                    "error_classification": last_classification,
+-                }
+-        fallback = {
+-            "status": "fallback",
+-            "text": _deterministic_truncation(messages),
+-            "route": "deterministic_fallback",
+-            "model": None,
+-        }
+-        if last_error is not None:
+-            fallback["error"] = str(last_error)
+-            fallback["error_classification"] = last_classification
+-        return fallback
+-
+-    def _summarize_with_escalation(self, source_messages, focus_topic="", **kwargs):
+-        # Port of hermes-lcm escalation.summarize_with_escalation: L1 detailed
+-        # summary, L2 aggressive bullets at reduced budget, then deterministic
+-        # L3 truncation. Each LLM rung accepts a result only when its token
+-        # estimate is below the source token estimate.
+-        serialized = _serialize_summary_messages(source_messages)
+-        source_tokens = _count_messages_tokens(source_messages)
+-        # Mirrors the leaf budget in hermes-lcm engine._summarize_leaf_chunk_with_rescue.
+-        token_budget = min(12000, max(2000, int(source_tokens * 0.20)))
+-        custom_instructions = str(
+-            _lcm_str_setting(self.config, "LCM_CUSTOM_INSTRUCTIONS", "custom_instructions", default="") or ""
+-        )
+-        l2_budget_ratio = _lcm_float_setting(
+-            self.config,
+-            "LCM_L2_BUDGET_RATIO",
+-            "l2_budget_ratio",
+-            default=0.50,
+-        )
+-        if l2_budget_ratio is None:
+-            l2_budget_ratio = 0.50
+-        l3_truncate_tokens = (
+-            _lcm_int_setting(self.config, "LCM_L3_TRUNCATE_TOKENS", "l3_truncate_tokens", default=512) or 512
+-        )
+-
+-        def accepts_result(text):
+-            return source_tokens <= 0 or _count_tokens(text) < source_tokens
+-
+-        l1_kwargs = dict(kwargs)
+-        l1_kwargs["accepts_result"] = accepts_result
+-        l1_kwargs["max_tokens"] = token_budget * 2
+-        l1_prompt = _build_l1_prompt(
+-            serialized,
+-            token_budget,
+-            0,
+-            focus_topic=focus_topic,
+-            custom_instructions=custom_instructions,
+-        )
+-        rung_failures = []
+-
+-        def record_rung_failure(level, summary):
+-            rung_failures.append({
+-                "level": level,
+-                "status": summary.get("status"),
+-                "route": summary.get("route"),
+-                "model": summary.get("model"),
+-                "error": summary.get("error"),
+-                "error_classification": summary.get("error_classification"),
+-            })
+-
+-        summary = self._call_auxiliary_summary(l1_prompt, source_messages, **l1_kwargs)
+-        if summary.get("status") == "ok":
+-            return summary
+-        record_rung_failure(1, summary)
+-
+-        l2_budget = max(1, int(token_budget * l2_budget_ratio))
+-        l2_kwargs = dict(kwargs)
+-        l2_kwargs["accepts_result"] = accepts_result
+-        l2_kwargs["max_tokens"] = l2_budget * 2
+-        l2_prompt = _build_l2_prompt(
+-            serialized,
+-            l2_budget,
+-            focus_topic=focus_topic,
+-            custom_instructions=custom_instructions,
+-        )
+-        summary = self._call_auxiliary_summary(l2_prompt, source_messages, **l2_kwargs)
+-        if summary.get("status") == "ok":
+-            if rung_failures:
+-                summary["rung_failures"] = rung_failures
+-            return summary
+-        record_rung_failure(2, summary)
+-        if summary.get("status") == "fallback":
+-            summary.setdefault("error", "Hermes auxiliary summary was not smaller than source")
+-            summary.setdefault("error_classification", "non_compressing_summary")
+-        fallback = {
+-            "status": "fallback",
+-            "text": _deterministic_truncation(source_messages, limit=max(1, l3_truncate_tokens * 4)),
+-            "route": "deterministic_fallback",
+-            "model": None,
+-            "error": summary.get("error") or "Hermes auxiliary summary was not smaller than source",
+-            "error_classification": summary.get("error_classification") or "non_compressing_summary",
+-            "rung_failures": rung_failures,
+-        }
+-        if summary.get("error"):
+-            fallback["auxiliary_error"] = summary.get("error")
+-        if summary.get("error_classification"):
+-            fallback["auxiliary_error_classification"] = summary.get("error_classification")
+-        return fallback
+-
+-    def _run_pre_compaction_extraction(self, summary_request, source_messages):
+-        if not _lcm_extraction_enabled(self.config):
+-            return None
+-        if not source_messages:
+-            return {"status": "no_source"}
+-        extraction_request = (
+-            summary_request.get("extraction_request") if isinstance(summary_request, dict) else None
+-        )
+-        prompt = extraction_request.get("prompt") if isinstance(extraction_request, dict) else None
+-        if not isinstance(prompt, str) or not prompt.strip():
+-            return {
+-                "status": "failed_non_blocking",
+-                "error": "LCM extraction envelope missing prompt",
+-                "model": None,
+-                "output_path": None,
+-            }
+-        extraction_model = str(
+-            _lcm_extraction_model(self.config)
+-            or _lcm_str_setting(self.config, "LCM_SUMMARY_MODEL", "summary_model", default="")
+-            or ""
+-        ).strip()
+-        timeout_seconds = _lcm_summary_timeout_ms(self.config, hermes_home=self.hermes_home) / 1000
+-        # Intentional divergence from upstream hermes-lcm: Rust stores extraction results in
+-        # summary-node metadata instead of writing daily markdown files. We still surface
+-        # output_path in the extraction contract for config/API parity.
+-        output_path = _lcm_extraction_output_path(self.config)
+-        client = _resolve_auxiliary_client(getattr(self, "agent", None))
+-        if client is None or not callable(getattr(client, "call_llm", None)):
+-            return {
+-                "status": "failed_non_blocking",
+-                "error": "Hermes auxiliary_client.call_llm is unavailable",
+-                "model": extraction_model or None,
+-                "output_path": output_path or None,
+-            }
+-        call_kwargs = {
+-            "task": _EXTRACTION_TASK["key"],
+-            "messages": [{"role": "user", "content": prompt}],
+-            "temperature": 0.2,
+-            "max_tokens": 2000,
+-        }
+-        _apply_lcm_model_route(call_kwargs, extraction_model)
+-        if timeout_seconds is not None:
+-            call_kwargs["timeout"] = timeout_seconds
+-        try:
+-            response = client.call_llm(**call_kwargs)
+-        except Exception as exc:
+-            return {
+-                "status": "failed_non_blocking",
+-                "error": str(exc),
+-                "model": extraction_model or None,
+-                "output_path": output_path or None,
+-            }
+-        cleaned = _strip_reasoning(_llm_response_text(response)).strip()
+-        if not cleaned or cleaned == "NOTHING_TO_EXTRACT":
+-            return {
+-                "status": "nothing_to_extract",
+-                "model": extraction_model or None,
+-                "output_path": output_path or None,
+-            }
+-        return {
+-            "status": "ok",
+-            "items": _normalize_extraction_items(cleaned),
+-            "text": cleaned,
+-            "model": extraction_model or None,
+-            "output_path": output_path or None,
+-        }
+-
+     def compress(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+         """Compact ``messages`` and return the new message LIST.
+ 
+@@ -3717,9 +2924,7 @@ class TraceDecayContextEngine(ContextEngine):
+         return replay
+ 
+     def _compress_to_result(self, messages, current_tokens=None, focus_topic=None, **kwargs):
+-        summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
+         force = bool(kwargs.pop("force", False))
+-        max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
+         tool_kwargs = _project_call_kwargs(
+             kwargs.get("project_root") or self.project_root
+         )
+@@ -3750,10 +2955,8 @@ class TraceDecayContextEngine(ContextEngine):
+         )
+         args.update({
+             "provider": STANDARD_HERMES_LCM_PROVIDER,
+-            "messages": messages,
+             "current_tokens": current_tokens,
+             "focus_topic": focus_topic,
+-            "summarizer": summarizer,
+         })
+         args = _lcm_store_args(
+             args,
+@@ -3777,100 +2980,10 @@ class TraceDecayContextEngine(ContextEngine):
+                 except (TypeError, ValueError):
+                     pass
+ 
+-        attempts = 0
+-        retry_status = None
+-        error_classification = None
+-        fallback_used = False
+-        attempt_args = dict(args)
+-
+-        while attempts < max_auxiliary_attempts:
+-            first = call_tracedecay_json(
+-                "tracedecay_lcm_compress", attempt_args, **tool_kwargs
+-            )
+-            if _compression_replay_is_compacted(first):
+-                return _with_auxiliary_metadata(
+-                    _compacted_lcm_result_error(first),
+-                    attempts=attempts,
+-                    retry_status=retry_status,
+-                    error_classification=error_classification,
+-                    fallback_used=fallback_used,
+-                )
+-            if first.get("status") != "needs_summary":
+-                return _with_auxiliary_metadata(
+-                    first,
+-                    attempts=attempts,
+-                    retry_status=retry_status,
+-                    error_classification=error_classification,
+-                    fallback_used=fallback_used,
+-                )
+-
+-            summary_request = first.get("summary_request") or {}
+-            source_messages = _summary_source_messages(
+-                summary_request.get("source_messages") or messages
+-            )
+-            attempts += 1
+-            extraction_result = self._run_pre_compaction_extraction(
+-                summary_request,
+-                source_messages,
+-            )
+-            summary = self._summarize_with_escalation(
+-                source_messages,
+-                focus_topic=summary_request.get("focus_topic") or focus_topic or "",
+-                summary_request=summary_request,
+-                allow_retry_signal=True,
+-                **kwargs,
+-            )
+-            summary_status = summary.get("status")
+-            if summary_status in ("retry", "error"):
+-                error_classification = summary.get("error_classification") or (
+-                    "retry_worthy" if summary_status == "retry" else "permanent"
+-                )
+-                smaller_limit = _next_smaller_source_limit(
+-                    source_messages,
+-                    attempt_args.get("max_source_messages"),
+-                )
+-                if (
+-                    summary_status == "retry"
+-                    and smaller_limit is not None
+-                    and attempts < max_auxiliary_attempts
+-                ):
+-                    retry_status = "retried"
+-                    attempt_args = dict(args)
+-                    attempt_args["max_source_messages"] = smaller_limit
+-                    continue
+-                retry_status = "retry_exhausted" if summary_status == "retry" else "not_retryable"
+-                return _auxiliary_error_result(
+-                    first,
+-                    attempts=attempts,
+-                    retry_status=retry_status,
+-                    error_classification=error_classification,
+-                    error=summary.get("error"),
+-                )
+-
+-            if summary_status == "fallback":
+-                fallback_used = True
+-                retry_status = retry_status or "fallback_summary"
+-                error_classification = summary.get("error_classification") or error_classification
+-
+-            provided_args = dict(attempt_args)
+-            provided_route = _extraction_route_payload(summary.get("route"), extraction_result)
+-            provided_args["summarizer"] = {
+-                "mode": "provided",
+-                "summary_text": summary["text"],
+-                "route": provided_route,
+-            }
+-            result = call_tracedecay_json(
+-                "tracedecay_lcm_compress", provided_args, **tool_kwargs
+-            )
+-            if _compression_replay_is_compacted(result):
+-                result = _compacted_lcm_result_error(result)
+-            return _with_auxiliary_metadata(
+-                result,
+-                attempts=attempts,
+-                retry_status=retry_status,
+-                error_classification=error_classification,
+-                fallback_used=fallback_used,
+-            )
++        result = call_tracedecay_json("tracedecay_lcm_compress", args, **tool_kwargs)
++        if _compression_replay_is_compacted(result):
++            result = _compacted_lcm_result_error(result)
++        return result
+ 
+ class TracedecayMemoryProvider(MemoryProvider):
+     provider_id = "tracedecay"
+@@ -4293,22 +3406,6 @@ def register(ctx):
+             register_config_defaults({"plugins": {"tracedecay": _plugin_config_defaults()}})
+         except Exception as exc:
+             logger.warning("tracedecay config defaults registration failed: %s", exc)
+-    # Declare the extraction side-LLM as a proper auxiliary task so users can
+-    # pin its provider/model under auxiliary.lcm_extraction instead of the
+-    # generic auto-resolved "extraction" defaults.
+-    register_auxiliary_task = getattr(ctx, "register_auxiliary_task", None)
+-    if callable(register_auxiliary_task):
+-        try:
+-            register_auxiliary_task(
+-                "lcm_extraction",
+-                display_name="LCM extraction",
+-                description="tracedecay pre-compaction decision/insight extraction",
+-                defaults={"provider": "auto", "model": "", "timeout": 60},
+-            )
+-        except Exception as exc:
+-            logger.debug("tracedecay auxiliary task registration failed: %s", exc)
+-        else:
+-            _EXTRACTION_TASK["key"] = "lcm_extraction"
+     register_command = getattr(ctx, "register_command", None)
+     if callable(register_command):
+         register_command(

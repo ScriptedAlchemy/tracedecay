@@ -27,9 +27,9 @@ use tracedecay_domain::{
     FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, UtcMicros,
 };
 use tracedecay_store::{
-    ProjectMemoryFactIdV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1,
-    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRelationV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryRelationProvenanceV1, FactStoreError, FactStoreResult, FactWriteBatch,
+    FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactIdV1,
+    ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1, ProjectMemoryFactNormalizeTagsV1,
+    ProjectMemoryFactRelationV1, ProjectMemoryFactTargetV1, ProjectMemoryRelationProvenanceV1,
     StoredFactV1,
 };
 

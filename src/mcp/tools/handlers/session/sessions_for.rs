@@ -396,7 +396,10 @@ pub(in super::super) async fn handle_sessions_for(
         // index that simply had no rows matching this git ref.
         let correlation = crate::store::GlobalDbGitCorrelationStore::new(db);
         let health = correlation.correlation_index_health().await.ok();
-        let results = match correlation.sessions_for_with_relation(&query, relation).await {
+        let results = match correlation
+            .sessions_for_with_relation(&query, relation)
+            .await
+        {
             Ok(results) => results,
             // A Git-evidence projection whose verified head has not been
             // published yet is a typed unavailable state, not a transport

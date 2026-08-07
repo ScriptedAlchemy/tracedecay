@@ -1,69 +1,10 @@
 use tempfile::TempDir;
-use tracedecay_domain::{
-    FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
-    ProvenanceId, UtcMicros,
-};
+use tracedecay_domain::{FactOwnerV1, UtcMicros};
 
 use crate::db::engine::{Connection, TestConnection, params};
 
 use super::schema::{table_exists, table_has_column};
-use super::writers::insert_event;
 use super::*;
-
-// Identity, legacy-mapping, and current-projection rows used to be written by
-// the V1→V2 backfill writer layer. That layer had no production writer left
-// after the fresh-store cutover and was removed, so these tests seed the same
-// rows directly. `insert_event` is *not* duplicated here: it is still a live
-// production writer (the legacy-payload purge path appends through it), so the
-// tests keep exercising the real function.
-
-async fn seed_fact_identity(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    fact_id: &FactId,
-    identity_json: &str,
-    created_at: i64,
-) {
-    conn.execute(
-        "INSERT INTO memory_v2_facts(
-            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            fact_id.as_str(),
-            owner.kind,
-            owner.project_id.as_str(),
-            owner.json.as_str(),
-            identity_json,
-            created_at
-        ],
-    )
-    .await
-    .unwrap();
-}
-
-async fn seed_current_fact(
-    conn: &impl MemoryV2Executor,
-    owner: &OwnerKey,
-    fact_id: &FactId,
-    event_id: &tracedecay_domain::FactEventId,
-    updated_at: i64,
-) {
-    conn.execute(
-        "INSERT INTO memory_v2_current_facts(
-            fact_id, owner_kind, project_id, payload_access, trust_score,
-            active_assertion_id, last_event_id, updated_at
-         ) VALUES(?1, ?2, ?3, 'unavailable', NULL, NULL, ?4, ?5)",
-        params![
-            fact_id.as_str(),
-            owner.kind,
-            owner.project_id.as_str(),
-            event_id.as_str(),
-            updated_at
-        ],
-    )
-    .await
-    .unwrap();
-}
 
 async fn database() -> (TestConnection, TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -84,39 +25,69 @@ fn owner() -> FactOwnerV1 {
     }
 }
 
-fn source_store_id() -> SourceStoreId {
-    SourceStoreId::new(V1_COMPATIBILITY_SOURCE_STORE).unwrap()
+fn bank_vector() -> Vec<u8> {
+    let mut vector = Vec::with_capacity(BANK_VECTOR_BYTES);
+    vector.extend_from_slice(&BANK_VECTOR_HEADER);
+    vector.resize(BANK_VECTOR_BYTES, 0);
+    vector
 }
 
 async fn scalar(conn: &Connection, sql: &str) -> i64 {
-    scalar_i64(conn, sql).await.unwrap()
+    let mut rows = conn.query(sql, ()).await.unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
 #[tokio::test]
-async fn schema_install_does_not_start_unowned_backfill() {
+async fn fresh_store_carries_only_the_final_memory_shape() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
     assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_backfill_progress").await,
-        0
+        scalar(&conn, "PRAGMA user_version").await,
+        i64::from(super::super::migrations::SCHEMA_VERSION)
     );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM retrieval_anchors").await,
-        0
+    for legacy in [
+        "memory_v2_legacy_map",
+        "memory_v2_legacy_quarantine",
+        "memory_v2_backfill_progress",
+        "memory_v2_legacy_proposal_map",
+        "memory_v2_legacy_feedback_event_map",
+        "memory_v2_feedback_history_repair_progress",
+        "memory_v2_compatibility_operation_receipts",
+        "memory_v2_compatibility_banks",
+        "memory_v2_compatibility_bank_dirty",
+    ] {
+        assert!(
+            !table_exists(&conn, legacy).await.unwrap(),
+            "legacy table {legacy} must not exist in a fresh final store"
+        );
+    }
+    for table in [
+        "memory_v2_operation_receipts",
+        "memory_v2_feedback_history",
+        "memory_v2_fact_relations",
+        "memory_v2_banks",
+        "memory_v2_bank_dirty",
+    ] {
+        assert!(
+            table_exists(&conn, table).await.unwrap(),
+            "final table {table} is missing"
+        );
+    }
+    assert!(
+        table_has_column(&conn, "memory_facts", "canonical_fact_id", "final_shape")
+            .await
+            .unwrap()
     );
     assert!(
-        !row_exists(
-            &conn,
-            "SELECT 1 FROM sqlite_master WHERE name = 'memory_v2_retrieval_anchors'",
-            (),
-        )
-        .await
-        .unwrap()
+        !table_has_column(&conn, "memory_v2_proposals", "origin", "final_shape")
+            .await
+            .unwrap(),
+        "proposal origin column is import machinery and must be gone"
     );
 }
 
 #[tokio::test]
-async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
+async fn fact_relations_enforce_owner_evidence_and_identity() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
     let owner = owner_key(&owner()).unwrap();
@@ -124,16 +95,16 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
         "INSERT INTO memory_v2_facts(
             fact_id, owner_kind, project_id, owner_json, identity_json, created_at
          ) VALUES
-            ('v23.relation.source', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
-            ('v23.relation.target', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
-            ('v23.relation.evidence', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
+            ('relation.source', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
+            ('relation.target', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
+            ('relation.evidence', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
          INSERT INTO memory_v2_fact_relations(
             owner_kind, project_id, source_fact_id, target_fact_id, relation,
             confidence, source_label, provenance_json, evidence_fact_ids_json,
             occurred_at, updated_at
          ) VALUES(
-            '{kind}', '{project_id}', 'v23.relation.source', 'v23.relation.target',
-            'supports', 0.8, 'fixture', '{{}}', '[\"v23.relation.evidence\"]', 1, 1
+            '{kind}', '{project_id}', 'relation.source', 'relation.target',
+            'supports', 0.8, 'fixture', '{{}}', '[\"relation.evidence\"]', 1, 1
          );",
         kind = owner.kind,
         project_id = owner.project_id,
@@ -141,57 +112,32 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
     ))
     .await
     .unwrap();
-
-    assert_eq!(
-        optional_i64(&conn, "PRAGMA user_version", ())
-            .await
-            .unwrap(),
-        Some(i64::from(super::super::migrations::SCHEMA_VERSION))
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_banks")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_bank_dirty")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_has_column(
-            &conn,
-            "memory_v2_fact_relations",
-            "provenance_json",
-            "memory_v2_v23_relation_upgrade_test",
-        )
-        .await
-        .unwrap()
-    );
-    assert_eq!(
-        optional_string(
-            &conn,
-            "SELECT provenance_json FROM memory_v2_fact_relations
-             WHERE source_fact_id = 'v23.relation.source'
-               AND target_fact_id = 'v23.relation.target' AND relation = 'supports'",
-            (),
-        )
-        .await
-        .unwrap(),
-        Some("{}".to_owned())
-    );
+    // The final shape accepts every canonical relation without an upgrade
+    // dance.
     conn.execute(
         "INSERT INTO memory_v2_fact_relations(
             owner_kind, project_id, source_fact_id, target_fact_id, relation,
             confidence, source_label, provenance_json, evidence_fact_ids_json,
             occurred_at, updated_at
-         ) VALUES(?1, ?2, 'v23.relation.source', 'v23.relation.target',
-                   'contradicts', 0.8, 'fixture', '{}',
-                   '[\"v23.relation.evidence\"]', 2, 2)",
+         ) VALUES(?1, ?2, 'relation.source', 'relation.target',
+                   'contradicts', 0.8, 'fixture', '{}', '[\"relation.evidence\"]', 2, 2)",
         params![owner.kind, owner.project_id.as_str()],
     )
     .await
     .unwrap();
+    // Evidence outside the owner's facts is refused by the validation trigger.
+    let unknown_evidence = conn
+        .execute(
+            "INSERT INTO memory_v2_fact_relations(
+                owner_kind, project_id, source_fact_id, target_fact_id, relation,
+                confidence, source_label, provenance_json, evidence_fact_ids_json,
+                occurred_at, updated_at
+             ) VALUES(?1, ?2, 'relation.source', 'relation.target',
+                       'supersedes', 0.8, 'fixture', '{}', '[\"relation.unknown\"]', 3, 3)",
+            params![owner.kind, owner.project_id.as_str()],
+        )
+        .await;
+    assert!(unknown_evidence.is_err());
     assert_eq!(
         scalar(&conn, "SELECT COUNT(*) FROM memory_v2_fact_relations").await,
         2
@@ -203,118 +149,114 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
 }
 
 #[tokio::test]
-async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
+async fn bank_writers_enforce_canonical_shape_and_clear_by_generation() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
     let owner = owner();
-    let owner_key = owner_key(&owner).unwrap();
-    let material = FactIdentityMaterialV1::new(
-        owner.clone(),
-        FactIdentitySourceV1::Application {
-            operation_id: ProvenanceId::new("memory-v2.runtime-purge").unwrap(),
-        },
-    )
-    .unwrap();
-    let fact_id = FactId::derive(&material).unwrap();
-    let identity_json = json_text(&material).unwrap();
-    seed_fact_identity(&conn, &owner_key, &fact_id, &identity_json, 10).await;
-    let initial = FactLineageEventV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactLineageEventKindV1::PayloadAccessChanged {
-            previous: PayloadAccessState::Unavailable,
-            current: PayloadAccessState::Eligible,
-        },
-        UtcMicros(10),
-        None,
-    )
-    .unwrap();
-    insert_event(&conn, &owner_key, &initial, 10).await.unwrap();
-    seed_current_fact(&conn, &owner_key, &fact_id, initial.event_id(), 10).await;
-    conn.execute(
-        "INSERT INTO memory_v2_assertions(
-            assertion_id, fact_id, owner_kind, project_id, owner_json,
-            assertion_header_json, kind_json, payload_reference_json,
-            receipt_json, asserted_at, actor_id
-         ) VALUES(
-            'assertion.runtime-purge', ?1, ?2, ?3, ?4,
-            '{\"assertion_id\":\"assertion.runtime-purge\"}', '{}', '{}', '{}', 10, NULL
-         )",
-        params![
-            fact_id.as_str(),
-            owner_key.kind,
-            owner_key.project_id.as_str(),
-            owner_key.json.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memory_v2_assertion_payloads(
-            assertion_id, fact_id, owner_kind, project_id, payload_json, content
-         ) VALUES(
-            'assertion.runtime-purge', ?1, ?2, ?3,
-            '{\"content\":\"runtime-purge-canary\"}', 'runtime-purge-canary'
-         )",
-        params![
-            fact_id.as_str(),
-            owner_key.kind,
-            owner_key.project_id.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memory_v2_assertion_vectors(
-            assertion_id, fact_id, owner_kind, project_id, vector, algebra, dimensions, precision
-         ) VALUES(
-            'assertion.runtime-purge', ?1, ?2, ?3, x'0102', 'fixture', 2, 'f32'
-         )",
-        params![
-            fact_id.as_str(),
-            owner_key.kind,
-            owner_key.project_id.as_str()
-        ],
-    )
-    .await
-    .unwrap();
 
-    let source = source_store_id();
+    // Non-canonical vector material and empty banks are refused.
     assert!(
-        purge_memory_v2_fact(
+        upsert_memory_v2_bank_in_transaction(&conn, &owner, "all", &[1, 2, 3], 1, UtcMicros(10))
+            .await
+            .is_err()
+    );
+    assert!(
+        upsert_memory_v2_bank_in_transaction(
             &conn,
             &owner,
-            &source,
-            &fact_id,
-            initial.event_id(),
-            UtcMicros(20),
+            "all",
+            &bank_vector(),
+            0,
+            UtcMicros(10)
         )
         .await
-        .unwrap()
-        .payload_purged()
+        .is_err()
     );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_payloads").await,
-        0
+    assert!(
+        mark_memory_v2_bank_dirty_in_transaction(&conn, &owner, "nonsense", UtcMicros(10))
+            .await
+            .is_err()
     );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_vectors").await,
-        0
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertion_payloads_fts
-             WHERE memory_v2_assertion_payloads_fts MATCH '\"runtime-purge-canary\"'"
-        )
-        .await,
-        0
-    );
-    assert_eq!(
-        current_fact_state(&conn, &owner_key, &fact_id)
+
+    upsert_memory_v2_bank_in_transaction(&conn, &owner, "all", &bank_vector(), 3, UtcMicros(10))
+        .await
+        .unwrap();
+    mark_memory_v2_bank_dirty_in_transaction(&conn, &owner, "all", UtcMicros(20))
+        .await
+        .unwrap();
+    // A stale generation must not clear the dirty marker (compare-and-swap).
+    assert!(
+        !clear_memory_v2_bank_dirty_in_transaction(&conn, &owner, "all", UtcMicros(19))
             .await
             .unwrap()
-            .access,
-        PayloadAccessState::Deleted
     );
+    assert!(
+        clear_memory_v2_bank_dirty_in_transaction(&conn, &owner, "all", UtcMicros(20))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_bank_dirty").await,
+        0
+    );
+    delete_memory_v2_bank_in_transaction(&conn, &owner, "all")
+        .await
+        .unwrap();
+    assert_eq!(
+        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_banks").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn feedback_history_permits_only_detail_redaction() {
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
+    let owner = owner_key(&owner()).unwrap();
+    conn.execute_batch(&format!(
+        "INSERT INTO memory_v2_facts(
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES('history.fact', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
+         INSERT INTO memory_v2_lineage_events(
+            event_id, fact_id, owner_kind, project_id, event_json, occurred_at, recorded_at
+         ) VALUES('history.event', 'history.fact', '{kind}', '{project_id}', '{{}}', 1, 1);
+         INSERT INTO memory_v2_feedback_history(
+            owner_kind, project_id, fact_id, event_id, action, old_trust,
+            new_trust, occurred_at, source, note, details_availability
+         ) VALUES('{kind}', '{project_id}', 'history.fact', 'history.event',
+                   'helpful', 0.5, 0.6, 1, 'mcp', 'note', 'available');",
+        kind = owner.kind,
+        project_id = owner.project_id,
+        owner_json = owner.json,
+    ))
+    .await
+    .unwrap();
+    // Redaction is the only accepted update: details go NULL and availability
+    // moves available -> redacted.
+    conn.execute(
+        "UPDATE memory_v2_feedback_history
+         SET source = NULL, note = NULL, details_availability = 'redacted'
+         WHERE fact_id = 'history.fact'",
+        (),
+    )
+    .await
+    .unwrap();
+    // Any other rewrite (here: trust tampering) aborts.
+    let tampered = conn
+        .execute(
+            "UPDATE memory_v2_feedback_history
+             SET new_trust = 0.9
+             WHERE fact_id = 'history.fact'",
+            (),
+        )
+        .await;
+    assert!(tampered.is_err());
+    // Deleting recorded history aborts.
+    let deleted = conn
+        .execute(
+            "DELETE FROM memory_v2_feedback_history WHERE fact_id = 'history.fact'",
+            (),
+        )
+        .await;
+    assert!(deleted.is_err());
 }

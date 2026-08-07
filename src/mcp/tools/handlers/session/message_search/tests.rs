@@ -10,7 +10,9 @@ use tracedecay_domain::{
 use super::{
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
     SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
+    SessionRetrievalStoreScope, SessionRetrievalSweepFuture, SessionRetrievalSweepOutcome,
+    SessionRetrievalSweepPort, SessionRetrievalSweepRootView, SessionRetrievalSweepSkipReason,
+    SessionRetrievalSweepSkipView, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
     SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
     SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
     handle_message_search_with_service, render_temporal_message_search_md,
@@ -130,6 +132,7 @@ async fn existing_filters_translate_to_one_root_wide_temporal_query() {
         SessionRetrievalStoreScope::Project,
         args,
         Some(&service),
+        None,
     )
     .await
     .unwrap();
@@ -210,6 +213,7 @@ async fn message_search_clamps_page_and_context_budget_to_canonical_bounds() {
                 "format": "json"
             }),
             Some(&service),
+            None,
         )
         .await
         .unwrap();
@@ -236,6 +240,7 @@ async fn compatibility_filters_bind_the_temporal_cursor_request() {
             "format": "json"
         }),
         Some(&first),
+        None,
     )
     .await
     .unwrap();
@@ -253,6 +258,7 @@ async fn compatibility_filters_bind_the_temporal_cursor_request() {
             "format": "json"
         }),
         Some(&changed),
+        None,
     )
     .await
     .unwrap();
@@ -279,6 +285,7 @@ async fn goals_mode_keeps_query_optional_but_normal_search_requires_it() {
         SessionRetrievalStoreScope::Project,
         json!({"goals": true, "format": "json"}),
         Some(&service),
+        None,
     )
     .await
     .unwrap();
@@ -293,6 +300,7 @@ async fn goals_mode_keeps_query_optional_but_normal_search_requires_it() {
         SessionRetrievalStoreScope::Project,
         json!({"format": "json"}),
         Some(&missing),
+        None,
     )
     .await
     .unwrap_err();
@@ -323,6 +331,7 @@ async fn malformed_optional_arguments_are_rejected_without_broadening() {
             SessionRetrievalStoreScope::Project,
             args,
             Some(&service),
+            None,
         )
         .await
         .unwrap_err();
@@ -338,6 +347,7 @@ async fn malformed_optional_arguments_are_rejected_without_broadening() {
         SessionRetrievalStoreScope::Project,
         args,
         Some(&service),
+        None,
     )
     .await
     .unwrap_err();
@@ -353,6 +363,7 @@ async fn malformed_optional_arguments_are_rejected_without_broadening() {
         SessionRetrievalStoreScope::Project,
         args,
         Some(&service),
+        None,
     )
     .await
     .unwrap_err();
@@ -368,6 +379,7 @@ async fn catch_up_defaults_false_and_true_is_only_a_freshness_precondition() {
         SessionRetrievalStoreScope::Project,
         json_args(),
         Some(&stored),
+        None,
     )
     .await
     .unwrap();
@@ -388,6 +400,7 @@ async fn catch_up_defaults_false_and_true_is_only_a_freshness_precondition() {
         SessionRetrievalStoreScope::Project,
         args,
         Some(&fresh),
+        None,
     )
     .await
     .unwrap();
@@ -418,6 +431,7 @@ async fn stale_freshness_precondition_returns_coverage_and_typed_refresh_action(
             "format": "json"
         }),
         Some(&service),
+        None,
     )
     .await
     .unwrap();
@@ -470,6 +484,7 @@ async fn partial_outcome_preserves_results_temporal_metadata_and_omissions() {
             "format": "json"
         }),
         Some(&service),
+        None,
     )
     .await
     .unwrap();
@@ -534,6 +549,7 @@ async fn non_finite_result_score_is_rejected_instead_of_rendered_as_null() {
         SessionRetrievalStoreScope::Project,
         json_args(),
         Some(&service),
+        None,
     )
     .await
     .unwrap_err();
@@ -564,6 +580,7 @@ async fn fresh_partial_outcome_uses_cursor_without_requesting_refresh() {
             "format": "json"
         }),
         Some(&service),
+        None,
     )
     .await
     .unwrap();
@@ -577,32 +594,318 @@ async fn fresh_partial_outcome_uses_cursor_without_requesting_refresh() {
     assert!(payload["next_action"].is_null());
 }
 
+#[derive(Default)]
+struct RecordingSweep {
+    commands: Mutex<Vec<SessionRetrievalCommand>>,
+    outcome: Mutex<Option<SessionRetrievalSweepOutcome>>,
+}
+
+impl RecordingSweep {
+    fn with_outcome(outcome: SessionRetrievalSweepOutcome) -> Self {
+        Self {
+            commands: Mutex::new(Vec::new()),
+            outcome: Mutex::new(Some(outcome)),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.commands.lock().unwrap().len()
+    }
+
+    fn command(&self) -> SessionRetrievalCommand {
+        self.commands.lock().unwrap()[0].clone()
+    }
+}
+
+impl SessionRetrievalSweepPort for RecordingSweep {
+    fn execute_registered(
+        &self,
+        command: SessionRetrievalCommand,
+    ) -> SessionRetrievalSweepFuture<'_> {
+        self.commands.lock().unwrap().push(command);
+        let outcome = self.outcome.lock().unwrap().clone().unwrap_or(
+            SessionRetrievalSweepOutcome::Complete {
+                roots: Vec::new(),
+                skipped: Vec::new(),
+                registry_truncated: false,
+            },
+        );
+        Box::pin(async move { outcome })
+    }
+}
+
+fn swept_search_result(
+    project_key: &str,
+    message_id: &str,
+    timestamp: i64,
+    score: f64,
+) -> crate::sessions::SessionMessageSearchResult {
+    crate::sessions::SessionMessageSearchResult {
+        session: SessionRecord {
+            provider: "cursor".to_string(),
+            session_id: format!("session.{project_key}"),
+            project_key: project_key.to_string(),
+            project_path: format!("/{project_key}"),
+            title: None,
+            started_at: Some(timestamp),
+            ended_at: None,
+            transcript_path: None,
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        },
+        message: SessionMessageRecord {
+            provider: "cursor".to_string(),
+            message_id: message_id.to_string(),
+            session_id: format!("session.{project_key}"),
+            role: "assistant".to_string(),
+            timestamp: Some(timestamp),
+            ordinal: 0,
+            text: format!("swept evidence in {project_key}"),
+            kind: Some("message".to_string()),
+            model: None,
+            tool_names: None,
+            source_path: None,
+            source_offset: None,
+            metadata_json: None,
+        },
+        score,
+    }
+}
+
+fn sweep_root(
+    project_id: &str,
+    root: &str,
+    results: Vec<crate::sessions::SessionMessageSearchResult>,
+) -> SessionRetrievalSweepRootView {
+    SessionRetrievalSweepRootView {
+        project_id: project_id.to_string(),
+        root: root.to_string(),
+        outcome: SessionRetrievalServiceOutcome::Complete {
+            page: SessionRetrievalPageView {
+                results,
+                temporal: temporal(),
+            },
+            freshness: SessionDataFreshness::Fresh,
+        },
+    }
+}
+
+fn all_registered_args() -> Value {
+    json!({
+        "query": "database backup",
+        "project_scope": "all_registered",
+        "format": "json"
+    })
+}
+
 #[tokio::test]
-async fn all_registered_defers_without_invoking_retrieval() {
+async fn all_registered_without_sweep_authority_is_typed_unavailable() {
     let service = RecordingService::default();
     let result = handle_message_search_with_service(
         Some(Path::new("/repo")),
         SessionRetrievalStoreScope::Project,
-        json!({
-            "query": "database backup",
-            "project_scope": "all_registered",
-            "format": "json"
-        }),
+        all_registered_args(),
         Some(&service),
+        None,
     )
     .await
     .unwrap();
     let payload = response_payload(&result);
 
     assert_eq!(service.calls(), 0);
-    assert_eq!(payload["status"], "deferred");
-    assert_eq!(payload["outcome"], "deferred");
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(payload["outcome"], "unavailable");
     assert_eq!(payload["project_scope"], "all_registered");
     assert_eq!(
         payload["error"]["code"],
-        "session_retrieval_multi_root_deferred"
+        "session_retrieval_sweep_unavailable"
     );
     assert_eq!(payload["error"]["retryable"], false);
+}
+
+#[tokio::test]
+async fn all_registered_merges_roots_deterministically_with_provenance() {
+    let sweep = RecordingSweep::with_outcome(SessionRetrievalSweepOutcome::Complete {
+        roots: vec![
+            sweep_root(
+                "project.alpha",
+                "/roots/alpha",
+                vec![
+                    swept_search_result("project.alpha", "alpha-old", 5, 0.9),
+                    swept_search_result("project.alpha", "alpha-new", 30, 0.2),
+                ],
+            ),
+            sweep_root(
+                "project.beta",
+                "/roots/beta",
+                vec![swept_search_result("project.beta", "beta-mid", 20, 0.5)],
+            ),
+            SessionRetrievalSweepRootView {
+                project_id: "project.denied".to_string(),
+                root: "/roots/denied".to_string(),
+                outcome: SessionRetrievalServiceOutcome::Denied,
+            },
+        ],
+        skipped: vec![SessionRetrievalSweepSkipView {
+            project_id: "project.unmountable".to_string(),
+            reason: SessionRetrievalSweepSkipReason::StoreMountFailed,
+        }],
+        registry_truncated: true,
+    });
+    let service = RecordingService::default();
+    let result = handle_message_search_with_service(
+        Some(Path::new("/repo")),
+        SessionRetrievalStoreScope::Project,
+        all_registered_args(),
+        Some(&service),
+        Some(&sweep),
+    )
+    .await
+    .unwrap();
+    let payload = response_payload(&result);
+
+    // The single-root service must never be consulted: the sweep opens each
+    // registered project's own store instead of aliasing the active one.
+    assert_eq!(service.calls(), 0);
+    assert_eq!(sweep.calls(), 1);
+    let command = sweep.command();
+    assert_eq!(command.store_scope(), SessionRetrievalStoreScope::Project);
+    assert!(command.project_selector().is_none());
+
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_eq!(payload["outcome"], "complete");
+    assert_eq!(payload["project_scope"], "all_registered");
+    assert_eq!(payload["searched_project_count"], 3);
+    assert_eq!(payload["skipped_project_count"], 1);
+    assert_eq!(payload["registry_truncated"], true);
+    assert_eq!(payload["count"], 3);
+    // Newest first, and every merged result keeps its registered-root
+    // provenance.
+    assert_eq!(payload["results"][0]["message"]["message_id"], "alpha-new");
+    assert_eq!(payload["results"][0]["project_id"], "project.alpha");
+    assert_eq!(payload["results"][0]["root"], "/roots/alpha");
+    assert_eq!(payload["results"][1]["message"]["message_id"], "beta-mid");
+    assert_eq!(payload["results"][1]["project_id"], "project.beta");
+    assert_eq!(payload["results"][2]["message"]["message_id"], "alpha-old");
+    // Per-root outcomes stay typed, including denials.
+    assert_eq!(payload["roots"][0]["project_id"], "project.alpha");
+    assert_eq!(payload["roots"][0]["status"], "complete");
+    assert_eq!(payload["roots"][0]["count"], 2);
+    assert_eq!(payload["roots"][2]["project_id"], "project.denied");
+    assert_eq!(payload["roots"][2]["status"], "denied");
+    assert_eq!(payload["skipped"][0]["project_id"], "project.unmountable");
+    assert_eq!(payload["skipped"][0]["reason"], "store_mount_failed");
+}
+
+#[tokio::test]
+async fn all_registered_merge_is_bounded_by_the_requested_limit() {
+    let sweep = RecordingSweep::with_outcome(SessionRetrievalSweepOutcome::Complete {
+        roots: vec![
+            sweep_root(
+                "project.alpha",
+                "/roots/alpha",
+                vec![
+                    swept_search_result("project.alpha", "alpha-1", 40, 0.9),
+                    swept_search_result("project.alpha", "alpha-2", 30, 0.8),
+                ],
+            ),
+            sweep_root(
+                "project.beta",
+                "/roots/beta",
+                vec![swept_search_result("project.beta", "beta-1", 35, 0.7)],
+            ),
+        ],
+        skipped: Vec::new(),
+        registry_truncated: false,
+    });
+    let mut args = all_registered_args();
+    args["limit"] = json!(2);
+    let result = handle_message_search_with_service(
+        Some(Path::new("/repo")),
+        SessionRetrievalStoreScope::Project,
+        args,
+        None,
+        Some(&sweep),
+    )
+    .await
+    .unwrap();
+    let payload = response_payload(&result);
+
+    assert_eq!(payload["count"], 2);
+    assert_eq!(payload["results"][0]["message"]["message_id"], "alpha-1");
+    assert_eq!(payload["results"][1]["message"]["message_id"], "beta-1");
+}
+
+#[tokio::test]
+async fn all_registered_registry_absence_is_typed_not_empty_success() {
+    let sweep = RecordingSweep::with_outcome(SessionRetrievalSweepOutcome::RegistryUnavailable);
+    let result = handle_message_search_with_service(
+        Some(Path::new("/repo")),
+        SessionRetrievalStoreScope::Project,
+        all_registered_args(),
+        None,
+        Some(&sweep),
+    )
+    .await
+    .unwrap();
+    let payload = response_payload(&result);
+
+    assert_eq!(payload["status"], "unavailable");
+    assert_eq!(
+        payload["error"]["code"],
+        "session_retrieval_registry_unavailable"
+    );
+    assert!(payload.get("searched_project_count").is_none());
+}
+
+#[tokio::test]
+async fn all_registered_rejects_single_root_arguments_before_fanout() {
+    let denials = [
+        (json!({"cursor": "cursor.next"}), "cursor"),
+        (json!({"catch_up": true}), "catch_up"),
+        (json!({"project_id": "project.other"}), "project_scope"),
+        (
+            json!({"project_selector": {"project_id": "project.other"}}),
+            "project_scope",
+        ),
+    ];
+    for (extra, expected) in denials {
+        let sweep = RecordingSweep::default();
+        let mut args = all_registered_args();
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        let error = handle_message_search_with_service(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            args,
+            None,
+            Some(&sweep),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_eq!(sweep.calls(), 0);
+    }
+
+    let sweep = RecordingSweep::default();
+    let error = handle_message_search_with_service(
+        None,
+        SessionRetrievalStoreScope::Profile,
+        all_registered_args(),
+        None,
+        Some(&sweep),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("project session storage"),
+        "{error}"
+    );
+    assert_eq!(sweep.calls(), 0);
 }
 
 #[tokio::test]
@@ -620,6 +923,7 @@ async fn explicit_project_selector_and_profile_dispatch_remain_single_root() {
             "format": "json"
         }),
         Some(&project),
+        None,
     )
     .await
     .unwrap();
@@ -647,6 +951,7 @@ async fn explicit_project_selector_and_profile_dispatch_remain_single_root() {
         SessionRetrievalStoreScope::Profile,
         json_args(),
         Some(&profile),
+        None,
     )
     .await
     .unwrap();
@@ -669,6 +974,7 @@ async fn complete_zero_and_terminal_error_outcomes_are_typed() {
         SessionRetrievalStoreScope::Project,
         json_args(),
         Some(&complete_zero),
+        None,
     )
     .await
     .unwrap();
@@ -701,6 +1007,7 @@ async fn complete_zero_and_terminal_error_outcomes_are_typed() {
         SessionRetrievalStoreScope::Project,
         json_args(),
         Some(&complete),
+        None,
     )
     .await
     .unwrap();
@@ -760,6 +1067,7 @@ async fn complete_zero_and_terminal_error_outcomes_are_typed() {
             SessionRetrievalStoreScope::Project,
             json_args(),
             Some(&service),
+            None,
         )
         .await
         .unwrap();
@@ -789,6 +1097,7 @@ async fn unavailable_outcome_exposes_typed_worker_status() {
         SessionRetrievalStoreScope::Project,
         json_args(),
         Some(&service),
+        None,
     )
     .await
     .unwrap();
@@ -829,6 +1138,7 @@ async fn unavailable_outcome_reports_no_progress_backlog_as_stalled() {
         SessionRetrievalStoreScope::Project,
         json_args(),
         Some(&service),
+        None,
     )
     .await
     .unwrap();

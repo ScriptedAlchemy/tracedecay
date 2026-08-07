@@ -372,7 +372,7 @@ impl RetrievalCursorKeyringV1 {
         keyed_mac(&material.secret, &bytes).map_err(map_cursor_key_error)
     }
 
-    fn verify_cursor(&self, cursor: &RetrievalCursor) -> Result<(), RetrievalError> {
+    pub(crate) fn verify_cursor(&self, cursor: &RetrievalCursor) -> Result<(), RetrievalError> {
         let material = self
             .key_material(&cursor.key_id, cursor.key_epoch)
             .map_err(map_cursor_key_error)?;
@@ -1206,6 +1206,7 @@ fn build_cursor(
         )?,
         next_ordinal,
         semantic: None,
+        code_source: None,
         expiry: keyring.expiry_from(now)?,
         signature: QueryMac::new(format!("hmac-sha256:{}", "0".repeat(64)))?,
     };
@@ -1231,6 +1232,8 @@ struct CursorAuthenticatedPayload<'a> {
     next_ordinal: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic: &'a Option<tracedecay_domain::SemanticRetrievalContinuationV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_source: &'a Option<tracedecay_domain::CodeSourceCursorBindingV1>,
     expiry: UtcMicros,
 }
 
@@ -1251,6 +1254,7 @@ fn cursor_authenticated_bytes(cursor: &RetrievalCursor) -> Result<Vec<u8>, Retri
         ranking_revision: &cursor.ranking_revision,
         next_ordinal: cursor.next_ordinal,
         semantic: &cursor.semantic,
+        code_source: &cursor.code_source,
         expiry: cursor.expiry,
     })
     .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))

@@ -75,6 +75,25 @@ Examples:
 Related: tracedecay sync (refresh a stale index), tracedecay projects
 (registry lookup), tracedecay doctor (installation health).";
 
+pub(crate) const GIT_LONG_ABOUT: &str = "\
+Reads bounded, typed Git intelligence through the same catalogued application \
+surface used by supported agent hosts. It does not run a user-supplied Git \
+command: the daemon admits the selected project and revalidates repository and \
+worktree scope before answering. Retryable cold-project responses are retried \
+inside the selected catalog binding's deadline. Use `--json` when another \
+program needs the complete canonical application envelope.";
+
+pub(crate) const GIT_AFTER_HELP: &str = "\
+Examples:
+  tracedecay git status                           Typed status for the current project
+  tracedecay git diff --scope staged --json       Canonical staged-diff envelope
+  tracedecay git diff --scope commit-range --base <oid> --head <oid>
+  tracedecay git history --count 25 --path src/main.rs
+  tracedecay git blame --path src/main.rs
+  tracedecay git hunks --scope staged             Mint expiring hunk-preview evidence
+
+Related: tracedecay status (index freshness).";
+
 pub(crate) const TOOL_LONG_ABOUT: &str = "\
 Invoke any MCP tool from the shell — the full MCP surface with the same \
 arguments and the same payloads, no MCP client required. This is the fallback \

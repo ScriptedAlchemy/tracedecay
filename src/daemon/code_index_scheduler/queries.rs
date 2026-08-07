@@ -36,7 +36,9 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::SortContractId;
 
-use super::{CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1};
+use super::{
+    CodeIndexSchedulerRegistryV1, DaemonCodeIndexPublicationStoreV1, LatestCompleteCodeIndexV1,
+};
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLaneRequest, ExactLaneRetriever,
@@ -207,7 +209,19 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         scope: &tracedecay_application::ResolvedScope,
         generation_id: &CodeGenerationId,
-    ) -> Option<LatestCompleteCodeIndexV1> {
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
+    {
+        self.generation_for_controlled(scope, generation_id, None)
+            .await
+    }
+
+    pub(in crate::daemon) async fn generation_for_controlled(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+        generation_id: &CodeGenerationId,
+        control: Option<super::branch_generations::BranchGenerationReadControlV1>,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, code_search::CodeIndexSearchUnavailableReasonV1>
+    {
         let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             let mut matched = None;
@@ -216,7 +230,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     && worktree.worktree_id == scope.worktree_id
                 {
                     if matched.is_some() {
-                        return None;
+                        return Err(
+                            code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                        );
                     }
                     matched = Some((
                         std::sync::Arc::clone(&worktree.scheduler),
@@ -224,35 +240,66 @@ impl CodeIndexSchedulerRegistryV1 {
                     ));
                 }
             }
-            matched?
+            let Some(matched) = matched else {
+                return Ok(None);
+            };
+            matched
         };
         let scope = scope.clone();
         let generation_id = generation_id.clone();
+        let terminal_control = control.clone();
         // The blocking side may park on the single-flight decode barrier for a
         // sealed generation, which is an O(store) sweep. Do not hold an admission
         // slot across it.
-        crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
+        let task = tokio::task::spawn_blocking(move || {
+            if let Some(reason) = control.as_ref().and_then(|control| control.termination()) {
+                return Err(reason);
+            }
             if let Some(generation) = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
                 .filter(|generation| {
                     generation.generation.manifest().generation_id == generation_id
-                        && Self::latest_matches_scope(generation, &scope)
+                        && Self::latest_matches_scope_identity(generation, &scope)
                 })
                 .cloned()
             {
-                return Some(generation);
+                return Ok(Some(generation));
             }
             let scheduler = scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let generation = scheduler.generation(&generation_id).ok().flatten()?;
-            Self::latest_matches_scope(&generation, &scope).then_some(generation)
-        }))
+            let generation = scheduler
+                .generation(&generation_id)
+                .map_err(|error| match error {
+                    super::CodeIndexSchedulerErrorV1::Production(
+                        crate::code_index::production::CodeIndexProductionErrorV1::Publication(
+                            error,
+                        ),
+                    ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
+                    _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                })?;
+            Ok(generation
+                .filter(|generation| Self::latest_matches_scope_identity(generation, &scope)))
+        });
+        match crate::daemon::park_admission(
+            crate::daemon::code_index_task_support::settle_owned_blocking_task(
+                task,
+                std::time::Duration::from_millis(10),
+                || {
+                    terminal_control
+                        .as_ref()
+                        .and_then(|control| control.termination())
+                },
+            ),
+        )
         .await
-        .ok()
-        .flatten()
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(code_search::CodeIndexSearchUnavailableReasonV1::Internal),
+            Err(reason) => Err(reason),
+        }
     }
 
     /// Resolve the generation a callable-code query serves.
@@ -288,6 +335,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     |generation| async move { self.generation_for(&scope, &generation).await },
                 )?
                 .await
+                .map_err(|_| CallableCodeCursorError::Unavailable)?
                 .ok_or(CallableCodeCursorError::Unavailable)
             } else if is_unpinned_latest(requested) {
                 self.latest_complete_fresh_for_scope(request.scope())
@@ -296,6 +344,7 @@ impl CodeIndexSchedulerRegistryV1 {
             } else {
                 self.generation_for(request.scope(), requested)
                     .await
+                    .map_err(|_| CallableCodeCursorError::Unavailable)?
                     .ok_or(CallableCodeCursorError::Unavailable)
             }
         };

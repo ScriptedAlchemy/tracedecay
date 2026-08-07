@@ -4,7 +4,10 @@ use tracedecay_domain::{
 };
 
 use super::{
-    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
+    FactCompatibilityResult, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
+    FactLineageResponseV1, FactProposalStoreError, FactStoreResult, FactWriteBatch,
+    LegacyFactQuery, ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
     ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
@@ -16,8 +19,7 @@ use super::{
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
     ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
     ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalImportReceiptV1,
-    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPageV1,
     ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
     ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
     ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
@@ -25,10 +27,7 @@ use super::{
     ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1,
     ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
     ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
-    FactCommitOutcome, FactCompatibilityResult, FactCurrentQuery, FactCurrentResponseV1,
-    FactLineageQuery, FactLineageResponseV1, FactProposalStoreError, FactStoreResult,
-    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
+    ProjectMemoryMemoryStatusV1, PromoteFactProposal, PromoteFactProposalOutcome,
     RetrievalAnchorQuery, StoredFactV1,
 };
 
@@ -274,11 +273,6 @@ pub trait FactCompatibilityStore: FactProposalStore {
         reviewer: ActorId,
         reason: String,
     ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalRecordV1>> + Send;
-
-    fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: ProjectMemoryFactProposalImportV1,
-    ) -> impl Future<Output = FactCompatibilityResult<ProjectMemoryFactProposalImportReceiptV1>> + Send;
 
     fn promote_compatibility_fact_proposal(
         &self,

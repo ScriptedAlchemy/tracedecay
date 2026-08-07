@@ -120,9 +120,7 @@ impl From<GraphDbError> for GitTopologyProjectionError {
     fn from(error: GraphDbError) -> Self {
         match error {
             GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => {
-                Self::BudgetExhausted
-            }
+            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => Self::BudgetExhausted,
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Corrupt { message }
             | GraphDbError::ResetRequired { message }
@@ -169,8 +167,13 @@ pub fn git_topology_ref_watermark(
     head.validate()
         .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))?;
     validate_refs(refs)?;
-    canonical_sha256(&("tracedecay.git-topology-ref-watermark.v1", repository, head, refs))
-        .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))
+    canonical_sha256(&(
+        "tracedecay.git-topology-ref-watermark.v1",
+        repository,
+        head,
+        refs,
+    ))
+    .map_err(|error| GitTopologyProjectionError::Contract(error.to_string()))
 }
 
 pub fn git_topology_generation_id(

@@ -8,9 +8,8 @@ use super::super::envelope::{
     CompatibilityOperationReceiptV1, compatibility_receipt_u64, compatibility_target_digest,
 };
 use super::super::primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp,
-    compatibility_source_store_id, from_json, row_i64, row_string, storage_error, storage_message,
-    to_json,
+    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_legacy_timestamp, from_json, row_i64,
+    row_string, storage_error, storage_message, to_json,
 };
 use super::super::projection::{
     compatibility_required_mapping_tx, compatibility_source_for_fact_tx,
@@ -28,10 +27,10 @@ use crate::memory::entities::normalize_entity;
 use serde_json::{Value, json};
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
-    ProjectMemoryFactAddAliasV1, ProjectMemoryFactCurationOperationV1,
-    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactMappingV1,
-    ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactTargetV1, ProjectMemoryLegacyEntityTargetV1,
-    ProjectMemoryMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
+    FactCompatibilityResult, FactStoreError, FactStoreResult, ProjectMemoryFactAddAliasV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactMappingV1, ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairStatsV1,
 };
 async fn compatibility_owner_entity_tx(
     transaction: &Transaction<'_>,
@@ -39,27 +38,26 @@ async fn compatibility_owner_entity_tx(
     entity_id: i64,
 ) -> FactStoreResult<(String, Vec<String>)> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let foreign_links = transaction
         .query(
             "SELECT COUNT(*)
              FROM memory_fact_entities AS links
-             LEFT JOIN memory_v2_legacy_map AS mappings
-               ON mappings.legacy_fact_id = links.fact_id
+             LEFT JOIN memory_facts AS projections
+               ON projections.fact_id = links.fact_id
+             LEFT JOIN memory_v2_facts AS facts
+               ON facts.fact_id = projections.canonical_fact_id
              WHERE links.entity_id = ?1
                AND (
-                    mappings.legacy_fact_id IS NULL
-                    OR mappings.owner_kind <> ?2
-                    OR mappings.project_id <> ?3
-                    OR mappings.owner_json <> ?4
-                    OR mappings.source_store_id <> ?5
+                    projections.canonical_fact_id IS NULL
+                    OR facts.owner_kind <> ?2
+                    OR facts.project_id <> ?3
+                    OR facts.owner_json <> ?4
                )",
             params![
                 entity_id,
                 key.kind,
                 key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
+                key.json.as_str()
             ],
         )
         .await
@@ -115,28 +113,25 @@ async fn compatibility_entity_linked_to_evidence_tx(
     evidence_ids: &[FactId],
 ) -> FactStoreResult<()> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let placeholders = std::iter::repeat_n("?", evidence_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
         "SELECT 1
          FROM memory_fact_entities AS links
-         JOIN memory_v2_legacy_map AS mappings ON mappings.legacy_fact_id = links.fact_id
+         JOIN memory_facts AS projections ON projections.fact_id = links.fact_id
+         JOIN memory_v2_facts AS facts ON facts.fact_id = projections.canonical_fact_id
          WHERE links.entity_id = ?
-           AND mappings.owner_kind = ? AND mappings.project_id = ?
-           AND mappings.owner_json = ? AND mappings.source_store_id = ?
-           AND mappings.fact_id IN ({placeholders})
+           AND facts.owner_kind = ? AND facts.project_id = ?
+           AND facts.owner_json = ?
+           AND projections.canonical_fact_id IN ({placeholders})
          LIMIT 1"
     );
-    let mut values = Vec::with_capacity(evidence_ids.len() + 5);
+    let mut values = Vec::with_capacity(evidence_ids.len() + 4);
     values.push(crate::db::engine::Value::Integer(entity_id));
     values.push(crate::db::engine::Value::Text(key.kind.to_string()));
     values.push(crate::db::engine::Value::Text(key.project_id.clone()));
     values.push(crate::db::engine::Value::Text(key.json.clone()));
-    values.push(crate::db::engine::Value::Text(
-        source_store_id.as_str().to_owned(),
-    ));
     values.extend(
         evidence_ids
             .iter()
@@ -166,26 +161,23 @@ async fn compatibility_owner_entity_fact_ids_tx(
     entity_ids: &[i64],
 ) -> FactStoreResult<Vec<FactId>> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let placeholders = std::iter::repeat_n("?", entity_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT DISTINCT mappings.fact_id
+        "SELECT DISTINCT projections.canonical_fact_id
          FROM memory_fact_entities AS links
-         JOIN memory_v2_legacy_map AS mappings ON mappings.legacy_fact_id = links.fact_id
-         WHERE mappings.owner_kind = ? AND mappings.project_id = ?
-           AND mappings.owner_json = ? AND mappings.source_store_id = ?
+         JOIN memory_facts AS projections ON projections.fact_id = links.fact_id
+         JOIN memory_v2_facts AS facts ON facts.fact_id = projections.canonical_fact_id
+         WHERE facts.owner_kind = ? AND facts.project_id = ?
+           AND facts.owner_json = ?
            AND links.entity_id IN ({placeholders})
-         ORDER BY mappings.fact_id ASC LIMIT 257"
+         ORDER BY projections.canonical_fact_id ASC LIMIT 257"
     );
-    let mut values = Vec::with_capacity(entity_ids.len() + 4);
+    let mut values = Vec::with_capacity(entity_ids.len() + 3);
     values.push(crate::db::engine::Value::Text(key.kind.to_string()));
     values.push(crate::db::engine::Value::Text(key.project_id.clone()));
     values.push(crate::db::engine::Value::Text(key.json.clone()));
-    values.push(crate::db::engine::Value::Text(
-        source_store_id.as_str().to_owned(),
-    ));
     values.extend(
         entity_ids
             .iter()

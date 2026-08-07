@@ -88,6 +88,7 @@ fn publish(scheduler: &mut CodeIndexWorktreeSchedulerV1) -> CodeGenerationId {
 fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
     DaemonCodeIndexPublicationStoreV1::new(
         store_root,
+        store_root,
         SanitizerRevision::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("sanitizer revision"),
     )
     .expect("open publication store")

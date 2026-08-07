@@ -76,12 +76,14 @@ pub async fn node(
         Ok(read) if read.payload.is_some() => {
             graph_ready(&state, read.payload, read.generation.graph_generation_id)
         }
-        Ok(read) => Json(DashboardEnvelopeV1::complete_zero_findings(
-            scope_from_state(&state),
-            DashboardCoverageV1::complete(1, "nodes"),
-            None,
-        )
-        .with_version(graph_version(read.generation.graph_generation_id))),
+        Ok(read) => Json(
+            DashboardEnvelopeV1::complete_zero_findings(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(1, "nodes"),
+                None,
+            )
+            .with_version(graph_version(read.generation.graph_generation_id)),
+        ),
         Err(error) => graph_read_failed(&state, error),
     }
 }
@@ -97,12 +99,14 @@ pub async fn neighbors(
         Ok(read) if read.payload.is_some() => {
             graph_ready(&state, read.payload, read.generation.graph_generation_id)
         }
-        Ok(read) => Json(DashboardEnvelopeV1::complete_zero_findings(
-            scope_from_state(&state),
-            DashboardCoverageV1::complete(1, "nodes"),
-            None,
-        )
-        .with_version(graph_version(read.generation.graph_generation_id))),
+        Ok(read) => Json(
+            DashboardEnvelopeV1::complete_zero_findings(
+                scope_from_state(&state),
+                DashboardCoverageV1::complete(1, "nodes"),
+                None,
+            )
+            .with_version(graph_version(read.generation.graph_generation_id)),
+        ),
         Err(error) => graph_read_failed(&state, error),
     }
 }
@@ -149,7 +153,11 @@ fn graph_response<T>(
     result: Result<graph_service::GraphServiceReadV1<T>, DashboardGraphReadErrorV1>,
 ) -> Json<DashboardEnvelopeV1<Option<T>>> {
     match result {
-        Ok(read) => graph_ready(state, Some(read.payload), read.generation.graph_generation_id),
+        Ok(read) => graph_ready(
+            state,
+            Some(read.payload),
+            read.generation.graph_generation_id,
+        ),
         Err(error) => graph_read_failed(state, error),
     }
 }
@@ -159,12 +167,14 @@ fn graph_ready<T>(
     payload: Option<T>,
     generation: String,
 ) -> Json<DashboardEnvelopeV1<Option<T>>> {
-    Json(DashboardEnvelopeV1::ready(
-        scope_from_state(state),
-        DashboardCoverageV1::unknown(),
-        payload,
+    Json(
+        DashboardEnvelopeV1::ready(
+            scope_from_state(state),
+            DashboardCoverageV1::unknown(),
+            payload,
+        )
+        .with_version(graph_version(generation)),
     )
-    .with_version(graph_version(generation)))
 }
 
 fn graph_read_failed<T>(

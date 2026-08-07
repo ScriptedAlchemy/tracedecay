@@ -1,9 +1,8 @@
 //! Authority-backed automation fact proposals.
 //!
-//! `fact_proposals.json` was the legacy authority.  It is now read once as a
-//! bounded legacy import and then archived.  The separate projection file is
-//! strictly post-commit display metadata; proposal state, CAS, and applied
-//! facts always come from [`MemoryApplication`].
+//! The separate projection file is strictly post-commit display metadata;
+//! proposal state, CAS, and applied facts always come from
+//! [`MemoryApplication`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,29 +12,25 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{ActorId, LocatorDigest, ProvenanceId};
+use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
-    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalLegacyRecordV1,
-    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalStateV1, FactCompatibilityStore,
+    FactCompatibilityStore, ProjectMemoryFactProposalPromotionDispositionV1,
+    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalStateV1,
 };
 
 use super::config_error;
 use crate::application::memory::{
     MemoryApplication, MemoryApplicationError, automation_fact_proposal_add_command,
-    legacy_proposal_add_command, with_automation_run_id,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{AddFactOutcome, AddFactRequest, MemoryCategory};
 use crate::privacy::sanitize_provider_metadata_text;
 use crate::tracedecay::current_timestamp;
 
-/// Historical source, consumed only by the one-time importer.
-const FACT_PROPOSALS_FILENAME: &str = "fact_proposals.json";
 /// Best-effort post-commit presentation cache. Never read to authorize work.
 const FACT_PROPOSAL_PROJECTION_FILENAME: &str = "fact_proposals.projection.json";
-const FACT_PROPOSAL_ARCHIVE_DIRECTORY: &str = "fact_proposals.archive";
-const MAX_LEGACY_IMPORT_RECORDS: usize = 1_000;
+const MAX_FACT_PROPOSAL_PAGE_SIZE: usize = 1_000;
 
 static FACT_PROPOSAL_STORE_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -144,10 +139,6 @@ impl ProjectionMetadata<'_> {
     }
 }
 
-pub fn fact_proposals_path(dashboard_root: &Path) -> PathBuf {
-    dashboard_root.join(FACT_PROPOSALS_FILENAME)
-}
-
 pub fn fact_proposal_projection_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(FACT_PROPOSAL_PROJECTION_FILENAME)
 }
@@ -230,137 +221,6 @@ fn fact_proposal_store_lock(dashboard_root: &Path) -> Arc<tokio::sync::Mutex<()>
     lock
 }
 
-/// Imports the historical sidecar through the authority, then archives its
-/// exact bytes. A failed import leaves the source untouched for retry.
-pub async fn import_legacy_fact_proposals<A: FactCompatibilityStore>(
-    memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
-) -> Result<()> {
-    let lock = fact_proposal_store_lock(dashboard_root);
-    let _guard = lock.lock().await;
-    let legacy_path = fact_proposals_path(dashboard_root);
-    let bytes = match tokio::fs::read(&legacy_path).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(config_error(format!(
-                "failed to read legacy fact proposal sidecar '{}': {error}",
-                legacy_path.display()
-            )));
-        }
-    };
-    let legacy_store = serde_json::from_slice::<FactProposalStore>(&bytes).map_err(|error| {
-        config_error(format!(
-            "failed to parse legacy fact proposal sidecar '{}': {error}",
-            legacy_path.display()
-        ))
-    })?;
-    let sidecar_digest = sidecar_digest(&bytes)?;
-    let mut imported = Vec::new();
-    for (index, legacy) in legacy_store.proposals.into_iter().enumerate() {
-        let legacy_proposal_id = i64::try_from(index + 1)
-            .map_err(|_| config_error("legacy fact proposal sidecar has too many records"))?;
-        let Some(request) = legacy.add_fact_request else {
-            // The original bytes are kept in the archive; a missing request
-            // cannot be truthfully reconstructed into a fact assertion.
-            continue;
-        };
-        let Ok(command) = legacy_proposal_add_command(
-            memory.owner().clone(),
-            sidecar_digest.clone(),
-            legacy_proposal_id,
-            request,
-        ) else {
-            continue;
-        };
-        let Ok(command) = with_automation_run_id(command, &legacy.run_id) else {
-            continue;
-        };
-        let record = ProjectMemoryFactProposalLegacyRecordV1::new(
-            legacy_proposal_id,
-            import_state(legacy.state),
-            command,
-        )
-        .map_err(store_error)?;
-        imported.push(record);
-    }
-    for records in imported.chunks(MAX_LEGACY_IMPORT_RECORDS) {
-        let request = ProjectMemoryFactProposalImportV1::new(
-            memory.owner().clone(),
-            memory.compatibility_scope().source_store_id().clone(),
-            sidecar_digest.clone(),
-            records.to_vec(),
-        )
-        .map_err(store_error)?;
-        let receipt = memory
-            .import_legacy_compatibility_fact_proposals(request)
-            .await
-            .map_err(memory_error)?;
-        if receipt.imported_count() + receipt.quarantined_count() != records.len() {
-            return Err(config_error(
-                "legacy proposal import receipt did not account for every submitted record",
-            ));
-        }
-    }
-    archive_legacy_sidecar(dashboard_root, &legacy_path, &bytes, &sidecar_digest).await
-}
-
-/// Migration must never make an old or corrupt sidecar gate the canonical
-/// product path. An explicit importer can surface its error; routine calls
-/// retry opportunistically and continue against the authority.
-async fn best_effort_legacy_import<A: FactCompatibilityStore>(
-    memory: &MemoryApplication<A>,
-    dashboard_root: &Path,
-) {
-    let _ = import_legacy_fact_proposals(memory, dashboard_root).await;
-}
-
-async fn archive_legacy_sidecar(
-    dashboard_root: &Path,
-    legacy_path: &Path,
-    bytes: &[u8],
-    digest: &LocatorDigest,
-) -> Result<()> {
-    let archive_directory = dashboard_root.join(FACT_PROPOSAL_ARCHIVE_DIRECTORY);
-    tokio::fs::create_dir_all(&archive_directory)
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "failed to create fact proposal archive '{}': {error}",
-                archive_directory.display()
-            ))
-        })?;
-    let archive_path =
-        archive_directory.join(format!("{}.json", digest.as_str().replace(':', "-")));
-    match tokio::fs::rename(legacy_path, &archive_path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let archived = tokio::fs::read(&archive_path).await.map_err(|read_error| {
-                config_error(format!(
-                    "failed to read existing fact proposal archive '{}': {read_error}",
-                    archive_path.display()
-                ))
-            })?;
-            if archived != bytes {
-                return Err(config_error(format!(
-                    "legacy fact proposal archive '{}' conflicts with source bytes",
-                    archive_path.display()
-                )));
-            }
-            tokio::fs::remove_file(legacy_path).await.map_err(|remove_error| {
-                config_error(format!(
-                    "failed to retire duplicate legacy fact proposal sidecar '{}': {remove_error}",
-                    legacy_path.display()
-                ))
-            })
-        }
-        Err(error) => Err(config_error(format!(
-            "failed to archive legacy fact proposal sidecar '{}': {error}",
-            legacy_path.display()
-        ))),
-    }
-}
-
 pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
@@ -369,7 +229,6 @@ pub async fn record_session_fact_proposals<A: FactCompatibilityStore>(
     accepted_facts: &[Value],
     rejected_facts: &[Value],
 ) -> Result<Vec<FactProposalRecord>> {
-    best_effort_legacy_import(memory, dashboard_root).await;
     let mut records = Vec::with_capacity(accepted_facts.len() + rejected_facts.len());
     let observed_at = current_timestamp();
     let evidence_hash = bounded_metadata_text(evidence_hash, 160);
@@ -485,11 +344,10 @@ pub async fn list_fact_proposals<A: FactCompatibilityStore>(
     state: Option<FactProposalState>,
     limit: usize,
 ) -> Result<Vec<FactProposalRecord>> {
-    best_effort_legacy_import(memory, dashboard_root).await;
     if limit == 0 || state == Some(FactProposalState::Applying) {
         return Ok(Vec::new());
     }
-    let limit = limit.min(MAX_LEGACY_IMPORT_RECORDS);
+    let limit = limit.min(MAX_FACT_PROPOSAL_PAGE_SIZE);
     let page = memory
         .list_compatibility_fact_proposals(state.map(compatibility_state), None, limit)
         .await
@@ -535,7 +393,6 @@ pub async fn load_fact_proposal<A: FactCompatibilityStore>(
     dashboard_root: &Path,
     proposal_id: &str,
 ) -> Result<Option<FactProposalRecord>> {
-    best_effort_legacy_import(memory, dashboard_root).await;
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let proposal = memory
         .get_compatibility_fact_proposal(proposal_id)
@@ -558,7 +415,6 @@ pub async fn list_applying_fact_proposals<A: FactCompatibilityStore>(
     memory: &MemoryApplication<A>,
     dashboard_root: &Path,
 ) -> Result<Vec<FactProposalRecord>> {
-    best_effort_legacy_import(memory, dashboard_root).await;
     Ok(Vec::new())
 }
 
@@ -589,7 +445,6 @@ pub async fn apply_fact_proposal_with_result<A: FactCompatibilityStore>(
     proposal_id: &str,
     reviewer: Option<String>,
 ) -> Result<FactProposalApplyResult> {
-    best_effort_legacy_import(memory, dashboard_root).await;
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let current = memory
         .get_compatibility_fact_proposal(proposal_id.clone())
@@ -658,7 +513,6 @@ pub async fn reject_fact_proposal<A: FactCompatibilityStore>(
     reviewer: Option<String>,
     reason: Option<String>,
 ) -> Result<FactProposalRecord> {
-    best_effort_legacy_import(memory, dashboard_root).await;
     let proposal_id = ProvenanceId::new(proposal_id.to_string()).map_err(store_error)?;
     let current = memory
         .get_compatibility_fact_proposal(proposal_id.clone())
@@ -857,10 +711,6 @@ const fn compatibility_state(state: FactProposalState) -> ProjectMemoryFactPropo
     }
 }
 
-const fn import_state(state: FactProposalState) -> ProjectMemoryFactProposalStateV1 {
-    compatibility_state(state)
-}
-
 const fn display_state(state: ProjectMemoryFactProposalStateV1) -> FactProposalState {
     match state {
         ProjectMemoryFactProposalStateV1::PendingApproval
@@ -869,11 +719,6 @@ const fn display_state(state: ProjectMemoryFactProposalStateV1) -> FactProposalS
         ProjectMemoryFactProposalStateV1::Rejected => FactProposalState::Rejected,
         ProjectMemoryFactProposalStateV1::Quarantined => FactProposalState::Quarantined,
     }
-}
-
-fn sidecar_digest(bytes: &[u8]) -> Result<LocatorDigest> {
-    LocatorDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
-        .map_err(store_error)
 }
 
 fn proposal_actor(value: &str) -> Result<ActorId> {

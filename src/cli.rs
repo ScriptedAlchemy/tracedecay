@@ -228,6 +228,12 @@ pub enum Commands {
         #[command(flatten)]
         invocation: WorkflowInvocationArgs,
     },
+    /// Read bounded Git intelligence through the catalogued application surface.
+    #[command(long_about = GIT_LONG_ABOUT, after_help = GIT_AFTER_HELP)]
+    Git {
+        #[command(subcommand)]
+        action: GitAction,
+    },
     /// Inspect language-server support for dashboard code diagnostics
     #[command(long_about = LSP_LONG_ABOUT, after_help = LSP_AFTER_HELP)]
     Lsp {
@@ -770,6 +776,95 @@ pub enum AnalyticsAction {
     },
     /// Import hook_analytics.jsonl rows into the durable analytics_events table
     Sync,
+}
+
+/// Exact project selection shared by the first-class Git read commands.
+///
+/// The application surface revalidates the selected repository/worktree scope
+/// during admission; this argument group only carries the selector to that
+/// canonical route.
+#[derive(Args)]
+pub struct GitProjectArgs {
+    /// Project path (default: current directory, with discovery)
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Registered project id to inspect instead of discovering from cwd
+    #[arg(long, conflicts_with = "project")]
+    pub project_id: Option<String>,
+    /// Registered project root path or alias to inspect instead of discovering from cwd
+    #[arg(long, conflicts_with_all = ["project", "project_id"])]
+    pub project_path: Option<String>,
+    /// Output the canonical application envelope as one JSON line
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum GitDiffScopeArg {
+    WorkingTree,
+    Staged,
+    CommitRange,
+}
+
+/// First-class, schema-bound Git reads. Preview and apply are intentionally not
+/// exposed here: each requires immutable daemon-minted preview/receipt types,
+/// rather than accepting an arbitrary Git command line from this adapter.
+#[derive(Subcommand)]
+pub enum GitAction {
+    /// Read the typed status of the admitted project worktree
+    Status {
+        #[command(flatten)]
+        project: GitProjectArgs,
+    },
+    /// Read a bounded working-tree, staged, or exact commit-range diff
+    Diff {
+        #[arg(long, value_enum, default_value_t = GitDiffScopeArg::WorkingTree)]
+        scope: GitDiffScopeArg,
+        /// Base commit object id; required only with --scope commit-range
+        #[arg(long)]
+        base: Option<String>,
+        /// Head commit object id; required only with --scope commit-range
+        #[arg(long)]
+        head: Option<String>,
+        #[command(flatten)]
+        project: GitProjectArgs,
+    },
+    /// Read bounded commit history
+    History {
+        /// Maximum history entries (1 through 1000)
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        count: u32,
+        /// Restrict history to this repository-relative path
+        #[arg(long)]
+        path: Option<String>,
+        /// Follow file renames when --path is supplied
+        #[arg(long)]
+        follow: bool,
+        /// Follow only the first parent of merge commits
+        #[arg(long)]
+        first_parent: bool,
+        #[command(flatten)]
+        project: GitProjectArgs,
+    },
+    /// Read typed line provenance for one repository-relative path
+    Blame {
+        /// Repository-relative path to blame
+        #[arg(long)]
+        path: String,
+        /// Follow renames while resolving line provenance
+        #[arg(long)]
+        follow_renames: bool,
+        #[command(flatten)]
+        project: GitProjectArgs,
+    },
+    /// Mint bounded, expiring hunk-preview evidence from a working-tree or
+    /// staged diff (the daemon captures exact repository state itself)
+    Hunks {
+        #[arg(long, value_enum, default_value_t = GitDiffScopeArg::WorkingTree)]
+        scope: GitDiffScopeArg,
+        #[command(flatten)]
+        project: GitProjectArgs,
+    },
 }
 
 #[derive(clap::Args)]

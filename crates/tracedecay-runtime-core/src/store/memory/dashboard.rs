@@ -10,12 +10,13 @@ use serde_json::Value;
 
 use tracedecay_domain::{FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
+    FactCompatibilityResult, FactStoreError, LegacyFactQuery,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
     ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
     ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactTargetV1, FactCompatibilityResult, FactStoreError, LegacyFactQuery,
+    ProjectMemoryFactTargetV1,
 };
 
 use super::crud::compatibility_fact_history_tx;
@@ -46,13 +47,13 @@ async fn dashboard_compatibility_fact_summaries_tx(
     let mut rows = transaction
         .query(
             "SELECT mappings.fact_id, legacy_facts.hrr_vector IS NOT NULL
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              ORDER BY legacy_facts.trust_score DESC,
                       legacy_facts.updated_at DESC,
                       mappings.fact_id ASC
@@ -121,10 +122,10 @@ async fn dashboard_compatibility_entities_tx(
         .query(
             "SELECT entities.entity_id, entities.name, entities.entity_type,
                     entities.aliases, entities.created_at,
-                    COUNT(DISTINCT mappings.legacy_fact_id)
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+                    COUNT(DISTINCT legacy_facts.fact_id)
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              JOIN memory_fact_entities AS relations
                ON relations.fact_id = legacy_facts.fact_id
              JOIN memory_entities AS entities
@@ -132,10 +133,10 @@ async fn dashboard_compatibility_entities_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              GROUP BY entities.entity_id, entities.name, entities.entity_type,
                       entities.aliases, entities.created_at
-             ORDER BY COUNT(DISTINCT mappings.legacy_fact_id) DESC,
+             ORDER BY COUNT(DISTINCT legacy_facts.fact_id) DESC,
                       entities.name ASC, entities.entity_id ASC
              LIMIT ?5",
             params![
@@ -195,15 +196,15 @@ async fn dashboard_compatibility_fact_entity_links_tx(
     let mut rows = transaction
         .query(
             "SELECT mappings.fact_id, relations.entity_id
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              JOIN memory_fact_entities AS relations
                ON relations.fact_id = legacy_facts.fact_id
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              ORDER BY legacy_facts.trust_score DESC,
                       legacy_facts.updated_at DESC,
                       mappings.fact_id ASC, relations.entity_id ASC
@@ -252,24 +253,24 @@ async fn dashboard_compatibility_owner_count_tx(
     let source_store_id = compatibility_source_store_id()?;
     let sql = if entity_count {
         "SELECT COUNT(DISTINCT relations.entity_id)
-         FROM memory_v2_legacy_map AS mappings
-         JOIN memory_facts AS legacy_facts
-           ON legacy_facts.fact_id = mappings.legacy_fact_id
+         FROM memory_facts AS legacy_facts
+         JOIN memory_v2_facts AS mappings
+           ON mappings.fact_id = legacy_facts.canonical_fact_id
          JOIN memory_fact_entities AS relations
            ON relations.fact_id = legacy_facts.fact_id
          WHERE mappings.owner_kind = ?1
            AND mappings.project_id = ?2
            AND mappings.owner_json = ?3
-           AND mappings.source_store_id = ?4"
+           AND ?4 = 'legacy-memory-v1'"
     } else {
         "SELECT COUNT(*)
-         FROM memory_v2_legacy_map AS mappings
-         JOIN memory_facts AS legacy_facts
-           ON legacy_facts.fact_id = mappings.legacy_fact_id
+         FROM memory_facts AS legacy_facts
+         JOIN memory_v2_facts AS mappings
+           ON mappings.fact_id = legacy_facts.canonical_fact_id
          WHERE mappings.owner_kind = ?1
            AND mappings.project_id = ?2
            AND mappings.owner_json = ?3
-           AND mappings.source_store_id = ?4"
+           AND ?4 = 'legacy-memory-v1'"
     };
     let mut rows = transaction
         .query(
@@ -317,13 +318,13 @@ async fn dashboard_compatibility_named_counts_tx(
     let (sql, limit) = match kind {
         ProjectMemoryDashboardNamedCountKind::Category => (
             "SELECT legacy_facts.category, COUNT(*)
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              GROUP BY legacy_facts.category
              ORDER BY COUNT(*) DESC, legacy_facts.category ASC
              LIMIT 128",
@@ -331,9 +332,9 @@ async fn dashboard_compatibility_named_counts_tx(
         ),
         ProjectMemoryDashboardNamedCountKind::EntityType => (
             "SELECT entities.entity_type, COUNT(DISTINCT entities.entity_id)
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              JOIN memory_fact_entities AS relations
                ON relations.fact_id = legacy_facts.fact_id
              JOIN memory_entities AS entities
@@ -341,7 +342,7 @@ async fn dashboard_compatibility_named_counts_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              GROUP BY entities.entity_type
              ORDER BY COUNT(DISTINCT entities.entity_id) DESC, entities.entity_type ASC
              LIMIT 128",
@@ -354,13 +355,13 @@ async fn dashboard_compatibility_named_counts_tx(
                         ELSE CAST(legacy_facts.trust_score * 10.0 AS INTEGER)
                     END AS bucket,
                     COUNT(*)
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              GROUP BY bucket
              ORDER BY bucket ASC
              LIMIT 10",
@@ -443,25 +444,23 @@ async fn dashboard_compatibility_hrr_coverage_tx(
                     MAX(banks.hrr_dim),
                     MAX(banks.updated_at),
                     MAX(CASE WHEN dirty.bank_name IS NULL THEN 0 ELSE 1 END)
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
-             LEFT JOIN memory_v2_compatibility_banks AS banks
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
+             LEFT JOIN memory_v2_banks AS banks
                ON banks.owner_kind = mappings.owner_kind
               AND banks.project_id = mappings.project_id
-              AND banks.source_store_id = mappings.source_store_id
               AND banks.owner_json = mappings.owner_json
               AND banks.bank_name = legacy_facts.category
-             LEFT JOIN memory_v2_compatibility_bank_dirty AS dirty
+             LEFT JOIN memory_v2_bank_dirty AS dirty
                ON dirty.owner_kind = mappings.owner_kind
               AND dirty.project_id = mappings.project_id
-              AND dirty.source_store_id = mappings.source_store_id
               AND dirty.owner_json = mappings.owner_json
               AND dirty.bank_name = legacy_facts.category
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              GROUP BY legacy_facts.category
              ORDER BY COUNT(*) DESC, legacy_facts.category ASC
              LIMIT 128",
@@ -552,19 +551,13 @@ async fn dashboard_compatibility_memory_banks_tx(
         .query(
             "SELECT banks.bank_name, banks.hrr_dim, banks.updated_at,
                     banks.fact_count, banks.fact_count
-             FROM memory_v2_compatibility_banks AS banks
+             FROM memory_v2_banks AS banks
              WHERE banks.owner_kind = ?1
                AND banks.project_id = ?2
                AND banks.owner_json = ?3
-               AND banks.source_store_id = ?4
              ORDER BY banks.fact_count DESC, banks.bank_name ASC
              LIMIT 128",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-            ],
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
@@ -590,26 +583,26 @@ async fn dashboard_compatibility_growth_tx(
             "WITH latest_days AS (
                  SELECT date(legacy_facts.created_at, 'unixepoch') AS period,
                         COUNT(*) AS fact_count
-                 FROM memory_v2_legacy_map AS mappings
-                 JOIN memory_facts AS legacy_facts
-                   ON legacy_facts.fact_id = mappings.legacy_fact_id
+                 FROM memory_facts AS legacy_facts
+                 JOIN memory_v2_facts AS mappings
+                   ON mappings.fact_id = legacy_facts.canonical_fact_id
                  WHERE mappings.owner_kind = ?1
                    AND mappings.project_id = ?2
                    AND mappings.owner_json = ?3
-                   AND mappings.source_store_id = ?4
+                   AND ?4 = 'legacy-memory-v1'
                    AND legacy_facts.created_at > 0
                  GROUP BY period
                  ORDER BY period DESC
                  LIMIT 180
              ), prior AS (
                  SELECT COUNT(*) AS fact_count
-                 FROM memory_v2_legacy_map AS mappings
-                 JOIN memory_facts AS legacy_facts
-                   ON legacy_facts.fact_id = mappings.legacy_fact_id
+                 FROM memory_facts AS legacy_facts
+                 JOIN memory_v2_facts AS mappings
+                   ON mappings.fact_id = legacy_facts.canonical_fact_id
                  WHERE mappings.owner_kind = ?5
                    AND mappings.project_id = ?6
                    AND mappings.owner_json = ?7
-                   AND mappings.source_store_id = ?8
+                   AND ?8 = 'legacy-memory-v1'
                    AND legacy_facts.created_at > 0
                    AND date(legacy_facts.created_at, 'unixepoch') < (
                        SELECT MIN(period) FROM latest_days
@@ -731,26 +724,28 @@ async fn dashboard_compatibility_entities_for_fact_tx(
         .query(
             "SELECT entities.entity_id, entities.name, entities.entity_type,
                     entities.aliases, entities.created_at,
-                    COUNT(DISTINCT related_mappings.legacy_fact_id)
-             FROM memory_v2_legacy_map AS target_mappings
-             JOIN memory_facts AS target_facts
-               ON target_facts.fact_id = target_mappings.legacy_fact_id
+                    COUNT(DISTINCT related_mappings.fact_id)
+             FROM memory_facts AS target_facts
+             JOIN memory_v2_facts AS target_mappings
+               ON target_mappings.fact_id = target_facts.canonical_fact_id
              JOIN memory_fact_entities AS target_relations
                ON target_relations.fact_id = target_facts.fact_id
              JOIN memory_entities AS entities
                ON entities.entity_id = target_relations.entity_id
              LEFT JOIN memory_fact_entities AS related_relations
                ON related_relations.entity_id = entities.entity_id
-             LEFT JOIN memory_v2_legacy_map AS related_mappings
-               ON related_mappings.legacy_fact_id = related_relations.fact_id
+             LEFT JOIN memory_facts AS related_facts
+               ON related_facts.fact_id = related_relations.fact_id
+             LEFT JOIN memory_v2_facts AS related_mappings
+               ON related_mappings.fact_id = related_facts.canonical_fact_id
               AND related_mappings.owner_kind = ?1
               AND related_mappings.project_id = ?2
               AND related_mappings.owner_json = ?3
-              AND related_mappings.source_store_id = ?4
+              AND ?4 = 'legacy-memory-v1'
              WHERE target_mappings.owner_kind = ?1
                AND target_mappings.project_id = ?2
                AND target_mappings.owner_json = ?3
-               AND target_mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
                AND target_mappings.fact_id = ?5
              GROUP BY entities.entity_id, entities.name, entities.entity_type,
                       entities.aliases, entities.created_at
@@ -853,13 +848,12 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
             "SELECT mappings.fact_id, legacy_facts.hrr_vector, banks.bank_name,
                     COUNT(DISTINCT relations.entity_id),
                     COUNT(DISTINCT relations.entity_id)
-             FROM memory_v2_legacy_map AS mappings
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = mappings.legacy_fact_id
-             LEFT JOIN memory_v2_compatibility_banks AS banks
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
+             LEFT JOIN memory_v2_banks AS banks
                ON banks.owner_kind = mappings.owner_kind
               AND banks.project_id = mappings.project_id
-              AND banks.source_store_id = mappings.source_store_id
               AND banks.owner_json = mappings.owner_json
               AND banks.bank_name = legacy_facts.category
              LEFT JOIN memory_fact_entities AS relations
@@ -867,7 +861,7 @@ pub(super) async fn dashboard_compatibility_vector_points_tx(
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
                AND (
                     ?5 IS NULL
                     OR legacy_facts.content LIKE ?5 ESCAPE '\\'
@@ -989,12 +983,14 @@ pub(super) async fn dashboard_compatibility_memory_oplog_tx(
         .query(
             "SELECT oplog.id, oplog.ts, oplog.op, oplog.fact_id, oplog.detail_json
              FROM memory_oplog AS oplog
-             JOIN memory_v2_legacy_map AS mappings
-               ON mappings.legacy_fact_id = oplog.fact_id
+             JOIN memory_facts AS legacy_facts
+               ON legacy_facts.fact_id = oplog.fact_id
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
-               AND mappings.source_store_id = ?4
+               AND ?4 = 'legacy-memory-v1'
              ORDER BY oplog.id DESC
              LIMIT ?5",
             params![

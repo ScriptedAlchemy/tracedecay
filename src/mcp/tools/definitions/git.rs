@@ -119,13 +119,13 @@ pub(super) fn def_branch_search() -> ToolDefinition {
     def(
         "tracedecay_branch_search",
         "Cross-Branch Search",
-        "Search for symbols in another branch's code graph. Opens the target branch's DB and runs a search query against it.",
+        "Search the immutable code-index generation sealed for a local branch's exact current commit.",
         json!({
             "type": "object",
             "properties": {
                 "branch": {
                     "type": "string",
-                    "description": "Branch name to search in (must be tracked via `tracedecay branch add`)"
+                    "description": "Exact local branch name to search"
                 },
                 "query": {
                     "type": "string",
@@ -134,6 +134,10 @@ pub(super) fn def_branch_search() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of results to return (default: 10)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated continuation cursor returned by the preceding exact branch-search page"
                 }
             },
             "required": ["branch", "query"]
@@ -145,7 +149,7 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
     def(
         "tracedecay_branch_diff",
         "Branch Diff",
-        "Compare the code graphs of two branches. Shows symbols added, removed, and changed (signature differs) between base and head.",
+        "Compare immutable code-index generations sealed for two local branches' exact commits.",
         json!({
             "type": "object",
             "properties": {
@@ -164,6 +168,14 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
                 "kind": {
                     "type": "string",
                     "description": "Optional kind filter — only show diffs for this symbol kind (e.g. 'function', 'struct')"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum combined added, removed, and changed results (default: 100, maximum: 256)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated continuation cursor returned by the preceding exact branch-diff page"
                 }
             }
         }),
@@ -174,10 +186,19 @@ pub(super) fn def_branch_list() -> ToolDefinition {
     def(
         "tracedecay_branch_list",
         "List Tracked Branches",
-        "List all tracked branches with their DB sizes, parent branch, and last sync time. Returns an empty list if multi-branch is not active.",
+        "List a bounded snapshot of exact local branch refs and their current commit identities.",
         json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum local refs to return (default: 100, maximum: 128)"
+                },
+                "after": {
+                    "type": "string",
+                    "description": "Return the stable lexical page after this branch name"
+                }
+            }
         }),
     )
 }

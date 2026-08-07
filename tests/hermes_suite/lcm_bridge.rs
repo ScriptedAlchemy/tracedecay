@@ -638,8 +638,12 @@ plugin.register(ctx)
 # Code-graph / memory / transcript tools register even without message
 # forwarding; only the live-ingest LCM verbs whose schemas carry the
 # in-memory messages list (and the context-engine tool mirrors) are gated.
-assert "tracedecay_search" in ctx.tools
-assert "tracedecay_context" in ctx.tools
+expected_without_messages = {
+    schema["name"]
+    for schema in plugin.schemas.TOOL_SCHEMAS
+    if schema["name"] not in plugin.MESSAGE_DEPENDENT_TOOLS
+}
+assert expected_without_messages.issubset(ctx.tools)
 assert "tracedecay_lcm_compress" not in ctx.tools
 assert "tracedecay_lcm_preflight" not in ctx.tools
 assert "lcm_grep" not in ctx.tools
@@ -993,7 +997,7 @@ assert args["messages"] == [{"role": "user", "content": "current turn"}]
 
 tools.call_tracedecay_tool("tracedecay_status", {})
 args = json.loads(calls[1][calls[1].index("--args") + 1])
-assert args["format"] == "json"
+assert args == {}
 "#,
         "generated subprocess bridge should preserve messages kwargs in JSON args",
     );

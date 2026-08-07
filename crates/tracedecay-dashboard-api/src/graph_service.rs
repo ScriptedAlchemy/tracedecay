@@ -296,9 +296,9 @@ pub async fn node_payload(
     )
     .await?;
     expected_payload(read, |payload| match payload {
-        DashboardGraphReadPayloadV1::Node(node) => Some(json!(node.map(|node| {
-            json!({ "node": node })
-        }))),
+        DashboardGraphReadPayloadV1::Node(node) => {
+            Some(json!(node.map(|node| { json!({ "node": node }) })))
+        }
         _ => None,
     })
 }

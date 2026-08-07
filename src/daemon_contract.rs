@@ -31,11 +31,12 @@ use tracedecay_application::{
     ReplanDependenciesCommand, RequestId, ResolvedScope, ResumeWorkAttemptsCommand,
     RetrieverContribution, ReviewProposalRequestV1, StartWorkAttemptCommand, TaskHandoffGrant,
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, TemporalState,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkflowDefinitionDiff,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -48,9 +49,7 @@ use tracedecay_lsp::{
 };
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
-use crate::application::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
-};
+use crate::application::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use crate::application::primitives::PrimitiveRequest;
 use crate::application_surface::{
     ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
@@ -247,6 +246,7 @@ pub(crate) enum WorkApplicationInvocationV1 {
     AttemptStatus(WorkAttemptStatusRequestV1),
     CancelAttempt(CancelWorkAttemptCommand),
     ResumeAttempts(ResumeWorkAttemptsCommand),
+    ListAttempts(WorkAttemptListRequestV1),
 }
 
 impl WorkApplicationInvocationV1 {
@@ -266,6 +266,7 @@ impl WorkApplicationInvocationV1 {
             Self::AttemptStatus(_) => "attempt_status",
             Self::CancelAttempt(_) => "cancel_attempt",
             Self::ResumeAttempts(_) => "resume_attempts",
+            Self::ListAttempts(_) => "list_attempts",
         }
     }
 }
@@ -1462,6 +1463,12 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::CodeExactOccurrence
                 | DaemonInvocationOperation::CodePhraseSearch
                 | DaemonInvocationOperation::CodeCallees
+                | DaemonInvocationOperation::CodeFacets
+                | DaemonInvocationOperation::CodeTimeline
+                | DaemonInvocationOperation::CodeDeclaration
+                | DaemonInvocationOperation::CodeDefinition
+                | DaemonInvocationOperation::CodeTypeDefinition
+                | DaemonInvocationOperation::CodeReferences
                 | DaemonInvocationOperation::Configuration
                 | DaemonInvocationOperation::ContextScout
                 | DaemonInvocationOperation::MultiRootScopeSetRead
@@ -2290,6 +2297,7 @@ pub(crate) enum WorkApplicationOutcomeV1 {
     AttemptStatus(ApplicationOutcome<WorkAttemptV1>),
     CancelAttempt(ApplicationOutcome<WorkAttemptV1>),
     ResumeAttempts(ApplicationOutcome<WorkAttemptRecoveryReportV1>),
+    ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -41,10 +41,10 @@ use tracedecay_domain::{
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
+    FactCompatibilityResult, FactStoreError, FactStoreResult, FactWriteBatch,
     ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
     ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactMergeCommandV1,
     ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactRelationV1, ProjectMemoryMemoryRepairStatsV1,
-    FactCompatibilityResult, FactStoreError, FactStoreResult, FactWriteBatch,
 };
 pub(in crate::store::memory) async fn apply_compatibility_fact_curation_tx(
     db: &Database,

@@ -579,7 +579,37 @@ impl DaemonEngine {
     ) -> Arc<crate::mcp::McpServer> {
         // A freshly-handshaken project should be watched even on a cache hit
         // (the watcher may have started after this server was cached).
-        self.git_watcher.ensure_watching(&project_path).await;
+        match self
+            .git_watcher
+            .ensure_watching_with_config(&project_path, server.watcher_sync_config())
+            .await
+        {
+            git_watch::GitWatcherAdmission::Ready | git_watch::GitWatcherAdmission::Disabled => {}
+            git_watch::GitWatcherAdmission::ShuttingDown => {
+                log_daemon_event(
+                    "git_watch_admission_rejected",
+                    &[("reason", "shutting_down".to_string())],
+                );
+            }
+            git_watch::GitWatcherAdmission::Capacity => {
+                log_daemon_event(
+                    "git_watch_admission_rejected",
+                    &[("reason", "capacity".to_string())],
+                );
+            }
+            git_watch::GitWatcherAdmission::NotRepository => {
+                log_daemon_event(
+                    "git_watch_admission_rejected",
+                    &[("reason", "not_repository".to_string())],
+                );
+            }
+            git_watch::GitWatcherAdmission::IdentityUnavailable => {
+                log_daemon_event(
+                    "git_watch_admission_rejected",
+                    &[("reason", "identity_unavailable".to_string())],
+                );
+            }
+        }
         server
     }
 
@@ -824,7 +854,13 @@ impl DaemonEngine {
             .await;
 
         self.maintenance_coordinator.shutdown().await;
-        self.git_watcher.shutdown().await;
+        let watcher_shutdown = self.git_watcher.shutdown().await;
+        if !watcher_shutdown.is_clean() {
+            log_daemon_event(
+                "git_watch_shutdown_incomplete",
+                &[("failures", watcher_shutdown.failures().len().to_string())],
+            );
+        }
         if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
             handle.abort();
             let _ = handle.await;

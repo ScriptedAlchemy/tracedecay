@@ -715,8 +715,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         vec![],
     )
     .expect("manifest");
-    let idempotency =
-        GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
+    let idempotency = GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
 
     let published = runtime
         .publish_verified_manifest(
@@ -748,16 +747,14 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     runtime
         .publish_verified_manifest(
             &successor,
-            GraphIdempotencyKey::new("idempotency.generic-test.2")
-                .expect("successor idempotency"),
+            GraphIdempotencyKey::new("idempotency.generic-test.2").expect("successor idempotency"),
             Arc::new(AtomicBool::new(false)),
         )
         .expect("publish successor");
     assert!(matches!(
         runtime.publish_verified_manifest(
             &manifest,
-            GraphIdempotencyKey::new("idempotency.generic-test.1")
-                .expect("stale idempotency"),
+            GraphIdempotencyKey::new("idempotency.generic-test.1").expect("stale idempotency"),
             Arc::new(AtomicBool::new(false)),
         ),
         Err(GraphDbError::Conflict)

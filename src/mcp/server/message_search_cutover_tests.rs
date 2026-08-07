@@ -411,7 +411,7 @@ async fn fresh_direct_root_reuses_configuration_session_storage() {
 }
 
 #[tokio::test]
-async fn transport_selects_one_service_and_all_registered_stays_project_scoped() {
+async fn transport_selects_one_service_and_all_registered_sweeps_the_registry() {
     let (server, _dir, _pin) = server_with_authorities().await;
 
     let all_registered = message_search(
@@ -423,12 +423,36 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
         }),
     )
     .await;
-    assert_eq!(all_registered["status"], "deferred", "{all_registered}");
-    assert_eq!(
-        all_registered["error"]["code"], "session_retrieval_multi_root_deferred",
-        "{all_registered}"
-    );
+    // The sweep executes against the registry instead of deferring: every
+    // registered project is either served or reported skipped with a typed
+    // reason, and nothing aliases the active project store.
+    assert_eq!(all_registered["status"], "ok", "{all_registered}");
     assert_eq!(all_registered["project_scope"], "all_registered");
+    assert!(all_registered.get("error").is_none_or(Value::is_null));
+    let searched = all_registered["searched_project_count"]
+        .as_u64()
+        .expect("searched_project_count");
+    let skipped = all_registered["skipped_project_count"]
+        .as_u64()
+        .expect("skipped_project_count");
+    assert!(
+        searched + skipped >= 1,
+        "the registered fixture project must appear in the sweep: {all_registered}"
+    );
+    let swept_project_ids = all_registered["roots"]
+        .as_array()
+        .expect("roots")
+        .iter()
+        .chain(all_registered["skipped"].as_array().expect("skipped"))
+        .filter_map(|entry| entry["project_id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(
+        swept_project_ids
+            .iter()
+            .any(|project_id| project_id == MESSAGE_SEARCH_PROJECT_ID),
+        "sweep must account for the registered fixture project: {all_registered}"
+    );
+    assert_eq!(all_registered["registry_truncated"], false);
 
     let project = message_search(
         &server,

@@ -171,10 +171,10 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
         let (_target_root, target_cg) = setup_target_project(&fixture).await;
         let target_project_id = project_id(&target_cg);
         // Seed through the canonical fact facade so the compatibility
-        // projection and its owner-bound legacy mapping stay coherent. The
-        // post-cutover dashboard reads facts through that projection, so a
-        // manufactured legacy `memory_facts` row (without a
-        // `memory_v2_legacy_map` mapping) is intentionally invisible.
+        // projection and its canonical mirror binding stay coherent. The
+        // dashboard reads facts through that projection, so a manufactured
+        // `memory_facts` row (without a `canonical_fact_id` binding) is
+        // intentionally invisible.
         target_cg
             .add_fact(AddFactRequest {
                 content: "Target daemon project selector fact".to_string(),

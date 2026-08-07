@@ -136,6 +136,47 @@ fn run_surface_tool_from(
     }
 }
 
+/// Runs the first-class Git read command from an admitted checkout. Unlike the
+/// generic `tool` escape hatch, this is the operator-facing journey for
+/// catalogued Git intelligence. It shares the same warm-up retry transport as
+/// the typed surface path, so a cold daemon must not surface a terminal error.
+fn run_git_read_from(
+    home: &Path,
+    working_directory: &Path,
+    command_args: &[&str],
+) -> SurfaceOutcome {
+    let mut command = tracedecay_command_with_home(home);
+    command
+        .current_dir(working_directory)
+        .arg("git")
+        .args(command_args)
+        .arg("--json")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("tracedecay git {command_args:?} should spawn: {error}"));
+    let started = Instant::now();
+    loop {
+        if child.try_wait().expect("poll git child").is_some() {
+            break;
+        }
+        assert!(
+            started.elapsed() < SURFACE_TIMEOUT,
+            "tracedecay git {command_args:?} hung for {:?}",
+            started.elapsed()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let output = child.wait_with_output().expect("collect git output");
+    SurfaceOutcome {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 fn assert_surface_resolves_project(
     home: &Path,
     working_directory: &Path,
@@ -210,6 +251,51 @@ fn application_surface_git_reads_resolve_the_working_directory_worktree() {
     for tool in ["git_status", "git_diff", "git_history"] {
         assert_surface_resolves_project(&home_path, &project_path, tool, r#"{"format":"json"}"#);
     }
+}
+
+#[test]
+fn first_class_git_reads_wait_for_full_publication_then_dispatch() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    for command_args in [
+        ["status"].as_slice(),
+        ["history", "--count", "1"].as_slice(),
+        ["blame", "--path", "src/lib.rs"].as_slice(),
+    ] {
+        let outcome = run_git_read_from(&home_path, &project_path, command_args);
+        assert!(
+            outcome.success,
+            "first-class git {} must reach the fully published daemon-owned application \
+             route\nstdout:\n{}\nstderr:\n{}",
+            command_args[0], outcome.stdout, outcome.stderr
+        );
+        let payload = outcome.payload();
+        assert!(
+            payload.get("scope").is_some(),
+            "first-class git {} must preserve the authenticated scope, got:\n{}",
+            command_args[0],
+            outcome.stdout
+        );
+    }
+}
+
+/// The first-class Git commands must present the same typed denial as the
+/// tool escape hatch when the working directory is not an admitted project.
+#[test]
+fn first_class_git_reads_do_not_invent_a_project_outside_a_checkout() {
+    let (_home, _project, home_path, _project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+    let outside = TempDir::new().unwrap();
+    let outside_path = canonical_existing_path(outside.path());
+
+    let outcome = run_git_read_from(&home_path, &outside_path, &["status"]);
+    assert!(
+        !outcome.success,
+        "a directory that is not inside a project must not answer as an authorized \
+         worktree\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
 }
 
 #[test]

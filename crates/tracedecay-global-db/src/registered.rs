@@ -61,11 +61,14 @@ impl RegisteredWorkTopologyV1 {
         tracedecay_runtime_core::work_topology::WorkTopologyStore,
         tracedecay_runtime_core::work_topology::WorkTopologyError,
     > {
-        let events = self.source.load_authority_events(authority).map_err(|error| {
-            tracedecay_runtime_core::work_topology::WorkTopologyError::Unavailable(
-                error.to_string(),
-            )
-        })?;
+        let events = self
+            .source
+            .load_authority_events(authority)
+            .map_err(|error| {
+                tracedecay_runtime_core::work_topology::WorkTopologyError::Unavailable(
+                    error.to_string(),
+                )
+            })?;
         let check = || {
             if cancelled.load(Ordering::Acquire) {
                 Err(tracedecay_graph_db::GraphDbError::Cancelled)
@@ -103,16 +106,16 @@ impl RegisteredWorkflowTopologyV1 {
         let definition = self
             .source
             .load_definition_source(definition_id, definition_version)
-        .map_err(|error| {
-            tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
-                format!("{error:?}"),
-            )
-        })?
-        .ok_or_else(|| {
-            tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
-                "workflow definition source is missing".to_owned(),
-            )
-        })?;
+            .map_err(|error| {
+                tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
+                    format!("{error:?}"),
+                )
+            })?
+            .ok_or_else(|| {
+                tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
+                    "workflow definition source is missing".to_owned(),
+                )
+            })?;
         let check = || {
             if cancelled.load(Ordering::Acquire) {
                 Err(tracedecay_graph_db::GraphDbError::Cancelled)

@@ -20,7 +20,10 @@ impl std::fmt::Display for GitCorrelationError {
                 write!(formatter, "Git evidence projection is corrupt: {message}")
             }
             Self::Unavailable(message) => {
-                write!(formatter, "Git evidence projection is unavailable: {message}")
+                write!(
+                    formatter,
+                    "Git evidence projection is unavailable: {message}"
+                )
             }
             Self::Cancelled => formatter.write_str("Git evidence operation was cancelled"),
             Self::BudgetExhausted => {
@@ -50,9 +53,7 @@ impl From<tracedecay_graph_db::GraphDbError> for GitCorrelationError {
 
         match error {
             GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => {
-                Self::BudgetExhausted
-            }
+            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => Self::BudgetExhausted,
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Corrupt { message }
             | GraphDbError::ResetRequired { message }

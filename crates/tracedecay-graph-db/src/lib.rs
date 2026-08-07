@@ -1,3 +1,4 @@
+mod backup;
 mod error;
 mod generation;
 mod generation_runtime;
@@ -20,6 +21,7 @@ mod state;
 mod traversal;
 mod vector;
 
+pub use backup::GraphBackupReceipt;
 pub use error::GraphDbError;
 pub use generation::{
     GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,

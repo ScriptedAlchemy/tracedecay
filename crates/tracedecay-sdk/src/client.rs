@@ -219,14 +219,13 @@ impl Client {
             .and_then(Value::as_str)
             .ok_or_else(|| ClientError::Protocol {
                 status: Some(response.status()),
-                message: format!("daemon omitted the {} outcome kind", Operation::OPERATION_ID),
+                message: format!(
+                    "daemon omitted the {} outcome kind",
+                    Operation::OPERATION_ID
+                ),
             })?;
         let lifecycle_shape_is_legal = matches!(
-            (
-                Operation::RECEIPT,
-                Operation::RECONCILIATION,
-                outcome_kind
-            ),
+            (Operation::RECEIPT, Operation::RECONCILIATION, outcome_kind),
             (
                 ReceiptContract::Operation,
                 ReconciliationContract::NotRequired,

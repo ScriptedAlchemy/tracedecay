@@ -1,9 +1,9 @@
 use super::{
     AnalyticsAction, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
-    DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, HostBundleCliOptions, MAX_ASYNC_WORKER_THREADS,
-    MAX_BLOCKING_THREADS, PackageHookAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction,
-    SilentReinstallAction, StderrTracingDefault, async_worker_threads, daemon_cpu_threads_from,
-    is_daemon_run, is_extract_worker, is_local_install_command,
+    DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, GitAction, GitProjectArgs, HostBundleCliOptions,
+    MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS, PackageHookAction, RAYON_NUM_THREADS_ENV,
+    ScoopPackageHookAction, SilentReinstallAction, StderrTracingDefault, async_worker_threads,
+    daemon_cpu_threads_from, is_daemon_run, is_extract_worker, is_local_install_command,
     should_skip_agent_install_maintenance, should_skip_startup_maintenance,
     silent_reinstall_action, stderr_tracing_default, validate_host_bundle_options,
 };
@@ -258,6 +258,23 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
         name: Some("message_search".to_string()),
         args: Vec::new(),
     };
+    assert!(should_skip_startup_maintenance(&command));
+    assert!(should_skip_agent_install_maintenance(&command));
+}
+
+#[test]
+fn first_class_git_reads_skip_network_and_agent_startup_maintenance() {
+    let command = Commands::Git {
+        action: GitAction::Status {
+            project: GitProjectArgs {
+                project: None,
+                project_id: None,
+                project_path: None,
+                json: true,
+            },
+        },
+    };
+
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_maintenance(&command));
 }

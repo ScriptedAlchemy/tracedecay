@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, mpsc};
 use std::time::Duration;
 
@@ -7,10 +7,11 @@ use grafeo_common::types::Value;
 
 use super::{GraphDb, require_committed_vector_scalar};
 use crate::{
-    GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDbRuntimeState,
-    GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphProperty, GraphPropertyName, GraphTraversalDirection, GraphWatermark,
-    GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
+    GraphCommit, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
+    GraphDbRuntimeState, GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion,
+    GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
+    GraphTraversalDirection, GraphVector, GraphWatermark, GraphWriteBatch, NeverCancelled,
+    SourceGeneration, TraversalRequest, VectorMetric, mutation,
 };
 
 fn memory_db() -> Arc<GraphDb> {
@@ -263,4 +264,141 @@ fn snapshots_can_cross_daemon_worker_boundaries() {
     fn assert_send_sync<T: Send + Sync>() {}
 
     assert_send_sync::<super::GraphSnapshot>();
+}
+
+fn walsync_db(dir: &tempfile::TempDir) -> Arc<GraphDb> {
+    GraphDb::open(GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(dir.path().join("graph")),
+        expected_format: GraphFormatVersion::new(2).unwrap(),
+        durability: GraphDurability::WalSync,
+        cancellation: Arc::new(NeverCancelled),
+    })
+    .unwrap()
+}
+
+fn vector_batch(value: &str) -> GraphWriteBatch {
+    GraphWriteBatch::new(
+        GraphNamespace::new("project").unwrap(),
+        GraphProjectionId::new("code").unwrap(),
+        SourceGeneration::new(value).unwrap(),
+        GraphWatermark::new(value).unwrap(),
+        vec![GraphMutation::UpsertEntity(
+            GraphEntity::new(
+                GraphEntityId::new("vector-entity").unwrap(),
+                BTreeSet::new(),
+                BTreeMap::from([(
+                    GraphPropertyName::new("embedding").unwrap(),
+                    GraphProperty::Vector(
+                        GraphVector::new(vec![1.0, 2.0], 2, VectorMetric::Cosine).unwrap(),
+                    ),
+                )]),
+            )
+            .unwrap(),
+        )],
+        Arc::new(NeverCancelled),
+    )
+    .unwrap()
+}
+
+fn apply_vector_batch_with_check(
+    db: &Arc<GraphDb>,
+    value: &str,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphCommit, GraphDbError> {
+    let mut batch = vector_batch(value);
+    let digest = batch.validate_and_digest().unwrap();
+    let _snapshot_gate = db.inner.snapshot_gate.write();
+    let guard = db.write_guard().unwrap();
+    let database = guard.as_ref().unwrap();
+    let mut state = db.state_write_guard().unwrap();
+    db.apply_locked(
+        database,
+        &mut state,
+        batch,
+        digest,
+        None,
+        &mutation::RelationEndpointNamespaces::new(),
+        check,
+    )
+}
+
+fn committed_entity_present(db: &Arc<GraphDb>) -> bool {
+    db.snapshot()
+        .unwrap()
+        .entity(
+            &GraphNamespace::new("project").unwrap(),
+            &GraphEntityId::new("vector-entity").unwrap(),
+            Arc::new(NeverCancelled),
+        )
+        .unwrap()
+        .is_some()
+}
+
+/// A threaded deadline may expire at any observation point in the write path.
+/// Sweeping every expiry point proves the durability contract: cancellation
+/// may only surface while the Grafeo transaction is still uncommitted (rolled
+/// back, nothing durable); once the transaction commits, the apply must settle
+/// HNSW refresh and WAL sync and report the commit. A committed write reported
+/// as `Cancelled`/`DeadlineExceeded` on a `Ready` handle is the F-class defect:
+/// replay short-circuits on the committed publication record and the skipped
+/// settlement is never repaired.
+#[test]
+fn deadline_expiry_after_commit_settles_the_write_instead_of_cancelling() {
+    // Calibration: count every cancellation observation one full apply makes.
+    let total_checks = {
+        let dir = tempfile::tempdir().unwrap();
+        let db = walsync_db(&dir);
+        let observations = AtomicUsize::new(0);
+        apply_vector_batch_with_check(&db, "calibrate", &|| {
+            observations.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .expect("unrestricted apply must commit");
+        observations.into_inner()
+    };
+    assert!(total_checks > 0, "write path must observe cancellation");
+
+    // Sweep: expire the deadline at the k-th observation on a fresh store.
+    for expiry_point in 1..=total_checks + 1 {
+        let dir = tempfile::tempdir().unwrap();
+        let db = walsync_db(&dir);
+        let observations = AtomicUsize::new(0);
+        let result = apply_vector_batch_with_check(&db, "window", &|| {
+            if observations.fetch_add(1, Ordering::Relaxed) + 1 >= expiry_point {
+                Err(GraphDbError::DeadlineExceeded)
+            } else {
+                Ok(())
+            }
+        });
+
+        let committed = committed_entity_present(&db);
+        match result {
+            Ok(_) => {
+                assert!(
+                    committed,
+                    "expiry point {expiry_point}: reported commit is not readable"
+                );
+                assert_eq!(
+                    db.runtime_state(),
+                    GraphDbRuntimeState::Ready,
+                    "expiry point {expiry_point}: settled commit left a non-ready handle"
+                );
+            }
+            Err(GraphDbError::DeadlineExceeded | GraphDbError::Cancelled) => {
+                assert!(
+                    !committed,
+                    "expiry point {expiry_point}: durably committed write was mistyped as \
+                     cancelled, stranding unsynced WAL and stale HNSW state on a Ready handle"
+                );
+                assert_eq!(
+                    db.runtime_state(),
+                    GraphDbRuntimeState::Ready,
+                    "expiry point {expiry_point}: pre-commit cancellation must roll back cleanly"
+                );
+            }
+            Err(other) => {
+                panic!("expiry point {expiry_point}: unexpected write outcome {other:?}")
+            }
+        }
+    }
 }

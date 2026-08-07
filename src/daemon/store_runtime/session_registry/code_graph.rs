@@ -9,9 +9,9 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbRegistration, GraphGenerationDependency,
-    GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
-    GraphProjectorRevision, GraphReplayCollectionOutcome, GraphWriteBatch,
-    SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphReplayCollectionOutcome, GraphWriteBatch, SealedCodeGenerationReplay,
+    VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1, StoreRuntimeKey,
@@ -149,17 +149,13 @@ impl RetainedProjectGraphRuntimeV1 {
         let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let identity = manifest.generation.as_str();
         let cancellation_identity = RuntimeCancellationIdentityV1 {
-            cancellation_id: RuntimeCancellationIdV1::new(format!(
-                "graph-publish:{identity}"
-            ))
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            cancellation_id: RuntimeCancellationIdV1::new(format!("graph-publish:{identity}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             generation: 1,
         };
         let deadline_identity = RuntimeDeadlineV1 {
-            deadline_id: RuntimeDeadlineIdV1::new(format!(
-                "graph-publish-deadline:{identity}"
-            ))
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            deadline_id: RuntimeDeadlineIdV1::new(format!("graph-publish-deadline:{identity}"))
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
         let request_cancellation: Arc<dyn GraphCancellation> = Arc::new(
             AtomicGraphCancellationV1::new(Arc::clone(&request_cancelled)),
@@ -320,10 +316,8 @@ impl RetainedProjectGraphRuntimeV1 {
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let relational_projection = GraphProjectionIdentityV1 {
             shard_id: self.authority.binding().shard_id.clone(),
-            namespace: tracedecay_store::GraphNamespaceV1::new(
-                projection.namespace.as_str(),
-            )
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            namespace: tracedecay_store::GraphNamespaceV1::new(projection.namespace.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
             projection: GraphProjectionIdV1::new(projection.projection.as_str())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };

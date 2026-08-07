@@ -20,19 +20,18 @@ use tracedecay_domain::{
     EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionId, FactAssertionKindV1,
     FactAssertionV1, FactCategoryV1, FactCurationActionV1, FactEventId, FactEvidenceRefV1,
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
-    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1,
-    LegacyHistoryCoverageV1, ObservationScopeV1, PayloadAccessState, PayloadReferenceV1,
-    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId,
-    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
-    SensitivityV1, ShardDispositionV1, ShardId, SourceStoreId, UtcMicros, VectorWatermark,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, ObservationScopeV1,
+    PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
+    ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+    SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, ShardDispositionV1, ShardId,
+    UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
     FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactStore, FactStoreError,
-    FactWriteBatch, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
-    StoredFactV1,
+    FactWriteBatch, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery, StoredFactV1,
 };
 
 struct TestDb {
@@ -1379,101 +1378,6 @@ async fn unknown_denominators_report_unknown_not_fabricated() {
     assert_eq!(current_response.coverage().unknown(), 1);
     assert_eq!(current_response.coverage().redacted(), 0);
 
-    // A legacy import with unknown history coverage hydrates as unknown
-    // through the compatibility mapping instead of inventing history.
-    let source_store = SourceStoreId::new("store.fmh.legacy").unwrap();
-    let identity = FactIdentityMaterialV1::new(
-        owner.clone(),
-        FactIdentitySourceV1::Legacy {
-            source_store_id: source_store.clone(),
-            legacy_fact_id: 42,
-        },
-    )
-    .unwrap();
-    let fact_id = FactId::derive(&identity).unwrap();
-    let mapping = LegacyFactMappingV1::new(
-        owner.clone(),
-        source_store.clone(),
-        42,
-        fact_id.clone(),
-        LegacyHistoryCoverageV1::Unknown,
-        UtcMicros(2_002),
-    )
-    .unwrap();
-    let assertion = FactAssertionV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactAssertionKindV1::Initial,
-        payload("legacy claim", "receipt.fmh.legacy"),
-        Vec::new(),
-        UtcMicros(2_001),
-        None,
-    )
-    .unwrap();
-    let batch = FactWriteBatch::new(
-        fact_id.clone(),
-        owner.clone(),
-        Some(assertion.clone()),
-        vec![
-            FactLineageEventV1::new(
-                fact_id.clone(),
-                owner.clone(),
-                FactLineageEventKindV1::LegacyImported {
-                    mapping: mapping.clone(),
-                },
-                UtcMicros(2_000),
-                None,
-            )
-            .unwrap(),
-            recorded_event(&fact_id, &owner, assertion.assertion_id(), 2_001),
-        ],
-        Vec::new(),
-        Vec::new(),
-        Some(mapping.clone()),
-        None,
-    )
-    .unwrap()
-    .with_identity_material(identity)
-    .unwrap();
-    commit(&store, batch).await;
-
-    let hydrated = current(&store, &owner, &fact_id)
-        .await
-        .expect("legacy-imported fact should hydrate");
-    assert_eq!(
-        hydrated
-            .legacy_mapping()
-            .expect("legacy mapping should hydrate")
-            .history_coverage(),
-        LegacyHistoryCoverageV1::Unknown
-    );
-    let resolved = store
-        .resolve_legacy_fact(LegacyFactQuery::new(owner.clone(), source_store, 42).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resolved.as_ref(), Some(&fact_id));
-
-    // As-of before the recorded migration time the mapping is absent rather
-    // than back-filled.
-    let imported = as_of(&store, &owner, &fact_id, 2_001)
-        .await
-        .expect("as-of projection at the import");
-    assert!(imported.legacy_mapping().is_none());
-    let migrated = as_of(&store, &owner, &fact_id, 2_002)
-        .await
-        .expect("as-of projection at the migration time");
-    assert_eq!(
-        migrated
-            .legacy_mapping()
-            .expect("mapping should be visible at its migration time")
-            .history_coverage(),
-        LegacyHistoryCoverageV1::Unknown
-    );
-    let migrated_response = store
-        .query_fact_as_of_response(FactAsOfQuery::new(owner, fact_id, UtcMicros(2_002)).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(migrated_response.coverage().unknown(), 1);
 }
 
 #[tokio::test]

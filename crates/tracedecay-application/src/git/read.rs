@@ -20,6 +20,12 @@ pub const GIT_HISTORICAL_BLOB_MAX_BYTES: u64 = 8 * 1024 * 1024;
 pub enum GitIntelligenceError {
     #[error("git executable unavailable: {0}")]
     GitUnavailable(String),
+    #[error("git read cancelled")]
+    Cancelled,
+    #[error("git read deadline exceeded")]
+    DeadlineExceeded,
+    #[error("git {stream} output exceeded {bound} bytes")]
+    OutputLimitExceeded { stream: &'static str, bound: usize },
     #[error("not a git repository: {0}")]
     NotARepository(String),
     #[error("git {operation} failed ({status}): {stderr}")]

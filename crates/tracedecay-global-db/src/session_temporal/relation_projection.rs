@@ -213,7 +213,7 @@ impl RegisteredGlobalDb {
     }
 }
 
-pub(crate) async fn seed_session_relation_projection(
+pub async fn seed_session_relation_projection(
     database: &RegisteredGlobalDb,
     conn: &impl QueryExecutor,
     session_id: &SessionId,

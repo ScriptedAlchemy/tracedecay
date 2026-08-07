@@ -14,7 +14,7 @@
 use tracedecay_application::{
     DerivedMemoryRepairPort, DerivedMemoryRepairStatsV1, converge_derived_memory,
 };
-use tracedecay_store::{ProjectMemoryFeedbackRepairProgressV1, FactCompatibilityStore};
+use tracedecay_store::{FactCompatibilityStore, ProjectMemoryFeedbackRepairProgressV1};
 
 use super::MemoryApplication;
 use super::context::MemoryOperationContext;

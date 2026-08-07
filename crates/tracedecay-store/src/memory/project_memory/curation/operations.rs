@@ -6,7 +6,7 @@ use tracedecay_domain::{
 };
 
 use super::super::super::queries::validate_limit;
-use super::super::super::{ProjectMemoryMemoryRepairStatsV1, FactStoreError, FactStoreResult};
+use super::super::super::{FactStoreError, FactStoreResult, ProjectMemoryMemoryRepairStatsV1};
 use super::super::{
     ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_compatibility_metadata,
     validate_compatibility_text,

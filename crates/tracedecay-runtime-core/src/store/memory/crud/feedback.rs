@@ -8,7 +8,7 @@ use super::super::envelope::{
 use super::super::primitives::{
     COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey,
     compatibility_legacy_timestamp, compatibility_now, compatibility_source_label,
-    compatibility_source_store_id, from_json, row_f64, row_i64, row_optional_string, row_string,
+    from_json, row_f64, row_i64, row_optional_string, row_string,
     storage_error, storage_message,
 };
 use super::super::projection::{
@@ -38,16 +38,16 @@ use tracedecay_domain::{
     FactLineageEventV1, FactOwnerV1, RetrievalAnchorRecordV2, UtcMicros,
 };
 use tracedecay_store::{
-    ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactFeedbackCommandV1,
-    ProjectMemoryFactFeedbackDetailsAvailabilityV1, ProjectMemoryFactFeedbackHistoryEntryV1,
-    ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
-    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPromotionDispositionV1,
-    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
-    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalStateV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryFeedbackRepairProgressV1, FactCommitOutcome, FactCompatibilityResult,
-    FactLineageCursor, FactLineageQuery, FactStoreError, FactStoreResult, FactWriteBatch,
-    PromoteFactProposalOutcome, StoredFactV1,
+    FactCommitOutcome, FactCompatibilityResult, FactLineageCursor, FactLineageQuery,
+    FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactFeedbackActionV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackDetailsAvailabilityV1,
+    ProjectMemoryFactFeedbackHistoryEntryV1, ProjectMemoryFactFeedbackHistoryQueryV1,
+    ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactFeedbackOutcomeV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
+    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
+    ProjectMemoryFactProposalStateV1, ProjectMemoryFactTargetV1,
+    ProjectMemoryFeedbackRepairProgressV1, PromoteFactProposalOutcome, StoredFactV1,
 };
 fn compatibility_receipt_i32(receipt: &Value, field: &'static str) -> FactStoreResult<i32> {
     receipt
@@ -159,7 +159,7 @@ fn compatibility_feedback_details_label(
 ) -> &'static str {
     match availability {
         ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available => "available",
-        ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted => "legacy_redacted",
+        ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted => "redacted",
         ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown => "unknown",
     }
 }
@@ -169,7 +169,7 @@ fn compatibility_feedback_details_availability(
 ) -> FactStoreResult<ProjectMemoryFactFeedbackDetailsAvailabilityV1> {
     match value {
         "available" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available),
-        "legacy_redacted" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted),
+        "redacted" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted),
         "unknown" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown),
         _ => Err(storage_message(
             COMPATIBILITY_READ_OPERATION,
@@ -197,7 +197,6 @@ async fn compatibility_record_feedback_history_tx(
     owner: &FactOwnerV1,
     fact_id: &FactId,
     event_id: &FactEventId,
-    legacy_feedback_event_id: i64,
     action: ProjectMemoryFactFeedbackActionV1,
     old_trust: Confidence,
     new_trust: Confidence,
@@ -206,30 +205,7 @@ async fn compatibility_record_feedback_history_tx(
     note: Option<&str>,
     availability: ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 ) -> FactStoreResult<()> {
-    if legacy_feedback_event_id <= 0 {
-        return Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility legacy feedback event id must be positive",
-        ));
-    }
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    transaction
-        .execute(
-            "INSERT INTO memory_v2_legacy_feedback_event_map(
-                owner_kind, project_id, source_store_id, legacy_feedback_event_id, fact_id, event_id
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                source_store_id.as_str(),
-                legacy_feedback_event_id,
-                fact_id.as_str(),
-                event_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
     transaction
         .execute(
             "INSERT INTO memory_v2_feedback_history(
@@ -390,7 +366,6 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
         request.target().owner(),
         &fact_id,
         &event_id,
-        legacy_feedback_event_id,
         request.action(),
         old_trust,
         new_trust,
@@ -461,7 +436,6 @@ pub(in crate::store::memory) async fn record_compatibility_fact_feedback_tx(
 pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactFeedbackHistoryQueryV1,
-    repair_progress: ProjectMemoryFeedbackRepairProgressV1,
 ) -> FactCompatibilityResult<ProjectMemoryFactFeedbackHistoryV1> {
     let fact_id = resolve_compatibility_target_tx(transaction, query.target())
         .await?
@@ -545,7 +519,7 @@ pub(in crate::store::memory) async fn compatibility_fact_feedback_history_tx(
         query.target().owner().clone(),
         events,
         next_after,
-        repair_progress,
+        ProjectMemoryFeedbackRepairProgressV1::NotRequired,
     )
     .map_err(Into::into)
 }

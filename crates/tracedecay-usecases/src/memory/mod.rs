@@ -4,7 +4,7 @@ use tracedecay_domain::FactOwnerV1;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay_runtime_core::store::memory::DatabaseFactStore;
-use tracedecay_store::{ProjectMemoryFactTargetV1, LegacyFactQuery};
+use tracedecay_store::{LegacyFactQuery, ProjectMemoryFactTargetV1};
 
 mod anchors;
 mod canonical;
@@ -23,7 +23,7 @@ pub use anchors::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
 pub use compatibility::{
-    automation_fact_proposal_add_command, legacy_proposal_add_command, with_automation_run_id,
+    automation_fact_proposal_add_command, with_automation_run_id,
 };
 pub use context::MemoryOperationContext;
 pub use error::{
@@ -39,6 +39,9 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::memory::types::{FeedbackAction, FeedbackRequest};
 #[cfg(test)]
 use tracedecay_store::{
+    CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCompatibilityStore,
+    FactCompatibilityStoreError, FactCurrentQuery, FactLineageQuery, FactProposalStore,
+    FactProposalStoreError, FactStore, FactStoreError, FactWriteBatch,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
     ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
@@ -51,8 +54,7 @@ use tracedecay_store::{
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
     ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
     ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalImportReceiptV1,
-    ProjectMemoryFactProposalImportV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactProposalPageV1,
     ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
     ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
     ProjectMemoryFactProposalStateV1, ProjectMemoryFactRemoveCommandV1,
@@ -60,10 +62,8 @@ use tracedecay_store::{
     ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFeedbackRepairProgressV1,
     ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome,
-    FactCompatibilityStore, FactCompatibilityStoreError, FactCurrentQuery, FactLineageQuery,
-    FactProposalStore, FactProposalStoreError, FactStore, FactStoreError, FactWriteBatch,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryMemoryStatusV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing

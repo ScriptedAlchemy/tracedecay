@@ -20,7 +20,7 @@ pub(super) fn read_current(
         .query_row(
             "SELECT facts.owner_json, current.payload_access, current.trust_score,
                     current.active_assertion_id, current.last_event_id, current.updated_at,
-                    payload.payload_json, legacy.mapping_json
+                    payload.payload_json, legacy.fact_id, legacy.created_at
              FROM memory_v2_current_facts AS current
              JOIN memory_v2_facts AS facts
                USING(fact_id, owner_kind, project_id)
@@ -29,8 +29,8 @@ pub(super) fn read_current(
               AND payload.fact_id = current.fact_id
               AND payload.owner_kind = current.owner_kind
               AND payload.project_id = current.project_id
-             LEFT JOIN memory_v2_legacy_map AS legacy
-               USING(fact_id, owner_kind, project_id)
+             LEFT JOIN memory_facts AS legacy
+               ON legacy.canonical_fact_id = current.fact_id
              WHERE current.fact_id = ?1
                AND current.owner_kind = ?2
                AND current.project_id = ?3",
@@ -44,7 +44,8 @@ pub(super) fn read_current(
                     row.get::<_, String>(4)?,
                     row.get::<_, i64>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             },
         )
@@ -57,7 +58,8 @@ pub(super) fn read_current(
         last_event,
         updated_at,
         payload,
-        legacy,
+        legacy_fact_id,
+        legacy_created_at,
     )) = row
     else {
         return Ok(None);
@@ -75,6 +77,19 @@ pub(super) fn read_current(
     let Some(active_assertion) = active_assertion else {
         return Ok(None);
     };
+    let mapping = legacy_fact_id
+        .map(|legacy_fact_id| {
+            tracedecay_domain::LegacyFactMappingV1::new(
+                query.owner().clone(),
+                tracedecay_domain::SourceStoreId::new("legacy-memory-v1").map_err(invalid)?,
+                legacy_fact_id,
+                query.fact_id().clone(),
+                tracedecay_domain::LegacyHistoryCoverageV1::Complete,
+                UtcMicros(legacy_created_at.unwrap_or(updated_at)),
+            )
+            .map_err(invalid)
+        })
+        .transpose()?;
     StoredFactV1::new(
         query.fact_id().clone(),
         owner_value,
@@ -83,9 +98,7 @@ pub(super) fn read_current(
         Confidence::new(trust.unwrap_or(0.5)).map_err(invalid)?,
         FactAssertionId::new(active_assertion).map_err(invalid)?,
         FactEventId::new(last_event).map_err(invalid)?,
-        legacy
-            .map(decode::<tracedecay_domain::LegacyFactMappingV1>)
-            .transpose()?,
+        mapping,
         UtcMicros(updated_at),
     )
     .map(Some)

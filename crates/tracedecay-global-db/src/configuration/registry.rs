@@ -392,7 +392,7 @@ struct SyncDefaults {
 impl Default for SyncDefaults {
     fn default() -> Self {
         Self {
-            auto_watch: true,
+            auto_watch: false,
             watch_debounce_ms: 2000,
             watch_max_delay_ms: 30000,
             watch_max_projects: 32,

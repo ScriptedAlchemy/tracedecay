@@ -1,0 +1,224 @@
+diff a/src/mcp/tools/handlers/hook_runtime/ingest.rs b/src/mcp/tools/handlers/hook_runtime/ingest.rs	(rejected hunks)
+@@ -10,12 +10,13 @@ use crate::sessions::source::TranscriptSource;
+ use crate::tracedecay::TraceDecay;
+ use serde_json::{Value, json};
+ use std::path::Path;
++use std::sync::Arc;
+ use tracedecay_domain::{ObservationScopeV1, ProjectId};
+ 
+ use super::super::SessionAuthorities;
+ 
+ use super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
+-use super::{required_project_db, required_str};
++use super::required_str;
+ 
+ mod kernels;
+ 
+@@ -142,7 +143,17 @@ pub(super) async fn codex_compact(
+     session_authorities: SessionAuthorities<'_>,
+ ) -> Result<Value> {
+     let event_json = required_str(args, "event_json")?;
+-    let db = required_project_db(session_authorities)?;
++    let db = session_authorities
++        .project
++        .ok_or_else(|| config_error("daemon project session database is unavailable"))?;
++    let effects =
++        crate::daemon::lcm_effects::DaemonLcmEffectService::new(Arc::clone(db), None, None);
++    let parsed: Value = serde_json::from_str(event_json)?;
++    let session_id = ["session_id", "conversation_id", "thread_id"]
++        .iter()
++        .find_map(|key| parsed.get(*key).and_then(Value::as_str))
++        .filter(|value| !value.is_empty())
++        .ok_or_else(|| config_error("Codex compact event omitted session id"))?;
+     if let Some(source) = crate::sessions::codex::CodexSource::new() {
+         let project_id = project_observation_id(cg)?;
+         let scope = ObservationScopeV1::Project {
+@@ -164,49 +175,28 @@ pub(super) async fn codex_compact(
+         let cancellation = ObservationCancellation::default();
+         drain_host_observation_projections(&admission, &scope, &cancellation).await?;
+     }
+-    let session_id = serde_json::from_str::<Value>(event_json)
+-        .ok()
+-        .as_ref()
+-        .and_then(|value| {
+-            ["session_id", "conversation_id", "thread_id"]
+-                .iter()
+-                .find_map(|key| value.get(*key).and_then(Value::as_str))
+-                .map(str::to_string)
+-        });
+-    let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+-    let mut pending = db
+-        .pending_codex_compaction_summary_requests(session_id.as_deref(), 1, &control)
+-        .await
+-        .map_err(|error| config_error(format!("load Codex compaction request failed: {error}")))?;
+-    let Some(pending) = pending.pop() else {
+-        return Ok(json!({
+-            "action": "codex_compact",
+-            "status": "skipped",
+-            "reason": "no pending compaction summary",
+-        }));
+-    };
+-    let config = crate::sessions::codex_app_server::CodexAppServerSummaryConfig::from_env();
+-    let summary = crate::sessions::codex_app_server::summarize_with_codex_app_server(
+-        &pending.request,
+-        &config,
+-    )
+-    .map_err(|error| config_error(format!("Codex summary failed: {error}")))?;
+-    let published = db
+-        .publish_codex_compaction_summary_successor(
+-            &pending.node_id,
+-            &summary.text,
+-            "codex_app_server",
+-            summary.model.as_deref().or(config.model.as_deref()),
+-            &control,
+-            || Ok(()),
+-        )
++    let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
++    let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
++    let result = effects
++        .compress(host_lcm_request(
++            "codex",
++            session_id,
++            current_tokens,
++            context_length,
++            None,
++            None,
++            "Codex context compaction",
++            None,
++        ))
+         .await
+-        .map_err(|error| config_error(format!("store Codex compaction summary failed: {error}")))?;
++        .map_err(|error| config_error(format!("store Codex compaction failed: {error}")))?;
+     Ok(json!({
+         "action": "codex_compact",
+-        "status": "completed",
+-        "node_id": published.node_id,
+-        "predecessor_node_id": pending.node_id,
++        "status": result.status,
++        "reason": result.reason,
++        "summary_nodes_created": result.summary_nodes_created,
++        "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
++        "relation_projection_status": result.relation_projection_status,
+     }))
+ }
+ 
+@@ -216,7 +206,11 @@ pub(super) async fn cursor_compact(
+     session_authorities: SessionAuthorities<'_>,
+ ) -> Result<Value> {
+     let event_json = required_str(args, "event_json")?;
+-    let db = required_project_db(session_authorities)?;
++    let db = session_authorities
++        .project
++        .ok_or_else(|| config_error("daemon project session database is unavailable"))?;
++    let effects =
++        crate::daemon::lcm_effects::DaemonLcmEffectService::new(Arc::clone(db), None, None);
+     let project_id = project_observation_id(cg)?;
+     let admission =
+         host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
+@@ -241,54 +235,25 @@ pub(super) async fn cursor_compact(
+         .map(|(count, compact)| count.saturating_sub(compact));
+     let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
+     let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
+-    let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+-    let first = db
+-        .lcm_compress_guarded(
+-            cursor_lcm_request(
+-                session_id,
+-                current_tokens,
+-                context_length,
+-                messages_to_compact,
+-                fresh_tail_count,
+-                crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
+-                None,
+-            ),
+-            &control,
+-            || Ok(()),
+-        )
+-        .await
+-        .map_err(|error| config_error(format!("prepare Cursor compaction failed: {error}")))?;
+-    let Some(summary_request) = first.summary_request else {
+-        return Ok(cursor_compact_skipped(first.reason));
+-    };
+-    let config = crate::sessions::cursor_agent::CursorAgentSummaryConfig::from_env();
+-    let summary =
+-        crate::sessions::cursor_agent::summarize_with_cursor_agent(&summary_request, &config)
+-            .map_err(|error| config_error(format!("cursor-agent summary failed: {error}")))?;
+-    let second = db
+-        .lcm_compress_guarded(
+-            cursor_lcm_request(
+-                session_id,
+-                current_tokens,
+-                context_length,
+-                messages_to_compact,
+-                fresh_tail_count,
+-                crate::sessions::lcm::LcmSummarizerMode::Provided {
+-                    summary_text: summary,
+-                    route: Some("cursor_agent".to_string()),
+-                },
+-                first.frontier.current_frontier_store_id.or(Some(0)),
+-            ),
+-            &control,
+-            || Ok(()),
+-        )
++    let result = effects
++        .compress(host_lcm_request(
++            "cursor",
++            session_id,
++            current_tokens,
++            context_length,
++            messages_to_compact,
++            fresh_tail_count,
++            "Cursor context compaction",
++            None,
++        ))
+         .await
+         .map_err(|error| config_error(format!("store Cursor compaction failed: {error}")))?;
+     Ok(json!({
+-        "status": second.status,
+-        "reason": second.reason,
+-        "summary_nodes_created": second.summary_nodes_created,
+-        "summary_node_ids": second.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
++        "status": result.status,
++        "reason": result.reason,
++        "summary_nodes_created": result.summary_nodes_created,
++        "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
++        "relation_projection_status": result.relation_projection_status,
+         "messages_upserted": ingest.messages_upserted,
+     }))
+ }
+@@ -316,21 +282,22 @@ fn event_usize(value: &Value, keys: &[&str]) -> Option<usize> {
+     event_i64(value, keys).and_then(|value| usize::try_from(value).ok())
+ }
+ 
+-fn cursor_lcm_request(
++fn host_lcm_request(
++    provider: &str,
+     session_id: &str,
+     current_tokens: Option<i64>,
+     context_length: Option<i64>,
+     max_source_messages: Option<usize>,
+     fresh_tail_count: Option<usize>,
+-    summarizer: crate::sessions::lcm::LcmSummarizerMode,
++    focus_topic: &str,
+     expected_current_frontier_store_id: Option<i64>,
+ ) -> crate::sessions::lcm::LcmCompressionRequest {
+     crate::sessions::lcm::LcmCompressionRequest {
+-        provider: "cursor".to_string(),
++        provider: provider.to_string(),
+         session_id: session_id.to_string(),
+         messages: Vec::new(),
+         current_tokens,
+-        focus_topic: Some("Cursor context compaction".to_string()),
++        focus_topic: Some(focus_topic.to_string()),
+         ignore_session_patterns: Vec::new(),
+         stateless_session_patterns: Vec::new(),
+         ignore_message_patterns: Vec::new(),
+@@ -346,7 +313,7 @@ fn cursor_lcm_request(
+         dynamic_leaf_chunk_max: None,
+         context_length,
+         reserve_tokens_floor: None,
+-        summarizer,
++        summarizer: crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
+     }
+ }
+ 

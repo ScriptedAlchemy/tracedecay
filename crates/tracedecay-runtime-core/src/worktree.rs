@@ -133,8 +133,7 @@ fn git_repo_identity_from_authority(dir: &Path) -> Option<GitRepoIdentity> {
 }
 
 /// Absolute, symlink-resolved toplevel of the git working tree that `dir`
-/// belongs to, or `None` when `dir` isn't inside a git repo (or `git` is
-/// missing on PATH).
+/// belongs to, or `None` when `dir` isn't inside a readable repository.
 ///
 /// `git rev-parse --show-toplevel` returns the per-worktree root: the main
 /// checkout and each linked worktree report their own distinct directory,
@@ -488,6 +487,49 @@ mod tests {
             std::fs::canonicalize(&worktree).unwrap()
         );
         assert_eq!(mismatch.index_root, std::fs::canonicalize(&main).unwrap());
+        assert!(
+            detached_worktree_graph_scope(&worktree)
+                .is_some_and(|scope| scope.starts_with("detached-worktree/"))
+        );
+    }
+
+    #[test]
+    fn gix_resolves_the_linked_worktree_specific_branch() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree = tmp.path().join("feature");
+        run_git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            crate::branch::current_branch(&worktree).as_deref(),
+            Some("feature")
+        );
     }
 
     #[test]

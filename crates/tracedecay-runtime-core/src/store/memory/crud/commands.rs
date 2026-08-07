@@ -17,7 +17,7 @@ use super::super::projection::{
 use super::{
     CompatibilityMirrorInsertV1, compatibility_active_fact_count_tx, compatibility_commit_batch_tx,
     compatibility_initial_batch, compatibility_last_insert_rowid_tx,
-    compatibility_legacy_mapping_for_new_fact, compatibility_mark_owner_banks_dirty_tx,
+    compatibility_legacy_mapping_for_new_fact,
     compatibility_mirror_delete_tx, compatibility_mirror_insert_tx, compatibility_mirror_update_tx,
     compatibility_payload_metadata, compatibility_sanitize_payload, compatibility_verified_payload,
     load_current_fact_tx, load_current_projection,
@@ -29,14 +29,14 @@ use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1,
-    LegacyHistoryCoverageV1, PayloadAccessState, UtcMicros,
+    PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
+    FactCompatibilityResult, FactStoreError, FactStoreResult, FactWriteBatch,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactIdV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
-    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1, FactCompatibilityResult,
-    FactStoreError, FactStoreResult, FactWriteBatch, StoredFactV1,
+    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1, StoredFactV1,
 };
 pub(super) fn compatibility_feedback_action_label(
     action: ProjectMemoryFactFeedbackActionV1,
@@ -736,64 +736,25 @@ pub(in crate::store::memory) async fn remove_compatibility_fact_tx(
                     "compatibility remove target has no lineage CAS identity",
                 )
             })?;
-        let canonical_event_id = if mapping.history_coverage() == LegacyHistoryCoverageV1::Unknown {
-            let purge = db
-                .purge_memory_v2_legacy_fact_payload_in_transaction(
-                    transaction,
-                    request.target().owner(),
-                    mapping.source_store_id(),
-                    &fact_id,
-                    &expected_last_event_id,
-                    request.actor(),
-                    now,
-                )
-                .await
-                .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
-            if !purge.payload_purged() {
-                return Err(storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    "migrated compatibility fact was not purged",
-                )
-                .into());
-            }
-            compatibility_mark_owner_banks_dirty_tx(
-                db,
-                transaction,
-                request.target().owner(),
-                category,
-                now,
-            )
-            .await?;
-            load_current_projection(transaction, &owner_key, &fact_id)
-                .await?
-                .and_then(|projection| projection.last_event_id)
-                .ok_or_else(|| {
-                    storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "migrated compatibility purge produced no lineage event",
-                    )
-                })?
-        } else {
-            let batch = compatibility_removal_batch(
-                request.target().owner(),
-                &fact_id,
-                current.access,
-                Some(expected_last_event_id),
-                request.actor().cloned(),
-                now,
-            )?;
-            let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-            compatibility_mirror_delete_tx(
-                db,
-                transaction,
-                request.target().owner(),
-                mapping.legacy_fact_id(),
-                category,
-                now,
-            )
-            .await?;
-            canonical_receipt.last_event_id().clone()
-        };
+        let batch = compatibility_removal_batch(
+            request.target().owner(),
+            &fact_id,
+            current.access,
+            Some(expected_last_event_id),
+            request.actor().cloned(),
+            now,
+        )?;
+        let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+        compatibility_mirror_delete_tx(
+            db,
+            transaction,
+            request.target().owner(),
+            mapping.legacy_fact_id(),
+            category,
+            now,
+        )
+        .await?;
+        let canonical_event_id = canonical_receipt.last_event_id().clone();
         tombstone_fact_derivatives_tx(
             transaction,
             request.target().owner(),

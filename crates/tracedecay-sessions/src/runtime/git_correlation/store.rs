@@ -2,16 +2,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
-    GraphGenerationId, GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey,
-    GraphLabel, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
-    GraphProjectionReadRequest, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-    GraphRelationId, GraphRelationKind, GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
+    GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
+    GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectionReadRequest,
+    GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind,
+    GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, ReadSnapshot};
 
@@ -88,8 +88,7 @@ pub fn build_git_evidence_manifest_checked(
         ));
     }
     let generation = git_evidence_generation_id(projection, projector_revision)?;
-    let providers =
-        canonical_provider_map(projection.spans(), projection.commit_sessions())?;
+    let providers = canonical_provider_map(projection.spans(), projection.commit_sessions())?;
     let mut entities = vec![projection_entity(projection.source_watermark())?];
     let mut relations = Vec::new();
     for (session_id, provider) in &providers {
@@ -179,10 +178,7 @@ impl std::fmt::Debug for GitEvidenceProjectionStore {
             .field("projection", self.snapshot.projection())
             .field("generation", self.snapshot.generation())
             .field("span_count", &self.projection.spans().len())
-            .field(
-                "commit_count",
-                &self.projection.commit_sessions().len(),
-            )
+            .field("commit_count", &self.projection.commit_sessions().len())
             .finish_non_exhaustive()
     }
 }
@@ -253,11 +249,7 @@ impl GitEvidenceProjectionStore {
                 "verified Git evidence is missing projection metadata".to_owned(),
             )
         })?;
-        let projection = GitEvidenceProjectionV1::new(
-            source_watermark,
-            spans,
-            commit_sessions,
-        )?;
+        let projection = GitEvidenceProjectionV1::new(source_watermark, spans, commit_sessions)?;
         Ok(Self {
             snapshot,
             projection,
@@ -285,10 +277,7 @@ impl GitEvidenceProjectionStore {
         self.projection.sessions_for(query, relation)
     }
 
-    pub fn session_ids_for_scope(
-        &self,
-        filter: &GitScopeFilter,
-    ) -> Option<Vec<(String, String)>> {
+    pub fn session_ids_for_scope(&self, filter: &GitScopeFilter) -> Option<Vec<(String, String)>> {
         self.projection.session_ids_for_scope(filter)
     }
 
@@ -411,10 +400,7 @@ fn session_commit_relation(
             "session-commit",
             &format!("{}\0{}", record.session_id, record.commit_sha),
         ))?,
-        GraphEntityRef::new(
-            projection.clone(),
-            session_entity_id(&record.session_id)?,
-        ),
+        GraphEntityRef::new(projection.clone(), session_entity_id(&record.session_id)?),
         GraphEntityRef::new(projection.clone(), commit_entity_id(&record.commit_sha)?),
         GraphRelationKind::new(SESSION_COMMIT_RELATION)?,
         BTreeMap::from([(

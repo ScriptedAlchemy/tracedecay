@@ -5,13 +5,17 @@ use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    AuthorizedScopeSet, CostsReadModelV1, CreateWorkCommand, GenerateProposalRequest,
-    GeneratedWorkProposal, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
-    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, ObservatoryReadModelV1,
-    ReplanDependenciesCommand, ReviewProposalCommand, ReviewProposalRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkCommand,
+    GenerateProposalRequest, GeneratedWorkProposal, MultiRootExecuteRequestV1,
+    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
+    ObservatoryReadModelV1, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
+    ReviewProposalCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
-use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
+use tracedecay_domain::{
+    WorkAttemptV1, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
+};
 
 use super::analytics_api::{
     AnalyticsAgentsPayloadV1, AnalyticsDiagnosticsPayloadV1, AnalyticsHintsPayloadV1,
@@ -108,6 +112,14 @@ struct DashboardContractCatalogV1 {
     work_attach_runtime_evidence_command: AttachRuntimeEvidenceCommand,
     work_accept_task_command: AcceptTaskCommand,
     work_projection: WorkProjection,
+    work_start_attempt_command: StartWorkAttemptCommand,
+    work_attempt_status_request: WorkAttemptStatusRequestV1,
+    work_cancel_attempt_command: CancelWorkAttemptCommand,
+    work_resume_attempts_command: ResumeWorkAttemptsCommand,
+    work_attempt: WorkAttemptV1,
+    work_attempt_recovery_report: WorkAttemptRecoveryReportV1,
+    work_attempt_list_request: WorkAttemptListRequestV1,
+    work_attempt_list: WorkAttemptListV1,
     multi_root_capability: MultiRootCapabilityV1,
     multi_root_scope_set_read_request: MultiRootScopeSetReadRequestV1,
     multi_root_scope_set: Option<AuthorizedScopeSet>,
@@ -221,6 +233,17 @@ mod tests {
             ),
             ("work_accept_task_command", "AcceptTaskCommand"),
             ("work_projection", "WorkProjection"),
+            ("work_start_attempt_command", "StartWorkAttemptCommand"),
+            ("work_attempt_status_request", "WorkAttemptStatusRequestV1"),
+            ("work_cancel_attempt_command", "CancelWorkAttemptCommand"),
+            ("work_resume_attempts_command", "ResumeWorkAttemptsCommand"),
+            ("work_attempt", "WorkAttemptV1"),
+            (
+                "work_attempt_recovery_report",
+                "WorkAttemptRecoveryReportV1",
+            ),
+            ("work_attempt_list_request", "WorkAttemptListRequestV1"),
+            ("work_attempt_list", "WorkAttemptListV1"),
         ] {
             assert!(
                 definitions.contains_key(contract),

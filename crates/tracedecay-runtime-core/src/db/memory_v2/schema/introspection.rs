@@ -1,9 +1,9 @@
-//! Schema-shape introspection probes.
+//! Schema-shape introspection probes for the memory_v2 tests.
 
 use crate::db::engine::params;
 use crate::errors::Result;
 
-use super::super::{MemoryV2Executor, db_error, optional_string, row_exists};
+use super::super::{MemoryV2Executor, db_error, row_exists};
 
 pub(in crate::db::memory_v2) async fn table_has_column(
     conn: &impl MemoryV2Executor,
@@ -34,54 +34,4 @@ pub(in crate::db::memory_v2) async fn table_exists(
         params![table],
     )
     .await
-}
-
-async fn trigger_exists(conn: &impl MemoryV2Executor, trigger: &str) -> Result<bool> {
-    row_exists(
-        conn,
-        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
-        params![trigger],
-    )
-    .await
-}
-
-/// V20/V21 retain their original feedback-backfill behavior. The V22 map and
-/// history must be installed together before a backfill can write either.
-async fn proposal_current_is_v22(conn: &impl MemoryV2Executor) -> Result<bool> {
-    let Some(sql) = optional_string(
-        conn,
-        "SELECT sql FROM sqlite_master
-         WHERE type = 'table' AND name = 'memory_v2_proposal_current'",
-        (),
-    )
-    .await?
-    else {
-        return Ok(false);
-    };
-    let sql = sql.to_ascii_lowercase();
-    Ok(sql.contains("'quarantined'")
-        && !sql.contains("'applying'")
-        && sql.contains("revision >= 1"))
-}
-
-pub(in crate::db::memory_v2) async fn proposal_schema_is_v22(
-    conn: &impl MemoryV2Executor,
-) -> Result<bool> {
-    if !proposal_current_is_v22(conn).await? {
-        return Ok(false);
-    }
-    let Some(transitions_sql) = optional_string(
-        conn,
-        "SELECT sql FROM sqlite_master
-         WHERE type = 'table' AND name = 'memory_v2_proposal_transitions'",
-        (),
-    )
-    .await?
-    else {
-        return Ok(false);
-    };
-    Ok(transitions_sql
-        .to_ascii_lowercase()
-        .contains("'quarantined'")
-        && trigger_exists(conn, "memory_v2_proposal_transitions_no_new_applying").await?)
 }

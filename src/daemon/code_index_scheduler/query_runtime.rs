@@ -319,6 +319,10 @@ pub(in crate::daemon) enum QuerySearchExecutionErrorV1 {
     GenerationUnavailable,
     #[error("the exact code generation is mounted but still warming or unverified")]
     GenerationUnverified,
+    #[error("exact generation read is unavailable: {0:?}")]
+    ExactGenerationUnavailable(tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1),
+    #[error("exact generation cursor does not match the selected code source")]
+    ExactCursorInvalid,
     #[error("query authority is unavailable for the exact admitted scope")]
     AuthorityUnavailable,
     #[error("query search policy is invalid: {0}")]
@@ -410,118 +414,148 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             },
         };
-        let authority = self
-            .query_authority_for_scope(scope)
+        execute_query_search_on_latest(self, scope, input, latest, served_stale, graph_control)
             .await
-            .ok_or(QuerySearchExecutionErrorV1::AuthorityUnavailable)?;
-        let generation = latest.generation.manifest().generation_id.clone();
-        let request = RetrievalRequest {
-            principal: input.principal,
-            scope: RetrievalScope {
-                privacy_domain: latest.generation.manifest().privacy_domain.clone(),
-                root: SingleRootScopeV1 {
-                    repository: latest.generation.snapshot().repository.clone(),
-                    worktree: latest.generation.snapshot().worktree.clone(),
-                    reference: latest.generation.snapshot().reference.clone(),
-                },
-            },
-            temporal_mode: TemporalModeV1::Current,
-            snapshot: RetrievalSnapshot {
-                watermarks: VectorWatermark::default(),
-                freshness_digest: FreshnessVectorDigest::new(
-                    latest.generation.manifest().snapshot_digest.as_str(),
-                )
-                .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?,
-                authorization_revision: input.authorization_revision,
-                captured_at: latest.generation.manifest().seal.sealed_at,
-            },
-            profile_id: authority.profile().profile_id.clone(),
-            budget: authority.profile().retrieval_budget,
-        };
-        let sanitized = RawRetrievalRequestV1::new(input.query, request)
-            .sanitize(input.sanitizer_revision, input.normalization_revision)?;
-        let request = sanitized.request();
-        let query_view = sanitized.query_view();
-        let owners = latest.production_query_owners()?;
-
-        let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
-        let exact_request = ExactLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            literals: parser.parse_literals(query_view, request),
-            budget: request.budget,
-        };
-        let exact = owners.exact.retrieve_exact(&exact_request)?;
-
-        let lexical_parts = lexical_query_parts(query_view.as_str())?;
-        let lexical_request = LexicalLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            whole_terms: lexical_parts.whole_terms,
-            subtokens: lexical_parts.subtokens,
-            phrases: lexical_parts.phrases,
-            field_filters: Vec::new(),
-            fuzzy_budget: input.fuzzy_budget,
-            lexical_profile_revision: input.lexical_profile_revision,
-            score_domain: input.lexical_score_domain,
-            budget: request.budget,
-        };
-        let lexical = owners.lexical.retrieve_lexical(&lexical_request)?;
-
-        let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
-        let graph = if graph_seeds.is_empty() {
-            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                detail: "exact and lexical lanes produced no graph seed".to_owned(),
-            })
-        } else {
-            owners.graph.retrieve_graph(
-                &GraphLaneRequest {
-                    base: request.clone(),
-                    generation: generation.clone(),
-                    seed_anchors: graph_seeds,
-                    edge_kinds: input.graph_edge_kinds,
-                    max_depth: input.graph_max_depth,
-                    budget: request.budget,
-                },
-                graph_control,
-            )?
-        };
-        let lanes = vec![
-            CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
-                .map_err(QueryAuthorityErrorV1::from)?,
-            CompositionLaneInput::new(RetrieverKind::Lexical, lexical)
-                .map_err(QueryAuthorityErrorV1::from)?,
-            CompositionLaneInput::new(RetrieverKind::Graph, graph)
-                .map_err(QueryAuthorityErrorV1::from)?,
-        ];
-        // The caller's page size is an upper bound on results, while
-        // composition pagination refuses any page larger than the accepted
-        // profile's deterministic budget (`max_fused_candidates`). Serve
-        // budget-bounded pages instead of failing every request whose limit
-        // exceeds the evaluated budget. Nothing is silently dropped: a page
-        // smaller than the fused set always returns a continuation cursor.
-        let page_size = input
-            .page_size
-            .min(request.budget.max_fused_candidates as usize);
-        let authorized = self
-            .compose_query_fallback(
-                scope,
-                request,
-                query_view,
-                lanes,
-                page_size,
-                input.cursor.as_ref(),
-            )
-            .await?;
-        Ok(ExecutedQuerySearchV1 {
-            generation,
-            authorized,
-            sanitized,
-            served_stale,
-        })
     }
+
+    pub(in crate::daemon) async fn execute_query_search_on_generation<C>(
+        &self,
+        scope: &ResolvedScope,
+        input: QuerySearchExecutionRequestV1,
+        latest: super::LatestCompleteCodeIndexV1,
+        graph_control: Arc<C>,
+    ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
+    where
+        C: GraphExecutionControl + 'static,
+    {
+        scope
+            .validate()
+            .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
+        validate_search_policy(&input)?;
+        if !Self::latest_matches_scope(&latest, scope) {
+            return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
+        }
+        execute_query_search_on_latest(self, scope, input, latest, false, graph_control).await
+    }
+}
+
+async fn execute_query_search_on_latest<C>(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    scope: &ResolvedScope,
+    input: QuerySearchExecutionRequestV1,
+    latest: super::LatestCompleteCodeIndexV1,
+    served_stale: bool,
+    graph_control: Arc<C>,
+) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
+where
+    C: GraphExecutionControl + 'static,
+{
+    let authority = schedulers
+        .query_authority_for_scope(scope)
+        .await
+        .ok_or(QuerySearchExecutionErrorV1::AuthorityUnavailable)?;
+    let generation = latest.generation.manifest().generation_id.clone();
+    let request = RetrievalRequest {
+        principal: input.principal,
+        scope: RetrievalScope {
+            privacy_domain: latest.generation.manifest().privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: latest.generation.snapshot().repository.clone(),
+                worktree: latest.generation.snapshot().worktree.clone(),
+                reference: latest.generation.snapshot().reference.clone(),
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(
+                latest.generation.manifest().snapshot_digest.as_str(),
+            )
+            .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?,
+            authorization_revision: input.authorization_revision,
+            captured_at: latest.generation.manifest().seal.sealed_at,
+        },
+        profile_id: authority.profile().profile_id.clone(),
+        budget: authority.profile().retrieval_budget,
+    };
+    let sanitized = RawRetrievalRequestV1::new(input.query, request)
+        .sanitize(input.sanitizer_revision, input.normalization_revision)?;
+    let request = sanitized.request();
+    let query_view = sanitized.query_view();
+    let owners = latest.production_query_owners()?;
+    let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
+    let exact = owners.exact.retrieve_exact(&ExactLaneRequest {
+        base: request.clone(),
+        query_view,
+        generation: generation.clone(),
+        literals: parser.parse_literals(query_view, request),
+        budget: request.budget,
+    })?;
+    let lexical_parts = lexical_query_parts(query_view.as_str())?;
+    let lexical = owners.lexical.retrieve_lexical(&LexicalLaneRequest {
+        base: request.clone(),
+        query_view,
+        generation: generation.clone(),
+        whole_terms: lexical_parts.whole_terms,
+        subtokens: lexical_parts.subtokens,
+        phrases: lexical_parts.phrases,
+        field_filters: Vec::new(),
+        fuzzy_budget: input.fuzzy_budget,
+        lexical_profile_revision: input.lexical_profile_revision,
+        score_domain: input.lexical_score_domain,
+        budget: request.budget,
+    })?;
+    let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
+    let graph = if graph_seeds.is_empty() {
+        RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+            detail: "exact and lexical lanes produced no graph seed".to_owned(),
+        })
+    } else {
+        owners.graph.retrieve_graph(
+            &GraphLaneRequest {
+                base: request.clone(),
+                generation: generation.clone(),
+                seed_anchors: graph_seeds,
+                edge_kinds: input.graph_edge_kinds,
+                max_depth: input.graph_max_depth,
+                budget: request.budget,
+            },
+            graph_control,
+        )?
+    };
+    let lanes = vec![
+        CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
+            .map_err(QueryAuthorityErrorV1::from)?,
+        CompositionLaneInput::new(RetrieverKind::Lexical, lexical)
+            .map_err(QueryAuthorityErrorV1::from)?,
+        CompositionLaneInput::new(RetrieverKind::Graph, graph)
+            .map_err(QueryAuthorityErrorV1::from)?,
+    ];
+    // The caller's page size is an upper bound on results, while
+    // composition pagination refuses any page larger than the accepted
+    // profile's deterministic budget (`max_fused_candidates`). Serve
+    // budget-bounded pages instead of failing every request whose limit
+    // exceeds the evaluated budget. Nothing is silently dropped: a page
+    // smaller than the fused set always returns a continuation cursor.
+    let page_size = input
+        .page_size
+        .min(request.budget.max_fused_candidates as usize);
+    let authorized = schedulers
+        .compose_query_fallback(
+            scope,
+            request,
+            query_view,
+            lanes,
+            page_size,
+            input.cursor.as_ref(),
+        )
+        .await?;
+    Ok(ExecutedQuerySearchV1 {
+        generation,
+        authorized,
+        sanitized,
+        served_stale,
+    })
 }
 
 fn validate_search_policy(

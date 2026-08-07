@@ -17,6 +17,8 @@ pub(crate) use contract::{
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
     SessionRetrievalOmissionView, SessionRetrievalPageView, SessionRetrievalServiceFuture,
     SessionRetrievalServiceOutcome, SessionRetrievalServicePort, SessionRetrievalStoreScope,
+    SessionRetrievalSweepFuture, SessionRetrievalSweepOutcome, SessionRetrievalSweepPort,
+    SessionRetrievalSweepRootView, SessionRetrievalSweepSkipReason, SessionRetrievalSweepSkipView,
     SessionRetrievalUnavailable, SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
     SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
     SessionTemporalMetadataView, SessionTemporalWatermarksView,

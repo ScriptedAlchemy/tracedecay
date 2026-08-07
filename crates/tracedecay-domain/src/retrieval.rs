@@ -1133,6 +1133,25 @@ impl SemanticRetrievalContinuationV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct CodeSourceCursorBindingV1 {
+    pub reference: crate::research::id::RefId,
+    pub commit: crate::GitOidV1,
+    pub tree: crate::GitOidV1,
+    pub generation: crate::code_intelligence::CodeGenerationId,
+}
+
+impl CodeSourceCursorBindingV1 {
+    pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        self.reference.validate()?;
+        self.commit.validate()?;
+        self.tree.validate()?;
+        self.generation.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RetrievalCursor {
     pub key_id: RetrievalCursorKeyId,
     pub key_epoch: u64,
@@ -1152,6 +1171,8 @@ pub struct RetrievalCursor {
     /// Its absence preserves the canonical query cursor bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic: Option<SemanticRetrievalContinuationV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_source: Option<CodeSourceCursorBindingV1>,
     pub expiry: UtcMicros,
     pub signature: QueryMac,
 }
@@ -1161,6 +1182,9 @@ impl RetrievalCursor {
         self.key_id.validate()?;
         self.query_digest.validate()?;
         self.signature.validate()?;
+        if let Some(binding) = &self.code_source {
+            binding.validate()?;
+        }
         if self.query_digest.key_epoch != self.key_epoch
             || self.query_digest.privacy_domain != self.privacy_domain
         {

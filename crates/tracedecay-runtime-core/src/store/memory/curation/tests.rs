@@ -5,8 +5,8 @@ use crate::store::memory::primitives::{OwnerKey, storage_message};
 use tempfile::tempdir;
 use tracedecay_domain::{Confidence, FactId, FactOwnerV1, ProjectId, UtcMicros};
 use tracedecay_store::{
-    ProjectMemoryRelationProvenanceV1, FactCompatibilityResult, FactCompatibilityStoreError,
-    FactStoreError,
+    FactCompatibilityResult, FactCompatibilityStoreError, FactStoreError,
+    ProjectMemoryRelationProvenanceV1,
 };
 
 async fn seed_fact(db: &crate::db::Database, owner: &FactOwnerV1, fact_id: &FactId) {

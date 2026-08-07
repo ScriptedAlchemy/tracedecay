@@ -47,7 +47,7 @@ pub enum WorkAttemptStorageError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkAttemptInsertOutcome {
     Inserted,
-    Replayed(WorkAttemptV1),
+    Replayed(Box<WorkAttemptV1>),
 }
 
 /// Durable attempt persistence. Every transition is a compare-and-swap on the
@@ -87,6 +87,27 @@ pub trait WorkAttemptStoragePort: Send + Sync {
         &self,
         authority: &WorkAuthority,
     ) -> Result<Vec<WorkAttemptV1>, WorkAttemptStorageError>;
+
+    /// One page of attempts in this authority scope, in stable
+    /// task/run/attempt identity order, strictly after `start_after`.
+    ///
+    /// The page and its remaining count are read under one consistent view,
+    /// so `remaining` always covers exactly the rows the cursor has not yet
+    /// returned (this page included).
+    fn list(
+        &self,
+        authority: &WorkAuthority,
+        start_after: Option<&WorkAttemptIdentityV1>,
+        limit: u32,
+    ) -> Result<WorkAttemptListPageV1, WorkAttemptStorageError>;
+}
+
+/// One stable-ordered storage page of attempt rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkAttemptListPageV1 {
+    pub attempts: Vec<WorkAttemptV1>,
+    /// Attempts in scope strictly after the page start, including this page.
+    pub remaining: u32,
 }
 
 /// Typed provider availability observed at negotiation. These are product
@@ -217,6 +238,81 @@ pub struct WorkAttemptRecoveryReportV1 {
     pub cancelled: Vec<WorkAttemptV1>,
 }
 
+pub const MAX_WORK_ATTEMPT_LIST_PAGE_SIZE: u32 = 1_000;
+
+/// The verified Work topology snapshot one attempt-list page was read under.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptTopologyBindingV1 {
+    /// The verified graph generation the topology snapshot is published under.
+    pub generation: String,
+    /// The number of tasks in the verified topology.
+    pub task_count: u32,
+}
+
+/// Typed availability of the verified Work topology for a list read. The
+/// caller resolves this through the project graph publication mount; the
+/// service refuses to page attempts against anything else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkAttemptTopologyStateV1 {
+    /// No Work has ever been recorded in this authority scope.
+    Absent,
+    /// The topology snapshot was published and verified.
+    Verified(WorkAttemptTopologyBindingV1),
+}
+
+/// Resume point for the next attempt-list page, bound to the exact verified
+/// topology generation it was minted under.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptListCursorV1 {
+    /// The verified topology generation the cursor was minted under.
+    pub generation: String,
+    /// The last attempt identity the prior page returned.
+    pub start_after: WorkAttemptIdentityV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkAttemptListRequestV1 {
+    pub page_size: u32,
+    #[serde(default)]
+    pub cursor: Option<WorkAttemptListCursorV1>,
+}
+
+/// How much of the authorized attempt set one page covers.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "coverage", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkAttemptListCoverageV1 {
+    /// Every attempt after the page start was returned; zero returned is the
+    /// explicit empty authorized result, not a concealment.
+    Complete { returned: u32 },
+    /// The page cap was reached; `resume` continues under the same verified
+    /// topology generation.
+    Capped {
+        returned: u32,
+        remaining: u32,
+        resume: WorkAttemptListCursorV1,
+    },
+}
+
+/// One authority-scoped attempt-list read. Absence of any Work in scope is a
+/// typed state, distinct from an authorized-but-empty page.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorkAttemptListV1 {
+    /// No Work exists in this authority scope, so there is no attempt set to
+    /// page. Concealed scopes never reach this state: they are refused as
+    /// not-found-or-not-authorized before any read.
+    Absent,
+    /// One page of durable attempts under the verified topology snapshot.
+    Listed {
+        topology: WorkAttemptTopologyBindingV1,
+        attempts: Vec<WorkAttemptV1>,
+        coverage: WorkAttemptListCoverageV1,
+    },
+}
+
 /// The lease, transition, cancellation, recovery, and evidence authority for
 /// admitted provider attempts.
 pub struct WorkAttemptService<S, P, W> {
@@ -337,7 +433,7 @@ where
         .map_err(contract_problem)?;
         match self.attempts.insert(&authority, &attempt) {
             Ok(WorkAttemptInsertOutcome::Inserted) => Ok(attempt),
-            Ok(WorkAttemptInsertOutcome::Replayed(existing)) => Ok(existing),
+            Ok(WorkAttemptInsertOutcome::Replayed(existing)) => Ok(*existing),
             Err(error) => Err(storage_problem(error)),
         }
     }
@@ -357,6 +453,79 @@ where
         self.attempts
             .load(&authority, &identity)
             .map_err(storage_problem)
+    }
+
+    /// Lists one authority-scoped, page-bounded slice of provider attempts in
+    /// stable task/run/attempt order, read under the verified Work topology
+    /// snapshot the caller resolves through the graph publication mount.
+    ///
+    /// Every non-success is typed: an out-of-bounds page size is an invalid
+    /// request, a cursor minted under a superseded topology generation is
+    /// stale, a scope with no Work at all is the explicit `Absent` state, and
+    /// an authorized scope with no attempts is an explicit zero-complete page.
+    pub fn list(
+        &self,
+        context: &RequestContext,
+        request: &WorkAttemptListRequestV1,
+        topology: impl FnOnce(&WorkAuthority) -> Result<WorkAttemptTopologyStateV1, ApplicationProblem>,
+    ) -> Result<WorkAttemptListV1, ApplicationProblem> {
+        if request.page_size == 0 || request.page_size > MAX_WORK_ATTEMPT_LIST_PAGE_SIZE {
+            return Err(invalid_problem(
+                "application.work-attempt.invalid-page-size",
+                "The Work attempt list page size must be between 1 and 1000.",
+            ));
+        }
+        let authority = work_authority(context)?;
+        let binding = match topology(&authority)? {
+            WorkAttemptTopologyStateV1::Absent => {
+                return if request.cursor.is_some() {
+                    // The snapshot the cursor was minted under no longer
+                    // exists for this scope; resuming would fabricate a page.
+                    Err(stale_cursor_problem())
+                } else {
+                    Ok(WorkAttemptListV1::Absent)
+                };
+            }
+            WorkAttemptTopologyStateV1::Verified(binding) => binding,
+        };
+        if let Some(cursor) = &request.cursor
+            && cursor.generation != binding.generation
+        {
+            return Err(stale_cursor_problem());
+        }
+        let page = self
+            .attempts
+            .list(
+                &authority,
+                request.cursor.as_ref().map(|cursor| &cursor.start_after),
+                request.page_size,
+            )
+            .map_err(storage_problem)?;
+        let returned = u32::try_from(page.attempts.len())
+            .ok()
+            .filter(|returned| *returned <= request.page_size && *returned <= page.remaining)
+            .ok_or_else(list_page_contract_problem)?;
+        let coverage = if returned == page.remaining {
+            WorkAttemptListCoverageV1::Complete { returned }
+        } else {
+            let last = page
+                .attempts
+                .last()
+                .ok_or_else(list_page_contract_problem)?;
+            WorkAttemptListCoverageV1::Capped {
+                returned,
+                remaining: page.remaining - returned,
+                resume: WorkAttemptListCursorV1 {
+                    generation: binding.generation.clone(),
+                    start_after: last.identity().clone(),
+                },
+            }
+        };
+        Ok(WorkAttemptListV1::Listed {
+            topology: binding,
+            attempts: page.attempts,
+            coverage,
+        })
     }
 
     /// Records a cancellation request against a running attempt. The daemon
@@ -967,6 +1136,21 @@ fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {
 
 fn not_found_problem() -> ApplicationProblem {
     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+}
+
+fn stale_cursor_problem() -> ApplicationProblem {
+    ApplicationProblem::stale(SafeDiagnostic {
+        code: "application.work-attempt.stale-cursor".to_owned(),
+        message: "The Work attempt list cursor was minted under a superseded topology snapshot."
+            .to_owned(),
+    })
+}
+
+fn list_page_contract_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "application.work-attempt.list-page-inconsistent".to_owned(),
+        message: "The Work attempt storage returned an inconsistent list page.".to_owned(),
+    })
 }
 
 fn denied_problem(code: &str, message: &str) -> ApplicationProblem {

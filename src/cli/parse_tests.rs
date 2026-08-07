@@ -47,6 +47,36 @@ fn hidden_scoop_package_hook_contract_parses_both_operations() {
     }
 }
 
+#[test]
+fn first_class_git_status_parses_as_a_cli_journey() {
+    let parsed = Cli::try_parse_from(["tracedecay", "git", "status", "--json"]);
+
+    assert!(
+        parsed.is_ok(),
+        "catalogued Git status must be available without the generic tool escape hatch"
+    );
+}
+
+#[test]
+fn first_class_git_hunks_carries_no_preview_binding_arguments() {
+    // The daemon captures exact repository state itself and mints the preview
+    // binding; the public CLI must not accept caller-supplied preview
+    // identities or snapshot digests.
+    let parsed = Cli::try_parse_from([
+        "tracedecay",
+        "git",
+        "hunks",
+        "--preview-id",
+        "preview.manual",
+    ]);
+
+    assert!(
+        parsed.is_err(),
+        "git hunks must reject caller-supplied preview bindings"
+    );
+    assert!(Cli::try_parse_from(["tracedecay", "git", "hunks", "--scope", "staged"]).is_ok());
+}
+
 fn visible_subcommand_paths(command: &Command) -> Vec<Vec<String>> {
     fn collect(command: &Command, prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
         for subcommand in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {

@@ -184,7 +184,7 @@ fn default_git_ignore() -> bool {
 }
 
 fn default_sync_auto_watch() -> bool {
-    true
+    false
 }
 fn default_sync_watch_debounce_ms() -> u64 {
     2000

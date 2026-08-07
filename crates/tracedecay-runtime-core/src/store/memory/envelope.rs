@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_store::{
-    ProjectMemoryFactTargetV1, FactCompatibilityResult, FactCompatibilityStoreError,
-    FactStoreError, FactStoreResult,
+    FactCompatibilityResult, FactCompatibilityStoreError, FactStoreError, FactStoreResult,
+    ProjectMemoryFactTargetV1,
 };
 
 use super::DatabaseFactStore;
@@ -74,7 +74,7 @@ pub(super) async fn compatibility_lookup_operation_receipt_tx(
     let mut rows = transaction
         .query(
             "SELECT operation_kind, request_digest, fact_id, event_id, receipt_json
-             FROM memory_v2_compatibility_operation_receipts
+             FROM memory_v2_operation_receipts
              WHERE owner_kind = ?1
                AND project_id = ?2
                AND (
@@ -163,7 +163,7 @@ pub(super) async fn compatibility_record_operation_receipt_tx(
     let key = OwnerKey::new(owner)?;
     transaction
         .execute(
-            "INSERT INTO memory_v2_compatibility_operation_receipts(
+            "INSERT INTO memory_v2_operation_receipts(
                 owner_kind, project_id, operation_id, operation_kind, request_digest,
                 fact_id, event_id, receipt_json, recorded_at
              ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",

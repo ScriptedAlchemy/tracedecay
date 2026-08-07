@@ -1,0 +1,16 @@
+diff a/crates/tracedecay-sessions/src/runtime/lcm/maintenance.rs b/crates/tracedecay-sessions/src/runtime/lcm/maintenance.rs	(rejected hunks)
+@@ -13,14 +13,12 @@ use super::{LCM_SCAN_PAGE_ROWS, LcmError};
+ 
+ #[derive(Clone, Copy)]
+ pub(super) enum BackupKind {
+-    Clean,
+     Gc,
+ }
+ 
+ impl BackupKind {
+     fn name(self) -> &'static str {
+         match self {
+-            Self::Clean => "clean",
+             Self::Gc => "gc",
+         }
+     }

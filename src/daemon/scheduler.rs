@@ -796,7 +796,7 @@ impl DaemonEngine {
         &self,
         key: &ProjectServerKey,
     ) -> Option<AutomationSchedulerRetirement> {
-        let reservation = self.store_administration.reserve_retirement_reaper()?;
+        let reservation = self.store_administration.reserve_retirement_reaper(key)?;
         let (task, completion, termination) = {
             let mut schedulers = self
                 .store_administration
@@ -1212,7 +1212,10 @@ mod global_retention_cadence_tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("denied reservation must not deadlock the retention cadence lock");
         assert!(first, "first reservation must be granted");
-        assert!(!second, "in-flight cadence must deny the second reservation");
+        assert!(
+            !second,
+            "in-flight cadence must deny the second reservation"
+        );
     }
 
     #[test]

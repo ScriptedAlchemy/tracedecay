@@ -285,6 +285,42 @@ pub(super) fn execute_work_application(
                 WorkApplicationOutcomeV1::CancelAttempt,
             )
         }
+        WorkApplicationInvocationV1::ListAttempts(request) => complete_work_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services.attempts().list(&context, &request, |authority| {
+                // The invocation admission already refused cancelled requests
+                // and this dispatch path carries no live cancellation signal,
+                // so the bounded topology read runs to completion.
+                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                match services.topology().verified_snapshot(authority, cancelled) {
+                    Ok(topology) => {
+                        let task_count = u32::try_from(topology.task_count()).map_err(|_| {
+                            work_topology_unavailable_problem(
+                                "the verified topology task count overflowed",
+                            )
+                        })?;
+                        Ok(
+                            tracedecay_application::WorkAttemptTopologyStateV1::Verified(
+                                tracedecay_application::WorkAttemptTopologyBindingV1 {
+                                    generation: topology.generation().as_str().to_owned(),
+                                    task_count,
+                                },
+                            ),
+                        )
+                    }
+                    Err(error) => work_topology_problem(error),
+                }
+            }),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::ListAttempts,
+        ),
         WorkApplicationInvocationV1::ResumeAttempts(command) => {
             let report = services.attempts().resume(&context, &command);
             if let (Ok(report), Some(project_root)) = (&report, project_root.as_ref()) {
@@ -883,17 +919,17 @@ fn workflow_effect_outcome(
         }
         WorkflowEffectOutcomeV1::Problem(problem) => Err(workflow_effect_daemon_problem(*problem)),
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(result)) => {
-            work_effect(terminal, Some(result.clone()), EffectTermination::Completed)
+            work_effect(terminal, Some((**result).clone()), EffectTermination::Completed)
                 .map(WorkflowApplicationOutcome::RegisterDefinition)
                 .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(result)) => {
-            work_effect(terminal, Some(result.clone()), EffectTermination::Completed)
+            work_effect(terminal, Some((**result).clone()), EffectTermination::Completed)
                 .map(WorkflowApplicationOutcome::HandoffIssue)
                 .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(result)) => {
-            work_effect(terminal, Some(result.clone()), EffectTermination::Completed)
+            work_effect(terminal, Some((**result).clone()), EffectTermination::Completed)
                 .map(WorkflowApplicationOutcome::HandoffRedeem)
                 .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
@@ -930,6 +966,48 @@ fn task_handoff_problem(error: TaskHandoffError) -> DaemonInvocationProblem {
         | TaskHandoffError::Expired
         | TaskHandoffError::Replay => DaemonInvocationProblem::InvalidRequest,
     }
+}
+
+/// Maps a verified Work topology failure to the typed application problem the
+/// attempt-list read reports. Absence of any Work events is the only
+/// non-error state: it names an empty scope, not a failing authority.
+fn work_topology_problem(
+    error: tracedecay_runtime_core::work_topology::WorkTopologyError,
+) -> Result<tracedecay_application::WorkAttemptTopologyStateV1, ApplicationProblem> {
+    use tracedecay_runtime_core::work_topology::WorkTopologyError;
+    match error {
+        WorkTopologyError::EmptyEvents => {
+            Ok(tracedecay_application::WorkAttemptTopologyStateV1::Absent)
+        }
+        WorkTopologyError::Cancelled => Err(ApplicationProblem::Cancelled {
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        }),
+        WorkTopologyError::BudgetExhausted => Err(ApplicationProblem::TimedOut {
+            retry: RetryDirective::AfterDelay,
+            legal_actions: Vec::new(),
+        }),
+        WorkTopologyError::GenerationMismatch => Err(ApplicationProblem::stale(SafeDiagnostic {
+            code: "work.topology_generation_superseded".to_owned(),
+            message: "The verified Work topology generation was superseded during the read"
+                .to_owned(),
+        })),
+        WorkTopologyError::MixedAuthority
+        | WorkTopologyError::NonCanonicalTasks
+        | WorkTopologyError::DependencyCycle(_)
+        | WorkTopologyError::Contract(_)
+        | WorkTopologyError::Corrupt(_)
+        | WorkTopologyError::Unavailable(_) => Err(work_topology_unavailable_problem(
+            "the verified Work topology could not be served",
+        )),
+    }
+}
+
+fn work_topology_unavailable_problem(message: &str) -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "work.topology_unavailable".to_owned(),
+        message: message.to_owned(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -614,9 +614,7 @@ fn push_grep_git_scope_filter(
     }
     let mut selected = Vec::with_capacity(session_ids.len());
     for (provider, session_id) in session_ids {
-        selected.push(format!(
-            "({provider_column} = ? AND {session_column} = ?)"
-        ));
+        selected.push(format!("({provider_column} = ? AND {session_column} = ?)"));
         values.push(Value::Text(provider.clone()));
         values.push(Value::Text(session_id.clone()));
     }

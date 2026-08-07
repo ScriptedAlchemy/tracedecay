@@ -337,11 +337,9 @@ async fn read_git_projections(
     let project_sessions = state.lcm_db.clone();
     tokio::task::spawn_blocking(move || {
         let authority = match project_sessions {
-            Some(project_sessions) => GitReadAuthorityV1::new_with_project_sessions(
-                root,
-                scope.clone(),
-                project_sessions,
-            ),
+            Some(project_sessions) => {
+                GitReadAuthorityV1::new_with_project_sessions(root, scope.clone(), project_sessions)
+            }
             None => GitReadAuthorityV1::new(root, scope.clone()),
         };
         let bounds = GitQueryBounds {

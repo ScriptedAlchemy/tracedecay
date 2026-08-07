@@ -29,8 +29,8 @@ use tracedecay_application::{
     AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
     GenerateProposalRequest, GeneratedWorkProposal, ReplanDependenciesCommand, RequestId,
     ResumeWorkAttemptsCommand, RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
-    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
@@ -62,6 +62,7 @@ pub enum WorkOperation {
     AttemptStatus,
     CancelAttempt,
     ResumeAttempts,
+    ListAttempts,
 }
 
 /// Derive every Work operation projection from one `(variant, key, segment)`
@@ -125,11 +126,12 @@ work_operations! {
     AttemptStatus: "attempt_status", "attempt-status";
     CancelAttempt: "cancel_attempt", "cancel-attempt";
     ResumeAttempts: "resume_attempts", "resume-attempts";
+    ListAttempts: "list_attempts", "list-attempts";
 }
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Snapshot,
         Self::Delta,
         Self::GenerateProposal,
@@ -144,6 +146,7 @@ impl WorkOperation {
         Self::AttemptStatus,
         Self::CancelAttempt,
         Self::ResumeAttempts,
+        Self::ListAttempts,
     ];
 
     /// The catalog operation id.
@@ -155,7 +158,11 @@ impl WorkOperation {
     pub const fn is_read_only(self) -> bool {
         matches!(
             self,
-            Self::Snapshot | Self::Delta | Self::GenerateProposal | Self::AttemptStatus
+            Self::Snapshot
+                | Self::Delta
+                | Self::GenerateProposal
+                | Self::AttemptStatus
+                | Self::ListAttempts
         )
     }
 
@@ -176,6 +183,7 @@ impl WorkOperation {
             Self::AttemptStatus => schema_name::<WorkAttemptStatusRequestV1>(),
             Self::CancelAttempt => schema_name::<CancelWorkAttemptCommand>(),
             Self::ResumeAttempts => schema_name::<ResumeWorkAttemptsCommand>(),
+            Self::ListAttempts => schema_name::<WorkAttemptListRequestV1>(),
         }
     }
 
@@ -196,6 +204,7 @@ impl WorkOperation {
                 schema_name::<WorkAttemptV1>()
             }
             Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
+            Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
         }
     }
 
@@ -392,7 +401,8 @@ mod tests {
                 WorkOperation::Snapshot,
                 WorkOperation::Delta,
                 WorkOperation::GenerateProposal,
-                WorkOperation::AttemptStatus
+                WorkOperation::AttemptStatus,
+                WorkOperation::ListAttempts
             ]
         );
     }

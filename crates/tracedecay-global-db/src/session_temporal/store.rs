@@ -53,7 +53,7 @@ impl GraphCancellation for ExecutionControlGraphCancellation {
 /// after its graph operation to restore the original typed reason. This
 /// adapter preserves all three interruption paths during traversal without
 /// manufacturing a default control.
-pub(crate) fn execution_control_graph_cancellation(
+pub fn execution_control_graph_cancellation(
     control: &ExecutionControl,
 ) -> Arc<dyn GraphCancellation> {
     Arc::new(ExecutionControlGraphCancellation(control.clone()))

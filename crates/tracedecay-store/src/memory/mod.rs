@@ -4,24 +4,28 @@ use tracedecay_domain::{
     LegacyFactMappingV1, PayloadAccessState, UtcMicros,
 };
 
-mod project_memory;
 mod error;
+mod project_memory;
 mod queries;
 mod telemetry;
 mod traits;
 mod write;
 
+pub use error::{
+    FactCompatibilityResult, FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
+    FactStoreResult,
+};
 pub use project_memory::{
-    ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactDetailQueryV1,
-    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardFactEntityLinkV1,
-    ProjectMemoryDashboardFactSummaryV1, ProjectMemoryDashboardGrowthPointV1,
-    ProjectMemoryDashboardHrrCoverageV1, ProjectMemoryDashboardHrrStateV1,
-    ProjectMemoryDashboardMemoryBankV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
-    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardNamedCountV1,
-    ProjectMemoryDashboardOplogDetailsV1, ProjectMemoryDashboardOplogEntryV1,
-    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactAddAliasV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
+    FactProposalPromotionStateV1, ProjectMemoryDashboardEntityV1,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardFactEntityLinkV1, ProjectMemoryDashboardFactSummaryV1,
+    ProjectMemoryDashboardGrowthPointV1, ProjectMemoryDashboardHrrCoverageV1,
+    ProjectMemoryDashboardHrrStateV1, ProjectMemoryDashboardMemoryBankV1,
+    ProjectMemoryDashboardMemoryOverviewQueryV1, ProjectMemoryDashboardMemoryOverviewV1,
+    ProjectMemoryDashboardNamedCountV1, ProjectMemoryDashboardOplogDetailsV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryFactAddAliasV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactAvailabilityV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactContradictionV1, ProjectMemoryFactCurationBatchV1,
@@ -31,8 +35,7 @@ pub use project_memory::{
     ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1, ProjectMemoryFactMergeCommandV1,
     ProjectMemoryFactMergeEntitiesV1, ProjectMemoryFactMergeOutcomeV1,
     ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactProposalImportReceiptV1, ProjectMemoryFactProposalImportV1,
-    ProjectMemoryFactProposalLegacyRecordV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalPageV1,
     ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
     ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
     ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
@@ -44,19 +47,14 @@ pub use project_memory::{
     ProjectMemoryFactTargetV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
     ProjectMemoryLegacyEntityTargetV1, ProjectMemoryMemoryRepairCommandV1,
-    ProjectMemoryRelationProvenanceV1, FactProposalPromotionStateV1, PromoteFactProposal,
-    PromoteFactProposalOutcome,
-};
-pub use error::{
-    FactCompatibilityResult, FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
-    FactStoreResult,
+    ProjectMemoryRelationProvenanceV1, PromoteFactProposal, PromoteFactProposalOutcome,
 };
 pub use queries::{
-    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactFeedbackHistoryQueryV1,
-    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactSearchQuery,
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,
     FactCurrentQuery, FactCurrentResponseV1, FactLineageCursor, FactLineageQuery,
     FactLineageResponseV1, FactQueryCoverageV1, LegacyFactQuery, MAX_FACT_QUERY_CONTRADICTIONS,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactFeedbackHistoryQueryV1,
+    ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactListQueryV1, ProjectMemoryFactSearchQuery,
     RetrievalAnchorQuery,
 };
 pub use telemetry::{

@@ -372,7 +372,6 @@ pub(crate) async fn compute_health_delta_result(
     let (before, before_cursor) =
         pinned_before.unwrap_or_else(|| (after.clone(), after_cursor.clone()));
     let delta = i64::from(after.quality_signal) - i64::from(before.quality_signal);
-    let branch = cg.branch_diagnostics();
     let eligible = before.files_analyzed.saturating_add(after.files_analyzed);
     let denominator = (eligible > 0).then_some(eligible);
     Ok(HealthDeltaResult {
@@ -397,7 +396,10 @@ pub(crate) async fn compute_health_delta_result(
             .to_owned(),
         },
         currentness: HealthDeltaCurrentnessV1 {
-            state: if branch.serving_db_exists && !branch.is_fallback {
+            // Currentness follows the exact snapshots observed above. Legacy
+            // branch-database existence/fallback state is neither generation
+            // evidence nor an authority for this scoped comparison.
+            state: if denominator.is_some() {
                 "current"
             } else {
                 "degraded"

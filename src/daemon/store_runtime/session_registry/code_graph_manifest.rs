@@ -45,9 +45,10 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
     {
         use std::os::windows::fs::MetadataExt;
 
-        left.volume_serial_number() == right.volume_serial_number()
-            && left.file_index() == right.file_index()
-            && left.file_size() == right.file_size()
+        // Volume and file-index equality is checked separately through the
+        // stable handle authority (`same_windows_handle_identity`); metadata
+        // only carries the stable fields here.
+        left.file_size() == right.file_size()
             && left.last_write_time() == right.last_write_time()
             && left.creation_time() == right.creation_time()
     }
@@ -55,6 +56,26 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
     {
         false
     }
+}
+
+/// Confirms the opened handle and the path still denote the same file, via
+/// the stable GetFileInformationByHandle authority instead of the unstable
+/// `windows_by_handle` metadata surface.
+#[cfg(windows)]
+fn same_windows_handle_identity(
+    file: &File,
+    path: &std::path::Path,
+) -> Result<bool, GraphDbError> {
+    let path_file =
+        File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+    let path_identity = tracedecay_runtime_core::windows_file::information(&path_file)
+        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+    let handle_identity = tracedecay_runtime_core::windows_file::information(file)
+        .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+    Ok(
+        path_identity.volume_serial_number == handle_identity.volume_serial_number
+            && path_identity.file_index == handle_identity.file_index,
+    )
 }
 
 struct CheckedSealReader<'a> {
@@ -97,6 +118,13 @@ impl CheckedSealReader<'_> {
             || !same_file_identity(opened_metadata, &final_path_metadata)
             || self.bytes_read != admitted_len
         {
+            return Err(GraphDbError::Corrupt {
+                message: "sealed code generation identity or length changed while it was read"
+                    .to_owned(),
+            });
+        }
+        #[cfg(windows)]
+        if !same_windows_handle_identity(self.reader.get_ref(), path)? {
             return Err(GraphDbError::Corrupt {
                 message: "sealed code generation identity or length changed while it was read"
                     .to_owned(),
@@ -175,6 +203,12 @@ fn open_checked_seal_reader<'a>(
         message: format!("sealed code generation metadata cannot be read: {error}"),
     })?;
     if !same_file_identity(&path_metadata, &opened_metadata) {
+        return Err(GraphDbError::Corrupt {
+            message: "sealed code generation identity changed while it was opened".to_owned(),
+        });
+    }
+    #[cfg(windows)]
+    if !same_windows_handle_identity(&file, path)? {
         return Err(GraphDbError::Corrupt {
             message: "sealed code generation identity changed while it was opened".to_owned(),
         });

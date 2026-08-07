@@ -39,6 +39,10 @@ harness = false
 required-features = ["test-helpers"]
 
 [[test]]
+name = "backup_contract"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "cross_projection_contract"
 required-features = ["test-helpers"]
 

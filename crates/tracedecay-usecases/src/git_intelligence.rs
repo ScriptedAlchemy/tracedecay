@@ -25,10 +25,14 @@
 //! unborn, sparse, split-index, submodule, shallow boundary) are reported
 //! through typed [`GitCoverageV1`] degradations, never guessed clean.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::time::Instant;
 
+use gix::bstr::ByteSlice;
 use serde::Serialize;
 pub use tracedecay_application::git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
@@ -53,6 +57,7 @@ use tracedecay_domain::research::{
 use tracedecay_runtime_core::git_repository::{
     GitHistoryOptions as RepositoryHistoryOptions, GitReference, GitRepositoryAuthority,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Read subcommands the adapter is allowed to run. Anything outside this
 /// list is refused before spawn, which makes index/ref/worktree/config
@@ -167,11 +172,28 @@ struct JoinedDiff {
     conflicted: bool,
 }
 
+struct RepositoryReadSnapshot {
+    canonical_common_dir: PathBuf,
+    git_dir: PathBuf,
+    object_format: GitObjectFormatV1,
+    head: GitHeadStateV1,
+    head_degradations: BTreeSet<GitDegradationV1>,
+    degradations: BTreeSet<GitDegradationV1>,
+    operation: GitOperationStateV1,
+    index_has_unmerged: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static GIT_SUBPROCESS_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
 /// Fixed read-only native Git adapter for one repository checkout.
 pub struct NativeGitIntelligence {
     repo_root: PathBuf,
     repository: RepositoryId,
     worktree: WorktreeId,
+    command_bounds: tracedecay_runtime_core::git::GitCommandBounds,
 }
 
 pub trait GitTopologyReadPort {
@@ -216,7 +238,25 @@ impl NativeGitIntelligence {
             repo_root: repo_root.into(),
             repository,
             worktree,
+            command_bounds: tracedecay_runtime_core::git::GitCommandBounds::default(),
         }
+    }
+
+    /// Bind subprocess fallbacks to the request's live deadline,
+    /// cancellation token, and serialized-result byte ceiling.
+    #[must_use]
+    pub fn with_execution_bounds(
+        mut self,
+        deadline: Option<Instant>,
+        cancel: Option<CancellationToken>,
+        max_output_bytes: usize,
+    ) -> Self {
+        if let Some(deadline) = deadline {
+            self.command_bounds.deadline = deadline;
+        }
+        self.command_bounds.cancel = cancel;
+        self.command_bounds.max_stdout_bytes = max_output_bytes;
+        self
     }
 
     pub fn repo_root(&self) -> &Path {
@@ -339,22 +379,29 @@ impl NativeGitIntelligence {
             ));
         }
 
-        let mut command = std::process::Command::new(tracedecay_runtime_core::git::git_program());
-        // Scrub ambient Git redirection so no caller environment can retarget
-        // the index, object store, worktree, or hooks of this read.
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("GIT_") {
-                command.env_remove(&key);
+        #[cfg(test)]
+        GIT_SUBPROCESS_COUNT.set(GIT_SUBPROCESS_COUNT.get() + 1);
+        let output = tracedecay_runtime_core::git::bounded_git_output(
+            &self.repo_root,
+            args,
+            &self.command_bounds,
+        )
+        .map_err(|error| match error {
+            tracedecay_runtime_core::git::GitCommandError::Unavailable(error) => {
+                GitIntelligenceError::GitUnavailable(error.to_string())
             }
-        }
-        command
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env("LC_ALL", "C")
-            .args(args)
-            .current_dir(&self.repo_root);
-        let output = command
-            .output()
-            .map_err(|error| GitIntelligenceError::GitUnavailable(error.to_string()))?;
+            tracedecay_runtime_core::git::GitCommandError::Cancelled => {
+                GitIntelligenceError::Cancelled
+            }
+            tracedecay_runtime_core::git::GitCommandError::DeadlineExceeded => {
+                GitIntelligenceError::DeadlineExceeded
+            }
+            tracedecay_runtime_core::git::GitCommandError::OutputLimitExceeded {
+                stream,
+                bound,
+            } => GitIntelligenceError::OutputLimitExceeded { stream, bound },
+            error => GitIntelligenceError::GitUnavailable(error.to_string()),
+        })?;
         if output.status.success() {
             return Ok(output);
         }
@@ -383,12 +430,6 @@ impl NativeGitIntelligence {
         })
     }
 
-    /// Absolute per-worktree git directory (read-only probe).
-    fn git_dir(&self) -> Result<PathBuf, GitIntelligenceError> {
-        let dir = self.stdout("rev-parse", &["rev-parse", "--absolute-git-dir"])?;
-        Ok(PathBuf::from(dir.trim()))
-    }
-
     /// In-progress native operation state from repository metadata.
     fn operation_state(git_dir: &Path) -> GitOperationStateV1 {
         if git_dir.join("MERGE_HEAD").is_file() {
@@ -408,22 +449,38 @@ impl NativeGitIntelligence {
         }
     }
 
-    /// Repository-state degradations shared by every read operation:
-    /// sparse checkout, split index, submodule presence, in-progress
-    /// operation, and unsupported object format.
-    fn state_degradations(
+    /// Capture repository metadata once in-process for one public read.
+    ///
+    /// Exact porcelain remains the authority for mutable status/diff/blame
+    /// payloads, but HEAD, object format, operation state, configuration, and
+    /// index conflict state do not require subprocesses.
+    fn repository_snapshot(&self) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
+        let Ok(repo) = gix::open(&self.repo_root) else {
+            return self.cli_repository_snapshot();
+        };
+        if repo.object_hash() != gix::hash::Kind::Sha1 {
+            return self.cli_repository_snapshot();
+        }
+        self.repository_snapshot_from_open(&repo)
+    }
+
+    fn repository_snapshot_from_open(
         &self,
-        git_dir: &Path,
-    ) -> Result<BTreeSet<GitDegradationV1>, GitIntelligenceError> {
+        repo: &gix::Repository,
+    ) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
+        let git_dir = repo.git_dir().to_path_buf();
+        let canonical_common_dir = repo
+            .common_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| repo.common_dir().to_path_buf());
+        let (head, head_degradations) = Self::head_state_from_repository(repo)?;
         let mut degradations = BTreeSet::new();
 
-        let sparse = self
-            .stdout(
-                "config",
-                &["config", "--get", "--bool", "core.sparseCheckout"],
-            )
-            .is_ok_and(|value| value.trim() == "true");
-        if sparse {
+        if repo
+            .config_snapshot()
+            .boolean("core.sparseCheckout")
+            .unwrap_or(false)
+        {
             degradations.insert(GitDegradationV1::SparseCheckout);
         }
 
@@ -443,30 +500,104 @@ impl NativeGitIntelligence {
             degradations.insert(GitDegradationV1::SubmoduleState);
         }
 
-        if Self::operation_state(git_dir) != GitOperationStateV1::None {
+        let operation = Self::operation_state(&git_dir);
+        if operation != GitOperationStateV1::None {
             degradations.insert(GitDegradationV1::InProgressOperation);
         }
-
-        // Validate and bind the native object format; SHA-1 and SHA-256 are
-        // both fully represented by the typed values.
-        let _object_format = self.object_format()?;
-
-        Ok(degradations)
+        let index_has_unmerged = repo.open_index().is_ok_and(|index| {
+            index
+                .entries()
+                .iter()
+                .any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+        });
+        Ok(RepositoryReadSnapshot {
+            canonical_common_dir,
+            git_dir,
+            object_format: GitObjectFormatV1::Sha1,
+            head,
+            head_degradations,
+            degradations,
+            operation,
+            index_has_unmerged,
+        })
     }
 
-    fn object_format(&self) -> Result<GitObjectFormatV1, GitIntelligenceError> {
-        let value = self.stdout("rev-parse", &["rev-parse", "--show-object-format"])?;
-        match value.trim() {
-            "sha1" => Ok(GitObjectFormatV1::Sha1),
-            "sha256" => Ok(GitObjectFormatV1::Sha256),
-            unsupported => Err(GitIntelligenceError::MalformedOutput {
-                operation: "rev-parse",
-                detail: format!("unsupported object format {unsupported:?}"),
-            }),
+    /// Bounded compatibility read for object formats or repository layouts
+    /// that this build of gix cannot open. This path is uncommon and keeps
+    /// SHA-256 repositories truthful without claiming native support.
+    fn cli_repository_snapshot(&self) -> Result<RepositoryReadSnapshot, GitIntelligenceError> {
+        let git_dir = PathBuf::from(
+            self.stdout("rev-parse", &["rev-parse", "--absolute-git-dir"])?
+                .trim(),
+        );
+        let common_dir_raw = PathBuf::from(
+            self.stdout("rev-parse", &["rev-parse", "--git-common-dir"])?
+                .trim(),
+        );
+        let common_dir = if common_dir_raw.is_absolute() {
+            common_dir_raw
+        } else {
+            self.repo_root.join(common_dir_raw)
+        };
+        let canonical_common_dir = common_dir.canonicalize().unwrap_or(common_dir);
+        let object_format = match self
+            .stdout("rev-parse", &["rev-parse", "--show-object-format"])?
+            .trim()
+        {
+            "sha1" => GitObjectFormatV1::Sha1,
+            "sha256" => GitObjectFormatV1::Sha256,
+            unsupported => {
+                return Err(GitIntelligenceError::MalformedOutput {
+                    operation: "rev-parse",
+                    detail: format!("unsupported object format {unsupported:?}"),
+                });
+            }
+        };
+        let (head, head_degradations) = self.cli_head_state()?;
+        let mut degradations = BTreeSet::new();
+        if self
+            .stdout(
+                "config",
+                &["config", "--get", "--bool", "core.sparseCheckout"],
+            )
+            .is_ok_and(|value| value.trim() == "true")
+        {
+            degradations.insert(GitDegradationV1::SparseCheckout);
         }
+        if std::fs::read_dir(&git_dir).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("sharedindex.")
+            })
+        }) {
+            degradations.insert(GitDegradationV1::SplitIndex);
+        }
+        if self.repo_root.join(".gitmodules").is_file() {
+            degradations.insert(GitDegradationV1::SubmoduleState);
+        }
+        let operation = Self::operation_state(&git_dir);
+        if operation != GitOperationStateV1::None {
+            degradations.insert(GitDegradationV1::InProgressOperation);
+        }
+        let index_has_unmerged = !self
+            .run_git("ls-files", &["ls-files", "-u"])?
+            .stdout
+            .is_empty();
+        Ok(RepositoryReadSnapshot {
+            canonical_common_dir,
+            git_dir,
+            object_format,
+            head,
+            head_degradations,
+            degradations,
+            operation,
+            index_has_unmerged,
+        })
     }
 
-    fn head_state(
+    fn cli_head_state(
         &self,
     ) -> Result<(GitHeadStateV1, BTreeSet<GitDegradationV1>), GitIntelligenceError> {
         let mut degradations = BTreeSet::new();
@@ -485,8 +616,6 @@ impl NativeGitIntelligence {
                 }
             }
             Err(error) => {
-                // Distinguish an unborn branch from real failure: HEAD
-                // resolves symbolically but has no commit yet.
                 let branch = self
                     .stdout("symbolic-ref", &["symbolic-ref", "--short", "-q", "HEAD"])
                     .map(|name| name.trim().to_owned());
@@ -498,6 +627,46 @@ impl NativeGitIntelligence {
                     _ => Err(error),
                 }
             }
+        }
+    }
+
+    fn head_state_from_repository(
+        repo: &gix::Repository,
+    ) -> Result<(GitHeadStateV1, BTreeSet<GitDegradationV1>), GitIntelligenceError> {
+        let mut degradations = BTreeSet::new();
+        let head = repo
+            .head()
+            .map_err(|error| GitIntelligenceError::MalformedOutput {
+                operation: "head",
+                detail: error.to_string(),
+            })?;
+        let branch = head
+            .referent_name()
+            .and_then(|name| name.as_bstr().to_str().ok())
+            .and_then(|name| name.strip_prefix("refs/heads/"))
+            .map(str::to_owned);
+        if head.is_unborn() {
+            let Some(branch) = branch else {
+                return Err(GitIntelligenceError::MalformedOutput {
+                    operation: "head",
+                    detail: "unborn HEAD had no local branch referent".to_owned(),
+                });
+            };
+            degradations.insert(GitDegradationV1::UnbornBranch);
+            return Ok((GitHeadStateV1::Unborn { branch }, degradations));
+        }
+        let commit = head
+            .id()
+            .ok_or_else(|| GitIntelligenceError::MalformedOutput {
+                operation: "head",
+                detail: "born HEAD had no object id".to_owned(),
+            })
+            .and_then(|id| GitOidV1::new(id.to_hex().to_string()).map_err(Into::into))?;
+        if let Some(branch) = branch {
+            Ok((GitHeadStateV1::Attached { branch, commit }, degradations))
+        } else {
+            degradations.insert(GitDegradationV1::DetachedHead);
+            Ok((GitHeadStateV1::Detached { commit }, degradations))
         }
     }
 
@@ -525,7 +694,8 @@ impl NativeGitIntelligence {
 
     /// Typed diff for one scope with file and hunk structure.
     pub fn diff(&self, scope: &GitDiffScopeV1) -> Result<GitDiffV1, GitIntelligenceError> {
-        let joined = self.diff_internal(scope)?;
+        let snapshot = self.repository_snapshot()?;
+        let joined = self.diff_internal(scope, &snapshot)?;
         let mut files = Vec::with_capacity(joined.entries.len());
         for entry in joined.entries {
             let raw = entry.raw;
@@ -595,13 +765,11 @@ impl NativeGitIntelligence {
             }
         }
 
-        let git_dir = self.git_dir()?;
-        let mut degradations = self.state_degradations(&git_dir)?;
-        let (_head, head_degradations) = self.head_state()?;
+        let mut degradations = snapshot.degradations;
         // An unborn branch still supports a worktree diff against the index;
         // the UnbornBranch degradation records the state explicitly.
-        degradations.extend(head_degradations);
-        if joined.conflicted || self.index_has_unmerged()? {
+        degradations.extend(snapshot.head_degradations);
+        if joined.conflicted || snapshot.index_has_unmerged {
             degradations.insert(GitDegradationV1::ConflictedState);
         }
 
@@ -615,11 +783,6 @@ impl NativeGitIntelligence {
         Ok(diff)
     }
 
-    fn index_has_unmerged(&self) -> Result<bool, GitIntelligenceError> {
-        let output = self.run_git("ls-files", &["ls-files", "-u"])?;
-        Ok(!output.stdout.is_empty())
-    }
-
     /// Run the fixed raw + patch profiles for a scope and join them in raw
     /// emission order. Conflicted paths surface as `U` + `M` raw records and
     /// a combined `diff --cc` patch section; they are coalesced into one
@@ -627,16 +790,20 @@ impl NativeGitIntelligence {
     /// ordinary `GitHunkV1` values. Normal entries pair 1:1 with normal
     /// patch sections; a divergence means the repository changed mid-read
     /// and is reported rather than silently misjoined.
-    fn diff_internal(&self, scope: &GitDiffScopeV1) -> Result<JoinedDiff, GitIntelligenceError> {
+    fn diff_internal(
+        &self,
+        scope: &GitDiffScopeV1,
+        snapshot: &RepositoryReadSnapshot,
+    ) -> Result<JoinedDiff, GitIntelligenceError> {
         let mut scope_args: Vec<String> = Vec::new();
         match scope {
             GitDiffScopeV1::WorkingTree => {}
             GitDiffScopeV1::Staged => {
                 // With an unborn HEAD, `--cached` diffs against the empty
                 // tree so newly staged files are reported truthfully.
-                if matches!(self.head_state()?.0, GitHeadStateV1::Unborn { .. }) {
+                if matches!(snapshot.head, GitHeadStateV1::Unborn { .. }) {
                     scope_args.push(
-                        match self.object_format()? {
+                        match snapshot.object_format {
                             GitObjectFormatV1::Sha1 => EMPTY_TREE_SHA1,
                             GitObjectFormatV1::Sha256 => EMPTY_TREE_SHA256,
                         }
@@ -651,36 +818,26 @@ impl NativeGitIntelligence {
             }
         }
         let scope_refs: Vec<&str> = scope_args.iter().map(String::as_str).collect();
-        let abbrev = match self.object_format()? {
+        let abbrev = match snapshot.object_format {
             GitObjectFormatV1::Sha1 => "--abbrev=40",
             GitObjectFormatV1::Sha256 => "--abbrev=64",
         };
 
-        let mut raw_args = vec![
+        let mut args = vec![
             "diff",
             "--raw",
             "-z",
+            "--patch",
             "-M",
             abbrev,
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
         ];
-        raw_args.extend(scope_refs.iter().copied());
-        raw_args.push("--");
-        let raw = self.stdout("diff", &raw_args)?;
-
-        let mut patch_args = vec![
-            "diff",
-            "--patch",
-            "-M",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-        ];
-        patch_args.extend(scope_refs);
-        patch_args.push("--");
-        let patch = self.stdout("diff", &patch_args)?;
+        args.extend(scope_refs);
+        args.push("--");
+        let output = self.run_git("diff", &args)?;
+        let (raw, patch) = split_combined_diff_output(output.stdout)?;
 
         let raw_entries = parse_diff_raw(&raw)?;
         let patch_files = parse_diff_patch(&patch);
@@ -764,19 +921,18 @@ impl NativeGitIntelligence {
     /// Blame/line provenance for one path with boundary, rename-following,
     /// and typed unavailable states.
     pub fn blame(&self, request: &GitBlameRequest) -> Result<GitBlameV1, GitIntelligenceError> {
-        let git_dir = self.git_dir()?;
-        let mut degradations = self.state_degradations(&git_dir)?;
-        let (head, head_degradations) = self.head_state()?;
-        degradations.extend(head_degradations);
+        let snapshot = self.repository_snapshot()?;
+        let mut degradations = snapshot.degradations;
+        degradations.extend(snapshot.head_degradations);
 
-        if matches!(head, GitHeadStateV1::Unborn { .. }) {
+        if matches!(snapshot.head, GitHeadStateV1::Unborn { .. }) {
             return self.blame_unavailable(
                 request,
                 GitBlameAvailabilityV1::UnbornBranch,
                 degradations,
             );
         }
-        if git_dir.join("shallow").is_file() {
+        if snapshot.git_dir.join("shallow").is_file() {
             degradations.insert(GitDegradationV1::ShallowBoundary);
         }
 
@@ -874,7 +1030,8 @@ impl NativeGitIntelligence {
             }
         };
 
-        let joined = self.diff_internal(scope)?;
+        let snapshot = self.repository_snapshot()?;
+        let joined = self.diff_internal(scope, &snapshot)?;
         let mut references = Vec::new();
 
         for joined_entry in joined.entries {
@@ -933,7 +1090,7 @@ impl NativeGitIntelligence {
                 HunkDirectionV1::WorkingTreeToIndex => index_entry.blob.clone(),
                 HunkDirectionV1::IndexToHead => {
                     let base_path = entry.original_path.as_deref().unwrap_or(&entry.path);
-                    self.head_blob_expectation(base_path)?
+                    self.head_blob_expectation(base_path, &snapshot)?
                 }
             };
 
@@ -1013,8 +1170,9 @@ impl NativeGitIntelligence {
     fn head_blob_expectation(
         &self,
         path: &str,
+        snapshot: &RepositoryReadSnapshot,
     ) -> Result<GitBlobExpectationV1, GitIntelligenceError> {
-        if matches!(self.head_state()?.0, GitHeadStateV1::Unborn { .. }) {
+        if matches!(snapshot.head, GitHeadStateV1::Unborn { .. }) {
             return Ok(GitBlobExpectationV1::AbsentFile);
         }
         let output = self.run_git("ls-tree", &["ls-tree", "-z", "HEAD", "--", path])?;
@@ -1158,6 +1316,36 @@ fn parse_status_char(value: char) -> GitChangeKindV1 {
         'U' => GitChangeKindV1::Unmerged,
         _ => GitChangeKindV1::Unmodified,
     }
+}
+
+/// Split one `git diff --raw -z --patch` payload into its raw and patch
+/// sections. Git inserts one additional NUL between the raw record stream and
+/// the first `diff --git`/`diff --cc` patch header.
+fn split_combined_diff_output(output: Vec<u8>) -> Result<(String, String), GitIntelligenceError> {
+    let separator = output
+        .windows(b"\0\0diff --".len())
+        .position(|window| window == b"\0\0diff --");
+    let (raw, patch) = match separator {
+        Some(position) => (&output[..=position], &output[position + 2..]),
+        None if output.is_empty() => (&[][..], &[][..]),
+        None => {
+            return Err(GitIntelligenceError::MalformedOutput {
+                operation: "diff",
+                detail: "combined raw/patch output had no section separator".to_owned(),
+            });
+        }
+    };
+    let raw =
+        String::from_utf8(raw.to_vec()).map_err(|_| GitIntelligenceError::MalformedOutput {
+            operation: "diff",
+            detail: "raw output was not UTF-8".to_owned(),
+        })?;
+    let patch =
+        String::from_utf8(patch.to_vec()).map_err(|_| GitIntelligenceError::MalformedOutput {
+            operation: "diff",
+            detail: "patch output was not UTF-8".to_owned(),
+        })?;
+    Ok((raw, patch))
 }
 
 /// Parse `git diff --raw -z` records.
@@ -1550,6 +1738,132 @@ mod tests {
         fn assert_port<T: GitReadPort>() {}
 
         assert_port::<NativeGitIntelligence>();
+    }
+
+    #[test]
+    fn common_reads_have_bounded_subprocess_counts() {
+        let Some(fixture) = Fixture::standard() else {
+            return;
+        };
+        fixture.write("src/main.txt", "staged\n");
+        fixture.git_ok(&["add", "--", "src/main.txt"]);
+        fixture.write("src/main.txt", "staged\nunstaged\n");
+        let adapter = fixture.adapter();
+
+        let count = |read: &dyn Fn()| {
+            GIT_SUBPROCESS_COUNT.set(0);
+            read();
+            GIT_SUBPROCESS_COUNT.get()
+        };
+        assert_eq!(count(&|| drop(adapter.status().unwrap())), 1);
+        assert_eq!(
+            count(&|| drop(adapter.diff(&GitDiffScopeV1::WorkingTree).unwrap())),
+            1
+        );
+        assert_eq!(
+            count(&|| drop(adapter.diff(&GitDiffScopeV1::Staged).unwrap())),
+            1
+        );
+        assert_eq!(
+            count(&|| drop(adapter.history(&GitHistoryRequest::default()).unwrap())),
+            0
+        );
+        assert_eq!(
+            count(&|| {
+                drop(
+                    adapter
+                        .history(&GitHistoryRequest {
+                            path: Some("src/main.txt".to_owned()),
+                            ..GitHistoryRequest::default()
+                        })
+                        .unwrap(),
+                );
+            }),
+            1
+        );
+        assert_eq!(
+            count(&|| {
+                drop(
+                    adapter
+                        .blame(&GitBlameRequest {
+                            path: "src/main.txt".to_owned(),
+                            follow_renames: false,
+                        })
+                        .unwrap(),
+                );
+            }),
+            1
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit cold/warm performance evidence"]
+    fn measure_one_commit_dirty_worktree_cold_and_warm_reads() {
+        const SAMPLES: usize = 12;
+        const LABELS: [&str; 6] = [
+            "status",
+            "working_diff",
+            "staged_diff",
+            "pathless_history",
+            "path_history",
+            "blame",
+        ];
+        let mut cold: [Vec<u128>; 6] = std::array::from_fn(|_| Vec::with_capacity(SAMPLES));
+        let mut warm: [Vec<u128>; 6] = std::array::from_fn(|_| Vec::with_capacity(SAMPLES));
+        let elapsed = |read: &dyn Fn()| {
+            let started = Instant::now();
+            read();
+            started.elapsed().as_micros()
+        };
+
+        for _ in 0..SAMPLES {
+            let Some(fixture) = Fixture::standard() else {
+                return;
+            };
+            fixture.write("src/main.txt", "staged\n");
+            fixture.git_ok(&["add", "--", "src/main.txt"]);
+            fixture.write("src/main.txt", "staged\nunstaged\n");
+            let adapter = fixture.adapter();
+            let path_history = GitHistoryRequest {
+                path: Some("src/main.txt".to_owned()),
+                ..GitHistoryRequest::default()
+            };
+            let blame = GitBlameRequest {
+                path: "src/main.txt".to_owned(),
+                follow_renames: false,
+            };
+            let reads: [&dyn Fn(); 6] = [
+                &|| drop(adapter.status().unwrap()),
+                &|| {
+                    drop(adapter.diff(&GitDiffScopeV1::WorkingTree).unwrap());
+                },
+                &|| drop(adapter.diff(&GitDiffScopeV1::Staged).unwrap()),
+                &|| drop(adapter.history(&GitHistoryRequest::default()).unwrap()),
+                &|| drop(adapter.history(&path_history).unwrap()),
+                &|| drop(adapter.blame(&blame).unwrap()),
+            ];
+            for (index, read) in reads.into_iter().enumerate() {
+                cold[index].push(elapsed(read));
+                warm[index].push(elapsed(read));
+            }
+        }
+
+        let percentile = |values: &[u128], percentile: usize| {
+            let mut values = values.to_vec();
+            values.sort_unstable();
+            let index = ((values.len() - 1) * percentile).div_ceil(100);
+            values[index]
+        };
+        for index in 0..LABELS.len() {
+            eprintln!(
+                "{} cold_p50={}us cold_p95={}us warm_p50={}us warm_p95={}us",
+                LABELS[index],
+                percentile(&cold[index], 50),
+                percentile(&cold[index], 95),
+                percentile(&warm[index], 50),
+                percentile(&warm[index], 95),
+            );
+        }
     }
 
     fn conflicted_fixture() -> Option<Fixture> {

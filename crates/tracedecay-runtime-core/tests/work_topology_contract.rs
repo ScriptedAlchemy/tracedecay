@@ -34,12 +34,7 @@ fn authority() -> WorkAuthority {
     .expect("authority")
 }
 
-fn event(
-    task_id: TaskId,
-    version: u64,
-    sequence: u64,
-    kind: WorkEventKind,
-) -> WorkEvent {
+fn event(task_id: TaskId, version: u64, sequence: u64, kind: WorkEventKind) -> WorkEvent {
     WorkEvent::new(
         task_id,
         WorkVersion::new(version).expect("version"),
@@ -159,10 +154,7 @@ fn work_topology_rejects_cycles_and_rebuilds_byte_identically() {
             },
         ),
     ]);
-    assert!(matches!(
-        cyclic,
-        Err(WorkTopologyError::DependencyCycle(_))
-    ));
+    assert!(matches!(cyclic, Err(WorkTopologyError::DependencyCycle(_))));
 
     let input = projection();
     let mut reversed_events = vec![
@@ -202,15 +194,13 @@ fn work_topology_rejects_cycles_and_rebuilds_byte_identically() {
     let identity =
         work_topology_projection_identity(GraphNamespace::new("work-topology-test").expect("ns"))
             .expect("identity");
-    let revision =
-        GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-            .expect("revision");
+    let revision = GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+        .expect("revision");
     let original =
         build_work_topology_manifest_checked(identity.clone(), &input, &revision, &|| Ok(()))
             .expect("original");
-    let replayed =
-        build_work_topology_manifest_checked(identity, &rebuilt, &revision, &|| Ok(()))
-            .expect("replayed");
+    let replayed = build_work_topology_manifest_checked(identity, &rebuilt, &revision, &|| Ok(()))
+        .expect("replayed");
     assert_eq!(original.generation, replayed.generation);
     assert_eq!(
         original
@@ -225,9 +215,8 @@ fn work_topology_rejects_cycles_and_rebuilds_byte_identically() {
 #[test]
 fn work_topology_publication_identity_is_content_addressed() {
     let projection = projection();
-    let revision =
-        GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-            .expect("revision");
+    let revision = GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+        .expect("revision");
     let namespace = work_topology_namespace(&authority()).expect("namespace");
     let identity =
         work_topology_projection_identity(namespace.clone()).expect("projection identity");

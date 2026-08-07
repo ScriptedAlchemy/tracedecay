@@ -748,15 +748,33 @@ impl GraphDb {
             &self.inner.poisoned,
             check,
         )?;
+        // The Grafeo transaction (including any publication record) is durably
+        // committed from this point. Cancellation is deliberately not observed
+        // in the commit->refresh window: reporting Cancelled here would mistype
+        // a committed write, skip HNSW refresh and WAL settlement on a Ready
+        // handle, and retry would short-circuit as exact publication replay
+        // without ever repairing them. Settlement failures instead poison the
+        // handle and surface as typed DurabilityUncertain.
         for (identity, property, value) in vector_updates {
-            check()?;
-            let stored = crate::state::load_entity(database, &namespace, &identity)?.ok_or_else(
-                || GraphDbError::Corrupt {
-                    message: format!(
-                        "committed vector entity `{identity}` is missing from native identity index"
-                    ),
-                },
-            )?;
+            let stored = match crate::state::load_entity(database, &namespace, &identity) {
+                Ok(Some(stored)) => stored,
+                Ok(None) => {
+                    self.inner.poisoned.store(true, Ordering::Release);
+                    return Err(GraphDbError::DurabilityUncertain {
+                        message: format!(
+                            "committed vector entity `{identity}` is missing from native identity index; commit settlement is incomplete"
+                        ),
+                    });
+                }
+                Err(error) => {
+                    self.inner.poisoned.store(true, Ordering::Release);
+                    return Err(GraphDbError::DurabilityUncertain {
+                        message: format!(
+                            "committed vector entity `{identity}` could not be read for native index refresh; commit settlement is incomplete: {error}"
+                        ),
+                    });
+                }
+            };
             require_committed_vector_scalar(database, stored.node, &property, &value).inspect_err(
                 |_| {
                     self.inner.poisoned.store(true, Ordering::Release);

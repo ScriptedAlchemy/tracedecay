@@ -4,9 +4,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
+    FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
     ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalStateV1, FactCompatibilityStoreError, FactProposalStoreError,
-    FactStoreError,
+    ProjectMemoryFactProposalStateV1,
 };
 
 use crate::application::memory::{MemoryApplication, MemoryApplicationError};

@@ -6,8 +6,9 @@
 //! through `gix`; query owns status, diff, history, blame, and hunk intelligence.
 
 use std::collections::VecDeque;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use gix::bstr::ByteSlice;
 use sha2::{Digest, Sha256};
@@ -43,6 +44,42 @@ pub struct RepositoryProvenanceAdmissionContext {
     expected_common_dir: Option<PathBuf>,
     /// A deterministic project-domain salt, not a secret or credential.
     privacy_domain_salt: [u8; 32],
+    capture_cache: Arc<Mutex<Option<CachedRepositoryProvenance>>>,
+}
+
+#[derive(Clone)]
+struct CachedRepositoryProvenance {
+    watermark: RepositoryProvenanceWatermark,
+    captured: CapturedRepositoryProvenanceV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RepositoryProvenanceWatermark {
+    canonical_root: PathBuf,
+    canonical_common_dir: PathBuf,
+    head: HeadObservation,
+    index: PersistedFileWatermark,
+    origin_remote: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PersistedFileWatermark {
+    Missing,
+    Unavailable,
+    Present { len: u64, checksum_tail: Vec<u8> },
+}
+
+/// Cloneable immutable repository evidence captured at one exact Git
+/// watermark. Binding it to a sanitized observation performs no Git read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturedRepositoryProvenanceV1 {
+    availability: EvidenceAvailabilityV1<RepositoryProvenanceV1>,
+}
+
+impl CapturedRepositoryProvenanceV1 {
+    pub fn availability(&self) -> &EvidenceAvailabilityV1<RepositoryProvenanceV1> {
+        &self.availability
+    }
 }
 
 impl RepositoryProvenanceAdmissionContext {
@@ -62,6 +99,7 @@ impl RepositoryProvenanceAdmissionContext {
             worktree_id,
             expected_common_dir,
             privacy_domain_salt,
+            capture_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -122,6 +160,7 @@ impl RepositoryProvenanceAdmissionContext {
             worktree_id: Some(worktree_id),
             expected_common_dir: Some(canonical_common_dir),
             privacy_domain_salt,
+            capture_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -152,6 +191,74 @@ impl RepositoryProvenanceAdmissionContext {
         ingested_at: UtcMicros,
         authorization: ResolutionAuthorizationV1,
     ) -> PreparedRepositoryProvenanceV1 {
+        let captured = self.capture_snapshot(ingested_at);
+        self.bind_after_sanitization(
+            &captured,
+            observation,
+            projection_generation,
+            ingested_at,
+            authorization,
+        )
+    }
+
+    /// Capture repository evidence once per exact persisted Git watermark.
+    ///
+    /// The mutex covers the miss and capture, coalescing concurrent records
+    /// without a second repository traversal. A changed watermark invalidates
+    /// immediately; unstable reads are returned but never cached.
+    pub fn capture_snapshot(&self, captured_at: UtcMicros) -> CapturedRepositoryProvenanceV1 {
+        let Some(before) = repository_provenance_watermark(&self.project_root) else {
+            return self.capture_snapshot_uncached(captured_at);
+        };
+        let Ok(mut cache) = self.capture_cache.lock() else {
+            return self.capture_snapshot_uncached(captured_at);
+        };
+        if let Some(cached) = cache.as_ref()
+            && cached.watermark == before
+        {
+            return cached.captured.clone();
+        }
+        let captured = self.capture_snapshot_uncached(captured_at);
+        let after = repository_provenance_watermark(&self.project_root);
+        if after.as_ref() == Some(&before) {
+            *cache = Some(CachedRepositoryProvenance {
+                watermark: before,
+                captured: captured.clone(),
+            });
+        } else {
+            *cache = None;
+        }
+        captured
+    }
+
+    fn capture_snapshot_uncached(&self, captured_at: UtcMicros) -> CapturedRepositoryProvenanceV1 {
+        CapturedRepositoryProvenanceV1 {
+            availability: capture_repository_provenance(
+                &RepositoryProvenanceProbeRequest::new(
+                    &self.project_root,
+                    &self.repository_id,
+                    Some(&self.project_id),
+                    self.worktree_id.as_ref(),
+                    &self.privacy_domain_salt,
+                    captured_at,
+                )
+                .with_expected_common_dir(self.expected_common_dir.as_deref()),
+            ),
+        }
+    }
+
+    /// Bind an already captured snapshot to one sanitized observation.
+    ///
+    /// Identity is rechecked before binding so snapshots cannot cross project,
+    /// repository, or worktree admission contexts.
+    pub fn bind_after_sanitization(
+        &self,
+        captured: &CapturedRepositoryProvenanceV1,
+        observation: &DurableObservationV1,
+        projection_generation: &ProjectionGenerationId,
+        ingested_at: UtcMicros,
+        authorization: ResolutionAuthorizationV1,
+    ) -> PreparedRepositoryProvenanceV1 {
         let ObservationProjectId::Known(observation_project_id) =
             ObservationProjectId::from_observation(observation)
         else {
@@ -160,19 +267,15 @@ impl RepositoryProvenanceAdmissionContext {
         if observation_project_id != &self.project_id {
             return PreparedRepositoryProvenanceV1::unavailable();
         }
-        let captured = capture_repository_provenance(
-            &RepositoryProvenanceProbeRequest::new(
-                &self.project_root,
-                &self.repository_id,
-                Some(&self.project_id),
-                self.worktree_id.as_ref(),
-                &self.privacy_domain_salt,
-                ingested_at,
-            )
-            .with_expected_common_dir(self.expected_common_dir.as_deref()),
-        );
+        if captured.availability.value().is_some_and(|capture| {
+            capture.repository_id() != &self.repository_id
+                || capture.project_id() != Some(&self.project_id)
+                || capture.worktree_id() != self.worktree_id.as_ref()
+        }) {
+            return PreparedRepositoryProvenanceV1::unavailable();
+        }
         prepare_generation_binding(
-            captured,
+            captured.availability.clone(),
             observation,
             projection_generation,
             ingested_at,
@@ -444,7 +547,7 @@ fn bind_capture(
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct HeadObservation {
     attached_ref: EvidenceAvailabilityV1<RefId>,
     commit: EvidenceAvailabilityV1<CommitId>,
@@ -491,6 +594,58 @@ fn observe_head(repo: &gix::Repository) -> HeadObservation {
 fn canonical_path(path: &Path) -> (PathBuf, bool) {
     path.canonicalize()
         .map_or_else(|_| (path.to_path_buf(), true), |path| (path, false))
+}
+
+fn repository_provenance_watermark(project_root: &Path) -> Option<RepositoryProvenanceWatermark> {
+    let repo = gix::open(project_root).ok()?;
+    let workdir = repo.workdir()?;
+    let (canonical_root, root_partial) = canonical_path(workdir);
+    let (canonical_common_dir, common_partial) = canonical_path(repo.common_dir());
+    if root_partial || common_partial {
+        return None;
+    }
+    let origin_remote = repo
+        .config_snapshot()
+        .string("remote.origin.url")
+        .map(|value| value.to_vec());
+    Some(RepositoryProvenanceWatermark {
+        canonical_root,
+        canonical_common_dir,
+        head: observe_head(&repo),
+        index: persisted_index_watermark(&repo.index_path()),
+        origin_remote,
+    })
+}
+
+fn persisted_index_watermark(path: &Path) -> PersistedFileWatermark {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return PersistedFileWatermark::Missing;
+        }
+        Err(_) => return PersistedFileWatermark::Unavailable,
+    };
+    if metadata.len() > MAX_INDEX_FILE_BYTES {
+        return PersistedFileWatermark::Unavailable;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return PersistedFileWatermark::Unavailable;
+    };
+    let retained = metadata.len().min(64);
+    if file
+        .seek(SeekFrom::End(-i64::try_from(retained).unwrap_or(0)))
+        .is_err()
+    {
+        return PersistedFileWatermark::Unavailable;
+    }
+    let mut checksum_tail = vec![0; retained as usize];
+    if file.read_exact(&mut checksum_tail).is_err() {
+        return PersistedFileWatermark::Unavailable;
+    }
+    PersistedFileWatermark::Present {
+        len: metadata.len(),
+        checksum_tail,
+    }
 }
 
 fn discover_canonical_common_dir(project_root: &Path) -> Option<PathBuf> {
@@ -794,3 +949,7 @@ mod remote_normalization_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "repository_provenance_test.rs"]
+mod repository_provenance_test;

@@ -683,13 +683,13 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         .expect("auto-applied proposal has a canonical fact id")
         .clone();
     let projection = memory
-        .get_compatibility_fact(tracedecay_store::CompatibilityFactTargetV1::Canonical(
-            tracedecay_store::CompatibilityFactIdV1::new(owner, canonical_fact_id).unwrap(),
+        .get_compatibility_fact(tracedecay_store::ProjectMemoryFactTargetV1::Canonical(
+            tracedecay_store::ProjectMemoryFactIdV1::new(owner, canonical_fact_id).unwrap(),
         ))
         .await
         .unwrap()
         .expect("auto-applied canonical fact is readable");
-    let tracedecay_store::CompatibilityFactProjectionV1::Available(fact) = projection else {
+    let tracedecay_store::ProjectMemoryFactProjectionV1::Available(fact) = projection else {
         panic!("auto-applied fact must retain an available V1 projection");
     };
     assert_eq!(
@@ -875,7 +875,7 @@ async fn session_fact_proposals_replay_same_run_idempotently() {
     .unwrap();
     let proposals = memory
         .list_compatibility_fact_proposals(
-            Some(tracedecay_store::CompatibilityFactProposalStateV1::PendingApproval),
+            Some(tracedecay_store::ProjectMemoryFactProposalStateV1::PendingApproval),
             None,
             10,
         )
@@ -1170,7 +1170,8 @@ impl AgentTaskBackend for NoSummaryReplayBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         let evidence = &request.context["session_reflection_evidence"];
         assert_eq!(evidence["include_summaries"], json!(false));
@@ -1550,7 +1551,7 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
 
     let proposals = memory
         .list_compatibility_fact_proposals(
-            Some(tracedecay_store::CompatibilityFactProposalStateV1::PendingApproval),
+            Some(tracedecay_store::ProjectMemoryFactProposalStateV1::PendingApproval),
             None,
             10,
         )
@@ -1635,7 +1636,7 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         .expect("submitted authority proposal");
     memory
         .promote_compatibility_fact_proposal(
-            tracedecay_store::CompatibilityFactProposalPromotionV1::new(
+            tracedecay_store::ProjectMemoryFactProposalPromotionV1::new(
                 owner,
                 applied_id.clone(),
                 submitted.revision(),
@@ -1652,7 +1653,7 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         .expect("applied authority proposal");
     assert_eq!(
         applied_before.state(),
-        tracedecay_store::CompatibilityFactProposalStateV1::Applied
+        tracedecay_store::ProjectMemoryFactProposalStateV1::Applied
     );
 
     let paraphrase = json!({

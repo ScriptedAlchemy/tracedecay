@@ -4,8 +4,8 @@ use thiserror::Error;
 
 use tracedecay_domain::{DomainError, FactOwnerV1, SourceStoreId};
 use tracedecay_store::{
-    ProjectMemoryFeedbackRepairProgressV1, FactCompatibilityStoreError, FactProposalStoreError,
-    FactStoreError,
+    FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,
+    ProjectMemoryFeedbackRepairProgressV1,
 };
 
 use super::anchors::EvidenceAnchorResolutionError;

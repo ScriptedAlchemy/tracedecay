@@ -16,8 +16,6 @@ use tracedecay_domain::{
     EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, RelationEdgeKindV1,
     RepositoryId, SourceFreshness, SymbolOccurrenceId, canonical_sha256,
 };
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
@@ -25,6 +23,8 @@ use tracedecay_graph_db::{
     GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
     SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
 
 mod builder;
 mod reader;

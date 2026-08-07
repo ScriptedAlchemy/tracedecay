@@ -1,0 +1,34 @@
+diff a/crates/tracedecay-global-db/src/transcript.rs b/crates/tracedecay-global-db/src/transcript.rs	(rejected hunks)
+@@ -801,11 +498,7 @@ impl RegisteredGlobalDb {
+                 storage_root,
+             );
+ 
+-        let write_result: Result<
+-            Vec<crate::session_temporal::relations::SessionRelationProjection>,
+-            TranscriptPersistenceError,
+-        > = async {
+-            let mut relation_projections = Vec::new();
++        let write_result: Result<(), TranscriptPersistenceError> = async {
+             if let TranscriptWritePolicy::Full { expected_offset } = policy {
+                 require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
+             }
+@@ -819,17 +512,12 @@ impl RegisteredGlobalDb {
+                 for message in &batch.messages {
+                     match policy {
+                         TranscriptWritePolicy::Full { .. } => {
+-                            if let Some(projection) = self
+-                                .upsert_session_message_in_existing_tx(
++                            self.upsert_session_message_in_existing_tx(
+                                 &transaction,
+                                 message,
+                                 &mut payload_rollback,
+-                                Arc::clone(&cancellation),
+                             )
+-                            .await?
+-                            {
+-                                relation_projections.push(projection);
+-                            }
++                            .await?;
+                         }
+                         TranscriptWritePolicy::ProjectionOnly => {
+                             let text =

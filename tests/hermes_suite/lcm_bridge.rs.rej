@@ -1,0 +1,1588 @@
+diff a/tests/hermes_suite/lcm_bridge.rs b/tests/hermes_suite/lcm_bridge.rs	(rejected hunks)
+@@ -572,9 +576,6 @@ assert status["project_root"] == "/tmp/project"
+ assert status["tracedecay_binary_path"] == plugin.tools.TRACEDECAY_BIN
+ assert isinstance(status["tracedecay_binary_available"], bool)
+ assert status["context_engine_tool_names"] == sorted(schema_names)
+-assert status["route_failures"] == {}
+-assert status["cooldown_routes"] == []
+-assert status["route_cooldowns"] == {}
+ assert status["last_compress_result"] == {"status": "never_ran"}
+ assert status["live_ingest"]["registered_tool_names"] == []
+ assert status["live_ingest"]["context_tool_names"] == []
+@@ -883,200 +884,6 @@ assert preflight_calls[1][1]["messages"] == changed_messages
+     );
+ }
+ 
+-#[test]
+-fn context_engine_wraps_extraction_result_into_provided_summarizer_route() {
+-    run_generated_plugin_script(
+-        "check_auxiliary_extraction_route.py",
+-        r#"
+-import json
+-import os
+-
+-os.environ["LCM_EXTRACTION_ENABLED"] = "true"
+-os.environ["LCM_EXTRACTION_MODEL"] = "openai/gpt-5.4-mini"
+-os.environ["LCM_EXTRACTION_OUTPUT_PATH"] = "/tmp/extractions"
+-os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
+-
+-compress_calls = []
+-
+-def fake_call_tracedecay_json(name, args, **kwargs):
+-    if name != "tracedecay_lcm_compress":
+-        raise AssertionError(name)
+-    compress_calls.append((name, dict(args)))
+-    summarizer_mode = (args.get("summarizer") or {}).get("mode")
+-    if summarizer_mode == "hermes_auxiliary":
+-        return {
+-            "status": "needs_summary",
+-            "summary_request": {
+-                "focus_topic": "billing",
+-                "source_range": {"from_store_id": 11, "to_store_id": 11},
+-                "source_messages": [
+-                    {"store_id": 11, "role": "user", "content": "We decided to rotate keys weekly."}
+-                ],
+-                "extraction_request": {
+-                    "session_id": "session-1",
+-                    "source_range": {"from_store_id": 11, "to_store_id": 11},
+-                    "source_messages": [
+-                        {"store_id": 11, "role": "user", "content": "We decided to rotate keys weekly."}
+-                    ],
+-                    "serialized_messages": "[USER]: We decided to rotate keys weekly.",
+-                    "prompt": "extract decisions"
+-                },
+-            },
+-            "replay_messages": [{"role": "user", "content": "fresh"}],
+-        }
+-    if summarizer_mode == "provided":
+-        return {
+-            "status": "ok",
+-            "reason": "compressed_backlog",
+-            "summary_nodes_created": 1,
+-            "summary_nodes": [],
+-            "replay_messages": [{"role": "system", "content": "summary"}],
+-            "frontier": {
+-                "provider": "cursor",
+-                "conversation_id": "session-1",
+-                "current_session_id": "session-1",
+-                "current_frontier_store_id": 11,
+-                "last_finalized_session_id": None,
+-                "last_finalized_frontier_store_id": None,
+-                "maintenance_debt": [],
+-            },
+-        }
+-    raise AssertionError(f"unexpected summarizer mode: {summarizer_mode}")
+-
+-plugin.call_tracedecay_json = fake_call_tracedecay_json
+-
+-class _FakeMessage:
+-    def __init__(self, content):
+-        self.content = content
+-
+-class _FakeChoice:
+-    def __init__(self, content):
+-        self.message = _FakeMessage(content)
+-
+-class _FakeResponse:
+-    def __init__(self, content):
+-        self.choices = [_FakeChoice(content)]
+-
+-class _AuxClient:
+-    def __init__(self):
+-        self.calls = []
+-    def call_llm(self, **kwargs):
+-        self.calls.append(dict(kwargs))
+-        if kwargs.get("task") == "extraction":
+-            return _FakeResponse("<think>hidden reasoning</think>- Decision: rotate keys weekly")
+-        if kwargs.get("task") == "compression":
+-            return _FakeResponse("Compact summary text")
+-        raise AssertionError(kwargs.get("task"))
+-
+-agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
+-
+-engine = plugin.TraceDecayContextEngine()
+-engine.agent = agent
+-engine.initialize(session_id="session-1", project_root="/tmp/project")
+-
+-result = engine._compress_to_result([{"role": "user", "content": "current"}], current_tokens=700)
+-
+-assert result["status"] == "ok"
+-assert len(compress_calls) == 2
+-provided_args = compress_calls[1][1]
+-assert provided_args["summarizer"]["mode"] == "provided"
+-route_payload = json.loads(provided_args["summarizer"]["route"])
+-assert route_payload["pre_compaction_extraction"]["status"] == "ok"
+-assert route_payload["pre_compaction_extraction"]["items"] == ["Decision: rotate keys weekly"]
+-assert route_payload["pre_compaction_extraction"]["model"] == "openai/gpt-5.4-mini"
+-assert route_payload["pre_compaction_extraction"]["output_path"] == "/tmp/extractions"
+-assert route_payload["route"] == "default"
+-
+-tasks = [call["task"] for call in agent.auxiliary_client.calls]
+-assert tasks == ["extraction", "compression"]
+-"#,
+-        "generated context engine should attach extraction results to provided route envelope",
+-    );
+-}
+-
+-#[test]
+-fn context_engine_compress_continues_when_extraction_call_fails() {
+-    run_generated_plugin_script(
+-        "check_auxiliary_extraction_failure_non_blocking.py",
+-        r#"
+-import json
+-import os
+-
+-os.environ["LCM_EXTRACTION_ENABLED"] = "true"
+-
+-compress_calls = []
+-
+-def fake_call_tracedecay_json(name, args, **kwargs):
+-    compress_calls.append(dict(args))
+-    mode = (args.get("summarizer") or {}).get("mode")
+-    if mode == "hermes_auxiliary":
+-        return {
+-            "status": "needs_summary",
+-            "summary_request": {
+-                "source_messages": [{"store_id": 1, "role": "user", "content": "hello"}],
+-                "source_range": {"from_store_id": 1, "to_store_id": 1},
+-                "extraction_request": {
+-                    "session_id": "session-1",
+-                    "source_range": {"from_store_id": 1, "to_store_id": 1},
+-                    "prompt": "extract decisions"
+-                },
+-            },
+-            "replay_messages": [],
+-        }
+-    return {
+-        "status": "ok",
+-        "reason": "compressed_backlog",
+-        "summary_nodes_created": 1,
+-        "summary_nodes": [],
+-        "replay_messages": [],
+-        "frontier": {
+-            "provider": "cursor",
+-            "conversation_id": "session-1",
+-            "current_session_id": "session-1",
+-            "current_frontier_store_id": 1,
+-            "last_finalized_session_id": None,
+-            "last_finalized_frontier_store_id": None,
+-            "maintenance_debt": [],
+-        },
+-    }
+-
+-plugin.call_tracedecay_json = fake_call_tracedecay_json
+-
+-class _FakeMessage:
+-    def __init__(self, content):
+-        self.content = content
+-
+-class _FakeChoice:
+-    def __init__(self, content):
+-        self.message = _FakeMessage(content)
+-
+-class _FakeResponse:
+-    def __init__(self, content):
+-        self.choices = [_FakeChoice(content)]
+-
+-class _AuxClient:
+-    def call_llm(self, **kwargs):
+-        if kwargs.get("task") == "extraction":
+-            raise RuntimeError("extraction backend unavailable")
+-        return _FakeResponse("summary text")
+-
+-agent = type("Agent", (), {"auxiliary_client": _AuxClient()})()
+-
+-engine = plugin.TraceDecayContextEngine()
+-engine.agent = agent
+-engine.initialize(session_id="session-1", project_root="/tmp/project")
+-
+-result = engine._compress_to_result([{"role": "user", "content": "current"}], current_tokens=700)
+-assert result["status"] == "ok"
+-provided = compress_calls[1]
+-payload = json.loads(provided["summarizer"]["route"])
+-assert payload["pre_compaction_extraction"]["status"] == "failed_non_blocking"
+-assert "extraction backend unavailable" in payload["pre_compaction_extraction"]["error"]
+-"#,
+-        "generated context engine should never block compression when extraction fails",
+-    );
+-}
+-
+ #[test]
+ fn generated_context_engine_home_default_uses_installed_profile() {
+     run_generated_plugin_script(
+@@ -1433,7 +1240,6 @@ assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_prefli
+ args_index = argv.index("--args")
+ args = json.loads(argv[args_index + 1])
+ assert args == {
+-    "format": "json",
+     "provider": "hermes",
+     "fresh_tail_count": 64,
+     "leaf_chunk_tokens": 20000,
+@@ -1518,7 +1324,6 @@ assert argv[0] == plugin.tools.TRACEDECAY_BIN
+ assert argv[1:6] == ["tool", "--project", "/tmp/project", "tracedecay_lcm_session_boundary", "--json"]
+ args = json.loads(argv[argv.index("--args") + 1])
+ assert args == {
+-    "format": "json",
+     "provider": "hermes",
+     "session_id": "session-b",
+     "old_session_id": "session-c",
+@@ -1625,8 +1430,7 @@ if args_ref.startswith("@"):
+ else:
+     args = json.loads(args_ref)
+ # expanduser matches the plugin's fallback byte-for-byte on Windows too.
+-assert args == {
+-    "format": "json",
++expected_args = {
+     "response_handle_project_root": "/tmp/project",
+     "provider": "hermes",
+     "fresh_tail_count": 64,
+@@ -1638,11 +1442,10 @@ assert args == {
+     "summary_fan_in": 4,
+     "incremental_max_depth": 1,
+     "session_id": "session-2",
+-    "messages": messages,
+     "current_tokens": 1200,
+     "focus_topic": "handoff",
+-    "summarizer": {"mode": "hermes_auxiliary"},
+ }
++assert args == expected_args, {"actual": args, "expected": expected_args}
+ "#,
+         "generated context engine should call tracedecay_lcm_compress through the JSON bridge",
+     );
+@@ -1739,7 +1542,8 @@ for args in (preflight_args, compress_args):
+ assert preflight_args["session_id"] == "session-1"
+ assert preflight_args["current_tokens"] == 800
+ assert preflight_args["messages"] == [{"role": "user", "content": "hello"}]
+-assert compress_args["summarizer"] == {"mode": "hermes_auxiliary"}
++assert "messages" not in compress_args
++assert "summarizer" not in compress_args
+ "#,
+         "generated context engine should project configured Hermes defaults into preflight/compress args",
+     );
+@@ -1848,71 +1652,6 @@ assert explicit_args["hermes_home"] == "/tmp/hermes-profile"
+     );
+ }
+ 
+-#[test]
+-fn auxiliary_summary_strips_reasoning_tags() {
+-    run_python_check(
+-        "check_auxiliary_summary.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-
+-parent_name = "_hermes_user_context"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-assert plugin._strip_reasoning("<think>x</think>Useful") == "Useful"
+-assert plugin._strip_reasoning("<THINKING>x</THINKING>\nUseful") == "Useful"
+-assert plugin._strip_reasoning("<reasoning>x</reasoning>\nUseful") == "Useful"
+-assert plugin._strip_reasoning("<thought>x</thought>\nUseful") == "Useful"
+-assert plugin._strip_reasoning("<REASONING_SCRATCHPAD>x</REASONING_SCRATCHPAD>\nUseful") == "Useful"
+-
+-class Aux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        return "<think>hidden chain</think>\nUseful compact summary"
+-
+-agent = type("Agent", (), {"auxiliary_client": Aux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-summary = engine._call_auxiliary_summary(
+-    "Summarize",
+-    [{"role": "user", "content": "raw"}],
+-)
+-
+-assert summary["status"] == "ok"
+-assert summary["text"] == "Useful compact summary"
+-assert summary["route"] == "default"
+-assert summary["model"] is None
+-assert agent.auxiliary_client.calls[0]["task"] == "compression"
+-# Hermes _call_llm_for_summary sends the full prompt as one user message.
+-assert agent.auxiliary_client.calls[0]["messages"] == [
+-    {"role": "user", "content": "Summarize"},
+-]
+-assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
+-"#,
+-        "generated context engine should strip reasoning from auxiliary summaries",
+-    );
+-}
+-
+ #[test]
+ fn context_engine_expand_query_synthesizes_and_degrades() {
+     run_python_check(
+@@ -2042,131 +1781,6 @@ assert failed_payload["matches"], "retrieval must survive synthesis failures"
+     );
+ }
+ 
+-#[test]
+-fn context_engine_compress_provides_auxiliary_summary_after_needs_summary() {
+-    run_python_check(
+-        "check_auxiliary_compress_flow.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import json
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-
+-parent_name = "_hermes_user_context"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-calls = []
+-old_one = "old one " * 20
+-old_two = "old two " * 20
+-
+-class Result:
+-    def __init__(self, returncode, stdout, stderr):
+-        self.returncode = returncode
+-        self.stdout = stdout
+-        self.stderr = stderr
+-
+-def mcp_response(inner):
+-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+-
+-def fake_run(argv, check, capture_output, text, timeout, shell):
+-    args = json.loads(argv[argv.index("--args") + 1])
+-    calls.append(args)
+-    if len(calls) == 1:
+-        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+-        return mcp_response({
+-            "status": "needs_summary",
+-            "reason": "hermes_auxiliary_not_available_in_task_9",
+-            "summary_nodes_created": 0,
+-            "summary_nodes": [],
+-            "replay_messages": [{"role": "user", "content": "fresh"}],
+-            "frontier": {"current_frontier_store_id": None},
+-            "summary_request": {
+-                "provider": "cursor",
+-                "session_id": "session-1",
+-                "focus_topic": "handoff",
+-                "prompt": "Summarize backlog",
+-                "source_range": {"from_store_id": 1, "to_store_id": 2},
+-                "source_messages": [
+-                    {"store_id": 1, "role": "user", "content": old_one},
+-                    {"store_id": 2, "role": "assistant", "content": old_two},
+-                ],
+-            },
+-        })
+-    assert args["summarizer"] == {
+-        "mode": "provided",
+-        "summary_text": "Useful compact summary",
+-        "route": "default",
+-    }
+-    return mcp_response({
+-        "status": "ok",
+-        "reason": "compressed_backlog",
+-        "summary_nodes_created": 1,
+-        "summary_nodes": [],
+-        "replay_messages": [{"role": "system", "content": "Useful compact summary"}],
+-        "frontier": {"current_frontier_store_id": 2},
+-        "summary_request": None,
+-    })
+-
+-plugin.tools.subprocess.run = fake_run
+-
+-class Aux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        return "<thinking>hidden chain</thinking>\nUseful compact summary"
+-
+-agent = type("Agent", (), {"auxiliary_client": Aux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-result = engine._compress_to_result(
+-    [{"role": "user", "content": old_one}],
+-    current_tokens=1200,
+-    focus_topic="handoff",
+-)
+-
+-assert result["status"] == "ok"
+-assert result["reason"] == "compressed_backlog"
+-assert len(calls) == 2
+-assert agent.auxiliary_client.calls[0]["task"] == "compression"
+-# Hermes escalation L1 contract: a single user message carrying the depth-0
+-# prompt with focus brief, token budget, and serialized CONTENT block.
+-assert len(agent.auxiliary_client.calls[0]["messages"]) == 1
+-assert agent.auxiliary_client.calls[0]["messages"][0]["role"] == "user"
+-prompt = agent.auxiliary_client.calls[0]["messages"][0]["content"]
+-assert prompt.startswith("Summarize this conversation segment for future turns.")
+-assert "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values." in prompt
+-assert 'End with: "Expand for details about: <what was compressed>"' in prompt
+-assert "Focus brief:" in prompt
+-assert "Primary focus: handoff" in prompt
+-assert "Target ~2000 tokens." in prompt
+-assert "CONTENT:" in prompt
+-assert f"[USER]: {old_one}" in prompt
+-assert f"[ASSISTANT]: {old_two}" in prompt
+-assert agent.auxiliary_client.calls[0]["temperature"] == 0.3
+-assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
+-"#,
+-        "generated context engine should provide auxiliary summaries back to Rust",
+-    );
+-}
+-
+ #[test]
+ fn context_engine_marks_no_usable_replay_as_aborted() {
+     run_generated_plugin_script(
+@@ -2909,19 +2523,22 @@ assert payload["answer"] == "retrieval-only answer"
+ }
+ 
+ #[test]
+-fn context_engine_compress_rejects_oversized_auxiliary_summary() {
+-    run_python_check(
+-        "check_auxiliary_oversized_fallback.py",
++fn generated_plugin_reads_lcm_env_config_overrides() {
++    run_generated_plugin_script(
++        "check_lcm_env_config.py",
+         r#"
+ import importlib.machinery
+ import importlib.util
+ import json
++import os
+ import pathlib
+ import sys
+ 
+-plugin_dir = pathlib.Path(sys.argv[1])
++for key in [name for name in os.environ if name.startswith("LCM_")]:
++    del os.environ[key]
+ 
+-parent_name = "_hermes_user_context"
++plugin_dir = pathlib.Path(sys.argv[1])
++parent_name = "_hermes_user_env_config"
+ parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+ parent_spec.submodule_search_locations = []
+ parent_module = importlib.util.module_from_spec(parent_spec)
+@@ -2938,8 +2555,6 @@ sys.modules[module_name] = plugin
+ spec.loader.exec_module(plugin)
+ 
+ calls = []
+-source_content = "source text " * 600
+-huge_summary = "non-compressing summary " * 600
+ 
+ class Result:
+     def __init__(self, returncode, stdout, stderr):
+@@ -2947,928 +2562,34 @@ class Result:
+         self.stdout = stdout
+         self.stderr = stderr
+ 
+-def mcp_response(inner):
+-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+-
+ def fake_run(argv, check, capture_output, text, timeout, shell):
+-    args = json.loads(argv[argv.index("--args") + 1])
+-    calls.append(args)
+-    if len(calls) == 1:
+-        return mcp_response({
+-            "status": "needs_summary",
+-            "reason": "summary_required",
+-            "summary_nodes_created": 0,
+-            "summary_nodes": [],
+-            "replay_messages": [{"role": "user", "content": "fresh"}],
+-            "frontier": {"current_frontier_store_id": None},
+-            "summary_request": {
+-                "provider": "cursor",
+-                "session_id": "session-1",
+-                "focus_topic": "handoff",
+-                "prompt": "Summarize backlog",
+-                "source_range": {"from_store_id": 1, "to_store_id": 1},
+-                "source_messages": [
+-                    {"store_id": 1, "role": "user", "content": source_content},
+-                ],
+-            },
+-        })
+-    summary = args["summarizer"]
+-    assert summary["mode"] == "provided"
+-    assert summary["summary_text"] != huge_summary
+-    assert len(summary["summary_text"]) < len(source_content)
+-    assert summary["summary_text"].endswith("[deterministic compression fallback]")
+-    assert summary["route"] == "deterministic_fallback"
+-    return mcp_response({
+-        "status": "ok",
+-        "reason": "compressed_backlog",
+-        "summary_nodes_created": 1,
+-        "summary_nodes": [],
+-        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
+-        "frontier": {"current_frontier_store_id": 1},
+-        "summary_request": None,
+-    })
++    calls.append(json.loads(argv[argv.index("--args") + 1]))
++    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
++    return Result(0, json.dumps(outer), "")
+ 
+ plugin.tools.subprocess.run = fake_run
+ 
+-class OversizedAux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        return huge_summary
+-
+-agent = type("Agent", (), {"auxiliary_client": OversizedAux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-result = engine._compress_to_result(
+-    [{"role": "user", "content": source_content}],
+-    current_tokens=1200,
+-    focus_topic="handoff",
+-)
++# Documented hermes-lcm env vars (LCMConfig.from_env) override both the
++# hardcoded defaults and host ctx.config attributes.
++os.environ.update({
++    "LCM_FRESH_TAIL_COUNT": "7",
++    "LCM_LEAF_CHUNK_TOKENS": "111",
++    "LCM_CONTEXT_THRESHOLD": "0.5",
++    "LCM_CONDENSATION_FANIN": "9",
++    "LCM_DYNAMIC_LEAF_CHUNK_ENABLED": "true",
++    "LCM_DYNAMIC_LEAF_CHUNK_MAX": "222",
++    "LCM_MAX_ASSEMBLY_TOKENS": "333",
++    "LCM_RESERVE_TOKENS_FLOOR": "444",
++    "LCM_INCREMENTAL_MAX_DEPTH": "3",
++    "LCM_IGNORE_SESSION_PATTERNS": "tmp-*, scratch-*",
++    "LCM_STATELESS_SESSION_PATTERNS": "ro-*",
++    "LCM_IGNORE_MESSAGE_PATTERNS": "^/lcm ",
++})
+ 
+-assert result["status"] == "ok"
+-assert result["fallback_used"] is True
+-assert len(calls) == 2
+-# Hermes escalation: oversized L1 retries once with the aggressive L2
+-# bullet prompt at half budget before deterministic (L3) fallback.
+-assert len(agent.auxiliary_client.calls) == 2
+-l1_prompt = agent.auxiliary_client.calls[0]["messages"][0]["content"]
+-l2_prompt = agent.auxiliary_client.calls[1]["messages"][0]["content"]
+-assert l1_prompt.startswith("Summarize this conversation segment for future turns.")
+-assert l2_prompt.startswith("Compress this into bullet points. Maximum 1000 tokens.")
+-assert "Keep only: decisions made, files changed, errors hit, current state." in l2_prompt
+-assert agent.auxiliary_client.calls[0]["max_tokens"] == 4000
+-assert agent.auxiliary_client.calls[1]["max_tokens"] == 2000
+-"#,
+-        "generated context engine should reject oversized auxiliary summaries",
+-    );
+-}
+-
+-#[test]
+-fn retry_worthy_auxiliary_failures_fall_through_escalation_rungs() {
+-    run_generated_plugin_script(
+-        "check_auxiliary_retry_shrinks_chunk.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import json
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_context"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-calls = []
+-source_messages = [
+-    {"store_id": 1, "role": "user", "content": "old one " * 20},
+-    {"store_id": 2, "role": "assistant", "content": "old two " * 20},
+-]
+-
+-class Result:
+-    def __init__(self, returncode, stdout, stderr):
+-        self.returncode = returncode
+-        self.stdout = stdout
+-        self.stderr = stderr
+-
+-def mcp_response(inner):
+-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+-
+-def needs_summary(messages):
+-    return {
+-        "status": "needs_summary",
+-        "reason": "summary_required",
+-        "summary_nodes_created": 0,
+-        "summary_nodes": [],
+-        "replay_messages": [{"role": "user", "content": "fresh"}],
+-        "frontier": {"current_frontier_store_id": None, "maintenance_debt": []},
+-        "summary_request": {
+-            "provider": "cursor",
+-            "session_id": "session-1",
+-            "focus_topic": "handoff",
+-            "prompt": "Summarize backlog",
+-            "source_range": {
+-                "from_store_id": messages[0]["store_id"],
+-                "to_store_id": messages[-1]["store_id"],
+-            },
+-            "source_messages": messages,
+-        },
+-    }
+-
+-def fake_run(argv, check, capture_output, text, timeout, shell):
+-    args = json.loads(argv[argv.index("--args") + 1])
+-    calls.append(args)
+-    if len(calls) == 1:
+-        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+-        assert "max_source_messages" not in args
+-        return mcp_response(needs_summary(source_messages))
+-    assert args["summarizer"]["mode"] == "provided"
+-    assert args["summarizer"]["route"] == "deterministic_fallback"
+-    assert args["summarizer"]["summary_text"].endswith("[deterministic compression fallback]")
+-    return mcp_response({
+-        "status": "ok",
+-        "reason": "compressed_backlog",
+-        "summary_nodes_created": 1,
+-        "summary_nodes": [],
+-        "replay_messages": [{"role": "system", "content": args["summarizer"]["summary_text"]}],
+-        "frontier": {"current_frontier_store_id": 1, "maintenance_debt": [
+-            {"kind": "raw_backlog", "from_store_id": 2, "to_store_id": 2}
+-        ]},
+-        "summary_request": None,
+-        "replay_token_estimate": 3,
+-        "replay_over_budget": False,
+-    })
+-
+-plugin.tools.subprocess.run = fake_run
+-
+-class ContextLimitedAux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        if "old two" in kwargs["messages"][0]["content"]:
+-            raise RuntimeError("context length exceeded")
+-        return "Smaller chunk summary"
+-
+-agent = type("Agent", (), {"auxiliary_client": ContextLimitedAux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-result = engine._compress_to_result(
+-    [{"role": "user", "content": "active"}],
+-    current_tokens=1200,
+-    focus_topic="handoff",
+-)
+-
+-assert result["status"] == "ok"
+-assert len(calls) == 2
+-assert len(agent.auxiliary_client.calls) == 2
+-assert "old two" in agent.auxiliary_client.calls[0]["messages"][0]["content"]
+-assert "old two" in agent.auxiliary_client.calls[1]["messages"][0]["content"]
+-assert result["auxiliary_attempts"] == 1
+-assert result["auxiliary_retry_status"] == "fallback_summary"
+-assert result["auxiliary_error_classification"] == "retry_worthy"
+-"#,
+-        "retry-worthy auxiliary failures should fall through L1/L2 before deterministic fallback",
+-    );
+-}
+-
+-#[test]
+-fn generated_auxiliary_retry_classifier_matches_hermes_context_markers() {
+-    run_generated_plugin_script(
+-        "check_auxiliary_retry_classifier.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_context_retry_classifier"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-retry_worthy_markers = (
+-    "context length exceeded",
+-    "maximum context",
+-    "max context",
+-    "too many tokens",
+-    "token limit",
+-    "prompt is too long",
+-    "input too long",
+-    "request too large",
+-    "timed out",
+-    "timeout",
+-)
+-for marker in retry_worthy_markers:
+-    assert plugin._auxiliary_error_classification(RuntimeError(marker)) == "retry_worthy", marker
+-
+-permanent_markers = (
+-    "rate limit",
+-    "temporarily unavailable",
+-    "service unavailable",
+-    "overloaded",
+-    "try again",
+-    "route unavailable",
+-)
+-for marker in permanent_markers:
+-    assert plugin._auxiliary_error_classification(RuntimeError(marker)) == "permanent", marker
+-"#,
+-        "generated auxiliary retry classifier should match Hermes LCM context markers",
+-    );
+-}
+-
+-#[test]
+-fn permanent_auxiliary_failure_falls_back_deterministically() {
+-    run_generated_plugin_script(
+-        "check_auxiliary_permanent_failure.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import json
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_context"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-calls = []
+-
+-class Result:
+-    def __init__(self, returncode, stdout, stderr):
+-        self.returncode = returncode
+-        self.stdout = stdout
+-        self.stderr = stderr
+-
+-def mcp_response(inner):
+-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+-
+-def fake_run(argv, check, capture_output, text, timeout, shell):
+-    args = json.loads(argv[argv.index("--args") + 1])
+-    calls.append(args)
+-    if len(calls) == 1:
+-        assert args["summarizer"] == {"mode": "hermes_auxiliary"}
+-        return mcp_response({
+-            "status": "needs_summary",
+-            "reason": "summary_required",
+-            "summary_nodes_created": 0,
+-            "summary_nodes": [],
+-            "replay_messages": [{"role": "user", "content": "fresh"}],
+-            "frontier": {"current_frontier_store_id": None, "maintenance_debt": [
+-                {"kind": "raw_backlog", "from_store_id": 1, "to_store_id": 2}
+-            ]},
+-            "summary_request": {
+-                "provider": "cursor",
+-                "session_id": "session-1",
+-                "focus_topic": "handoff",
+-                "prompt": "Summarize backlog",
+-                "source_range": {"from_store_id": 1, "to_store_id": 2},
+-                "source_messages": [
+-                    {"store_id": 1, "role": "user", "content": "old one"},
+-                    {"store_id": 2, "role": "assistant", "content": "old two"},
+-                ],
+-            },
+-        })
+-
+-    assert args["summarizer"]["mode"] == "provided"
+-    assert args["summarizer"]["route"] == "deterministic_fallback"
+-    assert args["summarizer"]["summary_text"].endswith("[deterministic compression fallback]")
+-    return mcp_response({
+-        "status": "ok",
+-        "reason": "compressed_backlog",
+-        "summary_nodes_created": 1,
+-        "summary_nodes": [],
+-        "replay_messages": [{"role": "system", "content": args["summarizer"]["summary_text"]}],
+-        "frontier": {"current_frontier_store_id": 1, "maintenance_debt": []},
+-        "summary_request": None,
+-        "replay_token_estimate": 3,
+-        "replay_over_budget": False,
+-    })
+-
+-plugin.tools.subprocess.run = fake_run
+-
+-class BadTemplateAux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        raise RuntimeError("template exploded")
+-
+-agent = type("Agent", (), {"auxiliary_client": BadTemplateAux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-result = engine._compress_to_result(
+-    [{"role": "user", "content": "active"}],
+-    current_tokens=1200,
+-    focus_topic="handoff",
+-)
+-
+-assert result["status"] == "ok"
+-assert result["reason"] == "compressed_backlog"
+-assert result["auxiliary_attempts"] == 1
+-assert result["auxiliary_retry_status"] == "fallback_summary"
+-assert result["auxiliary_error_classification"] == "permanent"
+-assert result["frontier"]["current_frontier_store_id"] == 1
+-assert len(calls) == 2
+-assert len(agent.auxiliary_client.calls) == 2
+-"#,
+-        "permanent auxiliary failures should still fall through to deterministic fallback",
+-    );
+-}
+-
+-#[test]
+-fn auxiliary_summary_falls_back_and_tracks_route_cooldown() {
+-    run_python_check(
+-        "check_auxiliary_fallbacks.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-
+-parent_name = "_hermes_user_context"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-class RoutingAux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        if kwargs.get("model") == "primary":
+-            raise RuntimeError("primary unavailable")
+-        return "<reasoning>scratch</reasoning>Fallback route summary"
+-
+-agent = type("Agent", (), {"auxiliary_client": RoutingAux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-summary = engine._call_auxiliary_summary(
+-    "Summarize",
+-    [{"role": "user", "content": "raw"}],
+-    routes=[
+-        {"model": "primary", "temperature": 0.2},
+-        {"model": "backup", "temperature": 0.3},
+-    ],
+-)
+-assert summary["status"] == "ok"
+-assert summary["text"] == "Fallback route summary"
+-assert summary["route"] == "backup"
+-assert summary["model"] == "backup"
+-assert engine._route_failures["primary"] == 1
+-assert "primary" not in engine._cooldown_until
+-assert [call.get("model") for call in agent.auxiliary_client.calls] == ["primary", "backup"]
+-summary_second = engine._call_auxiliary_summary(
+-    "Summarize again",
+-    [{"role": "user", "content": "raw"}],
+-    routes=[
+-        {"model": "primary", "temperature": 0.2},
+-        {"model": "backup", "temperature": 0.3},
+-    ],
+-)
+-assert summary_second["status"] == "ok"
+-assert engine._route_failures["primary"] == 2
+-assert engine._cooldown_until["primary"] > 0
+-
+-class FailingAux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        raise RuntimeError("route unavailable")
+-
+-failing_agent = type("Agent", (), {"auxiliary_client": FailingAux()})()
+-failing_engine = plugin.TraceDecayContextEngine()
+-failing_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
+-fallback = failing_engine._call_auxiliary_summary(
+-    "Summarize",
+-    [{"role": "user", "content": "A" * 10000}],
+-)
+-assert fallback["status"] == "fallback"
+-assert len(fallback["text"]) < 10000
+-assert fallback["text"].endswith("[deterministic compression fallback]")
+-assert failing_engine._route_failures["default"] == 1
+-assert "default" not in failing_engine._cooldown_until
+-
+-import os
+-os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"] = "1"
+-os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"] = "30"
+-tuned_engine = plugin.TraceDecayContextEngine()
+-tuned_engine.initialize(session_id="session-1", project_root="/tmp/project", agent=failing_agent)
+-tuned_engine._call_auxiliary_summary(
+-    "Summarize",
+-    [{"role": "user", "content": "B" * 1000}],
+-)
+-assert tuned_engine._route_failures["default"] == 1
+-assert tuned_engine._cooldown_until["default"] > 0
+-del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD"]
+-del os.environ["LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS"]
+-"#,
+-        "generated context engine should route, cooldown, and fallback auxiliary summaries",
+-    );
+-}
+-
+-#[test]
+-fn auxiliary_model_route_splits_resolvable_providers() {
+-    run_generated_plugin_script(
+-        "check_auxiliary_model_routing.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import pathlib
+-import sys
+-import types
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_model_routing"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-# Fake Hermes host provider registries used by the model-route resolver.
+-hermes_cli = types.ModuleType("hermes_cli")
+-hermes_cli.__path__ = []
+-auth = types.ModuleType("hermes_cli.auth")
+-auth.PROVIDER_REGISTRY = {"cerebras": {}, "anthropic": {}, "openai-codex": {}}
+-runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+-
+-def _get_named_custom_provider(name):
+-    return {"name": name} if name == "mycustom" else None
+-
+-runtime_provider._get_named_custom_provider = _get_named_custom_provider
+-sys.modules["hermes_cli"] = hermes_cli
+-sys.modules["hermes_cli.auth"] = auth
+-sys.modules["hermes_cli.runtime_provider"] = runtime_provider
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-def routed(value):
+-    kwargs = {}
+-    plugin._apply_lcm_model_route(kwargs, value)
+-    return kwargs
+-
+-# Registry allowlist provider splits into provider/model.
+-assert routed("cerebras/llama-3.3-70b") == {"provider": "cerebras", "model": "llama-3.3-70b"}
+-# Registry providers off the allowlist stay model-only (OpenRouter-style slugs).
+-assert routed("anthropic/claude-sonnet") == {"model": "anthropic/claude-sonnet"}
+-# Named custom providers are resolvable, including the custom: prefix form.
+-assert routed("mycustom/bar-model") == {"provider": "mycustom", "model": "bar-model"}
+-assert routed("custom:mycustom/foo-model") == {"provider": "mycustom", "model": "foo-model"}
+-# Canonical built-ins behind custom: stay model-only.
+-assert routed("custom:openai-codex/gpt") == {"model": "custom:openai-codex/gpt"}
+-# Plain model names and empty overrides pass through untouched.
+-assert routed("plain-model") == {"model": "plain-model"}
+-assert routed("") == {}
+-assert routed(None) == {}
+-
+-# End to end: routed kwargs reach the Hermes auxiliary client.
+-class Aux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        return "Routed summary"
+-
+-agent = type("Agent", (), {"auxiliary_client": Aux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-summary = engine._call_auxiliary_summary(
+-    "Summarize",
+-    [{"role": "user", "content": "raw"}],
+-    routes=[{"model": "cerebras/llama-3.3-70b"}],
+-)
+-assert summary["status"] == "ok"
+-assert summary["model"] == "cerebras/llama-3.3-70b"
+-assert agent.auxiliary_client.calls[0]["provider"] == "cerebras"
+-assert agent.auxiliary_client.calls[0]["model"] == "llama-3.3-70b"
+-"#,
+-        "generated plugin should split resolvable provider-prefixed LCM model overrides",
+-    );
+-}
+-
+-#[test]
+-fn oversized_l1_summary_escalates_to_l2_bullets() {
+-    run_generated_plugin_script(
+-        "check_l2_escalation_rung.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import json
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_l2_escalation"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-calls = []
+-source_content = "alpha beta " * 300
+-oversize_l1 = "L1 too big " * 2000
+-
+-class Result:
+-    def __init__(self, returncode, stdout, stderr):
+-        self.returncode = returncode
+-        self.stdout = stdout
+-        self.stderr = stderr
+-
+-def mcp_response(inner):
+-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+-
+-def fake_run(argv, check, capture_output, text, timeout, shell):
+-    args = json.loads(argv[argv.index("--args") + 1])
+-    calls.append(args)
+-    if len(calls) == 1:
+-        return mcp_response({
+-            "status": "needs_summary",
+-            "reason": "summary_required",
+-            "summary_nodes_created": 0,
+-            "summary_nodes": [],
+-            "replay_messages": [{"role": "user", "content": "fresh"}],
+-            "frontier": {"current_frontier_store_id": None},
+-            "summary_request": {
+-                "provider": "cursor",
+-                "session_id": "session-1",
+-                "focus_topic": "handoff",
+-                "prompt": "Summarize backlog",
+-                "source_range": {"from_store_id": 1, "to_store_id": 1},
+-                "source_messages": [
+-                    {"store_id": 1, "role": "user", "content": source_content},
+-                ],
+-            },
+-        })
+-    summary = args["summarizer"]
+-    assert summary["mode"] == "provided"
+-    assert summary["summary_text"] == "Bullet summary of decisions"
+-    assert summary["route"] == "default"
+-    return mcp_response({
+-        "status": "ok",
+-        "reason": "compressed_backlog",
+-        "summary_nodes_created": 1,
+-        "summary_nodes": [],
+-        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
+-        "frontier": {"current_frontier_store_id": 1},
+-        "summary_request": None,
+-    })
+-
+-plugin.tools.subprocess.run = fake_run
+-
+-class EscalatingAux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        prompt = kwargs["messages"][0]["content"]
+-        if prompt.startswith("Summarize this conversation segment"):
+-            return oversize_l1
+-        return "Bullet summary of decisions"
+-
+-agent = type("Agent", (), {"auxiliary_client": EscalatingAux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-result = engine._compress_to_result(
+-    [{"role": "user", "content": source_content}],
+-    current_tokens=1200,
+-    focus_topic="handoff",
+-)
+-
+-assert result["status"] == "ok"
+-assert result.get("fallback_used") is not True
+-assert len(calls) == 2
+-assert len(agent.auxiliary_client.calls) == 2
+-l2_prompt = agent.auxiliary_client.calls[1]["messages"][0]["content"]
+-assert l2_prompt.startswith("Compress this into bullet points. Maximum 1000 tokens.")
+-assert "Drop all reasoning, alternatives considered, and process detail." in l2_prompt
+-assert "Primary focus: handoff" in l2_prompt
+-assert "CONTENT:" in l2_prompt
+-"#,
+-        "oversized L1 summaries should escalate to the L2 bullet rung before fallback",
+-    );
+-}
+-
+-#[test]
+-fn l1_auxiliary_errors_fall_through_to_l2_success() {
+-    run_generated_plugin_script(
+-        "check_l1_error_l2_success.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_l1_error_l2_success"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-source_messages = [
+-    {"store_id": 1, "role": "user", "content": "alpha " * 120},
+-    {"store_id": 2, "role": "assistant", "content": "beta " * 120},
+-]
+-
+-class Aux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        prompt = kwargs["messages"][0]["content"]
+-        if prompt.startswith("Summarize this conversation segment"):
+-            raise RuntimeError("timed out")
+-        return "L2 concise summary"
+-
+-agent = type("Agent", (), {"auxiliary_client": Aux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-summary = engine._summarize_with_escalation(
+-    source_messages,
+-    focus_topic="handoff",
+-    allow_retry_signal=True,
+-)
+-
+-assert summary["status"] == "ok"
+-assert summary["text"] == "L2 concise summary"
+-assert summary["route"] == "default"
+-assert len(summary["rung_failures"]) == 1
+-assert summary["rung_failures"][0]["level"] == 1
+-assert summary["rung_failures"][0]["status"] in ("retry", "error")
+-assert summary["rung_failures"][0]["error_classification"] == "retry_worthy"
+-assert len(agent.auxiliary_client.calls) == 2
+-"#,
+-        "L1 auxiliary errors should fall through to L2 success",
+-    );
+-}
+-
+-#[test]
+-fn summary_acceptance_uses_token_estimates_not_chars() {
+-    run_generated_plugin_script(
+-        "check_token_based_acceptance.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import json
+-import pathlib
+-import sys
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_token_acceptance"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-# Per-message role overhead means short messages cost ~5 tokens each even
+-# though they are only two characters long. A 51-char summary therefore has
+-# fewer tokens than the source but more characters than the char sum, which
+-# the old char-based acceptance falsely rejected.
+-source_messages = [
+-    {"store_id": idx + 1, "role": "user", "content": "hi"} for idx in range(10)
+-]
+-accepted_summary = "This summary is longer than the raw character sum."
+-assert len(accepted_summary) > sum(len(m["content"]) for m in source_messages)
+-assert plugin._count_messages_tokens(source_messages) > plugin._count_tokens(accepted_summary)
+-
+-calls = []
+-
+-class Result:
+-    def __init__(self, returncode, stdout, stderr):
+-        self.returncode = returncode
+-        self.stdout = stdout
+-        self.stderr = stderr
+-
+-def mcp_response(inner):
+-    return Result(0, json.dumps({"content": [{"type": "text", "text": json.dumps(inner)}]}), "")
+-
+-def fake_run(argv, check, capture_output, text, timeout, shell):
+-    args = json.loads(argv[argv.index("--args") + 1])
+-    calls.append(args)
+-    if len(calls) == 1:
+-        return mcp_response({
+-            "status": "needs_summary",
+-            "reason": "summary_required",
+-            "summary_nodes_created": 0,
+-            "summary_nodes": [],
+-            "replay_messages": [{"role": "user", "content": "fresh"}],
+-            "frontier": {"current_frontier_store_id": None},
+-            "summary_request": {
+-                "provider": "cursor",
+-                "session_id": "session-1",
+-                "focus_topic": None,
+-                "prompt": "Summarize backlog",
+-                "source_range": {"from_store_id": 1, "to_store_id": 10},
+-                "source_messages": source_messages,
+-            },
+-        })
+-    summary = args["summarizer"]
+-    assert summary["mode"] == "provided"
+-    assert summary["summary_text"] == accepted_summary
+-    assert summary["route"] == "default"
+-    return mcp_response({
+-        "status": "ok",
+-        "reason": "compressed_backlog",
+-        "summary_nodes_created": 1,
+-        "summary_nodes": [],
+-        "replay_messages": [{"role": "system", "content": summary["summary_text"]}],
+-        "frontier": {"current_frontier_store_id": 10},
+-        "summary_request": None,
+-    })
+-
+-plugin.tools.subprocess.run = fake_run
+-
+-class Aux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        return accepted_summary
+-
+-agent = type("Agent", (), {"auxiliary_client": Aux()})()
+-engine = plugin.TraceDecayContextEngine()
+-engine.initialize(session_id="session-1", project_root="/tmp/project", agent=agent)
+-result = engine._compress_to_result(
+-    [{"role": "user", "content": "active"}],
+-    current_tokens=1200,
+-)
+-
+-assert result["status"] == "ok"
+-assert result.get("fallback_used") is not True
+-assert len(calls) == 2
+-assert len(agent.auxiliary_client.calls) == 1
+-"#,
+-        "summary acceptance should compare token estimates, not character lengths",
+-    );
+-}
+-
+-#[test]
+-fn generated_plugin_reads_lcm_env_config_overrides() {
+-    run_generated_plugin_script(
+-        "check_lcm_env_config.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import json
+-import os
+-import pathlib
+-import sys
+-
+-for key in [name for name in os.environ if name.startswith("LCM_")]:
+-    del os.environ[key]
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_env_config"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-calls = []
+-
+-class Result:
+-    def __init__(self, returncode, stdout, stderr):
+-        self.returncode = returncode
+-        self.stdout = stdout
+-        self.stderr = stderr
+-
+-def fake_run(argv, check, capture_output, text, timeout, shell):
+-    calls.append(json.loads(argv[argv.index("--args") + 1]))
+-    outer = {"content": [{"type": "text", "text": json.dumps({"status": "ok"})}]}
+-    return Result(0, json.dumps(outer), "")
+-
+-plugin.tools.subprocess.run = fake_run
+-
+-# Documented hermes-lcm env vars (LCMConfig.from_env) override both the
+-# hardcoded defaults and host ctx.config attributes.
+-os.environ.update({
+-    "LCM_FRESH_TAIL_COUNT": "7",
+-    "LCM_LEAF_CHUNK_TOKENS": "111",
+-    "LCM_CONTEXT_THRESHOLD": "0.5",
+-    "LCM_CONDENSATION_FANIN": "9",
+-    "LCM_DYNAMIC_LEAF_CHUNK_ENABLED": "true",
+-    "LCM_DYNAMIC_LEAF_CHUNK_MAX": "222",
+-    "LCM_MAX_ASSEMBLY_TOKENS": "333",
+-    "LCM_RESERVE_TOKENS_FLOOR": "444",
+-    "LCM_INCREMENTAL_MAX_DEPTH": "3",
+-    "LCM_IGNORE_SESSION_PATTERNS": "tmp-*, scratch-*",
+-    "LCM_STATELESS_SESSION_PATTERNS": "ro-*",
+-    "LCM_IGNORE_MESSAGE_PATTERNS": "^/lcm ",
+-})
+-
+-config = {"fresh_tail_count": 64, "context_length": 100000, "context_threshold": 0.9}
+-engine = plugin.TraceDecayContextEngine(config=config)
+-engine.initialize(session_id="session-1", project_root="/tmp/project")
+-engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
++config = {"fresh_tail_count": 64, "context_length": 100000, "context_threshold": 0.9}
++engine = plugin.TraceDecayContextEngine(config=config)
++engine.initialize(session_id="session-1", project_root="/tmp/project")
++engine.should_compress_preflight([{"role": "user", "content": "hello"}], current_tokens=10)
+ 
+ args = calls.pop()
+ assert args["fresh_tail_count"] == 7
+@@ -4398,133 +3119,6 @@ assert llm_call["timeout"] == 9.0
+     );
+ }
+ 
+-#[test]
+-fn summary_routes_built_from_config_and_env_models() {
+-    run_generated_plugin_script(
+-        "check_summary_route_wiring.py",
+-        r#"
+-import importlib.machinery
+-import importlib.util
+-import os
+-import pathlib
+-import sys
+-import tempfile
+-
+-for key in [name for name in os.environ if name.startswith("LCM_")]:
+-    del os.environ[key]
+-
+-plugin_dir = pathlib.Path(sys.argv[1])
+-parent_name = "_hermes_user_summary_routes"
+-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
+-parent_spec.submodule_search_locations = []
+-parent_module = importlib.util.module_from_spec(parent_spec)
+-sys.modules[parent_name] = parent_module
+-
+-module_name = f"{parent_name}.tracedecay"
+-spec = importlib.util.spec_from_file_location(
+-    module_name,
+-    plugin_dir / "__init__.py",
+-    submodule_search_locations=[str(plugin_dir)],
+-)
+-plugin = importlib.util.module_from_spec(spec)
+-sys.modules[module_name] = plugin
+-spec.loader.exec_module(plugin)
+-
+-# summary_model / summary_fallback_models from ctx.config wire the default
+-# auxiliary route chain (deduplicated, in order, with the summary timeout).
+-config = {
+-    "summary_model": "primary",
+-    "summary_fallback_models": ["backup", "primary"],
+-    "summary_timeout_ms": 30000,
+-}
+-engine = plugin.TraceDecayContextEngine(config=config)
+-engine.initialize(session_id="session-1", project_root="/tmp/project")
+-routes = engine._auxiliary_routes()
+-assert [route.get("model") for route in routes] == ["primary", "backup"]
+-assert [route.get("timeout") for route in routes] == [30.0, 30.0]
+-
+-# Hosts that pass no config keep the single task-default route; an environment
+-# override cannot redirect the timeout config.
+-with tempfile.TemporaryDirectory() as tmp:
+-    os.environ["HERMES_HOME"] = tmp
+-    pathlib.Path(tmp, "config.yaml").write_text(
+-        "auxiliary:\n  compression:\n    timeout: 1\n"
+-    )
+-    bare_engine = plugin.TraceDecayContextEngine()
+-    bare_engine.initialize(session_id="session-1", project_root="/tmp/project")
+-    bare_routes = bare_engine._auxiliary_routes()
+-    assert len(bare_routes) == 1
+-    assert "model" not in bare_routes[0]
+-    assert bare_routes[0]["timeout"] == 60.0
+-
+-with tempfile.TemporaryDirectory() as tmp:
+-    cfg = pathlib.Path(tmp) / "config.yaml"
+-    cfg.write_text("auxiliary:\n  compression:\n    timeout: 12.5\n")
+-    yaml_engine = plugin.TraceDecayContextEngine()
+-    yaml_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
+-    yaml_routes = yaml_engine._auxiliary_routes()
+-    assert yaml_routes[0]["timeout"] == 12.5
+-
+-with tempfile.TemporaryDirectory() as tmp:
+-    cfg = pathlib.Path(tmp) / "config.yaml"
+-    cfg.write_text("auxiliary:\n  compression:\n    timeout: not-a-number\n")
+-    malformed_engine = plugin.TraceDecayContextEngine()
+-    malformed_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
+-    malformed_routes = malformed_engine._auxiliary_routes()
+-    assert malformed_routes[0]["timeout"] == 60.0
+-
+-with tempfile.TemporaryDirectory() as tmp:
+-    missing_engine = plugin.TraceDecayContextEngine()
+-    missing_engine.initialize(session_id="session-1", project_root="/tmp/project", hermes_home=tmp)
+-    missing_routes = missing_engine._auxiliary_routes()
+-    assert missing_routes[0]["timeout"] == 60.0
+-
+-# Documented env vars override ctx.config for the route chain.
+-os.environ["LCM_SUMMARY_MODEL"] = "env-primary"
+-os.environ["LCM_SUMMARY_FALLBACK_MODELS"] = "env-backup1, env-backup2"
+-os.environ["LCM_SUMMARY_TIMEOUT_MS"] = "45000"
+-env_routes = engine._auxiliary_routes()
+-assert [route.get("model") for route in env_routes] == [
+-    "env-primary",
+-    "env-backup1",
+-    "env-backup2",
+-]
+-assert env_routes[0]["timeout"] == 45.0
+-for key in [name for name in os.environ if name.startswith("LCM_")]:
+-    del os.environ[key]
+-
+-# Per-call model overrides still take precedence over the configured chain.
+-kwarg_routes = engine._auxiliary_routes(model="kwarg-model")
+-assert [route.get("model") for route in kwarg_routes] == ["kwarg-model"]
+-
+-# End to end: the configured chain falls over from primary to backup.
+-class RoutingAux:
+-    def __init__(self):
+-        self.calls = []
+-
+-    def call_llm(self, **kwargs):
+-        self.calls.append(kwargs)
+-        if kwargs.get("model") == "primary":
+-            raise RuntimeError("primary unavailable")
+-        return "Configured backup summary"
+-
+-agent = type("Agent", (), {"auxiliary_client": RoutingAux()})()
+-engine.agent = agent
+-summary = engine._call_auxiliary_summary(
+-    "Summarize",
+-    [{"role": "user", "content": "raw"}],
+-)
+-assert summary["status"] == "ok"
+-assert summary["text"] == "Configured backup summary"
+-assert summary["route"] == "backup"
+-assert summary["model"] == "backup"
+-assert [call.get("model") for call in agent.auxiliary_client.calls] == ["primary", "backup"]
+-assert agent.auxiliary_client.calls[0]["timeout"] == 30.0
+-"#,
+-        "summary model chain should wire config and env models into auxiliary routes",
+-    );
+-}
+-
+ #[test]
+ fn call_tracedecay_json_normalizes_and_decodes_mcp_envelopes() {
+     run_generated_plugin_script(

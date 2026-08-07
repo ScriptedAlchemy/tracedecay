@@ -180,3 +180,24 @@ impl DashboardGraphTestRuntimeV1 {
         .await
     }
 }
+
+/// Records one git span through a registered ProjectSessions authority.
+///
+/// Root-owned bridge for the dashboard integration suite: span evidence is
+/// published through the same graph-backed correlation store the dashboard
+/// APIs read, which is crate-internal.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub async fn record_project_span_for_test(
+    project_database: &crate::global_db::RegisteredGlobalDb,
+    observation: &crate::sessions::git_correlation::SpanObservation,
+    merge_gap_secs: i64,
+) -> crate::errors::Result<i64> {
+    crate::store::GlobalDbGitCorrelationStore::new(project_database)
+        .record_span_observation(observation, merge_gap_secs)
+        .await
+        .map_err(|error| crate::errors::TraceDecayError::Database {
+            operation: "record dashboard test git span".to_owned(),
+            message: error.to_string(),
+        })
+}

@@ -20,6 +20,8 @@ pub struct SessionAuthorities<'a> {
         Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
     pub(super) profile_retrieval:
         Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
+    pub(super) project_retrieval_sweep:
+        Option<&'a dyn session::message_search::SessionRetrievalSweepPort>,
     pub(crate) project_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
     pub(crate) profile_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
 }
@@ -39,6 +41,7 @@ impl<'a> SessionAuthorities<'a> {
             profile_refresh: None,
             project_retrieval: None,
             profile_retrieval: None,
+            project_retrieval_sweep: None,
             project_lcm: None,
             profile_lcm: None,
         }
@@ -81,6 +84,14 @@ impl<'a> SessionAuthorities<'a> {
     ) -> Self {
         self.project_retrieval = project;
         self.profile_retrieval = profile;
+        self
+    }
+
+    pub(crate) const fn with_retrieval_sweep(
+        mut self,
+        sweep: Option<&'a dyn session::message_search::SessionRetrievalSweepPort>,
+    ) -> Self {
+        self.project_retrieval_sweep = sweep;
         self
     }
 

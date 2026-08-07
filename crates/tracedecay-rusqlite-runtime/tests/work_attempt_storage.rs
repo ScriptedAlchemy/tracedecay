@@ -102,7 +102,22 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
 }
 
 fn attempt(attempt_id: &str, epoch: u64) -> WorkAttemptV1 {
-    let identity = identity(attempt_id);
+    attempt_with_identity(identity(attempt_id), epoch)
+}
+
+fn attempt_at(task: &str, run: &str, attempt_id: &str) -> WorkAttemptV1 {
+    attempt_with_identity(
+        WorkAttemptIdentityV1::new(
+            id::<TaskId>(task),
+            id::<RunId>(run),
+            id::<AttemptId>(attempt_id),
+        )
+        .unwrap(),
+        1,
+    )
+}
+
+fn attempt_with_identity(identity: WorkAttemptIdentityV1, epoch: u64) -> WorkAttemptV1 {
     let binding = WorkAttemptProjectionBindingV1::new(
         id::<ProjectionGenerationId>("generation.attempt.storage"),
         tracedecay_domain::WorkProjectionSequenceV1::new(7),
@@ -211,7 +226,7 @@ fn insert_replays_identical_admissions_and_refuses_divergent_ones() {
     // Byte-identical admission replays without a second row.
     assert_eq!(
         store.storage().insert(&authority, &first).unwrap(),
-        WorkAttemptInsertOutcome::Replayed(first.clone())
+        WorkAttemptInsertOutcome::Replayed(Box::new(first.clone()))
     );
     assert_eq!(store.count("work_attempts_v1"), 1);
     // The same identity with different content is a conflict, not a refresh.
@@ -351,4 +366,100 @@ fn terminal_attempts_leave_the_open_set_and_survive_restart() {
     let closed_after = store.storage().load(&authority, closed.identity()).unwrap();
     assert_eq!(closed_after.state(), WorkAttemptStateV1::Succeeded);
     assert!(closed_after.is_terminal());
+}
+
+#[test]
+fn list_pages_rows_in_identity_order_with_exact_remaining_counts() {
+    let store = RegisteredWorkStore::start("attempt-list");
+    let authority = authority("actor.attempt.list");
+    // Inserted deliberately out of identity order; "attempt.10" sorts before
+    // "attempt.9" under the byte order both SQLite BINARY collation and the
+    // domain identity Ord use.
+    let rows = [
+        attempt_at("task.b", "run.1", "attempt.2"),
+        attempt_at("task.a", "run.2", "attempt.1"),
+        attempt_at("task.a", "run.1", "attempt.9"),
+        attempt_at("task.a", "run.1", "attempt.10"),
+    ];
+    for row in &rows {
+        store.storage().insert(&authority, row).unwrap();
+    }
+    // A terminal attempt stays listed: the list is the durable evidence
+    // surface, not the open set.
+    let closing = &rows[2];
+    let closing_running = running(closing);
+    store
+        .storage()
+        .update(
+            &authority,
+            closing.lease(),
+            WorkAttemptStateV1::Leased,
+            &closing_running,
+            None,
+        )
+        .unwrap();
+    let closed = succeeded(&closing_running);
+    store
+        .storage()
+        .update(
+            &authority,
+            closing_running.lease(),
+            WorkAttemptStateV1::Running,
+            &closed,
+            Some(&evidence(&closing_running)),
+        )
+        .unwrap();
+
+    let expected_order = [
+        "task.a/run.1/attempt.10",
+        "task.a/run.1/attempt.9",
+        "task.a/run.2/attempt.1",
+        "task.b/run.1/attempt.2",
+    ];
+    let first = store.storage().list(&authority, None, 3).unwrap();
+    assert_eq!(first.remaining, 4);
+    assert_eq!(first.attempts.len(), 3);
+    let listed = first
+        .attempts
+        .iter()
+        .map(|attempt| {
+            format!(
+                "{}/{}/{}",
+                attempt.identity().task_id().as_str(),
+                attempt.identity().run_id().as_str(),
+                attempt.identity().attempt_id().as_str()
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listed, &expected_order[..3]);
+    assert_eq!(first.attempts[1].state(), WorkAttemptStateV1::Succeeded);
+
+    // The next page starts strictly after the cursor identity.
+    let cursor = first.attempts.last().unwrap().identity().clone();
+    let second = store.storage().list(&authority, Some(&cursor), 3).unwrap();
+    assert_eq!(second.remaining, 1);
+    assert_eq!(second.attempts.len(), 1);
+    assert_eq!(second.attempts[0].identity().task_id().as_str(), "task.b");
+
+    // A limit past the end returns the complete remainder, nothing invented.
+    let all = store.storage().list(&authority, None, 100).unwrap();
+    assert_eq!(all.remaining, 4);
+    assert_eq!(all.attempts.len(), 4);
+}
+
+#[test]
+fn list_is_scoped_to_the_exact_authority() {
+    let store = RegisteredWorkStore::start("attempt-list-isolation");
+    let owner = authority("actor.attempt.list.owner");
+    let stranger = authority("actor.attempt.list.stranger");
+    store
+        .storage()
+        .insert(&owner, &attempt("attempt.storage.1", 1))
+        .unwrap();
+    let foreign = store.storage().list(&stranger, None, 10).unwrap();
+    assert_eq!(foreign.remaining, 0);
+    assert!(foreign.attempts.is_empty());
+    let owned = store.storage().list(&owner, None, 10).unwrap();
+    assert_eq!(owned.remaining, 1);
+    assert_eq!(owned.attempts.len(), 1);
 }

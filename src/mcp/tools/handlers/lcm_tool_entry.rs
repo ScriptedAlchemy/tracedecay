@@ -41,6 +41,7 @@ pub(crate) async fn handle_user_lcm_tool_with_authorities(
             session::message_search::SessionRetrievalStoreScope::Profile,
             args,
             retrieval_service,
+            None,
         )
         .await;
     }

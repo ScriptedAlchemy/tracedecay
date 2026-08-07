@@ -11,7 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 
 /// The one schema shape this binary creates and accepts. It is an identity
 /// stamp, not a ladder rung: a store at any other version is refused.
-pub const SCHEMA_VERSION: u32 = 27;
+pub const SCHEMA_VERSION: u32 = 28;
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
@@ -267,8 +267,6 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
 
     create_holographic_memory_schema(conn, "create_schema").await?;
     super::memory_v2::create_schema(conn, "create_schema").await?;
-    super::memory_v2::install_v22_fresh_schema(conn, "create_schema").await?;
-    super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
     conn.execute_batch(tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1)
@@ -433,6 +431,10 @@ async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str)
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_facts (
             fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            -- Canonical memory_v2 fact identity for this holographic mirror row.
+            -- Nullable only between the mirror insert and the same-transaction
+            -- canonical link write; every committed fact row carries it.
+            canonical_fact_id TEXT UNIQUE,
             content TEXT NOT NULL UNIQUE,
             category TEXT NOT NULL DEFAULT 'general',
             tags TEXT NOT NULL DEFAULT '[]',

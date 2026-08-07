@@ -26,6 +26,7 @@ mod git_scope;
 mod graph;
 mod lcm;
 mod memory;
+mod multi_root;
 mod session;
 mod skills;
 mod testing;
@@ -38,6 +39,7 @@ use git::*;
 use graph::*;
 use lcm::*;
 use memory::*;
+use multi_root::*;
 use skills::*;
 use testing::*;
 
@@ -483,6 +485,9 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_git_hunks(),
         def_git_preview(),
         def_git_apply(),
+        def_multi_root_scope_set_read(),
+        def_multi_root_scope_set_compare_and_swap(),
+        def_multi_root_execute(),
         def_context_scout_status(),
         def_context_scout_recent(),
         def_context_scout_explain(),
@@ -607,6 +612,7 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_move_symbol(),
         def_rename_symbol(),
         def_source_edit_reconcile(),
+        def_source_edit_rollback(),
         def_find_exact_symbol(),
     ];
     definitions.extend(configuration_definitions());
@@ -863,6 +869,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_rename_symbol",
     "tracedecay_ast_grep_rewrite",
     "tracedecay_source_edit_reconcile",
+    "tracedecay_source_edit_rollback",
     // git & info
     "tracedecay_branch_list",
     "tracedecay_active_project",
@@ -931,7 +938,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_root_tools_are_not_discoverable() {
+    fn multi_root_tools_are_discoverable() {
         let definitions = get_tool_definitions();
         for name in [
             "tracedecay_multi_root_scope_set_read",
@@ -939,8 +946,8 @@ mod tests {
             "tracedecay_multi_root_execute",
         ] {
             assert!(
-                definitions.iter().all(|definition| definition.name != name),
-                "{name} must remain quarantined"
+                definitions.iter().any(|definition| definition.name == name),
+                "{name} must expose its daemon-owned public journey"
             );
         }
     }

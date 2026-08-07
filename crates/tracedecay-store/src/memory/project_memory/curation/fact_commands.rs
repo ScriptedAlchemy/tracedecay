@@ -5,8 +5,8 @@ use tracedecay_domain::{
 };
 
 use super::super::super::{
-    ProjectMemoryFactFeedbackActionV1, FactStoreError, FactStoreResult,
-    MAX_COMPATIBILITY_REASON_BYTES,
+    FactStoreError, FactStoreResult, MAX_COMPATIBILITY_REASON_BYTES,
+    ProjectMemoryFactFeedbackActionV1,
 };
 use super::super::{
     ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,

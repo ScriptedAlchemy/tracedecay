@@ -2,14 +2,14 @@
 
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
-    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContradictionQueryV1,
+    FactCompatibilityStore, ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactContradictionQueryV1,
     ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactFeedbackCommandV1,
     ProjectMemoryFactFeedbackDetailsAvailabilityV1, ProjectMemoryFactFeedbackHistoryQueryV1,
     ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchFilterV1,
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactTargetV1,
     ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
-    ProjectMemoryFeedbackRepairProgressV1, FactCompatibilityStore,
+    ProjectMemoryFeedbackRepairProgressV1,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;

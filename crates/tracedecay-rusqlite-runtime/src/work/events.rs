@@ -106,13 +106,11 @@ pub(crate) fn append_registered(
         .map_err(|_| WorkStorageError::Unavailable)?;
     let authority = request.event.authority();
     let task_id = request.event.task_id();
-    let history =
-        load_registered_history_in_transaction(&transaction, authority, task_id).or_else(
-            |error| match error {
-                WorkStorageError::NotFoundOrNotAuthorized => Ok(Vec::new()),
-                error => Err(error),
-            },
-        )?;
+    let history = load_registered_history_in_transaction(&transaction, authority, task_id)
+        .or_else(|error| match error {
+            WorkStorageError::NotFoundOrNotAuthorized => Ok(Vec::new()),
+            error => Err(error),
+        })?;
     let current = if history.is_empty() {
         None
     } else {
@@ -158,8 +156,7 @@ pub(crate) fn append_registered(
     advance_registered_owner_cursor(&transaction, authority)?;
     registered_insert_event(&transaction, &request.event)?;
     let next_history = load_registered_history_in_transaction(&transaction, authority, task_id)?;
-    let next =
-        WorkProjection::rebuild(&next_history).map_err(|_| WorkStorageError::Unavailable)?;
+    let next = WorkProjection::rebuild(&next_history).map_err(|_| WorkStorageError::Unavailable)?;
     transaction
         .commit()
         .map_err(|_| WorkStorageError::Unavailable)?;

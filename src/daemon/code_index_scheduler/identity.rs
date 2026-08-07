@@ -301,7 +301,13 @@ fn git_metadata_dirs(project_root: &Path) -> (PathBuf, PathBuf) {
 pub(crate) fn repository_id_for(project_root: &Path) -> Result<RepositoryId, IdentityErrorV1> {
     let common =
         crate::worktree::git_common_dir(project_root).unwrap_or_else(|| project_root.to_path_buf());
-    let digest = super::sha256_hex(common.to_string_lossy().as_bytes());
+    repository_id_for_common_dir(&common)
+}
+
+pub(crate) fn repository_id_for_common_dir(
+    common_dir: &Path,
+) -> Result<RepositoryId, IdentityErrorV1> {
+    let digest = super::sha256_hex(common_dir.to_string_lossy().as_bytes());
     RepositoryId::new(format!("repository.daemon.{digest}"))
         .map_err(|error| IdentityErrorV1::Domain(error.to_string()))
 }

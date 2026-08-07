@@ -385,9 +385,11 @@ impl crate::automation::backend::AgentTaskBackend for FakeSynthesisBackend {
         crate::automation::backend::AgentTaskError,
     > {
         if self.fail {
-            return Err(crate::automation::backend::AgentTaskError::from_backend_message(
-                "synthesis backend permanently failed",
-            ));
+            return Err(
+                crate::automation::backend::AgentTaskError::from_backend_message(
+                    "synthesis backend permanently failed",
+                ),
+            );
         }
         Ok(crate::automation::backend::AgentTaskResponse {
             run_id: request.run_id.clone(),

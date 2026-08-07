@@ -2,8 +2,8 @@
 //! registered exact-SQL channel.
 
 use tracedecay_application::{
-    WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome, WorkAttemptStorageError,
-    WorkAttemptStoragePort,
+    WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
+    WorkAttemptStorageError, WorkAttemptStoragePort,
 };
 use tracedecay_domain::{WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority};
 
@@ -226,6 +226,74 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
                 serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)
             })
             .collect()
+    }
+
+    fn list(
+        &self,
+        authority: &WorkAuthority,
+        start_after: Option<&WorkAttemptIdentityV1>,
+        limit: u32,
+    ) -> Result<WorkAttemptListPageV1, WorkAttemptStorageError> {
+        let authority_filter = "project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+               AND actor_id = ?4 AND policy_digest = ?5";
+        let after_filter = if start_after.is_some() {
+            " AND (task_id, run_id, attempt_id) > (?6, ?7, ?8)"
+        } else {
+            ""
+        };
+        let mut params = authority_params_owned(authority);
+        if let Some(start_after) = start_after {
+            params.extend(identity_params(start_after));
+        }
+        // One deferred transaction keeps the remaining count and the page on
+        // the same consistent view of the attempt rows.
+        let transaction = self
+            .handle
+            .begin_deferred()
+            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        let counted = registered_work_query(
+            &transaction,
+            &format!(
+                "SELECT COUNT(*) FROM work_attempts_v1 WHERE {authority_filter}{after_filter}"
+            ),
+            params.clone(),
+        )
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        let remaining = counted
+            .rows
+            .first()
+            .and_then(|row| exact_sql_integer(&row.values, 0))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(WorkAttemptStorageError::Unavailable)?;
+        let limit_placeholder = params.len() + 1;
+        params.push(ExactSqlValue::Integer(i64::from(limit)));
+        let rows = registered_work_query(
+            &transaction,
+            &format!(
+                "SELECT attempt_payload FROM work_attempts_v1
+                 WHERE {authority_filter}{after_filter}
+                 ORDER BY task_id, run_id, attempt_id
+                 LIMIT ?{limit_placeholder}"
+            ),
+            params,
+        )
+        .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        let attempts = rows
+            .rows
+            .into_iter()
+            .map(|row| {
+                let payload =
+                    exact_sql_text(&row.values, 0).ok_or(WorkAttemptStorageError::Unavailable)?;
+                serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)
+            })
+            .collect::<Result<Vec<WorkAttemptV1>, _>>()?;
+        Ok(WorkAttemptListPageV1 {
+            attempts,
+            remaining,
+        })
     }
 }
 

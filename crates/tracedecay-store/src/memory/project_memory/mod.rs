@@ -8,9 +8,9 @@ use tracedecay_domain::{
 
 use super::queries::{MAX_CURRENT_LIMIT, MAX_LINEAGE_LIMIT};
 use super::{
-    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, FactLineageCursor, FactStoreError,
-    FactStoreResult, LegacyFactQuery, MAX_COMPATIBILITY_REASON_BYTES,
-    MAX_COMPATIBILITY_SEARCH_BYTES, StoredFactV1, validate_owned_fact_id,
+    FactLineageCursor, FactStoreError, FactStoreResult, LegacyFactQuery,
+    MAX_COMPATIBILITY_REASON_BYTES, MAX_COMPATIBILITY_SEARCH_BYTES, ProjectMemoryFactStatusV1,
+    ProjectMemoryFactTelemetryV1, StoredFactV1, validate_owned_fact_id,
 };
 
 mod curation;
@@ -43,12 +43,11 @@ pub use dashboard::{
     ProjectMemoryDashboardVectorPointsQueryV1,
 };
 pub use proposal::{
-    ProjectMemoryFactProposalImportReceiptV1, ProjectMemoryFactProposalImportV1,
-    ProjectMemoryFactProposalLegacyRecordV1, ProjectMemoryFactProposalPageV1,
-    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1,
-    FactProposalPromotionStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    FactProposalPromotionStateV1,
+    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionDispositionV1,
+    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
+    ProjectMemoryFactProposalStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
 };
 pub use search::{
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,

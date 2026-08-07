@@ -91,8 +91,8 @@ const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
 pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
-    AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert,
-    PendingCodexCompactionSummary, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
+    AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
+    ProjectRegistryContext, ProjectStoreContext,
     ProjectStoreResolution, RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal,
     SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,

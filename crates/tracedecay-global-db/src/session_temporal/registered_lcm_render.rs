@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::HydrationStateV1;
 
+use super::relations::{SummaryRelationRead, SummarySourceRef as GraphSummarySourceRef};
 use super::render::apply_canonical_content;
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
@@ -26,9 +27,52 @@ macro_rules! field {
     };
 }
 
+pub(super) async fn describe_relation_summary_ids(
+    snapshot: &ReadSnapshot,
+    request: &LcmDescribeRequest,
+) -> Result<Vec<String>, LcmError> {
+    match &request.target {
+        LcmDescribeTarget::Session => {
+            session_summary_ids(snapshot, &request.provider, &request.session_id).await
+        }
+        LcmDescribeTarget::SummaryNode { node_id } => Ok(vec![node_id.clone()]),
+        LcmDescribeTarget::ExternalPayload { .. } => Ok(Vec::new()),
+    }
+}
+
+pub(super) fn expand_relation_summary_ids(request: &LcmExpandRequest) -> Vec<String> {
+    match &request.target {
+        LcmExpandTarget::SummaryNode { node_id } => vec![node_id.clone()],
+        LcmExpandTarget::RawMessage { .. } | LcmExpandTarget::ExternalPayload { .. } => Vec::new(),
+    }
+}
+
+async fn session_summary_ids(
+    snapshot: &ReadSnapshot,
+    provider: &str,
+    session_id: &str,
+) -> Result<Vec<String>, LcmError> {
+    let mut rows = query(
+        snapshot,
+        "SELECT node_id
+         FROM lcm_summary_nodes
+         WHERE provider = ?1 AND session_id = ?2
+         ORDER BY depth, created_at, node_id
+         LIMIT 20",
+        params![provider, session_id],
+    )
+    .await?;
+    let mut ids = Vec::new();
+    while let Some(row) = next_row(&mut rows).await? {
+        ids.push(field!(&row, 0)?);
+    }
+    Ok(ids)
+}
+
 pub(super) async fn describe(
     snapshot: &ReadSnapshot,
     request: LcmDescribeRequest,
+    relations: &[SummaryRelationRead],
 ) -> Result<LcmDescribeResponse, LcmError> {
     let provider = request.provider.as_str();
     let session_id = request.session_id.as_str();
@@ -38,7 +82,7 @@ pub(super) async fn describe(
         LcmDescribeTarget::Session => (
             "session".to_string(),
             raw_message_overviews(snapshot, provider, session_id).await?,
-            summary_overviews(snapshot, provider, session_id).await?,
+            summary_overviews(snapshot, provider, session_id, relations).await?,
             None,
             None,
         ),
@@ -46,7 +90,7 @@ pub(super) async fn describe(
             "summary_node".to_string(),
             Vec::new(),
             Vec::new(),
-            Some(describe_summary_node(snapshot, provider, session_id, &node_id).await?),
+            Some(describe_summary_node(snapshot, provider, session_id, &node_id, relations).await?),
             None,
         ),
         LcmDescribeTarget::ExternalPayload { payload_ref } => (
@@ -78,6 +122,7 @@ pub(super) async fn expand(
     snapshot: &ReadSnapshot,
     request: LcmExpandRequest,
     canonical_content: &str,
+    relations: &[SummaryRelationRead],
 ) -> Result<LcmExpandResponse, LcmError> {
     let slice = request.content_slice.unwrap_or(LcmContentSlice {
         offset: 0,
@@ -108,14 +153,12 @@ pub(super) async fn expand(
             }
         }
         LcmExpandTarget::SummaryNode { node_id } => {
-            let summary =
-                load_summary_node(snapshot, &request.provider, &request.session_id, &node_id)
-                    .await?;
-            validate_summary_source_ownership(
+            let summary = load_summary_node(
                 snapshot,
                 &request.provider,
                 &request.session_id,
                 &node_id,
+                relations,
             )
             .await?;
             let total_sources = summary.source_refs.len();
@@ -128,9 +171,14 @@ pub(super) async fn expand(
                 .take(source_pagination.source_limit)
                 .cloned()
                 .collect::<Vec<_>>();
-            let summary_sources =
-                load_summary_sources(snapshot, &request.provider, &request.session_id, &page_refs)
-                    .await?;
+            let summary_sources = load_summary_sources(
+                snapshot,
+                &request.provider,
+                &request.session_id,
+                &page_refs,
+                relations,
+            )
+            .await?;
             LcmExpandResponse {
                 kind: "summary_node".to_string(),
                 content: String::new(),
@@ -256,28 +304,28 @@ async fn summary_overviews(
     snapshot: &ReadSnapshot,
     provider: &str,
     session_id: &str,
+    relations: &[SummaryRelationRead],
 ) -> Result<Vec<LcmSummaryNodeOverview>, LcmError> {
     let mut rows = query(
         snapshot,
-        "SELECT n.node_id, n.conversation_id, n.depth, n.created_at,
-                COUNT(s.source_id)
-         FROM lcm_summary_nodes AS n
-         LEFT JOIN lcm_summary_sources AS s ON s.node_id = n.node_id
-         WHERE n.provider = ?1 AND n.session_id = ?2
-         GROUP BY n.node_id, n.conversation_id, n.depth, n.created_at
-         ORDER BY n.depth, n.created_at, n.node_id
+        "SELECT node_id, conversation_id, depth, created_at
+         FROM lcm_summary_nodes
+         WHERE provider = ?1 AND session_id = ?2
+         ORDER BY depth, created_at, node_id
          LIMIT 20",
         params![provider, session_id],
     )
     .await?;
     let mut out = Vec::new();
     while let Some(row) = next_row(&mut rows).await? {
+        let node_id: String = field!(&row, 0)?;
+        let source_count = relation(relations, &node_id)?.sources.len();
         out.push(LcmSummaryNodeOverview {
-            node_id: field!(&row, 0)?,
+            node_id,
             conversation_id: field!(&row, 1)?,
             depth: field!(&row, 2)?,
             summary_preview: String::new(),
-            source_count: field!(&row, 4, i64)?.max(0) as usize,
+            source_count,
             created_at: field!(&row, 3)?,
         });
     }
@@ -289,6 +337,7 @@ async fn describe_summary_node(
     provider: &str,
     session_id: &str,
     node_id: &str,
+    relations: &[SummaryRelationRead],
 ) -> Result<LcmDescribeSummaryNode, LcmError> {
     let mut rows = query(
         snapshot,
@@ -303,7 +352,8 @@ async fn describe_summary_node(
     let row = next_row(&mut rows)
         .await?
         .ok_or(LcmError::SummaryNodeNotFound)?;
-    let children = describe_summary_sources(snapshot, provider, session_id, node_id).await?;
+    let children =
+        describe_summary_sources(snapshot, provider, session_id, node_id, relations).await?;
     Ok(LcmDescribeSummaryNode {
         node_id: field!(&row, 0)?,
         conversation_id: field!(&row, 1)?,
@@ -325,128 +375,55 @@ async fn describe_summary_sources(
     provider: &str,
     session_id: &str,
     node_id: &str,
+    relations: &[SummaryRelationRead],
 ) -> Result<Vec<LcmDescribeSourceOverview>, LcmError> {
-    let mut rows = query(
+    let source_refs = relation_source_refs(
         snapshot,
-        "SELECT source.source_kind, source.source_id,
-                raw.role, raw.storage_kind,
-                child.summary_token_count, child.source_token_count, child.expand_hint
-         FROM lcm_summary_sources AS source
-         LEFT JOIN lcm_raw_messages AS raw
-           ON source.source_kind = 'raw_message'
-          AND raw.store_id = CAST(source.source_id AS INTEGER)
-          AND raw.provider = ?2
-          AND raw.session_id = ?3
-         LEFT JOIN lcm_summary_nodes AS child
-           ON source.source_kind = 'summary_node'
-          AND child.node_id = source.source_id
-          AND child.provider = ?2
-          AND child.session_id = ?3
-         WHERE source.node_id = ?1
-         ORDER BY source.ordinal",
-        params![node_id, provider, session_id],
+        provider,
+        session_id,
+        relation(relations, node_id)?,
     )
     .await?;
     let mut out = Vec::new();
-    while let Some(row) = next_row(&mut rows).await? {
-        let source_kind: String = field!(&row, 0)?;
-        let source_id: String = field!(&row, 1)?;
-        match source_kind.as_str() {
-            "raw_message" => {
-                let store_id = parse_store_id(&source_id)?;
-                let Some(role) = field!(&row, 2, Option<String>)? else {
-                    continue;
-                };
-                let Some(storage_kind_text) = field!(&row, 3, Option<String>)? else {
-                    continue;
-                };
+    for source_ref in source_refs {
+        match source_ref {
+            LcmSourceRef::RawMessage { store_id } => {
+                let raw = load_raw_message(snapshot, store_id).await?;
+                if raw.provider != provider || raw.session_id != session_id {
+                    return Err(LcmError::SummarySourceNotOwnedBySession);
+                }
                 out.push(LcmDescribeSourceOverview {
-                    source_kind,
+                    source_kind: "raw_message".to_owned(),
                     source_ref: LcmSourceRef::RawMessage { store_id },
                     store_id: Some(store_id),
                     node_id: None,
-                    role: Some(role),
-                    storage_kind: LcmStorageKind::from_db(&storage_kind_text),
+                    role: Some(raw.role),
+                    storage_kind: Some(raw.storage_kind),
                     summary_token_count: None,
                     source_token_count: None,
                     expand_hint: None,
                 });
             }
-            "summary_node" => {
-                let Some(summary_token_count) = field!(&row, 4, Option<i64>)? else {
-                    continue;
-                };
-                let Some(source_token_count) = field!(&row, 5, Option<i64>)? else {
-                    continue;
-                };
+            LcmSourceRef::SummaryNode { node_id: child_id } => {
+                let child =
+                    load_summary_node(snapshot, provider, session_id, &child_id, relations).await?;
                 out.push(LcmDescribeSourceOverview {
-                    source_kind,
+                    source_kind: "summary_node".to_owned(),
                     source_ref: LcmSourceRef::SummaryNode {
-                        node_id: source_id.clone(),
+                        node_id: child_id.clone(),
                     },
                     store_id: None,
-                    node_id: Some(source_id),
+                    node_id: Some(child_id),
                     role: None,
                     storage_kind: None,
-                    summary_token_count: Some(summary_token_count),
-                    source_token_count: Some(source_token_count),
-                    expand_hint: field!(&row, 6)?,
+                    summary_token_count: Some(child.summary_token_count),
+                    source_token_count: Some(child.source_token_count),
+                    expand_hint: child.expand_hint,
                 });
             }
-            _ => {}
         }
     }
     Ok(out)
-}
-
-async fn validate_summary_source_ownership(
-    snapshot: &ReadSnapshot,
-    provider: &str,
-    session_id: &str,
-    node_id: &str,
-) -> Result<(), LcmError> {
-    let mut rows = query(
-        snapshot,
-        "SELECT source.source_kind
-         FROM lcm_summary_sources AS source
-         LEFT JOIN lcm_raw_messages AS raw
-           ON source.source_kind = 'raw_message'
-          AND raw.store_id = CAST(source.source_id AS INTEGER)
-         LEFT JOIN lcm_summary_nodes AS child
-          ON source.source_kind = 'summary_node'
-          AND child.node_id = source.source_id
-         WHERE source.node_id = ?1
-           AND (
-                (
-                    source.source_kind = 'raw_message'
-                    AND (
-                         raw.store_id IS NULL
-                      OR raw.provider != ?2
-                      OR raw.session_id != ?3
-                    )
-                )
-             OR (
-                    source.source_kind = 'summary_node'
-                    AND (
-                         child.node_id IS NULL
-                      OR child.provider != ?2
-                      OR child.session_id != ?3
-                    )
-                )
-           )
-         ORDER BY source.ordinal
-         LIMIT 1",
-        params![node_id, provider, session_id],
-    )
-    .await?;
-    let Some(row) = next_row(&mut rows).await? else {
-        return Ok(());
-    };
-    match field!(&row, 0, String)?.as_str() {
-        "raw_message" => Err(LcmError::SummarySourceNotOwnedBySession),
-        "summary_node" => Err(LcmError::SummaryNodeNotFound),
-        _ => Ok(()),
-    }
 }
 
 async fn describe_external_payload(
@@ -520,6 +497,7 @@ async fn load_summary_node(
     provider: &str,
     session_id: &str,
     node_id: &str,
+    relations: &[SummaryRelationRead],
 ) -> Result<LcmSummaryNode, LcmError> {
     let mut rows = query(
         snapshot,
@@ -540,6 +518,13 @@ async fn load_summary_node(
     if node_provider != provider || node_session_id != session_id {
         return Err(LcmError::SummaryNodeNotFound);
     }
+    let source_refs = relation_source_refs(
+        snapshot,
+        provider,
+        session_id,
+        relation(relations, node_id)?,
+    )
+    .await?;
     Ok(LcmSummaryNode {
         node_id: field!(&row, 0)?,
         provider: node_provider,
@@ -548,7 +533,7 @@ async fn load_summary_node(
         depth: field!(&row, 4)?,
         summary_text: field!(&row, 5)?,
         summary_hash: field!(&row, 6)?,
-        source_refs: load_source_refs(snapshot, node_id).await?,
+        source_refs,
         summary_token_count: field!(&row, 7)?,
         source_token_count: field!(&row, 8)?,
         source_time_start: field!(&row, 9)?,
@@ -559,26 +544,74 @@ async fn load_summary_node(
     })
 }
 
-async fn load_source_refs(
+async fn relation_source_refs(
     snapshot: &ReadSnapshot,
-    node_id: &str,
+    provider: &str,
+    session_id: &str,
+    relation: &SummaryRelationRead,
 ) -> Result<Vec<LcmSourceRef>, LcmError> {
-    let mut rows = query(
-        snapshot,
-        "SELECT source_kind, source_id
-         FROM lcm_summary_sources
-         WHERE node_id = ?1
-         ORDER BY ordinal",
-        params![node_id],
-    )
-    .await?;
-    let mut out = Vec::new();
-    while let Some(row) = next_row(&mut rows).await? {
-        let source_kind: String = field!(&row, 0)?;
-        let source_id: String = field!(&row, 1)?;
-        out.push(source_ref(&source_kind, &source_id)?);
+    let mut out = Vec::with_capacity(relation.sources.len());
+    for source in &relation.sources {
+        match source {
+            GraphSummarySourceRef::Anchor { anchor_id } => {
+                out.push(LcmSourceRef::RawMessage {
+                    store_id: anchor_store_id(snapshot, provider, session_id, anchor_id.as_str())
+                        .await?,
+                });
+            }
+            GraphSummarySourceRef::Summary { summary_id } => {
+                out.push(LcmSourceRef::SummaryNode {
+                    node_id: summary_id.clone(),
+                });
+            }
+        }
     }
     Ok(out)
+}
+
+async fn anchor_store_id(
+    snapshot: &ReadSnapshot,
+    provider: &str,
+    session_id: &str,
+    anchor_id: &str,
+) -> Result<i64, LcmError> {
+    let mut rows = query(
+        snapshot,
+        "SELECT raw.store_id
+         FROM session_occurrences AS occurrence
+         JOIN session_temporal_generations AS generation
+           ON generation.session_id = occurrence.session_id
+          AND generation.generation = occurrence.generation
+          AND generation.state = 'active'
+         JOIN lcm_raw_messages AS raw
+           ON raw.message_id = occurrence.message_id
+          AND raw.provider = ?1
+          AND raw.session_id = ?2
+         WHERE occurrence.session_id = ?2
+           AND occurrence.retrieval_anchor_id = ?3
+         ORDER BY raw.store_id",
+        params![provider, session_id, anchor_id],
+    )
+    .await?;
+    let store_id = next_row(&mut rows)
+        .await?
+        .map(|row| field!(&row, 0, i64))
+        .transpose()?
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+    if next_row(&mut rows).await?.is_some() {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    }
+    Ok(store_id)
+}
+
+fn relation<'a>(
+    relations: &'a [SummaryRelationRead],
+    summary_id: &str,
+) -> Result<&'a SummaryRelationRead, LcmError> {
+    relations
+        .iter()
+        .find(|relation| relation.summary_id == summary_id)
+        .ok_or(LcmError::SummaryNodeNotFound)
 }
 
 async fn load_summary_sources(
@@ -586,6 +619,7 @@ async fn load_summary_sources(
     provider: &str,
     session_id: &str,
     source_refs: &[LcmSourceRef],
+    relations: &[SummaryRelationRead],
 ) -> Result<Vec<LcmExpandedSummarySource>, LcmError> {
     let raw_ids = source_refs
         .iter()
@@ -602,7 +636,8 @@ async fn load_summary_sources(
         })
         .collect::<BTreeSet<_>>();
     let raw = load_raw_messages(snapshot, &raw_ids).await?;
-    let children = load_summary_nodes(snapshot, &child_ids).await?;
+    let children =
+        load_summary_nodes(snapshot, provider, session_id, &child_ids, relations).await?;
     let mut out = Vec::with_capacity(source_refs.len());
     for source_ref in source_refs {
         match source_ref {
@@ -680,7 +715,10 @@ async fn load_raw_messages(
 
 async fn load_summary_nodes(
     snapshot: &ReadSnapshot,
+    provider: &str,
+    session_id: &str,
     node_ids: &BTreeSet<String>,
+    relations: &[SummaryRelationRead],
 ) -> Result<BTreeMap<String, LcmSummaryNode>, LcmError> {
     if node_ids.is_empty() {
         return Ok(BTreeMap::new());
@@ -699,7 +737,7 @@ async fn load_summary_nodes(
          FROM lcm_summary_nodes
          WHERE node_id IN ({placeholders})"
     );
-    let mut rows = query(snapshot, &sql, params_from_iter(values.clone())).await?;
+    let mut rows = query(snapshot, &sql, params_from_iter(values)).await?;
     let mut out = BTreeMap::new();
     while let Some(row) = next_row(&mut rows).await? {
         let node_id: String = field!(&row, 0)?;
@@ -724,20 +762,19 @@ async fn load_summary_nodes(
             },
         );
     }
-    let sql = format!(
-        "SELECT node_id, source_kind, source_id
-         FROM lcm_summary_sources
-         WHERE node_id IN ({placeholders})
-         ORDER BY node_id, ordinal"
-    );
-    let mut rows = query(snapshot, &sql, params_from_iter(values)).await?;
-    while let Some(row) = next_row(&mut rows).await? {
-        let node_id: String = field!(&row, 0)?;
-        if let Some(node) = out.get_mut(&node_id) {
-            let source_kind: String = field!(&row, 1)?;
-            let source_id: String = field!(&row, 2)?;
-            node.source_refs.push(source_ref(&source_kind, &source_id)?);
+    for node_id in node_ids {
+        let source_refs = relation_source_refs(
+            snapshot,
+            provider,
+            session_id,
+            relation(relations, node_id)?,
+        )
+        .await?;
+        let node = out.get_mut(node_id).ok_or(LcmError::SummaryNodeNotFound)?;
+        if node.provider != provider || node.session_id != session_id {
+            return Err(LcmError::SummarySourceNotOwnedBySession);
         }
+        node.source_refs = source_refs;
     }
     Ok(out)
 }
@@ -840,26 +877,6 @@ fn empty_content_range(slice: LcmContentSlice) -> LcmContentRange {
         total_chars: 0,
         truncated: false,
     }
-}
-
-fn source_ref(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmError> {
-    match source_kind {
-        "raw_message" => Ok(LcmSourceRef::RawMessage {
-            store_id: parse_store_id(source_id)?,
-        }),
-        "summary_node" => Ok(LcmSourceRef::SummaryNode {
-            node_id: source_id.to_string(),
-        }),
-        _ => Err(LcmError::Db(format!(
-            "invalid summary source_kind: {source_kind}"
-        ))),
-    }
-}
-
-fn parse_store_id(source_id: &str) -> Result<i64, LcmError> {
-    source_id
-        .parse::<i64>()
-        .map_err(|error| LcmError::Db(format!("invalid raw source id: {error}")))
 }
 
 fn storage_kind(value: &str) -> Result<LcmStorageKind, LcmError> {

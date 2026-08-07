@@ -260,6 +260,29 @@ pub(crate) async fn run(
     .await
 }
 
+/// Dispatch one catalogued application-surface operation on behalf of a
+/// first-class CLI command (e.g. `tracedecay git status`).
+///
+/// This is the same normalized-argument, deadline, and warm-up-retry path the
+/// `tracedecay tool` fallback uses, so first-class commands cannot drift from
+/// the typed surface's transport behavior.
+pub(crate) async fn dispatch_catalogued_cli_operation(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    project: Option<PathBuf>,
+    raw_json: bool,
+) -> Result<()> {
+    let tool_name = format!("tracedecay_{}", operation.as_str());
+    let deadline = Instant::now()
+        .checked_add(tool_command_deadline()?)
+        .ok_or_else(tool_deadline_range_error)?;
+    let (request, requested_format) = cli_surface_invocation(&tool_name, tool_args, raw_json)
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    dispatch_cli_application_surface(operation, request, project, requested_format, deadline).await
+}
+
 /// Splits a CLI `--args` object into the reviewed application request body and
 /// the requested output format, through the same adapter every other transport
 /// uses. `--json` and `format: "json"` are the same request for JSON output.

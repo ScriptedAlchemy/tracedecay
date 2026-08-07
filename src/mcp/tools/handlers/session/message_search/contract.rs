@@ -561,6 +561,78 @@ pub(crate) struct SessionRetrievalPageView {
     pub(crate) temporal: SessionTemporalMetadataView,
 }
 
+/// One registered project root served by the sweep, with the provenance the
+/// merged page must preserve.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SessionRetrievalSweepRootView {
+    pub(crate) project_id: String,
+    pub(crate) root: String,
+    pub(crate) outcome: SessionRetrievalServiceOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SessionRetrievalSweepSkipReason {
+    RegistryContextMissing,
+    StoreIdentityMissing,
+    StoreIdentityAmbiguous,
+    StoreIdentityMismatch,
+    StoreMountFailed,
+}
+
+impl SessionRetrievalSweepSkipReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::RegistryContextMissing => "registry_context_missing",
+            Self::StoreIdentityMissing => "store_identity_missing",
+            Self::StoreIdentityAmbiguous => "store_identity_ambiguous",
+            Self::StoreIdentityMismatch => "store_identity_mismatch",
+            Self::StoreMountFailed => "store_mount_failed",
+        }
+    }
+}
+
+/// A registered project the sweep could not serve, with the typed reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct SessionRetrievalSweepSkipView {
+    pub(crate) project_id: String,
+    pub(crate) reason: SessionRetrievalSweepSkipReason,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum SessionRetrievalSweepOutcome {
+    /// Every registered project was either served (with its own typed
+    /// per-root outcome) or skipped with a typed reason.
+    Complete {
+        roots: Vec<SessionRetrievalSweepRootView>,
+        skipped: Vec<SessionRetrievalSweepSkipView>,
+        /// True when the registry holds more projects than one bounded sweep
+        /// serves; the extra projects were not searched.
+        registry_truncated: bool,
+    },
+    /// The sweep command was not a selector-free project-store command.
+    WrongScope,
+    /// The project registry authority is unavailable; this is a typed
+    /// absence, never an empty success.
+    RegistryUnavailable,
+}
+
+pub(crate) type SessionRetrievalSweepFuture<'a> =
+    Pin<Box<dyn Future<Output = SessionRetrievalSweepOutcome> + Send + 'a>>;
+
+/// Authorized fanout over every registered project's durable session store.
+///
+/// Implementations open each selected project's store with exact
+/// project/profile/store identity through the daemon session registry; they
+/// never alias the active project's session store onto another project.
+pub(crate) trait SessionRetrievalSweepPort: Send + Sync {
+    #[allow(clippy::elidable_lifetime_names)]
+    fn execute_registered<'a>(
+        &'a self,
+        command: SessionRetrievalCommand,
+    ) -> SessionRetrievalSweepFuture<'a>;
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SessionRetrievalServiceOutcome {
     Complete {

@@ -9,12 +9,15 @@ impl HostAdmissionTestRuntimeV1 {
         crate::sessions::lcm::LcmCompressionResponse,
         crate::sessions::lcm::LcmError,
     > {
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_compress_guarded(request, &control, || Ok(()))
-            .await
+        crate::daemon::lcm_effects::DaemonLcmEffectService::new(
+            self.project_registered
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&self.profile_registered)),
+            None,
+            None,
+        )
+        .compress(request)
+        .await
     }
 
     #[doc(hidden)]
@@ -201,11 +204,15 @@ impl HostAdmissionTestRuntimeV1 {
         crate::sessions::lcm::LcmSessionBoundaryResponse,
         crate::sessions::lcm::LcmError,
     > {
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_session_boundary(request)
-            .await
+        crate::daemon::lcm_effects::DaemonLcmEffectService::new(
+            self.project_registered
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&self.profile_registered)),
+            None,
+            None,
+        )
+        .session_boundary(request)
+        .await
     }
 
     #[doc(hidden)]
@@ -263,47 +270,6 @@ impl HostAdmissionTestRuntimeV1 {
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
             .lcm_status(provider, session_id)
-            .await
-    }
-
-    #[doc(hidden)]
-    pub async fn pending_codex_compaction_summary_requests_for_test(
-        &self,
-        session_id: Option<&str>,
-        limit: usize,
-    ) -> std::result::Result<
-        Vec<crate::global_db::PendingCodexCompactionSummary>,
-        crate::sessions::lcm::LcmError,
-    > {
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .pending_codex_compaction_summary_requests(session_id, limit, &control)
-            .await
-    }
-
-    #[doc(hidden)]
-    pub async fn publish_codex_compaction_summary_successor_for_test(
-        &self,
-        node_id: &str,
-        summary_text: &str,
-        route: &str,
-        model: Option<&str>,
-    ) -> std::result::Result<crate::sessions::lcm::LcmSummaryNode, crate::sessions::lcm::LcmError>
-    {
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .publish_codex_compaction_summary_successor(
-                node_id,
-                summary_text,
-                route,
-                model,
-                &control,
-                || Ok(()),
-            )
             .await
     }
 }

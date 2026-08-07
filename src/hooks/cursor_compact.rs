@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use crate::sessions::lcm::LcmRelationProjectionStatus;
+
 /// A hook only waits for the daemon's typed pressure acknowledgement; the
 /// daemon owns any eventual transcript capture and compaction work. The budget
 /// covers one handshake plus one hook-runtime round trip, matching the
@@ -19,6 +21,8 @@ pub struct CursorPreCompactOutcome {
     pub reason: String,
     pub summary_nodes_created: usize,
     pub summary_node_ids: Vec<String>,
+    #[serde(default)]
+    pub relation_projection_status: LcmRelationProjectionStatus,
 }
 
 impl CursorPreCompactOutcome {
@@ -28,6 +32,7 @@ impl CursorPreCompactOutcome {
             reason: reason.into(),
             summary_nodes_created: 0,
             summary_node_ids: Vec::new(),
+            relation_projection_status: LcmRelationProjectionStatus::NotApplicable,
         }
     }
 
@@ -37,6 +42,7 @@ impl CursorPreCompactOutcome {
             reason: reason.into(),
             summary_nodes_created: 0,
             summary_node_ids: Vec::new(),
+            relation_projection_status: LcmRelationProjectionStatus::NotApplicable,
         }
     }
 }

@@ -158,6 +158,8 @@ impl RegisteredGlobalDbHarness {
         )
         .await
         .expect("open registered profile-sessions runtime");
+        bind_test_session_relation_graph(&registered)
+            .expect("bind registered profile-sessions relation graph");
         Self {
             registered,
             _directory: directory,
@@ -190,6 +192,29 @@ impl RegisteredGlobalDbHarness {
         )
         .await
         .expect("remount registered profile-sessions runtime")
+    }
+
+    pub async fn restart(self) -> Self {
+        let Self {
+            registered,
+            _directory,
+            _scope,
+        } = self;
+        let path = registered.db_path().to_path_buf();
+        drop(registered);
+        let registered = open_registered_test_database(
+            &path,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("restart registered profile-sessions runtime");
+        bind_test_session_relation_graph(&registered)
+            .expect("bind restarted profile-sessions relation graph");
+        Self {
+            registered,
+            _directory,
+            _scope,
+        }
     }
 
     #[cfg(test)]

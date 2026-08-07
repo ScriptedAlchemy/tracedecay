@@ -28,6 +28,7 @@ pub mod hook_runtime;
 pub mod info;
 mod lcm_tool_entry;
 pub mod memory;
+mod multi_root;
 mod project_registry;
 pub mod redundancy;
 mod retained_catalog;
@@ -50,7 +51,9 @@ pub(crate) use session::message_search::{
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
     SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
-    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalSweepFuture,
+    SessionRetrievalSweepOutcome, SessionRetrievalSweepPort, SessionRetrievalSweepRootView,
+    SessionRetrievalSweepSkipReason, SessionRetrievalSweepSkipView, SessionRetrievalUnavailable,
     SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
     SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
     SessionTemporalMetadataView, SessionTemporalWatermarksView,
@@ -148,6 +151,7 @@ use dispatch_groups::{
     dispatch_info_tools, dispatch_memory_tools, dispatch_retained_application_tools,
     dispatch_session_workflow_tools,
 };
+use multi_root::handle_multi_root;
 use retained_catalog::dispatch_profile_retained_application_tool;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
@@ -237,9 +241,13 @@ pub struct ToolCallRegistryOptions<'a> {
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
+    pub(crate) code_index_branch_diff_executor:
+        Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
     pub(crate) source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
     pub(crate) source_edit_reconciliation_executor:
         Option<crate::mcp::server::SourceEditReconciliationExecutor>,
+    pub(crate) source_edit_rollback_executor:
+        Option<crate::mcp::server::SourceEditRollbackExecutor>,
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver:
         Option<crate::mcp::server::RetainedProjectGraphResolver>,
@@ -278,8 +286,10 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_invocation_target: tracedecay_application::InvocationTarget::CurrentProject,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             source_edit_executor: None,
             source_edit_reconciliation_executor: None,
+            source_edit_rollback_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             session_sync_service: None,
@@ -436,6 +446,21 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             ))
             .await;
         }
+        if dispatch_group == Some(McpToolDispatchGroup::MultiRoot) {
+            // Multi-root tools are daemon-owned: they carry no application
+            // surface binding, so they return here rather than falling through
+            // to the catalog resolution below.
+            ensure_mcp_dispatch_available(tool_name)?;
+            return boxed_send(handle_multi_root(
+                tool_name,
+                args,
+                options.application_invocation_executor,
+                options.application_request_id.clone(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
+            ))
+            .await;
+        }
         // Catalog-declared compatibility operations must resolve the MCP binding
         // before reaching their retained typed handler. Operations without an
         // application-catalog contract remain under the explicit root MCP
@@ -549,11 +574,11 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                     ))
                     .await
                 }
-                // Application-surface tools already returned above; reaching here means
+                // Typed daemon surface tools already returned above; reaching here means
                 // the name resolves to no reachable dispatch entry.
-                Some(McpToolDispatchGroup::ApplicationSurface) | None => {
-                    Err(unknown_tool_error(tool_name))
-                }
+                Some(McpToolDispatchGroup::ApplicationSurface)
+                | Some(McpToolDispatchGroup::MultiRoot)
+                | None => Err(unknown_tool_error(tool_name)),
             }
         };
         match tokio::time::timeout(dispatch_budget, dispatched).await {

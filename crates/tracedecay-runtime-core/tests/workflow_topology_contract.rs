@@ -81,11 +81,7 @@ fn workflow_topology_orders_ready_steps_and_fan_out_deterministically() {
     );
     assert_eq!(
         store
-            .ready_steps(
-                &BTreeSet::from([step_id("a")]),
-                8,
-                cancellation.clone()
-            )
+            .ready_steps(&BTreeSet::from([step_id("a")]), 8, cancellation.clone())
             .expect("fan-out ready"),
         vec![step_id("b"), step_id("c")]
     );
@@ -99,10 +95,7 @@ fn workflow_topology_orders_ready_steps_and_fan_out_deterministically() {
         .descendants(&step_id("a"), 8, 16, cancellation)
         .expect("descendants");
     descendants.sort();
-    assert_eq!(
-        descendants,
-        vec![step_id("b"), step_id("c"), step_id("d")]
-    );
+    assert_eq!(descendants, vec![step_id("b"), step_id("c"), step_id("d")]);
 }
 
 #[test]
@@ -122,13 +115,9 @@ fn workflow_topology_replay_is_exact_and_stale_definition_is_rejected() {
         &|| Ok(()),
     )
     .expect("original");
-    let replayed = build_workflow_topology_manifest_checked(
-        identity,
-        &definition(1),
-        &revision,
-        &|| Ok(()),
-    )
-    .expect("replayed");
+    let replayed =
+        build_workflow_topology_manifest_checked(identity, &definition(1), &revision, &|| Ok(()))
+            .expect("replayed");
     assert_eq!(original.generation, replayed.generation);
     assert_eq!(
         original
@@ -156,13 +145,11 @@ fn workflow_topology_publication_identity_is_content_addressed() {
     let namespace = workflow_topology_namespace(&current_definition).expect("namespace");
     let identity =
         workflow_topology_projection_identity(namespace.clone()).expect("projection identity");
-    let manifest = build_workflow_topology_manifest_checked(
-        identity,
-        &current_definition,
-        &revision,
-        &|| Ok(()),
-    )
-    .expect("manifest");
+    let manifest =
+        build_workflow_topology_manifest_checked(identity, &current_definition, &revision, &|| {
+            Ok(())
+        })
+        .expect("manifest");
 
     assert_eq!(
         namespace,

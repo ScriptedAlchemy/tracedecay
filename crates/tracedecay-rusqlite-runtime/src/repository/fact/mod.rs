@@ -49,21 +49,18 @@ impl FactExecutor {
             insert_assertion(savepoint, &owner, assertion)?;
         }
         if let Some(mapping) = batch.legacy_mapping() {
-            savepoint.execute(
-                "INSERT INTO memory_v2_legacy_map (
-                    owner_kind, project_id, owner_json, source_store_id,
-                    legacy_fact_id, fact_id, mapping_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    owner.kind,
-                    owner.project_id,
-                    owner.json,
-                    mapping.source_store_id().as_str(),
-                    mapping.legacy_fact_id(),
-                    mapping.fact_id().as_str(),
-                    encode(mapping)?,
-                ],
+            let changed = savepoint.execute(
+                "UPDATE memory_facts
+                 SET canonical_fact_id = ?1
+                 WHERE fact_id = ?2
+                   AND (canonical_fact_id IS NULL OR canonical_fact_id = ?1)",
+                params![mapping.fact_id().as_str(), mapping.legacy_fact_id()],
             )?;
+            if changed != 1 {
+                return Err(invalid(
+                    "canonical fact projection row is missing or bound to another fact",
+                ));
+            }
         }
         for event in batch.events() {
             savepoint.execute(

@@ -25,6 +25,8 @@ pub(crate) enum CodeIndexCadenceTriggerV1 {
     HookHint,
     /// Hint overflow / dropped-event reconciliation.
     Overflow,
+    /// Single-owner git watcher advanced its monotonic worktree frontier.
+    GitWatcher,
     /// Query-admission freshness ladder required truth.
     QueryAdmission,
     /// Follow-up wake after a busy serve-prior-generation admission.
@@ -38,6 +40,7 @@ impl CodeIndexCadenceTriggerV1 {
             Self::Mount => "mount",
             Self::HookHint => "hook_hint",
             Self::Overflow => "overflow",
+            Self::GitWatcher => "git_watcher",
             Self::QueryAdmission => "query_admission",
             Self::BusyFollowUp => "busy_follow_up",
         }

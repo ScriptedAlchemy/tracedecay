@@ -364,6 +364,32 @@ impl QueryAuthorityV1 {
         Ok(())
     }
 
+    pub fn bind_code_source_cursor(
+        &self,
+        cursor: &mut RetrievalCursor,
+        binding: tracedecay_domain::CodeSourceCursorBindingV1,
+    ) -> Result<(), QueryAuthorityErrorV1> {
+        binding.validate()?;
+        cursor.code_source = Some(binding);
+        self.keyring.resign_cursor(cursor)?;
+        Ok(())
+    }
+
+    pub fn verify_code_source_cursor(
+        &self,
+        cursor: &RetrievalCursor,
+        expected: &tracedecay_domain::CodeSourceCursorBindingV1,
+    ) -> Result<(), QueryAuthorityErrorV1> {
+        expected.validate()?;
+        self.keyring.verify_cursor(cursor)?;
+        if cursor.code_source.as_ref() != Some(expected) {
+            return Err(QueryAuthorityErrorV1::Retrieval(
+                RetrievalError::CursorSetMismatch,
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_request(&self, request: &RetrievalRequest) -> Result<(), QueryAuthorityErrorV1> {
         request.budget.validate()?;
         if request.profile_id != self.profile.profile_id

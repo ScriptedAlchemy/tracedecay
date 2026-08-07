@@ -16,10 +16,10 @@ use tracedecay_domain::{
     SanitizationReceiptV1,
 };
 use tracedecay_store::{
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1,
-    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, FactCompatibilityResult,
-    FactStoreError, FactStoreResult,
+    FactCompatibilityResult, FactStoreError, FactStoreResult, ProjectMemoryFactAddCommandV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1, ProjectMemoryFactProposalPageV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
+    ProjectMemoryFactProposalStateV1,
 };
 const COMPATIBILITY_PROPOSAL_PAGE_LIMIT: usize = 1_000;
 
