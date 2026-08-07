@@ -7,9 +7,11 @@ workflow-runtime application operations. The SDK delivery stabilizes every suppo
 public operation, including the daemon-API base and all later accepted additions, and
 publishes working SDK bindings. No operation family is deferred. The originally
 planned Python SDK was dropped: delivery is Rust-first through GitHub release
-assets. crates.io publication follows only after the crate structure is
-settled. A TypeScript npm SDK publishes later through npm OIDC trusted
-publishing once the Rust release path and wire contracts are stable. No Python
+assets. Release packaging decision (owner, 2026-08-07): binaries stay on
+GitHub Releases; the TypeScript SDK publishes to npm now, wired into the
+stable release workflow behind the release verification gate; crates.io
+publication waits until crate naming and structure are settled, with no
+crates.io publish steps or crate renames before that decision. No Python
 package ships.
 
 Earlier operation inventories, compatibility matrices, generated declarations,
@@ -21,7 +23,7 @@ fresh-store rule; all other retention is judged by the direct cross-language,
 lifecycle, platform, and regression behavior below.
 
 The first Rust package shape is not yet published; the TypeScript npm
-package publishes on a separate later gate. Branch acceptance and generated
+package publishes from the stable release workflow. Branch acceptance and generated
 schemas do not create an older supported SDK contract. Branch-local V2
 request/response APIs change in place. Persisted cursors, idempotency keys,
 journals, checkpoints, and receipts accept only their exact final shape; any
@@ -226,11 +228,13 @@ reconnect/resume, and structured errors idiomatic to native consumers.
 crates.io publication is a later release step after the crate structure is
 settled; it is not part of current acceptance.
 
-**TypeScript (later).** Ship the npm package only after npm OIDC trusted
-publishing is configured and the Rust release path, daemon wire contracts, and
-lifecycle fixtures are stable. The TypeScript package uses the same generated
-wire models and reviewed handwritten lifecycle façades over browser/Node
-`fetch`; npm publication is not required on Rust release day.
+**TypeScript (now).** The npm package publishes from the stable release
+workflow on the same GitHub Release trigger as the binaries, gated on release
+verification and on registry-client codegen parity, typecheck, tests, and
+real-daemon installed-package conformance. Publication authenticates with the
+`NPM_TOKEN` secret in the protected npm environment and attaches npm
+provenance. The TypeScript package uses the same generated wire models and
+reviewed handwritten lifecycle façades over browser/Node `fetch`.
 
 Generated low-level bindings may be used internally in either package, but
 reviewed façades provide complete journeys and contain no generic invocation
@@ -246,9 +250,9 @@ environments and never execute Claude Code, Codex, or provider binaries locally.
   Windows, including current and oldest-supported client/daemon combinations.
 - Publish the Rust crate version only after those examples and lifecycle tests
   pass against the same daemon artifact.
-- After the npm OIDC gate opens, publish TypeScript quickstarts and npm package
-  versions using the same daemon artifact and lifecycle fixtures; npm publication
-  is a separate acceptance gate from the Rust release.
+- Publish TypeScript quickstarts and npm package versions using the same
+  daemon artifact and lifecycle fixtures; the npm publish job carries its own
+  acceptance gate inside the release workflow.
 
 ## Replacement and deletion
 
@@ -269,8 +273,8 @@ matrices, and compilation-only conformance are not retained as release gates.
 - Every supported public operation is callable from the Rust SDK against the
   same production daemon boundary; no operation family is omitted because it
   predates the work/workflow delivery, and no SDK operation bypasses daemon authorization or opens
-  product storage. TypeScript npm acceptance follows the later npm OIDC gate
-  with the same operation coverage once published.
+  product storage. TypeScript npm acceptance runs inside the release
+  workflow's publish gate with the same operation coverage once published.
 - The Rust SDK runs representative read, paged, streamed, cancellable, and
   effect/receipt operations against both a local daemon and an enrolled
   remote authority. The two routes preserve identical application semantics,

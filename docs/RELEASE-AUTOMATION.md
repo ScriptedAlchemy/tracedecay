@@ -12,9 +12,14 @@ TraceDecay uses two workflows with one publication authority:
    - Builds platform binaries.
    - Uploads release assets, checksums, and `install.sh`.
    - Updates the in-repository `server.json` MCP registry manifest.
+   - Builds, conformance-tests, and publishes the TypeScript SDK
+     (`@tracedecay/sdk`) to npm, gated on the release verification job.
 
-Neither workflow runs `cargo publish`. Stable distribution is through GitHub
-Release assets.
+Release packaging decision (owner, 2026-08-07): binaries ship through GitHub
+Release assets; the TypeScript SDK ships through npm on the same release
+trigger; crates.io publication waits until crate naming and structure are
+settled. Neither workflow runs `cargo publish`, and no crates.io publish step
+may be added before that decision.
 
 ## Required GitHub Setup
 
@@ -34,6 +39,11 @@ Add these repository secrets:
   `Contents` and `Pull requests` access. The existing secret name is retained
   for compatibility. Releases created with the default `GITHUB_TOKEN` do not
   trigger the follow-up `release.yml` workflow.
+- `NPM_TOKEN`: an npm automation token with publish rights for
+  `@tracedecay/sdk`, stored in the `npm-tracedecay-sdk` protected environment
+  (or as a repository secret visible to that environment). The npm publish job
+  fails closed without it. The job additionally holds `id-token: write` so the
+  publication carries npm provenance for the exact conformance-tested tarball.
 
 Release PRs may modify only `.release-please-manifest.json`, `CHANGELOG.md`,
 `Cargo.lock`, `Cargo.toml`, and `version.txt`. The
@@ -63,15 +73,30 @@ fixture. They do not substitute for the installed host lifecycle journey.
 
 ## SDK release boundary
 
-No SDK is currently a release artifact. The Rust SDK and every other Cargo
-workspace package are private (`publish = false`), and the binary release
-workflow packages no SDK clients. The npm workflow keeps build authority
-separate from its protected OIDC job. Its unprivileged prerequisite regenerates
-the client exclusively from the canonical SDK executable-binding registry and
-verifies codegen parity before running typecheck, tests, a package dry-run, and
-real-daemon conformance. Missing schemas or mounted routes remain explicit
-unavailable entries in that registry; they are not compared against a separate
-manually maintained HTTP operation set.
+The TypeScript SDK (`@tracedecay/sdk`) is a release artifact: `release.yml`
+publishes it to npm on the stable release trigger. The Rust SDK and every
+other Cargo workspace package remain private (`publish = false`) until the
+crate-naming decision lands, and the binary release jobs package no SDK
+clients. The npm publication keeps build authority separate from its
+protected publish job. The unprivileged build job regenerates the client
+exclusively from the canonical SDK executable-binding registry and verifies
+codegen parity before running typecheck, tests, a package dry-run, and
+real-daemon conformance against the exact tarball whose digest it records.
+The publish job depends on both that build and the release verification job,
+digest-verifies the artifact bytes, authenticates with `NPM_TOKEN`, and
+publishes with npm provenance using the digest-pinned reviewed npm CLI.
+Missing schemas or mounted routes remain explicit unavailable entries in the
+binding registry; they are not compared against a separate manually
+maintained HTTP operation set.
+
+The SDK package version lives in `sdks/typescript/package.json` and is
+independent of the daemon version; bump it in ordinary PRs. A prerelease SDK
+version (containing `-`) publishes under the `beta` dist-tag, mirroring the
+beta release convention; stable versions take `latest`. Re-running the
+workflow for a tag whose SDK version is already on the registry is a
+byte-verified no-op; identical version with different bytes fails and
+requires an SDK version bump. The `scripts/check-sdk-publish-workflow.py`
+gate (run by SDK conformance CI) enforces this job isolation.
 
 ## Normal Release Flow
 
@@ -81,7 +106,8 @@ manually maintained HTTP operation set.
 4. Merge the release PR.
 5. `Release Please` creates the tag and GitHub Release.
 6. The GitHub Release triggers `release.yml`, which builds and uploads
-   checksummed GitHub Release assets and refreshes `server.json`.
+   checksummed GitHub Release assets, refreshes `server.json`, and publishes
+   `@tracedecay/sdk` to npm once release verification passes.
 
 ## Manual Recovery
 
