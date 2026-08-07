@@ -246,6 +246,12 @@ name = "serve_proxy_lifecycle_test"
 path = "tests/serve_proxy_lifecycle_test.rs"
 required-features = ["test-transport"]
 
+# Drives a live daemon, the real stdio MCP server, and the real CLI listing to
+# grade every declared surface for a mount in both directions.
+[[test]]
+name = "v2_surface_mount_conformance"
+path = "tests/v2_surface_mount_conformance.rs"
+required-features = ["test-transport"]
 [dependencies]
 axum = "0.8"
 tower = "0.5"
