@@ -1540,8 +1540,8 @@ mod runtime_configuration_cutover {
             AuthorityRef::Project(project_id.clone()),
         )
         .expect("build foreign-id binding");
-        let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
-            .expect("source bindings setting key");
+        let source_bindings_key =
+            SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).expect("source bindings setting key");
         let seeded_revision = revision_id("configuration.seeded.foreign-binding");
         let resolution = resolve_configuration(
             &ConfigurationRegistry::core().expect("configuration registry"),
