@@ -906,6 +906,7 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             TerminalState::Cancelled,
             TerminalState::TimedOut,
             TerminalState::EffectUnknown,
+            TerminalState::Partial,
         ])?,
         availability: AvailabilityContract::Available,
         binding_ids: rollback_binding_ids,
