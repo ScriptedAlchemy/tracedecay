@@ -4,7 +4,6 @@ on:
   pull_request:
     paths:
       - ".github/workflows/sdk-conformance.yml"
-      - ".github/workflows/sdk-publish.yml"
       - ".github/workflows/release.yml"
       - ".github/workflows/release-beta.yml"
       - ".github/workflows/release-please.yml"
@@ -57,7 +56,6 @@ jobs:
       - name: actionlint
         run: >-
           ./actionlint
-          .github/workflows/sdk-publish.yml
           .github/workflows/sdk-conformance.yml
           .github/workflows/release.yml
           .github/workflows/release-beta.yml

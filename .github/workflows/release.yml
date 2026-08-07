@@ -737,3 +737,176 @@ jobs:
           git add server.json
           git diff --cached --quiet || git commit -m "chore(release): update server.json for ${VERSION}"
           git push
+
+  # --- TypeScript SDK npm publication ---
+  #
+  # Owner decision 2026-08-07: GitHub Releases stay the binary authority, the
+  # TypeScript SDK publishes to npm on this same stable release trigger, and
+  # crates.io publication waits until the crate structure is settled.
+  #
+  # The build job never holds registry credentials or publish authority. It
+  # regenerates the client from the canonical SDK executable-binding registry
+  # and verifies byte-for-byte codegen parity, then runs typecheck, unit
+  # tests, a package dry-run, and real-daemon installed-package conformance
+  # against the exact tarball whose digest it records. It also stages and
+  # digest-verifies the reviewed npm CLI. Only the publish job gets the
+  # protected environment, the NPM_TOKEN secret, and provenance authority; it
+  # verifies those exact bytes without installing executable code.
+  build-typescript:
+    name: Build & test @tracedecay/sdk (unprivileged)
+    needs: validate-release
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate-release.outputs.source_sha }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: |
+            dashboard/package-lock.json
+            sdks/typescript/package-lock.json
+
+      - name: Install reviewed npm
+        run: npm install -g npm@12.0.2
+
+      - name: Install dependencies
+        working-directory: sdks/typescript
+        run: npm ci
+
+      - name: Verify canonical SDK registry-client parity
+        run: scripts/check-sdk-codegen.sh
+
+      - name: Typecheck
+        working-directory: sdks/typescript
+        run: npm run typecheck
+
+      - name: Fast unit suite
+        working-directory: sdks/typescript
+        run: npm test
+
+      - name: Build
+        working-directory: sdks/typescript
+        run: npm run build
+
+      - name: Verify package dry run
+        working-directory: sdks/typescript
+        run: npm pack --dry-run --json --ignore-scripts
+
+      - name: Pack the exact publish artifact once
+        id: pack
+        working-directory: sdks/typescript
+        run: |
+          set -euo pipefail
+          json="$(npm pack --json --ignore-scripts)"
+          filename="$(node -e 'console.log(JSON.parse(process.argv[1])[0].filename)' "$json")"
+          test -f "$filename"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the reviewed npm publish tool
+        working-directory: sdks/typescript
+        run: |
+          set -euo pipefail
+          npm pack npm@12.0.2 --ignore-scripts
+          echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
+            | sha256sum -c -
+
+      - name: Build embedded dashboard for the conformance daemon
+        working-directory: dashboard
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build the real production daemon for conformance
+        run: cargo build --bin tracedecay
+
+      - name: Real-daemon conformance against the exact packed tarball
+        working-directory: sdks/typescript
+        run: npx vitest run test/installed-package.test.ts
+        env:
+          TRACEDECAY_SDK_TARBALL: ${{ github.workspace }}/sdks/typescript/${{ steps.pack.outputs.filename }}
+
+      - name: Record artifact digests
+        working-directory: sdks/typescript
+        run: |
+          sha256sum -- "${{ steps.pack.outputs.filename }}" \
+            > "${{ steps.pack.outputs.filename }}.sha256"
+          sha256sum -- npm-12.0.2.tgz > npm-12.0.2.tgz.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-tarball
+          path: |
+            sdks/typescript/${{ steps.pack.outputs.filename }}
+            sdks/typescript/${{ steps.pack.outputs.filename }}.sha256
+            sdks/typescript/npm-12.0.2.tgz
+            sdks/typescript/npm-12.0.2.tgz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-typescript:
+    name: Publish @tracedecay/sdk to npm
+    needs: [validate-release, build-typescript, verify-release]
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
+    environment: npm-tracedecay-sdk
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-tarball
+          path: artifact
+
+      - name: Verify the downloaded artifact digests
+        working-directory: artifact
+        run: sha256sum -c -- *.sha256
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.23.2"
+
+      # Prerelease SDK versions mirror the beta release convention: they take
+      # the beta dist-tag and never take latest. Recovery re-runs are
+      # byte-verified no-ops; a republished version with different bytes is a
+      # hard failure that requires an SDK version bump.
+      - name: Publish the exact conformance-tested tarball with reviewed npm
+        working-directory: artifact
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$NPM_TOKEN"
+          tarball="$(ls -- tracedecay-sdk-*.tgz)"
+          version="${tarball#tracedecay-sdk-}"
+          version="${version%.tgz}"
+          dist_tag=latest
+          if [[ "$version" == *-* ]]; then
+            dist_tag=beta
+          fi
+          mkdir npm-cli
+          tar -xzf npm-12.0.2.tgz -C npm-cli
+          printf "//registry.npmjs.org/:_authToken=\${NPM_TOKEN}\n" > "$HOME/.npmrc"
+          local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
+          if published_integrity="$(node npm-cli/package/bin/npm-cli.js view "@tracedecay/sdk@${version}" dist.integrity 2>/dev/null)" \
+            && [[ -n "$published_integrity" ]]; then
+            if [[ "$published_integrity" != "$local_integrity" ]]; then
+              echo "::error::@tracedecay/sdk@${version} is already published with different bytes; bump the SDK version"
+              exit 1
+            fi
+            echo "@tracedecay/sdk@${version} already published with identical bytes; nothing to publish"
+            exit 0
+          fi
+          node npm-cli/package/bin/npm-cli.js \
+            publish "$tarball" --provenance --access public --tag "$dist_tag"

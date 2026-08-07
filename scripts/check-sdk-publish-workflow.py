@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Enforce the TypeScript SDK workflow's isolated npm OIDC boundary."""
+"""Enforce the release workflow's isolated TypeScript SDK npm publication boundary."""
 
 from __future__ import annotations
 
@@ -10,12 +10,11 @@ from typing import Any
 
 import yaml
 
-WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github/workflows/sdk-publish.yml"
+WORKFLOW_PATH = Path(__file__).resolve().parents[1] / ".github/workflows/release.yml"
 SHA_RE = re.compile(r"^[^@]+@[0-9a-f]{40}(\s*#.*)?$")
-MASTER_GUARD = (
-    "github.repository == 'ScriptedAlchemy/tracedecay' "
-    "&& github.ref == 'refs/heads/master'"
-)
+REPO_GUARD = "github.repository == 'ScriptedAlchemy/tracedecay'"
+VALIDATE_JOB = "validate-release"
+VERIFY_JOB = "verify-release"
 BUILD_JOB = "build-typescript"
 PUBLISH_JOB = "publish-typescript"
 FORBIDDEN_PYTHON_PUBLICATION = (
@@ -30,7 +29,7 @@ FORBIDDEN_PYTHON_PUBLICATION = (
 
 
 def fail(message: str) -> None:
-    print(f"sdk-publish.yml policy violation: {message}", file=sys.stderr)
+    print(f"release.yml SDK publication policy violation: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -50,10 +49,10 @@ def find_step(steps: list[dict[str, Any]], fragment: str) -> int | None:
     )
 
 
-def assert_master_only(name: str, job: dict[str, Any]) -> None:
+def assert_repository_guard(name: str, job: dict[str, Any]) -> None:
     condition = job.get("if")
-    if condition != MASTER_GUARD:
-        fail(f"'{name}' must have exact guard {MASTER_GUARD!r}, found {condition!r}")
+    if condition != REPO_GUARD:
+        fail(f"'{name}' must have exact guard {REPO_GUARD!r}, found {condition!r}")
 
 
 def assert_actions_pinned(name: str, job: dict[str, Any]) -> None:
@@ -63,7 +62,22 @@ def assert_actions_pinned(name: str, job: dict[str, Any]) -> None:
             fail(f"'{name}' uses unpinned action {uses!r}")
 
 
+def assert_release_trigger(workflow: dict[str, Any]) -> None:
+    triggers = workflow.get("on", workflow.get(True, {}))
+    if not isinstance(triggers, dict) or set(triggers) != {"release", "workflow_dispatch"}:
+        fail("npm publication must ride the GitHub Release trigger plus tag recovery only")
+    release = triggers.get("release")
+    if not isinstance(release, dict) or release.get("types") != ["published"]:
+        fail("the release trigger must fire on published releases only")
+    dispatch = triggers.get("workflow_dispatch")
+    inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
+    if not isinstance(inputs, dict) or set(inputs) != {"release_tag"}:
+        fail("manual dispatch is release-tag recovery only; no SDK selector is allowed")
+
+
 def assert_build_job(job: dict[str, Any]) -> None:
+    if job.get("needs") != VALIDATE_JOB:
+        fail(f"'{BUILD_JOB}' must depend on '{VALIDATE_JOB}' only")
     if job.get("permissions") != {"contents": "read"}:
         fail(f"'{BUILD_JOB}' must grant contents: read only")
     if "environment" in job:
@@ -113,8 +127,12 @@ def assert_build_job(job: dict[str, Any]) -> None:
 
 
 def assert_publish_job(job: dict[str, Any]) -> None:
-    if job.get("needs") != BUILD_JOB:
-        fail(f"'{PUBLISH_JOB}' must depend on '{BUILD_JOB}'")
+    needs = job.get("needs")
+    if not isinstance(needs, list) or set(needs) != {VALIDATE_JOB, BUILD_JOB, VERIFY_JOB}:
+        fail(
+            f"'{PUBLISH_JOB}' must depend on exactly "
+            f"'{VALIDATE_JOB}', '{BUILD_JOB}', and '{VERIFY_JOB}'"
+        )
     if job.get("environment") != "npm-tracedecay-sdk":
         fail(f"'{PUBLISH_JOB}' must use the protected npm-tracedecay-sdk environment")
     if job.get("permissions") != {"contents": "read", "id-token": "write"}:
@@ -130,20 +148,28 @@ def assert_publish_job(job: dict[str, Any]) -> None:
     ):
         fail("the downloaded artifacts must be digest-verified before npm publication")
 
-    publish_command = str(steps[publish_index].get("run", ""))
+    publish_step = steps[publish_index]
+    publish_env = publish_step.get("env")
+    if not isinstance(publish_env, dict) or publish_env.get("NPM_TOKEN") != "${{ secrets.NPM_TOKEN }}":
+        fail(f"'{PUBLISH_JOB}' must authenticate with the NPM_TOKEN secret")
+
+    publish_command = str(publish_step.get("run", ""))
     for required in (
+        'test -n "$NPM_TOKEN"',
         "npm-12.0.2.tgz",
         "node npm-cli/package/bin/npm-cli.js",
         'publish "$tarball"',
         "--provenance",
         "--access public",
+        '--tag "$dist_tag"',
+        "dist.integrity",
     ):
         if required not in publish_command:
             fail(f"'{PUBLISH_JOB}' publish command is missing {required!r}")
 
     commands = "\n".join(str(step.get("run", "")) for step in steps)
     if "npm install" in commands or "npx " in commands:
-        fail(f"'{PUBLISH_JOB}' must not install executable packages with OIDC authority")
+        fail(f"'{PUBLISH_JOB}' must not install executable packages with publish authority")
 
     for step in steps:
         uses = step.get("uses")
@@ -152,9 +178,9 @@ def assert_publish_job(job: dict[str, Any]) -> None:
         ):
             fail(f"'{PUBLISH_JOB}' uses unnecessary privileged action {uses!r}")
         if "registry-url" in step.get("with", {}):
-            fail(f"'{PUBLISH_JOB}' must not configure token-based npm authentication")
+            fail(f"'{PUBLISH_JOB}' must not configure setup-node npm authentication")
         command = str(step.get("run", ""))
-        if command and "sha256sum -c" not in command and step is not steps[publish_index]:
+        if command and "sha256sum -c" not in command and step is not publish_step:
             fail(f"'{PUBLISH_JOB}' runs unnecessary privileged setup code {command!r}")
 
 
@@ -169,33 +195,31 @@ def main() -> None:
             )
 
     workflow = yaml.safe_load(text)
-    triggers = workflow.get("on", workflow.get(True, {}))
-    if not isinstance(triggers, dict) or set(triggers) != {"workflow_dispatch"}:
-        fail("publication must be manually dispatched only")
-    dispatch = triggers.get("workflow_dispatch")
-    if not isinstance(dispatch, dict) or dispatch:
-        fail("npm is the only SDK registry authority; no SDK selector is allowed")
+    assert_release_trigger(workflow)
 
     if workflow.get("permissions") != {"contents": "read"}:
         fail("top-level permissions must grant contents: read only")
 
     jobs = workflow.get("jobs", {})
-    if not isinstance(jobs, dict) or set(jobs) != {BUILD_JOB, PUBLISH_JOB}:
-        fail("workflow must contain only TypeScript build and npm publish jobs")
+    if not isinstance(jobs, dict) or not {BUILD_JOB, PUBLISH_JOB} <= set(jobs):
+        fail("workflow must contain the TypeScript build and npm publish jobs")
+    for gate in (VALIDATE_JOB, VERIFY_JOB):
+        if gate not in jobs:
+            fail(f"workflow must retain the '{gate}' release verification job")
     build = jobs[BUILD_JOB]
     publish = jobs[PUBLISH_JOB]
     if not isinstance(build, dict) or not isinstance(publish, dict):
         fail("workflow jobs must be mappings")
 
     for name, job in ((BUILD_JOB, build), (PUBLISH_JOB, publish)):
-        assert_master_only(name, job)
+        assert_repository_guard(name, job)
         assert_actions_pinned(name, job)
     assert_build_job(build)
     assert_publish_job(publish)
 
     print(
-        "sdk-publish.yml isolates npm OIDC authority and exact artifact bytes "
-        "behind the SDK registry-client readiness gate."
+        "release.yml isolates npm publish authority and exact artifact bytes "
+        "behind the release verification and SDK readiness gates."
     )
 
 

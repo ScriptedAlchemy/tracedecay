@@ -11,7 +11,6 @@ set -euo pipefail
 release_please=".github/workflows/release-please.yml"
 release_stable=".github/workflows/release.yml"
 release_beta=".github/workflows/release-beta.yml"
-sdk_publish=".github/workflows/sdk-publish.yml"
 release_pr_integrity=".github/workflows/release-pr-integrity.yml"
 sdk_conformance=".github/workflows/sdk-conformance.yml"
 
@@ -65,7 +64,7 @@ for path in sys.argv[1:]:
         raise SystemExit(f"{path} must never cancel in-progress publication")
 PY
 
-python3 - "$release_please" "$release_stable" "$release_beta" "$sdk_publish" \
+python3 - "$release_please" "$release_stable" "$release_beta" \
   "$release_pr_integrity" "$sdk_conformance" <<'PY'
 import re
 import sys

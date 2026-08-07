@@ -10,7 +10,7 @@ from types import ModuleType
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CHECKER_PATH = REPOSITORY_ROOT / "scripts/check-sdk-publish-workflow.py"
-WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/sdk-publish.yml"
+WORKFLOW_PATH = REPOSITORY_ROOT / ".github/workflows/release.yml"
 
 
 def load_checker() -> ModuleType:
@@ -30,7 +30,7 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
     def assert_rejected(self, workflow: str) -> None:
         self.assertNotEqual(workflow, self.workflow, "mutation must change the workflow")
         with tempfile.TemporaryDirectory() as scratch:
-            path = Path(scratch) / "sdk-publish.yml"
+            path = Path(scratch) / "release.yml"
             path.write_text(workflow, encoding="utf-8")
             self.checker.WORKFLOW_PATH = path
             with self.assertRaises(SystemExit):
@@ -40,58 +40,85 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.checker.WORKFLOW_PATH = WORKFLOW_PATH
         self.checker.main()
 
-    def test_rejects_sdk_selector(self) -> None:
+    def test_rejects_dropping_the_release_trigger(self) -> None:
         mutated = self.workflow.replace(
-            "  workflow_dispatch: {}",
-            "  workflow_dispatch:\n    inputs:\n      sdk:\n        required: true",
+            "on:\n  release:\n    types: [published]\n  workflow_dispatch:",
+            "on:\n  workflow_dispatch:",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_sdk_dispatch_selector(self) -> None:
+        mutated = self.workflow.replace(
+            "  workflow_dispatch:\n    inputs:\n      release_tag:",
+            "  workflow_dispatch:\n    inputs:\n      sdk:\n"
+            "        description: \"SDK selector\"\n"
+            "        required: true\n"
+            "        type: string\n"
+            "      release_tag:",
             1,
         )
         self.assert_rejected(mutated)
 
     def test_rejects_extra_top_level_permission(self) -> None:
         mutated = self.workflow.replace(
-            "permissions:\n  contents: read",
-            "permissions:\n  contents: read\n  issues: write",
+            "permissions:\n  contents: read\n\nenv:",
+            "permissions:\n  contents: read\n  issues: write\n\nenv:",
             1,
         )
         self.assert_rejected(mutated)
 
     def test_rejects_extra_build_permission(self) -> None:
         mutated = self.workflow.replace(
-            "    permissions:\n      contents: read",
-            "    permissions:\n      contents: read\n      actions: read",
+            "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n"
+            "    runs-on: ubuntu-latest\n"
+            "    permissions:\n"
+            "      contents: read\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@",
+            "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n"
+            "    runs-on: ubuntu-latest\n"
+            "    permissions:\n"
+            "      contents: read\n"
+            "      actions: read\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@",
             1,
         )
         self.assert_rejected(mutated)
 
     def test_rejects_extra_publish_permission(self) -> None:
         mutated = self.workflow.replace(
-            "      id-token: write",
-            "      id-token: write\n      issues: write",
-            1,
-        )
-        self.assert_rejected(mutated)
-
-    def test_rejects_master_guard_bypass(self) -> None:
-        mutated = self.workflow.replace(
-            "if: github.repository == 'ScriptedAlchemy/tracedecay' && github.ref == 'refs/heads/master'",
-            "if: github.repository == 'ScriptedAlchemy/tracedecay' && github.ref == 'refs/heads/master' || true",
+            "    permissions:\n      contents: read\n      id-token: write\n    steps:\n"
+            "      - uses: actions/download-artifact@",
+            "    permissions:\n      contents: read\n      id-token: write\n"
+            "      issues: write\n    steps:\n"
+            "      - uses: actions/download-artifact@",
             1,
         )
         self.assert_rejected(mutated)
 
     def test_rejects_missing_repository_guard(self) -> None:
         mutated = self.workflow.replace(
-            "if: github.repository == 'ScriptedAlchemy/tracedecay' && github.ref == 'refs/heads/master'",
-            "if: github.ref == 'refs/heads/master'",
+            "  build-typescript:\n"
+            "    name: Build & test @tracedecay/sdk (unprivileged)\n"
+            "    needs: validate-release\n"
+            "    if: github.repository == 'ScriptedAlchemy/tracedecay'\n",
+            "  build-typescript:\n"
+            "    name: Build & test @tracedecay/sdk (unprivileged)\n"
+            "    needs: validate-release\n",
             1,
         )
         self.assert_rejected(mutated)
 
     def test_rejects_mutable_action_reference(self) -> None:
         mutated = self.workflow.replace(
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-            "actions/checkout@v7",
+            "      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable\n"
+            "        with:\n"
+            "          toolchain: stable",
+            "      - uses: dtolnay/rust-toolchain@stable\n"
+            "        with:\n"
+            "          toolchain: stable",
             1,
         )
         self.assert_rejected(mutated)
@@ -120,11 +147,44 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.assert_rejected(mutated)
 
     def test_rejects_privileged_install_step(self) -> None:
-        marker = "    steps:\n      - uses: actions/download-artifact@"
+        marker = (
+            "    steps:\n      - uses: actions/download-artifact@"
+        )
         mutated = self.workflow.replace(
             marker,
             "    steps:\n      - run: npm install -g npm@12.0.2\n"
             "      - uses: actions/download-artifact@",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_publish_without_release_verification(self) -> None:
+        mutated = self.workflow.replace(
+            "    needs: [validate-release, build-typescript, verify-release]\n",
+            "    needs: [validate-release, build-typescript]\n",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_missing_npm_token_secret(self) -> None:
+        mutated = self.workflow.replace(
+            "        env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated)
+
+    def test_rejects_setup_node_token_authentication(self) -> None:
+        mutated = self.workflow.replace(
+            "      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n"
+            "        with:\n"
+            "          node-version: \"22.23.2\"\n\n"
+            "      # Prerelease SDK versions mirror the beta release convention",
+            "      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0\n"
+            "        with:\n"
+            "          node-version: \"22.23.2\"\n"
+            "          registry-url: https://registry.npmjs.org\n\n"
+            "      # Prerelease SDK versions mirror the beta release convention",
             1,
         )
         self.assert_rejected(mutated)
