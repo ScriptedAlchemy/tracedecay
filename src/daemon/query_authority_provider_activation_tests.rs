@@ -1,5 +1,9 @@
 use super::*;
 
+use crate::application::semantic_runtime::{
+    project_committed_semantic_pins, project_semantic_retained_vector_generations,
+};
+
 #[tokio::test]
 async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let project = TempDir::new().expect("project root");
