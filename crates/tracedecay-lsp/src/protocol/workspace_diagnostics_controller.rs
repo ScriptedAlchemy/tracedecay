@@ -3,7 +3,13 @@ use super::diagnostics_controller::{
     workspace_diagnostic_failure, workspace_result_identity, workspace_root_failure,
     workspace_root_failure_value,
 };
-use super::*;
+use super::{
+    AdmittedRoot, AuthorizedLspWorkspace, BTreeMap, BTreeSet, DaemonLspProtocolSession,
+    DiagnosticRefreshAdmission, DiagnosticSerializationCapabilities, DiagnosticSnapshotPort,
+    DocumentDiagnosticReport, FeedbackCyclePort, GatewayMethod, ManifestDigest,
+    MethodUnavailableReason, RpcFailure, SemanticProviderPort, Value, diagnostic_value,
+    document_diagnostic_report_value, json,
+};
 use crate::workspace_diagnostics::{
     MAX_WORKSPACE_DIAGNOSTIC_FANOUT, MAX_WORKSPACE_DIAGNOSTIC_RESULTS,
     WorkspaceDiagnosticSnapshotOutcome, WorkspaceGenerationDiagnostics,

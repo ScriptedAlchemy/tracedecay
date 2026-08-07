@@ -193,7 +193,7 @@ pub(crate) fn dispatch_incoming<P, S, D>(
 {
     match incoming {
         ParsedIncoming::ClientResponse { id, succeeded } => {
-            session.handle_client_response(id, succeeded)
+            session.handle_client_response(id, succeeded);
         }
         ParsedIncoming::Notification { method, params } => {
             dispatch_notification(session, method, params, now_ms);

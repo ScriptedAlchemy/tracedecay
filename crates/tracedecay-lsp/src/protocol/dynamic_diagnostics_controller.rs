@@ -100,11 +100,11 @@ where
                         DynamicDiagnosticState::UnregistrationRequired { cancel_request };
                     self.drive_dynamic_diagnostic_unregistration();
                 }
-                DynamicDiagnosticState::Unregistering { .. } => {}
                 DynamicDiagnosticState::RegistrationFailed if readiness_changed => {
                     self.dynamic_diagnostics.state = DynamicDiagnosticState::Unregistered;
                 }
-                DynamicDiagnosticState::Unregistered
+                DynamicDiagnosticState::Unregistering { .. }
+                | DynamicDiagnosticState::Unregistered
                 | DynamicDiagnosticState::RegistrationFailed
                 | DynamicDiagnosticState::UnregistrationFailed => {}
             }

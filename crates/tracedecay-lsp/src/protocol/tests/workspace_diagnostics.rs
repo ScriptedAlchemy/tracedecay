@@ -592,7 +592,6 @@ struct ChangingPartialWorkspaceDiagnostics {
 
 impl ChangingPartialWorkspaceDiagnostics {
     fn ready_snapshot(
-        &self,
         root: &AdmittedRoot,
         message: &str,
         generation: u64,
@@ -664,7 +663,7 @@ impl DiagnosticSnapshotPort for ChangingPartialWorkspaceDiagnostics {
         let phase = self.phase.load(Ordering::Acquire);
         if root.uri() == "file:///left" {
             self.left_reads.fetch_add(1, Ordering::AcqRel);
-            return self.ready_snapshot(
+            return Self::ready_snapshot(
                 root,
                 if phase == 1 { "old-left" } else { "new-left" },
                 u64::from(phase),
@@ -677,7 +676,7 @@ impl DiagnosticSnapshotPort for ChangingPartialWorkspaceDiagnostics {
                 target_generation: Some(2),
             })
         } else {
-            self.ready_snapshot(root, "new-right", 2)
+            Self::ready_snapshot(root, "new-right", 2)
         }
     }
 }
