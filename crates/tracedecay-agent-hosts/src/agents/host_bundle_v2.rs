@@ -506,9 +506,10 @@ fn plan_artifact_action(
         ObservedArtifactKindV1::RegularFile => {}
     }
     if state.ownership_marker.as_deref() != Some(artifact.ownership_marker.as_str()) {
-        // Receiptless artifacts left behind by the pre-v2 installer are the one
-        // exception, and only under `Repair`. Adoption still requires the exact
-        // expected ownership marker; a foreign or absent marker conflicts.
+        // Receiptless artifacts are adoptable only inside the narrow boundary
+        // `adopts_pre_receipt_artifact` defines (`Repair` restoring a cataloged
+        // deployment, `Install` recording its own byte-identical staged
+        // deploy). Everything else with a foreign or absent marker conflicts.
         if !adopts_pre_receipt_artifact(operation, artifact, state) {
             return Err(HostBundleError::OwnershipConflict);
         }
@@ -557,14 +558,21 @@ fn plan_artifact_action(
 
 /// Decide whether a receiptless observation may be adopted into v2 ownership.
 ///
-/// Pre-v2 installers deployed first-party artifacts without writing a v2
-/// ownership receipt, so their files are indistinguishable from foreign files
-/// by receipt evidence alone and every lifecycle operation refuses them. The
-/// adoption boundary is deliberately narrow:
+/// Pre-v2 installers and pre-activation staging deploy first-party artifacts
+/// without writing a v2 ownership receipt, so their files are
+/// indistinguishable from foreign files by receipt evidence alone and every
+/// lifecycle operation refuses them by default. The adoption boundary is
+/// deliberately narrow:
 ///
-/// * only `Repair`, whose contract is already "restore the cataloged
-///   deployment", may adopt. `Install` must never claim a path it did not
-///   create, `Update` must know the previously owned digest before it can tell
+/// * `Repair`, whose contract is already "restore the cataloged deployment",
+///   may adopt any content at a cataloged path. `Install` may adopt only a
+///   byte-identical observation: the documented hand-over journey for hosts
+///   that own their own activation (Claude Code, Codex) stages the deploy,
+///   defers activation to the stock host, and has the operator re-run
+///   TraceDecay "to record the staged source" — that re-run finds exactly the
+///   bytes TraceDecay staged, so recording them is a legitimate install state,
+///   not a repair. A divergent file is still a foreign claim `Install` must
+///   refuse, `Update` must know the previously owned digest before it can tell
 ///   a stale deployment from a user edit, and `Uninstall` must never delete a
 ///   file whose ownership it cannot prove;
 /// * the observation must carry the planned component's own cataloged
@@ -581,10 +589,16 @@ fn adopts_pre_receipt_artifact(
     artifact: &HostBundleArtifactV1,
     state: &ObservedHostArtifactV1,
 ) -> bool {
-    operation == HostBundleLifecycleOpV1::Repair
-        && state.ownership_marker.is_none()
+    let receiptless_cataloged_path = state.ownership_marker.is_none()
         && state.owned_artifact_digest.is_none()
-        && state.cataloged_ownership_marker.as_deref() == Some(artifact.ownership_marker.as_str())
+        && state.cataloged_ownership_marker.as_deref() == Some(artifact.ownership_marker.as_str());
+    match operation {
+        HostBundleLifecycleOpV1::Repair => receiptless_cataloged_path,
+        HostBundleLifecycleOpV1::Install => {
+            receiptless_cataloged_path && state.artifact_digest == Some(artifact.artifact_digest)
+        }
+        HostBundleLifecycleOpV1::Update | HostBundleLifecycleOpV1::Uninstall => false,
+    }
 }
 
 /// Execution-specific input kept separate from the public lifecycle request
@@ -6462,6 +6476,56 @@ mod tests {
             std::fs::read(install_root.path().join("plugins/tracedecay.json")).unwrap(),
             b"legacy"
         );
+    }
+
+    /// The documented stock-host hand-over: TraceDecay stages the deploy, the
+    /// host activates it natively, and the re-run records the staged source.
+    /// The staged file is receiptless but byte-identical to the catalog, so
+    /// `Install` adopts it instead of reporting an ownership conflict.
+    #[test]
+    fn install_records_a_byte_identical_receiptless_staged_deploy() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("plugins")).unwrap();
+        std::fs::write(root.path().join("plugins/tracedecay.json"), b"expected").unwrap();
+        let bundle = manifest(HostKindV1::KimiCode, b"expected");
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+
+        let receipt = writer
+            .execute(
+                &bundle,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Install,
+                    22,
+                    true,
+                ),
+                &content(b"expected"),
+                &verifier(&bundle),
+            )
+            .expect("recording the staged source is a legitimate install state");
+
+        assert_eq!(receipt.artifacts.len(), 1);
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"expected"
+        );
+        // The recorded receipt now owns the path: a follow-up uninstall can
+        // prove ownership and remove it.
+        let uninstall = writer
+            .execute(
+                &bundle,
+                &execution(
+                    HostKindV1::KimiCode,
+                    HostBundleLifecycleOpV1::Uninstall,
+                    23,
+                    true,
+                ),
+                &content(b"expected"),
+                &verifier(&bundle),
+            )
+            .expect("the adopted install must leave provable ownership behind");
+        assert_eq!(uninstall.operation, HostBundleLifecycleOpV1::Uninstall);
+        assert!(!root.path().join("plugins/tracedecay.json").exists());
     }
 
     #[test]
