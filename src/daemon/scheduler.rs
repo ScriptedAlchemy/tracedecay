@@ -1191,6 +1191,30 @@ mod global_retention_cadence_tests {
     use super::{GlobalRetentionCadence, RETENTION_MIN_INTERVAL_SECS};
     use std::time::{Duration, Instant};
 
+    /// A denied reservation must return without touching the cadence lock
+    /// again: constructing (and dropping) a reservation while the lock is
+    /// held deadlocks `reserve_global_retention` against its own Drop and
+    /// falsely finishes a pass the caller never owned. Runs on a helper
+    /// thread with a bounded wait so a regression fails fast instead of
+    /// hanging the suite.
+    #[test]
+    fn denied_reservation_returns_without_relocking_the_cadence() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let now = Instant::now();
+            let first = super::reserve_global_retention(now);
+            let second = super::reserve_global_retention(now);
+            let outcome = (first.is_some(), second.is_some());
+            drop(first);
+            sender.send(outcome).expect("report reservation outcome");
+        });
+        let (first, second) = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("denied reservation must not deadlock the retention cadence lock");
+        assert!(first, "first reservation must be granted");
+        assert!(!second, "in-flight cadence must deny the second reservation");
+    }
+
     #[test]
     fn failed_pass_is_immediately_retryable() {
         let mut cadence = GlobalRetentionCadence::default();
@@ -1239,9 +1263,14 @@ fn reserve_global_retention(now: std::time::Instant) -> Option<GlobalRetentionRe
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
+    // `then` (not `then_some`) so the reservation only exists when the
+    // cadence granted it: `then_some` constructs the value eagerly, and a
+    // denied reservation would be dropped right here — its Drop re-locks
+    // GLOBAL_RETENTION_CADENCE while this guard is still held, deadlocking
+    // the scheduler tick (and falsely finishing a pass it never owned).
     guard
         .reserve(now)
-        .then_some(GlobalRetentionReservation { active: true })
+        .then(|| GlobalRetentionReservation { active: true })
 }
 
 fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
