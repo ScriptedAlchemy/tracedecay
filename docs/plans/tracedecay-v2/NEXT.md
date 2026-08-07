@@ -30,6 +30,14 @@ next direct user journeys. Numbered plans own the detailed semantics.
 - Doctor reports unavailable authority audit data and Cursor Core has an
   unresolved component-ownership conflict.
   Plans 09 and 27 own the corresponding product repairs.
+  (Update 2026-08-07: both code repairs are landed — the doctor report now
+  runs the real read-only authority-audit pass instead of hardcoding
+  unavailable, and Cursor Core drift was separated from ownership conflict
+  with the component-set transaction as the sole receipt-owned writer.
+  Closure still requires the real journeys: a doctor run showing measured
+  audit coverage, and a clean Cursor install → version bump → doctor pass on
+  an operator machine, whose lifecycle receipts root does not currently
+  exist.)
 - Semantic search is unavailable because the active configuration snapshot is
   invalid. Plan 20 owns snapshot repair and Plan 31 owns semantic activation;
   exact, lexical, and graph retrieval must remain available.

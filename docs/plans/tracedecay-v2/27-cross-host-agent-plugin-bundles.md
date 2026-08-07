@@ -28,7 +28,10 @@ The retained product rules are:
 The remaining product work is the official lifecycle and feedback journey,
 OpenCode duplicate-analyzer prevention, selected cross-platform lifecycle and
 rollback combinations, real Cline-family route or unavailable proof, and the
-Cursor Core component-ownership conflict. Exact test names, counts, generated
+Cursor Core component-ownership conflict (its code repair landed 2026-08-07 —
+drift distinct from conflict, transaction as sole writer, drift-converges
+acceptance test — leaving only the operator install/upgrade/doctor
+re-verification journey). Exact test names, counts, generated
 matrices, and intermediate registration scaffolding are historical evidence,
 not acceptance requirements.
 

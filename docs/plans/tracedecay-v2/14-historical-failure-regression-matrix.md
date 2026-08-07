@@ -33,9 +33,11 @@ serving during refresh; and bundled-SQLite FTS blob self-heal without treating
 whole-database corruption as repairable. Those observable regressions are
 delivered and their old missing-test language must not be recreated.
 
-Operational acceptance remains open. Doctor reports
-`authority_audit_unavailable` and a Cursor Core component-ownership conflict,
-semantic search is disabled by an invalid configuration snapshot, incremental
+Operational acceptance remains open. Doctor reported
+`authority_audit_unavailable` and a Cursor Core component-ownership conflict
+(code repairs for both landed 2026-08-07; measured doctor and Cursor
+lifecycle journeys still owed), semantic search is disabled by an invalid
+configuration snapshot, incremental
 index cadence is suspect, and the full suite has not completed. Plan 09 owns
 Doctor composition, Plan 27 owns host component lifecycle, Plans 20/31 own
 semantic configuration/activation, Plan 25 owns index freshness, and the active

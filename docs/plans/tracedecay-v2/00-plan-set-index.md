@@ -89,6 +89,13 @@ product journeys or the full verification suite.
   conflict. Plan 09 owns Doctor composition and Plan 27 owns
   host lifecycle/ownership recovery. The host capability/lifecycle reachability
   fixes do not close this Cursor Core ownership conflict, which remains open.
+  (Update 2026-08-07: code repairs landed for both — the doctor composed
+  report now consults the real read-only authority-audit pass, and Cursor
+  Core content drift is reported as `Drifted` distinct from
+  `OwnershipConflict`, with the component-set transaction the sole writer of
+  receipt-owned paths and a drift-converges acceptance test. Operational
+  closure still requires the measured doctor journey and a clean Cursor
+  install/upgrade/doctor pass on an operator machine.)
 - Semantic search is disabled by an invalid configuration snapshot. Plan 20
   owns final-snapshot validity and explicit reset/recreation; Plan 31 owns
   semantic activation.
