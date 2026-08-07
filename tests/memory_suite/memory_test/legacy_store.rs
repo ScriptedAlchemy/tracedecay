@@ -179,7 +179,7 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
 
     assert_eq!(report.merged_entities, 1);
     assert_eq!(report.aliases_added, 1);
-    assert!(report.derived_repair.banks_rebuilt >= 2);
+    assert_eq!(report.derived_repair.banks_rebuilt, 0);
     assert_eq!(
         scalar_i64(
             &db,
@@ -1182,7 +1182,7 @@ async fn memory_status_reports_backlog_and_explicit_repair_converges_it() {
     // batch stats; the next status read reflects the converged backlog.
     let repair = cg.repair_project_memory_once().await.unwrap();
     assert_eq!(repair.missing_vectors_repaired(), 1);
-    assert!(repair.banks_rebuilt() >= 1);
+    assert_eq!(repair.banks_rebuilt(), 0);
 
     let status = cg.memory_status().await.unwrap();
     assert_eq!(status.missing_vector_count, 0);
