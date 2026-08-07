@@ -672,13 +672,15 @@ pub fn run_code_generation_retention(
     mode: CodeGenerationRetentionModeV1,
     completed_at: UtcMicros,
 ) -> Result<CodeGenerationRetentionReportV1, CodeGenerationRetentionErrorV1> {
+    // Apply must sweep the same census dry-run reports (bounded by the batch
+    // cap), not the single-unit "next" plan: that truncation exists for daemon
+    // maintenance, which calls `prepare_next_…` directly so one graph writer
+    // transaction never holds more than one collection unit.
     let plan = match mode {
-        CodeGenerationRetentionModeV1::Apply => prepare_next_code_generation_retention_cancellable(
-            store_root,
-            vector_readable_sources,
-            rollback_floor,
-            &|| false,
-        )?,
+        CodeGenerationRetentionModeV1::Apply => {
+            recover_code_generation_retention(store_root, vector_readable_sources)?;
+            plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?
+        }
         CodeGenerationRetentionModeV1::DryRun => {
             plan_code_generation_retention(store_root, vector_readable_sources, rollback_floor)?
         }

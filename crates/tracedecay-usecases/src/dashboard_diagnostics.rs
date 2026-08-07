@@ -18,6 +18,7 @@ use tracedecay_lsp::analyzer::adapters::builtin_adapters;
 use tracedecay_lsp::analyzer::broker::{
     DiagnosticBroker, DiagnosticsSnapshot, EngineState, NodeSpan,
 };
+use tracedecay_lsp::analyzer::host_ownership::HostAnalyzerOwnership;
 use tracedecay_lsp::analyzer::settings::{
     CodeDiagnosticsSettings, IdleBackfillMode, save_settings,
 };
@@ -65,9 +66,10 @@ pub fn diagnostic_broker(
 }
 
 /// Opens the broker every dashboard mounts when a daemon does not hand it one,
-/// reading the project's persisted analyzer settings. Both the MCP server and
-/// the directly served dashboard route through here so the code-diagnostics
-/// surface does not depend on which entry point started the dashboard.
+/// reading the project's persisted analyzer settings. The daemon, the MCP
+/// server, and the directly served dashboard all route through here so the
+/// code-diagnostics surface does not depend on which entry point started the
+/// dashboard.
 pub async fn open_diagnostic_broker(
     project_root: PathBuf,
     dashboard_root: &std::path::Path,
@@ -77,8 +79,9 @@ pub async fn open_diagnostic_broker(
     // read or parsed. Falling back to the defaults there drops every
     // `custom_adapters` entry the user configured, and the broker has to say
     // so rather than report the fallback as the user's configuration.
-    match tracedecay_lsp::analyzer::settings::load_settings(dashboard_root).await {
-        Ok(settings) => Arc::new(Mutex::new(diagnostic_broker(project_root, settings))),
+    let mut broker = match tracedecay_lsp::analyzer::settings::load_settings(dashboard_root).await
+    {
+        Ok(settings) => diagnostic_broker(project_root, settings),
         Err(error) => {
             tracing::warn!(
                 dashboard_root = %dashboard_root.display(),
@@ -87,9 +90,19 @@ pub async fn open_diagnostic_broker(
             );
             let mut broker = diagnostic_broker(project_root, CodeDiagnosticsSettings::default());
             broker.record_settings_unavailable(error.to_string());
-            Arc::new(Mutex::new(broker))
+            broker
         }
+    };
+    // The OpenCode installer registers TraceDecay at the project level and at
+    // the home level. Construction reads the project file; the home-level
+    // declaration is adopted here so a host that was only registered in
+    // `~/.config/opencode/opencode.json` still keeps its retained analyzers.
+    let home_ownership = HostAnalyzerOwnership::from_opencode_process_home();
+    if home_ownership.is_engaged() {
+        let merged = broker.host_analyzer_ownership().union(&home_ownership);
+        broker.adopt_host_analyzer_ownership(merged);
     }
+    Arc::new(Mutex::new(broker))
 }
 
 #[derive(Clone)]
@@ -400,8 +413,68 @@ async fn indexed_files(database: &Database) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    /// Isolates `HOME`/`XDG_CONFIG_HOME` for tests that open a broker.
+    ///
+    /// `open_diagnostic_broker` reads the process user's home-level OpenCode
+    /// registration, and a test must never read the operator's real host
+    /// configuration. The lock serializes every test in this module that
+    /// touches the ambient environment.
+    struct HomeGuard {
+        previous_home: Option<std::ffi::OsString>,
+        previous_userprofile: Option<std::ffi::OsString>,
+        previous_xdg: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        fn isolate(home: &std::path::Path) -> Self {
+            static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let previous_home = std::env::var_os("HOME");
+            let previous_userprofile = std::env::var_os("USERPROFILE");
+            let previous_xdg = std::env::var_os("XDG_CONFIG_HOME");
+            // SAFETY: the module env lock is held for the guard's lifetime,
+            // so no sibling test observes the override.
+            unsafe {
+                std::env::set_var("HOME", home);
+                std::env::set_var("USERPROFILE", home);
+                std::env::remove_var("XDG_CONFIG_HOME");
+            }
+            Self {
+                previous_home,
+                previous_userprofile,
+                previous_xdg,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `HomeGuard::isolate`; the lock is still held.
+            unsafe {
+                match self.previous_home.take() {
+                    Some(previous) => std::env::set_var("HOME", previous),
+                    None => std::env::remove_var("HOME"),
+                }
+                match self.previous_userprofile.take() {
+                    Some(previous) => std::env::set_var("USERPROFILE", previous),
+                    None => std::env::remove_var("USERPROFILE"),
+                }
+                match self.previous_xdg.take() {
+                    Some(previous) => std::env::set_var("XDG_CONFIG_HOME", previous),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn unreadable_settings_mount_a_broker_that_reports_itself_degraded() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _env = HomeGuard::isolate(home.path());
         let dashboard_root = tempfile::tempdir().expect("dashboard root");
         tokio::fs::write(
             tracedecay_lsp::analyzer::settings::settings_path(dashboard_root.path()),
@@ -432,6 +505,8 @@ mod tests {
 
     #[tokio::test]
     async fn absent_settings_mount_a_healthy_broker_on_the_defaults() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _env = HomeGuard::isolate(home.path());
         let dashboard_root = tempfile::tempdir().expect("dashboard root");
 
         let broker =
@@ -442,6 +517,112 @@ mod tests {
             broker.lock().await.snapshot().settings_unavailable,
             None,
             "a project that never configured analyzer settings is not degraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_home_level_opencode_registration_retains_its_analyzers() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _env = HomeGuard::isolate(home.path());
+        let opencode_dir = home.path().join(".config").join("opencode");
+        tokio::fs::create_dir_all(&opencode_dir)
+            .await
+            .expect("home opencode config dir");
+        tokio::fs::write(
+            opencode_dir.join("opencode.json"),
+            serde_json::json!({
+                "lsp": {
+                    "tracedecay": {
+                        "initialization": {
+                            "tracedecay": {
+                                "duplicateAnalyzerAvoidance": true,
+                                "analyzerOwnership": {
+                                    "mode": "projection_only",
+                                    "retainedByExtension": { ".rs": ["rust-analyzer"] }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write home opencode.json");
+        let project_root = tempfile::tempdir().expect("project root");
+
+        let broker =
+            open_diagnostic_broker(project_root.path().to_path_buf(), project_root.path()).await;
+
+        assert_eq!(
+            broker.lock().await.host_retained_analyzer("rust"),
+            Some("rust-analyzer"),
+            "a host registered only at the home level still keeps its analyzer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_home_level_registration_does_not_revoke_the_project_level_one() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _env = HomeGuard::isolate(home.path());
+        let opencode_dir = home.path().join(".config").join("opencode");
+        tokio::fs::create_dir_all(&opencode_dir)
+            .await
+            .expect("home opencode config dir");
+        tokio::fs::write(
+            opencode_dir.join("opencode.json"),
+            serde_json::json!({
+                "lsp": {
+                    "tracedecay": {
+                        "initialization": {
+                            "tracedecay": {
+                                "duplicateAnalyzerAvoidance": true,
+                                "analyzerOwnership": {
+                                    "retainedByExtension": { ".ts": ["typescript"] }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write home opencode.json");
+        let project_root = tempfile::tempdir().expect("project root");
+        tokio::fs::write(
+            project_root.path().join("opencode.json"),
+            serde_json::json!({
+                "lsp": {
+                    "tracedecay": {
+                        "initialization": {
+                            "tracedecay": {
+                                "duplicateAnalyzerAvoidance": true,
+                                "analyzerOwnership": {
+                                    "retainedByExtension": { ".rs": ["rust-analyzer"] }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .expect("write project opencode.json");
+
+        let broker =
+            open_diagnostic_broker(project_root.path().to_path_buf(), project_root.path()).await;
+
+        let broker = broker.lock().await;
+        assert_eq!(
+            broker.host_retained_analyzer("rust"),
+            Some("rust-analyzer"),
+            "adopting the home level must not drop the project-level claim"
+        );
+        assert_eq!(
+            broker.host_retained_analyzer("typescript"),
+            Some("typescript")
         );
     }
 }
