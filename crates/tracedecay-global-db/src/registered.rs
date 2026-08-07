@@ -157,6 +157,9 @@ pub struct RegisteredWorkApplicationServicesV1 {
     placement: tracedecay_application::WorkPlacementService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    artifact_hydration: tracedecay_application::WorkArtifactHydrationService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
 }
 
 /// The Work product graph authority: its verified reads and its journaled
@@ -251,6 +254,15 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.placement
+    }
+
+    /// The artifact and evidence hydration read authority.
+    pub const fn artifact_hydration(
+        &self,
+    ) -> &tracedecay_application::WorkArtifactHydrationService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.artifact_hydration
     }
 }
 
@@ -682,6 +694,9 @@ impl RegisteredGlobalDb {
             ),
             run_control: tracedecay_application::WorkRunControlService::new(storage.clone()),
             placement: tracedecay_application::WorkPlacementService::new(storage.clone()),
+            artifact_hydration: tracedecay_application::WorkArtifactHydrationService::new(
+                storage.clone(),
+            ),
             topology: RegisteredWorkTopologyV1 {
                 source: storage,
                 runtime,

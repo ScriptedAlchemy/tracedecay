@@ -23,15 +23,15 @@ use crate::{
     GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
     ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
     ResumeWorkRunCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
-    WorkRunControlRequestV1,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
+    WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 23] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 24] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -98,6 +98,11 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 23] = [
         "list_attempts",
         "capability.work.list_attempts",
         "use-case.work.list_attempts",
+    ),
+    (
+        "hydrate_artifacts",
+        "capability.work.hydrate_artifacts",
+        "use-case.work.hydrate_artifacts",
     ),
     ("views", "capability.work.views", "use-case.work.views"),
     (
@@ -213,6 +218,11 @@ pub fn work_executable_binding_registry()
         available::<WorkAttemptListRequestV1, WorkAttemptListV1>(
             "list_attempts",
             "/application/work/list-attempts",
+            EffectClass::Read,
+        )?,
+        available::<WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1>(
+            "hydrate_artifacts",
+            "/application/work/hydrate-artifacts",
             EffectClass::Read,
         )?,
         available::<WorkGraphReadRequestV1, WorkGraphReadV1>(

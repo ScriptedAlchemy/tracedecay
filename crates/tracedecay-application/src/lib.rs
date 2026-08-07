@@ -46,6 +46,7 @@ mod source_edit_rollback;
 pub mod storage;
 pub mod wire;
 pub mod work;
+pub mod work_artifact_hydration;
 pub mod work_attempt;
 pub mod work_catalog;
 pub mod work_placement;
@@ -288,6 +289,7 @@ pub use wire::{
     ApplicationWireSchemaV1,
 };
 pub use work::*;
+pub use work_artifact_hydration::*;
 pub use work_attempt::*;
 pub use work_catalog::*;
 pub use work_placement::*;

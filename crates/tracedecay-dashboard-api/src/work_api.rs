@@ -63,6 +63,7 @@ dashboard_work_routes!(
     CancelAttempt,
     ResumeAttempts,
     ListAttempts,
+    HydrateArtifacts,
     Views,
     PauseRun,
     ResumeRun,

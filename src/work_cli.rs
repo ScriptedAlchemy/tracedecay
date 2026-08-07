@@ -17,10 +17,10 @@ use tracedecay_application::{
     CreateWorkCommand, Deadline, GenerateProposalRequest, LegalAction, PauseWorkRunCommand,
     ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResultContractRef,
     ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, ReviewProposalRequestV1,
-    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
-    WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1,
-    work_executable_binding_registry,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkAttemptListRequestV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
+    WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1, work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -112,6 +112,8 @@ fn decode_work_invocation(
         WorkOperation::ListAttempts => {
             decode::<WorkAttemptListRequestV1>(body).map(WorkApplicationInvocationV1::ListAttempts)
         }
+        WorkOperation::HydrateArtifacts => decode::<WorkArtifactHydrationRequestV1>(body)
+            .map(WorkApplicationInvocationV1::HydrateArtifacts),
         WorkOperation::Views => {
             decode::<WorkGraphReadRequestV1>(body).map(WorkApplicationInvocationV1::Views)
         }
@@ -190,6 +192,10 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
             | (
                 WorkOperation::ListAttempts,
                 WorkApplicationOutcomeV1::ListAttempts(_)
+            )
+            | (
+                WorkOperation::HydrateArtifacts,
+                WorkApplicationOutcomeV1::HydrateArtifacts(_)
             )
             | (WorkOperation::Views, WorkApplicationOutcomeV1::Views(_))
             | (
@@ -324,6 +330,7 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::CancelAttempt(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ResumeAttempts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ListAttempts(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::HydrateArtifacts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Views(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::PauseRun(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ResumeRun(outcome) => serde_json::to_value(outcome),

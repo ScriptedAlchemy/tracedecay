@@ -100,6 +100,7 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::GenerateProposal(_)
         | WorkApplicationInvocationV1::AttemptStatus(_)
         | WorkApplicationInvocationV1::ListAttempts(_)
+        | WorkApplicationInvocationV1::HydrateArtifacts(_)
         | WorkApplicationInvocationV1::Views(_)
         | WorkApplicationInvocationV1::RunControl(_)
         | WorkApplicationInvocationV1::PlacementPreflight(_)
@@ -525,6 +526,46 @@ fn dispatch_work_application(
             observed_at,
             deadline,
             WorkApplicationOutcomeV1::ListAttempts,
+        ),
+        WorkApplicationInvocationV1::HydrateArtifacts(request) => complete_work_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .artifact_hydration()
+                .hydrate(&context, &request, |authority| {
+                    // The invocation admission already refused cancelled
+                    // requests and this dispatch path carries no live
+                    // cancellation signal, so the bounded topology read runs
+                    // to completion.
+                    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    match services.topology().verified_snapshot(authority, cancelled) {
+                        Ok(topology) => {
+                            let task_count =
+                                u32::try_from(topology.task_count()).map_err(|_| {
+                                    work_topology_unavailable_problem(
+                                        "the verified topology task count overflowed",
+                                    )
+                                })?;
+                            Ok(
+                                tracedecay_application::WorkAttemptTopologyStateV1::Verified(
+                                    tracedecay_application::WorkAttemptTopologyBindingV1 {
+                                        generation: topology.generation().as_str().to_owned(),
+                                        task_count,
+                                    },
+                                ),
+                            )
+                        }
+                        Err(error) => work_topology_problem(error),
+                    }
+                }),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::HydrateArtifacts,
         ),
         WorkApplicationInvocationV1::ResumeAttempts(command) => {
             let report = services.attempts().resume(&context, &command);

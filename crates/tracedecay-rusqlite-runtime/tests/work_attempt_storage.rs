@@ -7,19 +7,20 @@ mod work_registered_store;
 use std::collections::BTreeSet;
 
 use tracedecay_application::{
-    WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome, WorkAttemptProviderOutcomeV1,
-    WorkAttemptStorageError, WorkAttemptStoragePort,
+    WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
+    WorkAttemptProviderOutcomeV1, WorkAttemptStorageError, WorkAttemptStoragePort,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
     ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId,
-    UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
-    WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCancellationStateV1, WorkEffectStateV1,
-    WorkEgressPolicy, WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1,
-    WorkFilesystemPolicy, WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1,
-    WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
-    WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorktreeId,
+    UtcMicros, WorkApprovalPolicy, WorkArtifactRefV1, WorkAttemptIdentityV1,
+    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+    WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkSandboxPolicy,
+    WorkTerminalEvidenceV1, WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 
 use work_registered_store::RegisteredWorkStore;
@@ -446,6 +447,102 @@ fn list_pages_rows_in_identity_order_with_exact_remaining_counts() {
     let all = store.storage().list(&authority, None, 100).unwrap();
     assert_eq!(all.remaining, 4);
     assert_eq!(all.attempts.len(), 4);
+}
+
+#[test]
+fn evidence_pages_carry_artifacts_and_typed_evidence_in_identity_order() {
+    let store = RegisteredWorkStore::start("attempt-evidence-page");
+    let mine = authority("actor.attempt.evidence");
+    let rows = [
+        attempt_at("task.a", "run.1", "attempt.1"),
+        attempt_at("task.b", "run.1", "attempt.1"),
+        attempt_at("task.c", "run.1", "attempt.1"),
+    ];
+    for row in &rows {
+        store.storage().insert(&mine, row).unwrap();
+    }
+    // Settle the first attempt with artifacts and sealed evidence; the other
+    // two stay leased with neither.
+    let closing = &rows[0];
+    let closing_running = running(closing);
+    store
+        .storage()
+        .update(
+            &mine,
+            closing.lease(),
+            WorkAttemptStateV1::Leased,
+            &closing_running,
+            None,
+        )
+        .unwrap();
+    let artifacts = vec![
+        WorkArtifactRefV1::new(id("artifact.storage.log"), digest('7'), 128).unwrap(),
+        WorkArtifactRefV1::new(id("artifact.storage.patch"), digest('8'), 4_096).unwrap(),
+    ];
+    let terminal = WorkTerminalEvidenceV1::succeeded(digest('9'), UtcMicros(500)).unwrap();
+    let closed = closing_running
+        .transition(
+            WorkAttemptStateV1::Succeeded,
+            None,
+            artifacts.clone(),
+            WorkCancellationStateV1::None,
+            WorkRecoveryStateV1::Fresh,
+            Some(requested_route()),
+            Some(terminal),
+            closing_running.lease().clone(),
+        )
+        .unwrap();
+    store
+        .storage()
+        .update(
+            &mine,
+            closing_running.lease(),
+            WorkAttemptStateV1::Running,
+            &closed,
+            Some(&evidence(&closing_running)),
+        )
+        .unwrap();
+
+    let first = store.storage().evidence_page(&mine, None, 2).unwrap();
+    assert_eq!(first.remaining, 3);
+    assert_eq!(first.rows.len(), 2);
+    assert_eq!(first.rows[0].identity, *closed.identity());
+    assert_eq!(first.rows[0].artifacts, artifacts);
+    let sealed = first.rows[0]
+        .evidence
+        .as_ref()
+        .expect("the settled attempt must carry its sealed evidence record");
+    assert_eq!(sealed.identity, *closed.identity());
+    assert_eq!(
+        sealed.outcome,
+        WorkAttemptProviderOutcomeV1::Exited { code: 0 }
+    );
+    assert!(first.rows[1].artifacts.is_empty());
+    assert!(
+        first.rows[1].evidence.is_none(),
+        "an unsettled attempt has no evidence record, not a fabricated one"
+    );
+
+    // The next page starts strictly after the cursor identity and stays
+    // consistent with the remaining count.
+    let cursor = first.rows.last().unwrap().identity.clone();
+    let second = store
+        .storage()
+        .evidence_page(&mine, Some(&cursor), 2)
+        .unwrap();
+    assert_eq!(second.remaining, 1);
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(
+        second.rows[0].identity.task_id().as_str(),
+        "task.c",
+        "the evidence page order is the attempt list order"
+    );
+
+    // Foreign authorities observe nothing, not an empty-but-real page.
+    let stranger = authority("actor.attempt.evidence.stranger");
+    let foreign = store.storage().evidence_page(&stranger, None, 10).unwrap();
+    assert_eq!(foreign.remaining, 0);
+    assert!(foreign.rows.is_empty());
 }
 
 #[test]

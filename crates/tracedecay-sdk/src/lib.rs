@@ -27,8 +27,9 @@ pub mod work {
         AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
         AttachRuntimeEvidenceCommand, CreateWorkCommand, PauseWorkRunCommand,
         ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkRunCommand,
-        ReviewProposalCommand, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
-        WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
+        ReviewProposalCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
+        WorkAttemptArtifactsV1, WorkAttemptEvidenceStateV1, WorkPlacementPreflightRequestV1,
+        WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
         WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
         work_executable_binding_registry as executable_binding_registry,
     };

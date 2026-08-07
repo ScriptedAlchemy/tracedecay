@@ -31,11 +31,11 @@ use tracedecay_application::{
     GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
     ReleaseWorkPlacementCommand, ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand,
     ResumeWorkRunCommand, RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
-    WorkRunControlRequestV1,
+    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
+    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
+    WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
@@ -69,6 +69,7 @@ pub enum WorkOperation {
     CancelAttempt,
     ResumeAttempts,
     ListAttempts,
+    HydrateArtifacts,
     Views,
     PauseRun,
     ResumeRun,
@@ -141,6 +142,7 @@ work_operations! {
     CancelAttempt: "cancel_attempt", "cancel-attempt";
     ResumeAttempts: "resume_attempts", "resume-attempts";
     ListAttempts: "list_attempts", "list-attempts";
+    HydrateArtifacts: "hydrate_artifacts", "hydrate-artifacts";
     Views: "views", "views";
     PauseRun: "pause_run", "pause-run";
     ResumeRun: "resume_run", "resume-run";
@@ -153,7 +155,7 @@ work_operations! {
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Snapshot,
         Self::Delta,
         Self::GenerateProposal,
@@ -169,6 +171,7 @@ impl WorkOperation {
         Self::CancelAttempt,
         Self::ResumeAttempts,
         Self::ListAttempts,
+        Self::HydrateArtifacts,
         Self::Views,
         Self::PauseRun,
         Self::ResumeRun,
@@ -193,6 +196,7 @@ impl WorkOperation {
                 | Self::GenerateProposal
                 | Self::AttemptStatus
                 | Self::ListAttempts
+                | Self::HydrateArtifacts
                 | Self::Views
                 | Self::RunControl
                 | Self::PlacementPreflight
@@ -218,6 +222,7 @@ impl WorkOperation {
             Self::CancelAttempt => schema_name::<CancelWorkAttemptCommand>(),
             Self::ResumeAttempts => schema_name::<ResumeWorkAttemptsCommand>(),
             Self::ListAttempts => schema_name::<WorkAttemptListRequestV1>(),
+            Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationRequestV1>(),
             Self::Views => schema_name::<WorkGraphReadRequestV1>(),
             Self::PauseRun => schema_name::<PauseWorkRunCommand>(),
             Self::ResumeRun => schema_name::<ResumeWorkRunCommand>(),
@@ -247,6 +252,7 @@ impl WorkOperation {
             }
             Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
             Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
+            Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationV1>(),
             Self::Views => schema_name::<WorkGraphReadV1>(),
             Self::PauseRun | Self::ResumeRun => schema_name::<WorkRunControlV1>(),
             Self::RunControl => schema_name::<WorkRunControlReadingV1>(),
@@ -477,6 +483,7 @@ mod tests {
                 WorkOperation::GenerateProposal,
                 WorkOperation::AttemptStatus,
                 WorkOperation::ListAttempts,
+                WorkOperation::HydrateArtifacts,
                 WorkOperation::Views,
                 WorkOperation::RunControl,
                 WorkOperation::PlacementPreflight,
