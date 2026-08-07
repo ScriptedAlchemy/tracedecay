@@ -27,9 +27,8 @@ impl ContractFixture {
         let profile_root = temp.path().join("profile");
         let identity =
             profile_identity::load_or_create(&profile_root).expect("profile identity authority");
-        let database_scope =
-            crate::db::enter_daemon_database_scope(&profile_root, 29, label)
-                .expect("daemon database scope");
+        let database_scope = crate::db::enter_daemon_database_scope(&profile_root, 29, label)
+            .expect("daemon database scope");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .expect("daemon session runtime registry");
@@ -87,9 +86,12 @@ impl ContractFixture {
             .await
             .expect("retained project graph runtime");
         let runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(runtime);
-        sessions
-            .bind_project_graph_runtime(Arc::clone(&runtime))
-            .expect("bind project graph runtime once");
+        assert!(
+            sessions
+                .bind_project_graph_runtime(Arc::clone(&runtime))
+                .is_ok(),
+            "bind project graph runtime once"
+        );
         (project_database, sessions, runtime)
     }
 }
@@ -159,9 +161,12 @@ async fn runtime_binding_is_absent_before_bind_and_rejects_double_bind() {
         .await
         .expect("retained project graph runtime");
     let runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(runtime);
-    sessions
-        .bind_project_graph_runtime(Arc::clone(&runtime))
-        .expect("first runtime binding");
+    assert!(
+        sessions
+            .bind_project_graph_runtime(Arc::clone(&runtime))
+            .is_ok(),
+        "first runtime binding"
+    );
     let rejected = sessions
         .bind_project_graph_runtime(Arc::clone(&runtime))
         .expect_err("second runtime binding must be rejected");
@@ -229,10 +234,8 @@ async fn stale_republication_conflicts_after_a_new_head_wins() {
         .expect("bound project graph runtime")
         .as_ref();
 
-    publish_through_trait(port, &first, key("stale-first"), false)
-        .expect("first publication");
-    publish_through_trait(port, &second, key("stale-second"), false)
-        .expect("new head publication");
+    publish_through_trait(port, &first, key("stale-first"), false).expect("first publication");
+    publish_through_trait(port, &second, key("stale-second"), false).expect("new head publication");
 
     assert!(matches!(
         publish_through_trait(port, &first, key("stale-first"), false),
