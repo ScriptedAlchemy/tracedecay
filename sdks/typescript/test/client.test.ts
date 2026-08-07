@@ -277,9 +277,16 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(new Set(OPERATIONS.map((operation) => operation.operation)).size).toBe(
       OPERATIONS.length,
     );
-    expect("health_read" in client.operations).toBe(false);
-    // @ts-expect-error Operations without a canonical SDK binding stay absent.
-    void client.operations.health_read;
+    // Operations without a canonical SDK binding stay absent. Asserting the
+    // whole deferred set — rather than one named operation — keeps this
+    // invariant true as families gain schemas and leave the deferred list.
+    const bound = new Set(Object.keys(client.operations));
+    for (const unavailable of UNAVAILABLE_OPERATIONS) {
+      expect(bound.has(unavailable.operation)).toBe(false);
+      expect(
+        bound.has(unavailable.operation.replace(/^application_/, "")),
+      ).toBe(false);
+    }
   });
 
   it("preserves remote base paths and origin policy", async () => {
