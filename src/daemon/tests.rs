@@ -202,6 +202,46 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     DaemonEngine::default().with_profile_identity(profile_identity)
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(previous) = self.previous.take() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+/// Pins the codex app-server launcher to a path that cannot exist so any
+/// automation tick reached during the test fails with the typed spawn error
+/// instead of invoking the operator's real `codex` binary. Without this,
+/// a tick spawns a live external process whose runtime depends on a real
+/// backend, and a harness kill (e.g. nextest SIGTERM) orphans that process
+/// group because in-process cleanup never runs.
+fn isolate_codex_app_server_binary(root: &std::path::Path) -> EnvVarGuard {
+    EnvVarGuard::set(
+        "TRACEDECAY_CODEX_BIN",
+        root.join("missing-codex-app-server-binary"),
+    )
+}
+
 fn enter_test_daemon_database_scope(
     profile_root: &std::path::Path,
     label: &str,

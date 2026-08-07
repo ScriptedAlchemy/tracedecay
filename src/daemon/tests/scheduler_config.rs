@@ -347,6 +347,7 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
 #[tokio::test]
 async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
     let dir = TempDir::new().expect("temp dir");
+    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().join("project");
     let profile_root = dir.path().join("profile");
     let client_identity = test_client_identity_for(profile_root);
@@ -422,6 +423,7 @@ async fn disabled_finished_scheduler_reenables_with_a_fresh_owner() {
 #[tokio::test]
 async fn concurrent_reenable_creates_one_live_scheduler_owner() {
     let dir = TempDir::new().expect("temp dir");
+    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().join("project");
     let profile_root = dir.path().join("profile");
     let client_identity = test_client_identity_for(profile_root);
@@ -676,6 +678,7 @@ async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
 #[tokio::test]
 async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncached_projects() {
     let dir = TempDir::new().expect("temp dir");
+    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let profile_root = dir.path().join("profile");
     let first_project = dir.path().join("first");
     let second_project = dir.path().join("second");
@@ -862,6 +865,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
     };
 
     let dir = TempDir::new().expect("temp dir");
+    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
@@ -1011,6 +1015,7 @@ async fn disabled_scheduler_reconcile_cannot_acknowledge_an_owner_that_then_exit
     use crate::dashboard::AutomationSchedulerReconcileOutcome;
 
     let dir = TempDir::new().expect("temp dir");
+    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
@@ -1171,6 +1176,7 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     use crate::automation::scheduler::{AutomationSchedulerControl, save_scheduler_control};
 
     let dir = TempDir::new().expect("temp dir");
+    let _codex_bin = isolate_codex_app_server_binary(dir.path());
     let project = dir.path().canonicalize().expect("canonical temp dir");
     let client_identity = test_client_identity_for(project.join("profile"));
     std::fs::create_dir_all(project.join("src")).expect("src dir");
