@@ -61,10 +61,14 @@ impl DoctorTestRuntime {
             )
             .await
             .expect("open Doctor test runtime registry");
+        // Mount the profile SESSIONS store: every production caller of
+        // `session_temporal_doctor_health` diagnoses a sessions store, which
+        // is the mount that binds the session relation graph the doctor's
+        // relation-health stage requires.
         let database = registry
-            .profile_database()
+            .profile_sessions()
             .await
-            .expect("mount Doctor test profile database");
+            .expect("mount Doctor test profile session store");
         Self {
             database,
             _registry: registry,

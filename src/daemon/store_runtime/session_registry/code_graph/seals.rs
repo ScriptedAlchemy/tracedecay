@@ -235,10 +235,25 @@ fn publish_staged_replay_seal_with_before_install(
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             check()?;
-            let Some(existing) = existing else {
-                drop(file);
-                remove_staged(&path, replay_root)?;
-                return Err(GraphDbError::Conflict);
+            // Staging pins the destination before the replay-pool lock is
+            // held, so a same-digest peer can install it in between. Re-pin
+            // under the held lock: a digest-exact destination is an
+            // idempotent replay, and only a foreign destination conflicts.
+            let existing = match existing {
+                Some(existing) => existing,
+                None => match pin_existing_replay_seal(&destination, digest, check) {
+                    Ok(Some(existing)) => existing,
+                    Ok(None) => {
+                        drop(file);
+                        remove_staged(&path, replay_root)?;
+                        return Err(GraphDbError::Conflict);
+                    }
+                    Err(error) => {
+                        drop(file);
+                        remove_staged(&path, replay_root)?;
+                        return Err(error);
+                    }
+                },
             };
             if !staged_identity_matches(&destination, &existing.file, &existing.fingerprint)? {
                 drop(existing);
