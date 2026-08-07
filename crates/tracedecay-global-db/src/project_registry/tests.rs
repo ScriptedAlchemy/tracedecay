@@ -47,6 +47,7 @@ async fn moved_checkout_old_root_alias_resolves_to_same_project() {
         .registered
         .get_code_project("project-moved")
         .await
+        .expect("registry read for the moved project should not fault")
         .expect("moved project remains registered");
     assert_eq!(
         record.canonical_root,
@@ -114,6 +115,7 @@ async fn failed_reregistration_rolls_back_without_leaking_replacement_alias() {
         .registered
         .get_code_project("project-rollback")
         .await
+        .expect("registry read for the rolled-back project should not fault")
         .expect("original project remains registered");
     assert_eq!(
         record.canonical_root,

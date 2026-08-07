@@ -876,7 +876,7 @@ impl RegisteredGlobalDb {
         // inconsistency, not an "unregistered project" — say so rather than
         // handing the caller an absence it would read as a clean refusal.
         self.get_code_project(&authority_project_id)
-            .await
+            .await?
             .ok_or_else(|| {
                 global_db_operation_message(
                     OPERATION,
@@ -888,11 +888,20 @@ impl RegisteredGlobalDb {
             })
     }
 
+    /// Mints or refreshes a `project_aliases` row.
+    ///
+    /// Every non-success is a [`TraceDecayError::Database`] naming the
+    /// `upsert project alias` operation: the previous `Option` return
+    /// swallowed the write, the commit, and the post-commit read-back into
+    /// one indistinguishable `None`, so a database fault read exactly like a
+    /// call that (impossibly) inserted nothing.
+    ///
+    /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
     pub async fn upsert_project_alias(
         &self,
         alias_path: &Path,
         project_id: &str,
-    ) -> Option<ProjectAliasRecord> {
+    ) -> tracedecay_runtime_core::errors::Result<ProjectAliasRecord> {
         self.upsert_project_alias_key(&project_path_alias_key(alias_path), project_id)
             .await
     }
@@ -901,9 +910,13 @@ impl RegisteredGlobalDb {
         &self,
         alias: &str,
         project_id: &str,
-    ) -> Option<ProjectAliasRecord> {
+    ) -> tracedecay_runtime_core::errors::Result<ProjectAliasRecord> {
+        const OPERATION: &str = "upsert project alias";
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        let transaction = self.begin_write_transaction().await.ok()?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         transaction
             .execute(
                 "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
@@ -914,9 +927,15 @@ impl RegisteredGlobalDb {
                 params![alias, project_id, now],
             )
             .await
-            .ok()?;
-        transaction.commit().await.ok()?;
-        let snapshot = self.read_snapshot().await.ok()?;
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut rows = snapshot
             .query(
                 "SELECT alias_path, project_id, last_seen_at
@@ -924,20 +943,49 @@ impl RegisteredGlobalDb {
                 params![alias],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some(ProjectAliasRecord {
-            alias_path: row.get(0).ok()?,
-            project_id: row.get(1).ok()?,
-            last_seen_at: row.get(2).ok()?,
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!("project alias '{alias}' is not readable after its write committed"),
+                )
+            })?;
+        Ok(ProjectAliasRecord {
+            alias_path: row
+                .get(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            project_id: row
+                .get(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            last_seen_at: row
+                .get(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
         })
     }
 
+    /// Mints or refreshes a `store_instances` row.
+    ///
+    /// Every non-success is a [`TraceDecayError::Database`] naming the
+    /// `upsert store instance` operation, covering the write, the commit,
+    /// and the post-commit read-back through
+    /// [`RegisteredGlobalDb::project_registry_context_by_id`] — including the
+    /// case where that context no longer names the store just written, which
+    /// is a registry inconsistency and not a legitimate absence.
+    ///
+    /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
     pub async fn upsert_store_instance(
         &self,
         upsert: StoreInstanceUpsert,
-    ) -> Option<StoreInstanceRecord> {
-        let transaction = self.begin_write_transaction().await.ok()?;
+    ) -> tracedecay_runtime_core::errors::Result<StoreInstanceRecord> {
+        const OPERATION: &str = "upsert store instance";
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         transaction
             .execute(
                 "INSERT INTO store_instances
@@ -965,20 +1013,53 @@ impl RegisteredGlobalDb {
                 ],
             )
             .await
-            .ok()?;
-        transaction.commit().await.ok()?;
-        self.project_registry_context_by_id(&upsert.project_id)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        transaction
+            .commit()
             .await
-            .ok()
-            .flatten()?
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        self.project_registry_context_by_id(&upsert.project_id)
+            .await?
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "project '{}' is not readable after its store write committed",
+                        upsert.project_id
+                    ),
+                )
+            })?
             .stores
             .into_iter()
             .map(|context| context.store)
             .find(|store| store.store_id == upsert.store_id)
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "store '{}' is not readable after its write committed",
+                        upsert.store_id
+                    ),
+                )
+            })
     }
 
-    pub async fn upsert_graph_scope(&self, upsert: GraphScopeUpsert) -> Option<GraphScopeRecord> {
-        let transaction = self.begin_write_transaction().await.ok()?;
+    /// Mints or refreshes a `graph_scopes` row.
+    ///
+    /// Every non-success is a [`TraceDecayError::Database`] naming the
+    /// `upsert graph scope` operation, on the same terms as
+    /// [`RegisteredGlobalDb::upsert_store_instance`].
+    ///
+    /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
+    pub async fn upsert_graph_scope(
+        &self,
+        upsert: GraphScopeUpsert,
+    ) -> tracedecay_runtime_core::errors::Result<GraphScopeRecord> {
+        const OPERATION: &str = "upsert graph scope";
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         transaction
             .execute(
                 "INSERT INTO graph_scopes
@@ -1005,23 +1086,53 @@ impl RegisteredGlobalDb {
                 ],
             )
             .await
-            .ok()?;
-        transaction.commit().await.ok()?;
-        self.project_registry_context_by_id(&upsert.project_id)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        transaction
+            .commit()
             .await
-            .ok()
-            .flatten()?
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        self.project_registry_context_by_id(&upsert.project_id)
+            .await?
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "project '{}' is not readable after its graph scope write committed",
+                        upsert.project_id
+                    ),
+                )
+            })?
             .stores
             .into_iter()
             .flat_map(|context| context.graph_scopes)
             .find(|scope| scope.graph_scope_id == upsert.graph_scope_id)
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "graph scope '{}' is not readable after its write committed",
+                        upsert.graph_scope_id
+                    ),
+                )
+            })
     }
 
+    /// Mints or refreshes a `store_artifacts` row.
+    ///
+    /// Every non-success is a [`TraceDecayError::Database`] naming the
+    /// `upsert store artifact` operation, on the same terms as
+    /// [`RegisteredGlobalDb::upsert_project_alias`].
+    ///
+    /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
     pub async fn upsert_store_artifact(
         &self,
         upsert: StoreArtifactUpsert,
-    ) -> Option<StoreArtifactRecord> {
-        let transaction = self.begin_write_transaction().await.ok()?;
+    ) -> tracedecay_runtime_core::errors::Result<StoreArtifactRecord> {
+        const OPERATION: &str = "upsert store artifact";
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         transaction
             .execute(
                 "INSERT INTO store_artifacts
@@ -1041,9 +1152,15 @@ impl RegisteredGlobalDb {
                 ],
             )
             .await
-            .ok()?;
-        transaction.commit().await.ok()?;
-        let snapshot = self.read_snapshot().await.ok()?;
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut rows = snapshot
             .query(
                 "SELECT store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at
@@ -1056,24 +1173,59 @@ impl RegisteredGlobalDb {
                 ],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some(StoreArtifactRecord {
-            store_id: row.get(0).ok()?,
-            artifact_kind: row.get(1).ok()?,
-            relpath: row.get(2).ok()?,
-            size_bytes: row.get(3).ok()?,
-            schema_version: row.get(4).ok()?,
-            updated_at: row.get(5).ok()?,
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "store artifact '{}/{}/{}' is not readable after its write committed",
+                        upsert.store_id, upsert.artifact_kind, upsert.relpath
+                    ),
+                )
+            })?;
+        Ok(StoreArtifactRecord {
+            store_id: row
+                .get(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            artifact_kind: row
+                .get(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            relpath: row
+                .get(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            size_bytes: row
+                .get(3)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            schema_version: row
+                .get(4)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+            updated_at: row
+                .get(5)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
         })
     }
 
-    pub async fn get_code_project(&self, project_id: &str) -> Option<CodeProjectRecord> {
-        self.project_registry_context_by_id(project_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|context| context.project)
+    /// Looks up a code project's durable authority row by id.
+    ///
+    /// Absence is a truthful `Ok(None)`, not an error: an unregistered or
+    /// deleted project id is a normal outcome callers already branch on
+    /// (registry reap, cascading delete). Only a database fault along the
+    /// read path is `Err`, via
+    /// [`RegisteredGlobalDb::project_registry_context_by_id`]. The previous
+    /// `Option` return conflated the two, so a broken registry read looked
+    /// exactly like "this project was never registered".
+    pub async fn get_code_project(
+        &self,
+        project_id: &str,
+    ) -> tracedecay_runtime_core::errors::Result<Option<CodeProjectRecord>> {
+        Ok(self
+            .project_registry_context_by_id(project_id)
+            .await?
+            .map(|context| context.project))
     }
 
     pub async fn resolve_project_store_by_alias(

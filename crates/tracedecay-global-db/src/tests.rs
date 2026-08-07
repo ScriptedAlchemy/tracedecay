@@ -261,6 +261,7 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
             .registered
             .get_code_project("proj_linked")
             .await
+            .expect("registry read for a merged-away alias should not fault")
             .is_none()
     );
     let context = harness
@@ -325,6 +326,7 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
                 .registered
                 .get_code_project("proj_symlink")
                 .await
+                .expect("registry read for a merged-away alias should not fault")
                 .is_none()
         );
     }
