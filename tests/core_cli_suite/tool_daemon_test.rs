@@ -1167,6 +1167,7 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
             "value": next_value,
         },
         "expected_revision": initial_revision,
+        "idempotency_key": "configuration.idempotency.cli-restart-survival",
     });
 
     configuration_tool_success(
@@ -1211,6 +1212,10 @@ fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
             "value": initial_value,
         },
         "expected_revision": initial_revision,
+        // A distinct key from the accepted write above: sharing one key would
+        // make this a replay of that effect, so the revision-CAS conflict this
+        // case asserts could never be observed.
+        "idempotency_key": "configuration.idempotency.cli-stale-revision-cas",
     });
     let project_arg = project_path.to_string_lossy().to_string();
     let stale_arguments = serde_json::to_string(&stale_mutation).unwrap();
