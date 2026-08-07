@@ -314,6 +314,7 @@ pub(super) async fn handle_dashboard(
     args: Value,
     retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
+    daemon_user_profile_id: Option<UserProfileId>,
     lcm_retrieval: Option<Arc<dyn SessionRetrievalServicePort>>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
@@ -403,12 +404,14 @@ pub(super) async fn handle_dashboard(
             })?;
             let dashboard_project_graph_resolver = retained_project_graph_resolver
                 .map(crate::mcp::server::dashboard_retained_project_graph_resolver);
-            let dashboard_profile_id = registered_project_session_db
-                .as_ref()
-                .map(|database| database.binding().shard_id.profile_id.clone());
+            // The profile write resolves its configuration layer through the
+            // profile identity the daemon handshake bound, which every
+            // daemon-owned server carries. Reading it from the project-session
+            // store instead withheld every profile mutation on the core server
+            // that answers tool calls before the session authorities mount.
             let application_invocation_executor = application_invocation_executor
                 .map(|executor| {
-                    DashboardInvocationExecutorAdapter::new(executor, dashboard_profile_id)
+                    DashboardInvocationExecutorAdapter::new(executor, daemon_user_profile_id)
                         .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
                 })
                 .transpose()?;
@@ -442,7 +445,8 @@ pub(super) async fn handle_dashboard(
                         super::dashboard_git_correlation::DashboardGitCorrelationReadAdapter::new(
                             Arc::clone(database),
                         ),
-                    ) as Arc<dyn crate::dashboard::DashboardGitCorrelationReadPortV1>
+                    )
+                        as Arc<dyn crate::dashboard::DashboardGitCorrelationReadPortV1>
                 });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
