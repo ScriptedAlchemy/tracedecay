@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{EphemeralSanitizedQueryViewV1, UtcMicros};
 
@@ -38,7 +39,7 @@ impl SymbolGraphScope {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolPrimitiveRecord {
     pub node_id: String,
@@ -57,7 +58,7 @@ pub struct SymbolPrimitiveRecord {
     pub score: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolRelationRecord {
     pub symbol: SymbolPrimitiveRecord,

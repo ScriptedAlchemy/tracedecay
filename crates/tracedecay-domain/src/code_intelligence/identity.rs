@@ -37,15 +37,15 @@ validated_string_newtype!(
     DomainError,
     validate_code_identity;
     CodeGenerationId,
+    FileOccurrenceId,
+    SymbolOccurrenceId,
+    CodeSearchChunkId,
 );
 
 validated_string_newtype!(
     plain,
     DomainError,
     validate_code_identity;
-    FileOccurrenceId,
-    SymbolOccurrenceId,
-    CodeSearchChunkId,
     LanguageId,
     LanguageDescriptorRevision,
     GrammarRevision,
@@ -79,7 +79,9 @@ impl ContentDigest {
 
 /// Byte range inside one sanitized source file. Mutable line numbers are
 /// never part of identity (Plan 25).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSpan {
     pub start_byte: u64,

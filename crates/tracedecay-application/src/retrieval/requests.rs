@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, ManifestDigest,
@@ -14,10 +15,13 @@ pub const MAX_APPLICATION_PAGE_SIZE: u32 = 1_000;
 
 /// Bounded opaque page request. Resume authorization occurs before an adapter
 /// decodes or hydrates the cursor.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PageRequest {
     pub page_size: u32,
+    /// Opaque resume token. The identifier type is deliberately absent from the
+    /// generated schema surface, so the public wire form is its bounded string.
+    #[schemars(with = "Option<String>")]
     pub cursor: Option<OpaqueCursor>,
 }
 
@@ -40,7 +44,9 @@ impl PageRequest {
 }
 
 /// Bounded output projection chosen by a concrete use case.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultProjection {
     Summary,
@@ -49,7 +55,9 @@ pub enum ResultProjection {
 }
 
 /// Stable semantic ordering; adapters may not replace it with transport order.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalOrder {
     Relevance,
@@ -58,7 +66,7 @@ pub enum RetrievalOrder {
     StableIdentity,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetrievalRequestMeta {
     pub temporal: TemporalModeV1,
@@ -108,7 +116,7 @@ pub struct SymbolSearchResult {
     pub query_fallback: QueryFallbackSubpayload,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceLinesRequest {
     pub file: FileOccurrenceId,
@@ -116,14 +124,14 @@ pub struct SourceLinesRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceReference {
     pub anchor: RetrievalAnchorId,
     pub span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceLinesResult {
     pub references: Vec<SourceReference>,
@@ -191,39 +199,39 @@ pub struct AffectedTestsResult {
     pub attributions: Vec<AffectedTestAttributionV1>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionLookupRequest {
     pub session_id: SessionId,
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionLookupResult {
     pub anchors: Vec<RetrievalAnchorId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnchorExpandRequest {
     pub anchor: RetrievalAnchorId,
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AnchorExpandResult {
     pub anchors: Vec<RetrievalAnchorId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthReadRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthReadResult {
     pub status: String,

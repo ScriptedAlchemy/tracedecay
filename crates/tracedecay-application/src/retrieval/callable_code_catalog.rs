@@ -1,13 +1,14 @@
+use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
     CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
-    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UseCaseId,
+    DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, PaginationContract,
+    PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension,
+    ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::current_bindings;
@@ -17,8 +18,12 @@ use crate::result::ResultContractRef;
 
 use super::callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
+    CodeFacetRecord, CodeFacetRequest, CodeNavigationRequest, CodeQueryPage, CodeRelationRequest,
+    CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
+    LexicalOccurrenceRecord, PhraseSearchSurfaceRequest,
 };
 use super::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use super::symbol_graph::{SymbolPrimitiveRecord, SymbolRelationRecord};
 
 pub fn callable_code_request_schema(
     kind: CallableCodeOperationKind,
@@ -127,13 +132,73 @@ pub fn callable_code_catalog_contribution()
         capabilities.len() + CANONICAL_SURFACE_EQUIVALENT_COUNT,
         CALLABLE_CODE_OPERATION_COUNT
     );
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.callable-code-query")?,
         depends_on: Vec::new(),
         capabilities,
         retrieval_primitives: Vec::new(),
         bindings,
-    })?)
+    })?;
+    let schemas = callable_code_executable_schemas(&contribution)?;
+    Ok(contribution.with_executable_schemas(schemas)?)
+}
+
+/// Rust-owned request/result schema bodies for every advertised callable-code
+/// query.
+///
+/// The pairs mirror `CallableCodeQueryService` exactly: each service method
+/// names the request type it validates and the `CodeQueryPage` item type it
+/// returns, so the generated SDKs cannot describe a shape the service does not
+/// produce. Only `code_phrase_search` differs, because its service request
+/// holds a non-serializable sanitized query view and its admitted wire form is
+/// [`PhraseSearchSurfaceRequest`].
+fn callable_code_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    let mut schemas = Vec::new();
+    macro_rules! add {
+        ($kind:ident, $request:ty, $item:ty) => {
+            schemas.push(callable_code_executable_schema::<
+                $request,
+                CodeQueryPage<$item>,
+            >(contribution, CallableCodeOperationKind::$kind)?)
+        };
+    }
+    add!(ExactOccurrence, ExactOccurrenceRequest, ExactOccurrenceRecord);
+    add!(
+        PhraseSearch,
+        PhraseSearchSurfaceRequest,
+        LexicalOccurrenceRecord
+    );
+    add!(Callees, CodeRelationRequest, SymbolRelationRecord);
+    add!(Facets, CodeFacetRequest, CodeFacetRecord);
+    add!(Timeline, CodeTimelineRequest, CodeTimelineRecord);
+    add!(Declaration, CodeNavigationRequest, SymbolPrimitiveRecord);
+    add!(Definition, CodeNavigationRequest, SymbolPrimitiveRecord);
+    add!(TypeDefinition, CodeNavigationRequest, SymbolPrimitiveRecord);
+    add!(References, CodeNavigationRequest, SymbolRelationRecord);
+    Ok(schemas)
+}
+
+fn callable_code_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    kind: CallableCodeOperationKind,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let capability_id = code_query_capability_id(kind)?;
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == &capability_id)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "callable code schema capability",
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
+        manifest,
+    )?)
 }
 
 const CANONICAL_SURFACE_EQUIVALENT_COUNT: usize = 9;

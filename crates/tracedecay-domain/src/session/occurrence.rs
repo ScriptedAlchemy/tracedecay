@@ -256,7 +256,9 @@ pub struct SignedCursorKeyRefV1 {
 }
 
 /// Requested temporal interpretation.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, schemars::JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TemporalModeV1 {
     Current,

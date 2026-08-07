@@ -242,7 +242,19 @@ impl CodeSearchChunkAnchorV1 {
 /// The classification of one whole exact technical term (Plan 25/Plan 15
 /// exact tier). Whole exact terms and language-profiled subtokens are
 /// distinct fields.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ExactTechnicalTermKindV1 {
     WholeSymbol,
