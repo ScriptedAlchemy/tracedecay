@@ -46,7 +46,6 @@ pub(crate) use location::{
 pub use owner::GraphDbOwner;
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use owner::GraphDbOwner;
-#[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
 pub use projection::NeverCancelled;
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use projection::ProjectionReplacement;

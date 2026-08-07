@@ -20,11 +20,12 @@ pub trait GraphCancellation: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
-#[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+/// Typed no-cancellation authority for graph work that must run to
+/// completion once durably begun (e.g. settlement after a committed
+/// publication) or bounded reads that carry no caller cancellation.
 #[derive(Debug)]
 pub struct NeverCancelled;
 
-#[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
 impl GraphCancellation for NeverCancelled {
     fn is_cancelled(&self) -> bool {
         false
