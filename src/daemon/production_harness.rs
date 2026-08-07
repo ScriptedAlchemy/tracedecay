@@ -442,7 +442,11 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .shutdown_host_admission_replay()
         .await;
     resources.invocation.shutdown().await;
-    shutdown_detached_project_servers(servers).await;
+    shutdown_detached_project_servers(
+        tokio::time::Instant::now() + super::DAEMON_SHUTDOWN_DEADLINE,
+        servers,
+    )
+    .await;
     drop(resources);
 }
 
