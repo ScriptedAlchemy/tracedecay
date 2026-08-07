@@ -553,10 +553,14 @@ async fn resolve_project_registry_context(
         .try_resolve_project_store_record_by_alias(selector_path)
         .await?
     {
-        return Ok(db
-            .project_registry_context_by_id(&store.project_id)
-            .await?
-            .into());
+        // A store-instance alias hit still names a root that several
+        // registered projects may claim; picking the store's project here
+        // would serve an arbitrary claimant, so this resolution path keeps
+        // the same sole-claimant guard as the project-alias paths below.
+        return match db.project_registry_context_by_id(&store.project_id).await? {
+            Some(context) => sole_claimant_of_its_root(db, context).await,
+            None => Ok(ProjectSelectorResolution::Unresolved),
+        };
     }
     if is_explicit_project_path_selector(project_path) {
         // A registered project needs no registered *store instance* row to be

@@ -25,6 +25,15 @@ struct RoutedProjects {
     target_project_id: String,
 }
 
+fn init_git_repo(root: &Path) {
+    fs::write(root.join(".gitignore"), ".tracedecay/\n").unwrap();
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.email", "test@test.com"]);
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "initial"]);
+}
+
 async fn routed_projects() -> RoutedProjects {
     let home = TempDir::new().unwrap();
     let profile_root = home
@@ -37,6 +46,10 @@ async fn routed_projects() -> RoutedProjects {
         global_db_path: Some(profile_root.join("global.db")),
     };
 
+    // Both projects are real repositories BEFORE `TraceDecay::init` runs:
+    // registered-route identity admission reads the repository identity
+    // marker that real registration writes into the git common dir, so a
+    // routable project must be a repository at registration time.
     let active_dir = TempDir::new().unwrap();
     fs::create_dir_all(active_dir.path().join("src")).unwrap();
     fs::write(
@@ -44,6 +57,7 @@ async fn routed_projects() -> RoutedProjects {
         "fn active_only() -> i32 { 1 }\n",
     )
     .unwrap();
+    init_git_repo(active_dir.path());
     let active = TraceDecay::init_with_options(active_dir.path(), options.clone())
         .await
         .unwrap();
@@ -56,6 +70,7 @@ async fn routed_projects() -> RoutedProjects {
         "fn target_only() -> i32 { 2 }\n",
     )
     .unwrap();
+    init_git_repo(target_dir.path());
     let target = TraceDecay::init_with_options(target_dir.path(), options)
         .await
         .unwrap();
@@ -271,14 +286,9 @@ async fn linked_worktree_hook_route_reaches_target_across_client_sockets() {
     let projects = routed_projects().await;
     let target_project = projects.target_root().to_path_buf();
 
-    // Turn the target into a real repository and attach a linked worktree at a
-    // sibling path outside every ancestor of the registered checkout.
-    fs::write(target_project.join(".gitignore"), ".tracedecay/\n").unwrap();
-    git(&target_project, &["init", "-b", "main"]);
-    git(&target_project, &["config", "user.email", "test@test.com"]);
-    git(&target_project, &["config", "user.name", "Test"]);
-    git(&target_project, &["add", "."]);
-    git(&target_project, &["commit", "-m", "initial"]);
+    // Attach a linked worktree at a sibling path outside every ancestor of
+    // the registered checkout, so the parent-directory alias walk from it can
+    // never reach the registered project.
     let worktree_parent = TempDir::new().unwrap();
     let linked_worktree = worktree_parent.path().join("linked-feature");
     git(
@@ -298,10 +308,10 @@ async fn linked_worktree_hook_route_reaches_target_across_client_sockets() {
     );
 
     let registry_db = projects.registered_runtime().await;
-    // Re-register the target with its git common dir. The repository was
-    // created after the store, so there is no identity marker to fall back on:
-    // this alias is the only bridge from the linked worktree back to the
-    // registered checkout.
+    // Re-register the target with its git common dir: a linked worktree lives
+    // at a sibling path, so this common-dir identity row is the only bridge
+    // from the worktree back to the registered checkout. Identity admission
+    // then reads the repository marker registration wrote at init.
     registry_db
         .upsert_code_project(
             &projects.target_project_id,
