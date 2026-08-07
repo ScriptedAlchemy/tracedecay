@@ -13,7 +13,6 @@ use super::super::projection::{
     project_memory_required_mapping_tx, project_memory_source_for_fact_tx,
     resolve_project_memory_target_tx,
 };
-use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::privacy::{
@@ -495,7 +494,6 @@ pub(super) fn project_memory_curated_correction_batch(
 }
 
 pub(super) async fn project_memory_normalize_tags_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
@@ -550,9 +548,7 @@ pub(super) async fn project_memory_normalize_tags_tx(
     )
     .await?;
     compatibility_mirror_update_tx(
-        db,
         transaction,
-        owner,
         mapping
             .legacy_fact_id()
             .ok_or(FactStoreError::FactMismatch)?,

@@ -98,22 +98,6 @@ pub(in crate::db) async fn create_schema(
             SELECT RAISE(ABORT, 'memory_v2 assertion payloads are immutable');
         END;
 
-        CREATE TABLE IF NOT EXISTS memory_v2_assertion_vectors (
-            assertion_id TEXT NOT NULL,
-            fact_id TEXT NOT NULL,
-            owner_kind TEXT NOT NULL,
-            project_id TEXT NOT NULL,
-            vector BLOB NOT NULL,
-            algebra TEXT NOT NULL,
-            dimensions INTEGER NOT NULL CHECK(dimensions > 0),
-            precision TEXT NOT NULL,
-            PRIMARY KEY(assertion_id, fact_id, owner_kind, project_id),
-            FOREIGN KEY(assertion_id, fact_id, owner_kind, project_id)
-                REFERENCES memory_v2_assertion_payloads(
-                    assertion_id, fact_id, owner_kind, project_id
-                ) ON DELETE CASCADE
-        );
-
         CREATE TABLE IF NOT EXISTS memory_v2_evidence (
             evidence_id TEXT NOT NULL,
             fact_id TEXT NOT NULL,
@@ -309,10 +293,6 @@ pub(in crate::db) async fn create_schema(
         CREATE TRIGGER IF NOT EXISTS memory_v2_supersession_no_delete
         BEFORE DELETE ON memory_v2_assertion_supersession BEGIN
             SELECT RAISE(ABORT, 'memory_v2 assertion supersession is immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_vectors_no_update
-        BEFORE UPDATE ON memory_v2_assertion_vectors BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 assertion vectors are immutable');
         END;
         CREATE TRIGGER IF NOT EXISTS memory_v2_evidence_no_update
         BEFORE UPDATE ON memory_v2_evidence BEGIN

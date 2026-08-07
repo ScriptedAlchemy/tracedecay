@@ -129,27 +129,64 @@ async fn project_memory_owner_status_counts_tx(
     ))
 }
 
-async fn compatibility_owner_has_dirty_banks_tx(
+/// Recomputes the holographic bank count directly from eligible facts.
+///
+/// Plan 39 Task 7 (owner decision 2026-08-07, second) deleted the persisted
+/// `memory_v2_banks` projection: stored bank vectors were never read back, and
+/// recall re-encodes from canonical content at query time. The count is the
+/// number of distinct bank-eligible categories plus the aggregate `all` bank,
+/// using the same eligibility the deleted rebuild pass used — an eligible
+/// current fact whose mirrored vector is canonical FHRR material.
+async fn compatibility_owner_bank_count_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> FactStoreResult<bool> {
+) -> FactStoreResult<u64> {
     let key = OwnerKey::new(owner)?;
+    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            "SELECT 1
-             FROM memory_v2_bank_dirty AS dirty
-             WHERE dirty.owner_kind = ?1 AND dirty.project_id = ?2
-               AND dirty.owner_json = ?3
-             LIMIT 1",
-            params![key.kind, key.project_id.as_str(), key.json.as_str()],
+            "SELECT COUNT(DISTINCT legacy_facts.category)
+             FROM memory_facts AS legacy_facts
+             JOIN memory_v2_facts AS mappings
+               ON mappings.fact_id = legacy_facts.canonical_fact_id
+             JOIN memory_v2_current_facts AS current_facts
+               ON current_facts.fact_id = mappings.fact_id
+              AND current_facts.owner_kind = mappings.owner_kind
+              AND current_facts.project_id = mappings.project_id
+             WHERE mappings.owner_kind = ?1
+               AND mappings.project_id = ?2
+               AND mappings.owner_json = ?3
+               AND ?4 = 'legacy-memory-v1'
+               AND current_facts.payload_access = 'eligible'
+               AND legacy_facts.hrr_vector IS NOT NULL
+               AND legacy_facts.hrr_algebra = 'amari_fhrr'
+               AND legacy_facts.hrr_dim = ?5
+               AND legacy_facts.hrr_precision = ?6
+               AND length(legacy_facts.hrr_vector) = ?7",
+            params![
+                key.kind,
+                key.project_id.as_str(),
+                key.json.as_str(),
+                source_store_id.as_str(),
+                HolographicEncoder::DIMENSIONS as i64,
+                HolographicEncoder::HRR_PRECISION,
+                HolographicEncoder::SERIALIZED_F32_BYTES as i64,
+            ],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    Ok(rows
+    let category_count = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-        .is_some())
+        .map(|row| row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION))
+        .transpose()?
+        .unwrap_or(0);
+    let category_count = nonnegative_u64(category_count, "bank category count")?;
+    if category_count == 0 {
+        return Ok(0);
+    }
+    Ok(category_count.saturating_add(1))
 }
 
 pub(super) async fn project_memory_status_tx(
@@ -251,31 +288,8 @@ pub(super) async fn project_memory_status_tx(
         row_i64(&missing_row, 0, PROJECT_MEMORY_READ_OPERATION)?,
         "missing vector count",
     )?;
-    let dirty_banks = compatibility_owner_has_dirty_banks_tx(transaction, owner).await?;
-    let mut bank_rows = transaction
-        .query(
-            "SELECT COUNT(*) FROM memory_v2_banks AS banks
-             WHERE banks.owner_kind = ?1 AND banks.project_id = ?2
-               AND banks.owner_json = ?3",
-            params![key.kind, key.project_id.as_str(), key.json.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let bank_row = bank_rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_READ_OPERATION,
-                "compatibility bank count is missing",
-            )
-        })?;
-    let bank_count = nonnegative_u64(
-        row_i64(&bank_row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-        "bank count",
-    )?;
-    let projection_state = if missing_vector_count == 0 && !dirty_banks {
+    let bank_count = compatibility_owner_bank_count_tx(transaction, owner).await?;
+    let projection_state = if missing_vector_count == 0 {
         ProjectMemoryProjectionStateV1::Ready
     } else {
         ProjectMemoryProjectionStateV1::Rebuilding

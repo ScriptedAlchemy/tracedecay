@@ -225,7 +225,6 @@ async fn entity_grooming_rewires_links_supports_alias_retrieval_and_repairs_vect
     assert_eq!(dimension, HolographicEncoder::DIMENSIONS as i64);
     assert_eq!(precision, HolographicEncoder::HRR_PRECISION);
     assert_eq!(bytes, HolographicEncoder::SERIALIZED_F32_BYTES as i64);
-    assert!(dirty_bank_names(&db).await.is_empty());
 }
 
 #[test]
@@ -487,144 +486,6 @@ fn vector_deserialize_accepts_legacy_f64_blobs_for_forward_compatibility_and_bac
 }
 
 #[tokio::test]
-async fn memory_store_marks_and_rebuilds_dirty_banks() {
-    let (db, _tmp) = make_memory_store().await;
-    let writer = db.memory_writer().await.unwrap();
-    let store = writer.store();
-
-    let fact = store
-        .add_fact(
-            fact_request(
-                "Project facts should dirty project banks",
-                MemoryCategory::Project,
-                0.8,
-            ),
-            DEFAULT_TRUST,
-        )
-        .await
-        .unwrap()
-        .fact
-        .unwrap();
-    assert_eq!(dirty_bank_names(&db).await, vec!["all", "project"]);
-
-    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
-    assert!(dirty_bank_names(&db).await.is_empty());
-    assert_eq!(memory_bank_fact_count(&db, "all").await, Some(1));
-    assert_eq!(memory_bank_fact_count(&db, "project").await, Some(1));
-
-    store
-        .update_fact(UpdateFactRequest {
-            fact_id: fact.fact_id,
-            content: Some("Decision facts should replace project bank membership".to_string()),
-            category: Some(MemoryCategory::Decision),
-            tags: None,
-            entities: None,
-            trust: None,
-            source: None,
-            metadata: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        dirty_bank_names(&db).await,
-        vec!["all", "decision", "project"]
-    );
-
-    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 3);
-    assert!(dirty_bank_names(&db).await.is_empty());
-    assert_eq!(memory_bank_fact_count(&db, "all").await, Some(1));
-    assert_eq!(memory_bank_fact_count(&db, "decision").await, Some(1));
-    assert_eq!(memory_bank_fact_count(&db, "project").await, None);
-
-    assert!(store.remove_fact(fact.fact_id).await.unwrap());
-    assert_eq!(dirty_bank_names(&db).await, vec!["all", "decision"]);
-
-    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
-    assert!(dirty_bank_names(&db).await.is_empty());
-    assert_eq!(memory_bank_count(&db).await, 0);
-}
-
-#[tokio::test]
-async fn rebuild_dirty_banks_preserves_rows_updated_during_rebuild() {
-    let (db, _tmp) = make_memory_store().await;
-    let writer = db.memory_writer().await.unwrap();
-    let store = writer.store();
-
-    store
-        .add_fact(
-            fact_request(
-                "Project facts may be updated while banks rebuild",
-                MemoryCategory::Project,
-                0.8,
-            ),
-            DEFAULT_TRUST,
-        )
-        .await
-        .unwrap()
-        .fact
-        .unwrap();
-    let before = dirty_bank_updated_at(&db, "project").await;
-
-    drop(writer);
-    db.execute_write_batch(
-        "install dirty-bank trigger fixture",
-        "CREATE TRIGGER mark_project_dirty_after_bank_insert
-                AFTER INSERT ON memory_banks
-                WHEN NEW.bank_name = 'project'
-                BEGIN
-                    UPDATE memory_bank_dirty
-                    SET updated_at = updated_at + 100
-                    WHERE bank_name = 'project';
-                END;",
-    )
-    .await
-    .unwrap();
-    let writer = db.memory_writer().await.unwrap();
-    let store = writer.store();
-
-    assert_eq!(store.rebuild_dirty_banks().await.unwrap(), 2);
-    assert_eq!(dirty_bank_names(&db).await, vec!["project"]);
-    assert!(dirty_bank_updated_at(&db, "project").await > before);
-}
-
-#[tokio::test]
-async fn mark_bank_dirty_advances_marker_on_same_second_redirty() {
-    let (db, _tmp) = make_memory_store().await;
-    let writer = db.memory_writer().await.unwrap();
-    let store = writer.store();
-
-    store
-        .add_fact(
-            fact_request("First project fact", MemoryCategory::Project, 0.8),
-            DEFAULT_TRUST,
-        )
-        .await
-        .unwrap()
-        .fact
-        .unwrap();
-    let first = dirty_bank_updated_at(&db, "project").await;
-
-    store
-        .add_fact(
-            fact_request("Second project fact", MemoryCategory::Project, 0.8),
-            DEFAULT_TRUST,
-        )
-        .await
-        .unwrap()
-        .fact
-        .unwrap();
-    let second = dirty_bank_updated_at(&db, "project").await;
-
-    // The dirty marker is an optimistic-concurrency token, so re-marking a bank must move it
-    // strictly forward even when both writes land in the same wall-clock second; otherwise a
-    // re-dirty during a rebuild snapshot could be silently cleared.
-    assert!(
-        second > first,
-        "dirty marker must strictly increase on re-dirty (first={first}, second={second})"
-    );
-}
-
-#[tokio::test]
 async fn memory_store_add_list_get_and_deduplicates_by_content() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
@@ -827,7 +688,7 @@ async fn memory_store_rejects_secret_like_fact_updates_without_mutating() {
 }
 
 #[tokio::test]
-async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() {
+async fn memory_store_persists_vectors_and_repairs_missing_vectors() {
     let (db, _tmp) = make_memory_store().await;
     let writer = db.memory_writer().await.unwrap();
     let store = writer.store();
@@ -848,7 +709,7 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
     let fact_without_vector = store
         .add_fact(
             fact_request(
-                "Bank rebuild still counts facts while skipping missing vectors",
+                "A second fact keeps the recompute count falsifiable",
                 MemoryCategory::Project,
                 0.8,
             ),
@@ -905,34 +766,6 @@ async fn memory_store_persists_vectors_and_rebuilds_missing_vectors_and_banks() 
         "fresh and recomputed vectors should be marked as f32 precision with compact blobs"
     );
 
-    drop(writer);
-    execute_sql(
-        &db,
-        "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
-        rusqlite::params![fact_without_vector.fact_id],
-    );
-    let writer = db.memory_writer().await.unwrap();
-    let store = writer.store();
-    assert_eq!(
-        store
-            .rebuild_bank("project", Some(MemoryCategory::Project))
-            .await
-            .unwrap(),
-        2
-    );
-    assert!(store.rebuild_all_banks().await.unwrap() >= 1);
-    store.remove_fact(fact.fact_id).await.unwrap();
-    store
-        .remove_fact(fact_without_vector.fact_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .rebuild_bank("project", Some(MemoryCategory::Project))
-            .await
-            .unwrap(),
-        0
-    );
 }
 
 #[tokio::test]
@@ -985,67 +818,6 @@ async fn compute_missing_vectors_backfills_legacy_f64_precision_to_f32() {
     assert!(
         similarity > 0.999_999_999,
         "legacy f64→f32 backfill should preserve phase-cosine ordering; similarity={similarity}"
-    );
-}
-
-#[tokio::test]
-async fn compact_vectors_keep_recall_ordering_after_bank_rebuild() {
-    let (db, _tmp) = make_memory_store().await;
-    let writer = db.memory_writer().await.unwrap();
-    let store = writer.store();
-    let retriever = writer.retriever();
-    for (content, trust) in [
-        (
-            "Alpha recall fixture prefers compact Rust FHRR vectors",
-            0.95,
-        ),
-        (
-            "Alpha recall fixture mentions compact Rust vectors second",
-            0.75,
-        ),
-        ("Unrelated gardening note for ordering control", 0.95),
-    ] {
-        store
-            .add_fact(
-                fact_request(content, MemoryCategory::Project, trust),
-                DEFAULT_TRUST,
-            )
-            .await
-            .unwrap()
-            .fact
-            .unwrap();
-    }
-
-    let before: Vec<String> = retriever
-        .search(
-            "Alpha compact Rust FHRR",
-            Some(MemoryCategory::Project),
-            Some(0.1),
-            10,
-        )
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|hit| hit.fact.content)
-        .collect();
-
-    assert!(store.rebuild_all_banks().await.unwrap() >= 1);
-
-    let after: Vec<String> = retriever
-        .search(
-            "Alpha compact Rust FHRR",
-            Some(MemoryCategory::Project),
-            Some(0.1),
-            10,
-        )
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|hit| hit.fact.content)
-        .collect();
-    assert_eq!(
-        after, before,
-        "compact bank rebuild must preserve recall ordering"
     );
 }
 
@@ -1744,7 +1516,6 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
         })
         .await
         .unwrap();
-    store.rebuild_dirty_banks().await.unwrap();
 
     async fn count(db: &Database, sql: &str, fact_id: i64) -> i64 {
         rusqlite::Connection::open_with_flags(
@@ -1780,10 +1551,6 @@ async fn remove_fact_hard_deletes_fts_entity_links_and_feedback_events() {
         count(&db, feedback_sql, fact.fact_id).await,
         0,
         "feedback events must FK-cascade on fact delete"
-    );
-    assert!(
-        dirty_bank_names(&db).await.contains(&"project".to_string()),
-        "the deleted fact's bank must be marked dirty for rebuild"
     );
 }
 
@@ -1882,11 +1649,6 @@ async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
     assert_eq!(original.diff.diff, AddFactDiffKind::Add);
     let original_fact = original.fact.expect("original fact should be stored");
     let original_vector = fact_hrr_vector(&db, original_fact.fact_id).await;
-    store.rebuild_dirty_banks().await.unwrap();
-    assert!(
-        dirty_bank_names(&db).await.is_empty(),
-        "test setup should start with clean banks before the duplicate add"
-    );
 
     // Case/whitespace variant: near-exact AND content-normalized equivalent,
     // so the insert is skipped and the existing fact is returned.
@@ -1932,10 +1694,6 @@ async fn add_fact_reports_near_duplicates_and_skips_normalized_equivalents() {
     assert_vector_matches_with_f32_tolerance(
         &updated_vector,
         &encoder.encode_fact(&skipped_fact.content, &skipped_fact.entities),
-    );
-    assert!(
-        dirty_bank_names(&db).await.contains(&"tool".to_string()),
-        "normalized-equivalent vector refresh must dirty its memory bank"
     );
 
     let probe_results = retriever

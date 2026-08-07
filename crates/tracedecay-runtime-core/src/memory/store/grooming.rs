@@ -17,7 +17,7 @@ impl MemoryStore<'_> {
         fact_id: i64,
         tags: &[String],
     ) -> Result<Vec<String>> {
-        let fact = self.get_fact(fact_id).await?.ok_or_else(|| {
+        self.get_fact(fact_id).await?.ok_or_else(|| {
             db_message("normalize_fact_tags", format!("fact {fact_id} not found"))
         })?;
         let normalized: Vec<String> = tags
@@ -42,7 +42,6 @@ impl MemoryStore<'_> {
             )
             .await
             .map_err(|e| db_error("normalize_fact_tags", e))?;
-        self.mark_fact_banks_dirty(fact.category).await?;
         Ok(normalized)
     }
 
@@ -95,7 +94,6 @@ impl MemoryStore<'_> {
             )
             .await
             .map_err(|e| db_error("update_entity_aliases", e))?;
-        self.mark_entity_fact_banks_dirty(entity_id, false).await?;
         Ok(aliases)
     }
 
@@ -179,7 +177,7 @@ impl MemoryStore<'_> {
                 .map_err(|e| db_error("merge_entities", e))?;
         }
         for fact_id in &fact_ids {
-            self.invalidate_fact_vector_and_mark_dirty(*fact_id).await?;
+            self.invalidate_fact_vector(*fact_id).await?;
         }
         Ok(EntityGroomingResult {
             winner_entity_id,
@@ -210,7 +208,6 @@ impl MemoryStore<'_> {
         // Derived state is resumable. Keep its CPU-heavy work outside the
         // logical mutation transaction and cap each pass.
         report.derived_repair.missing_vectors_repaired = self.compute_missing_vectors(500).await?;
-        report.derived_repair.banks_rebuilt = self.rebuild_dirty_banks().await?;
         Ok(report)
     }
 
@@ -498,25 +495,6 @@ impl MemoryStore<'_> {
             .is_some())
     }
 
-    async fn mark_entity_fact_banks_dirty(&self, entity_id: i64, invalidate: bool) -> Result<()> {
-        let fact_ids = self
-            .fact_ids_for_entity(entity_id, "mark_entity_fact_banks_dirty")
-            .await?;
-        if invalidate {
-            for fact_id in fact_ids {
-                self.invalidate_fact_vector_and_mark_dirty(fact_id).await?;
-            }
-        } else {
-            let categories = self.fact_categories(&fact_ids).await?;
-            for fact_id in fact_ids {
-                if let Some(category) = categories.get(&fact_id) {
-                    self.mark_fact_banks_dirty(*category).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     async fn fact_ids_for_entity(
         &self,
         entity_id: i64,
@@ -550,9 +528,9 @@ impl MemoryStore<'_> {
         Ok(fact_ids)
     }
 
-    async fn invalidate_fact_vector_and_mark_dirty(&self, fact_id: i64) -> Result<()> {
+    async fn invalidate_fact_vector(&self, fact_id: i64) -> Result<()> {
         let categories = self.fact_categories(&[fact_id]).await?;
-        if let Some(category) = categories.get(&fact_id) {
+        if categories.contains_key(&fact_id) {
             self.conn
                 .execute(
                     "UPDATE memory_facts SET hrr_vector = NULL WHERE fact_id = ?1",
@@ -560,7 +538,6 @@ impl MemoryStore<'_> {
                 )
                 .await
                 .map_err(|e| db_error("invalidate_fact_vector", e))?;
-            self.mark_fact_banks_dirty(*category).await?;
         }
         Ok(())
     }

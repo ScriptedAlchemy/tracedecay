@@ -1,6 +1,10 @@
-//! Compatibility missing-vector repair and dirty-bank rebuilds.
+//! Compatibility missing-vector repair.
+//!
+//! Plan 39 Task 7 (owner decision 2026-08-07, second): the derived holographic
+//! bank projection is deleted, so repair no longer marks, rebuilds, or clears
+//! bank rows. Recall re-encodes candidate vectors from canonical fact content
+//! at query time.
 
-use crate::db::Database;
 use crate::memory::encoding::HolographicEncoder;
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -13,9 +17,7 @@ use tracedecay_store::{
     ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1, ProjectMemoryResult,
 };
 
-use super::crud::{
-    compatibility_mark_owner_banks_dirty_tx, compatibility_mirror_vector, load_current_fact_tx,
-};
+use super::crud::{compatibility_mirror_vector, load_current_fact_tx};
 use super::curation::{
     project_memory_available_curation_fact_tx, project_memory_curation_evidence_ids_tx,
 };
@@ -25,7 +27,7 @@ use super::envelope::{
 };
 use super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp,
-    compatibility_source_store_id, project_memory_now, row_i64, row_string, storage_error,
+    compatibility_source_store_id, project_memory_now, row_string, storage_error,
     storage_message,
 };
 use super::projection::project_memory_required_mapping_tx;
@@ -35,22 +37,15 @@ use super::projection::project_memory_required_mapping_tx;
 /// converging backlog.
 pub(crate) const COMPATIBILITY_REPAIR_VECTOR_BATCH: i64 = 512;
 
-pub(crate) const COMPATIBILITY_REPAIR_BANK_BATCH: i64 = 32;
-
-/// True when a repair pass filled either per-pass batch cap, so backlog may
-/// remain behind the cap. Only the store computes this — it owns the caps — so
+/// True when a repair pass filled the per-pass batch cap, so backlog may
+/// remain behind the cap. Only the store computes this — it owns the cap — so
 /// the daemon scheduler can consume [`ProjectMemoryMemoryRepairStatsV1::saturated`]
-/// without depending on these store-internal constants.
-fn compatibility_repair_batches_saturated(
-    missing_vectors_repaired: u64,
-    banks_rebuilt: u64,
-) -> bool {
+/// without depending on this store-internal constant.
+fn compatibility_repair_batches_saturated(missing_vectors_repaired: u64) -> bool {
     missing_vectors_repaired >= COMPATIBILITY_REPAIR_VECTOR_BATCH as u64
-        || banks_rebuilt >= COMPATIBILITY_REPAIR_BANK_BATCH as u64
 }
 
 pub(super) async fn compatibility_repair_vector_for_fact_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation: &ProjectMemoryFactRepairVectorV1,
@@ -88,8 +83,6 @@ pub(super) async fn compatibility_repair_vector_for_fact_tx(
             "compatibility vector target is missing from the legacy mirror",
         ));
     }
-    compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, payload.category(), now)
-        .await?;
     Ok(fact_id)
 }
 
@@ -103,7 +96,6 @@ pub(super) fn project_memory_repair_request_digest(
 }
 
 pub(super) async fn repair_project_memory_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryMemoryRepairCommandV1,
 ) -> ProjectMemoryResult<ProjectMemoryMemoryRepairStatsV1> {
@@ -119,29 +111,21 @@ pub(super) async fn repair_project_memory_tx(
     {
         let missing_vectors_repaired =
             project_memory_receipt_u64(&receipt.receipt, "missing_vectors_repaired")?;
-        let banks_rebuilt = project_memory_receipt_u64(&receipt.receipt, "banks_rebuilt")?;
         return Ok(
-            ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
-                .with_saturated(compatibility_repair_batches_saturated(
-                    missing_vectors_repaired,
-                    banks_rebuilt,
-                )),
+            ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, 0).with_saturated(
+                compatibility_repair_batches_saturated(missing_vectors_repaired),
+            ),
         );
     }
     let now = project_memory_now()?;
     let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
-        db,
         transaction,
         request.owner(),
         COMPATIBILITY_REPAIR_VECTOR_BATCH,
     )
     .await?;
-    compatibility_mark_absent_banks_dirty_tx(db, transaction, request.owner(), now).await?;
-    let banks_rebuilt =
-        compatibility_rebuild_dirty_banks_tx(db, transaction, request.owner()).await?;
     let receipt = json!({
         "missing_vectors_repaired": missing_vectors_repaired,
-        "banks_rebuilt": banks_rebuilt,
     });
     project_memory_record_operation_receipt_tx(
         transaction,
@@ -156,16 +140,13 @@ pub(super) async fn repair_project_memory_tx(
     )
     .await?;
     Ok(
-        ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
-            .with_saturated(compatibility_repair_batches_saturated(
-                missing_vectors_repaired,
-                banks_rebuilt,
-            )),
+        ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, 0).with_saturated(
+            compatibility_repair_batches_saturated(missing_vectors_repaired),
+        ),
     )
 }
 
 pub(super) async fn compatibility_repair_missing_vectors_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     limit: i64,
@@ -226,7 +207,6 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
         );
     }
     drop(rows);
-    let now = project_memory_now()?;
     let mut repaired = 0_u64;
     for fact_id in fact_ids {
         let Some(fact) = load_current_fact_tx(transaction, &key, owner, &fact_id).await? else {
@@ -260,302 +240,8 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
                 "compatibility vector target is missing from the legacy mirror",
             ));
         }
-        compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, payload.category(), now)
-            .await?;
         repaired = repaired.saturating_add(1);
     }
     Ok(repaired)
 }
 
-fn compatibility_average_vectors(vectors: &[Vec<f64>]) -> Vec<f64> {
-    let mut average = vec![0.0; HolographicEncoder::DIMENSIONS];
-    let mut count = 0_u64;
-    for vector in vectors {
-        if vector.len() != HolographicEncoder::DIMENSIONS {
-            continue;
-        }
-        count = count.saturating_add(1);
-        for (target, value) in average.iter_mut().zip(vector) {
-            *target += value;
-        }
-    }
-    if count != 0 {
-        for value in &mut average {
-            *value /= count as f64;
-        }
-    }
-    average
-}
-
-/// Marks every populated bank dirty when the owner has eligible facts but no
-/// materialized bank projections at all — the state a store lands in when its
-/// legacy cutover predates dirty-marking (or a bank table was lost). Repair
-/// then rebuilds them in the same pass; stores with any banks are untouched.
-async fn compatibility_mark_absent_banks_dirty_tx(
-    db: &Database,
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    now: UtcMicros,
-) -> FactStoreResult<()> {
-    let key = OwnerKey::new(owner)?;
-    let mut rows = transaction
-        .query(
-            "SELECT COUNT(*) FROM memory_v2_banks
-             WHERE owner_kind = ?1 AND project_id = ?2
-               AND owner_json = ?3",
-            params![key.kind, key.project_id.as_str(), key.json.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let bank_count = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-        .map(|row| row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION))
-        .transpose()?
-        .unwrap_or(0);
-    drop(rows);
-    if bank_count > 0 {
-        return Ok(());
-    }
-    let mut rows = transaction
-        .query(
-            "SELECT DISTINCT json_extract(payloads.payload_json, '$.category')
-             FROM memory_v2_current_facts AS current_facts
-             JOIN memory_v2_assertion_payloads AS payloads
-               ON payloads.assertion_id = current_facts.active_assertion_id
-              AND payloads.fact_id = current_facts.fact_id
-              AND payloads.owner_kind = current_facts.owner_kind
-              AND payloads.project_id = current_facts.project_id
-             WHERE current_facts.owner_kind = ?1
-               AND current_facts.project_id = ?2
-               AND current_facts.payload_access = 'eligible'
-               AND json_extract(payloads.payload_json, '$.category') IS NOT NULL",
-            params![key.kind, key.project_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let mut bank_names = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-    {
-        bank_names.push(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?);
-    }
-    drop(rows);
-    if bank_names.is_empty() {
-        return Ok(());
-    }
-    bank_names.push("all".to_owned());
-    for bank_name in bank_names {
-        db.mark_memory_v2_bank_dirty_in_transaction(transaction, owner, &bank_name, now)
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    }
-    Ok(())
-}
-
-pub(super) async fn compatibility_rebuild_dirty_banks_tx(
-    db: &Database,
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-) -> FactStoreResult<u64> {
-    let key = OwnerKey::new(owner)?;
-    let mut rows = transaction
-        .query(
-            "SELECT bank_name, updated_at
-             FROM memory_v2_bank_dirty
-             WHERE owner_kind = ?1 AND project_id = ?2
-               AND owner_json = ?3
-             ORDER BY bank_name ASC
-             LIMIT ?4",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                COMPATIBILITY_REPAIR_BANK_BATCH,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let mut dirty = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-    {
-        dirty.push((
-            row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?,
-            UtcMicros(row_i64(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?),
-        ));
-    }
-    drop(rows);
-    let now = project_memory_now()?;
-    let mut rebuilt = 0_u64;
-    for (bank_name, dirty_updated_at) in dirty {
-        if bank_name != "all"
-            && !matches!(
-                bank_name.as_str(),
-                "general" | "user_pref" | "project" | "tool" | "decision" | "code_area"
-            )
-        {
-            return Err(storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility dirty bank has an unsupported category",
-            ));
-        }
-        let mut vectors = transaction
-            .query(
-                "SELECT legacy_facts.fact_id, mappings.fact_id, legacy_facts.hrr_vector
-                 FROM memory_facts AS legacy_facts
-                 JOIN memory_v2_facts AS mappings
-                   ON mappings.fact_id = legacy_facts.canonical_fact_id
-                 JOIN memory_v2_current_facts AS current_facts
-                   ON current_facts.fact_id = mappings.fact_id
-                  AND current_facts.owner_kind = mappings.owner_kind
-                  AND current_facts.project_id = mappings.project_id
-                 JOIN memory_v2_assertion_payloads AS payloads
-                   ON payloads.assertion_id = current_facts.active_assertion_id
-                  AND payloads.fact_id = current_facts.fact_id
-                  AND payloads.owner_kind = current_facts.owner_kind
-                  AND payloads.project_id = current_facts.project_id
-                 WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-                   AND mappings.owner_json = ?3
-                   AND current_facts.payload_access = 'eligible'
-                   AND legacy_facts.hrr_vector IS NOT NULL
-                   AND legacy_facts.hrr_algebra = 'amari_fhrr'
-                   AND legacy_facts.hrr_dim = ?5
-                   AND legacy_facts.hrr_precision = ?6
-                   AND length(legacy_facts.hrr_vector) = ?7
-                   AND (?4 = 'all' OR legacy_facts.category = ?4)
-                 ORDER BY legacy_facts.fact_id ASC",
-                params![
-                    key.kind,
-                    key.project_id.as_str(),
-                    key.json.as_str(),
-                    bank_name.as_str(),
-                    HolographicEncoder::DIMENSIONS as i64,
-                    HolographicEncoder::HRR_PRECISION,
-                    HolographicEncoder::SERIALIZED_F32_BYTES as i64,
-                ],
-            )
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-        let mut decoded = Vec::new();
-        let mut malformed_legacy_fact_ids = Vec::new();
-        while let Some(row) = vectors
-            .next()
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-        {
-            let legacy_fact_id = row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?;
-            let fact_id = FactId::new(row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?)
-                .map_err(FactStoreError::from)?;
-            let vector = match row.get::<crate::db::engine::Value>(2) {
-                Ok(crate::db::engine::Value::Blob(bytes)) => {
-                    HolographicEncoder::deserialize(&bytes)
-                        .ok()
-                        .filter(|vector| {
-                            vector.len() == HolographicEncoder::DIMENSIONS
-                                && vector.iter().all(|value| value.is_finite())
-                        })
-                }
-                Ok(_) | Err(_) => None,
-            };
-            match vector {
-                Some(vector) => decoded.push(vector),
-                None => malformed_legacy_fact_ids.push((legacy_fact_id, fact_id)),
-            }
-        }
-        drop(vectors);
-        for (legacy_fact_id, fact_id) in malformed_legacy_fact_ids {
-            let replacement = match load_current_fact_tx(transaction, &key, owner, &fact_id).await?
-            {
-                Some(fact) => fact.payload().and_then(|payload| {
-                    compatibility_mirror_vector(payload).ok().and_then(|bytes| {
-                        HolographicEncoder::deserialize(&bytes)
-                            .ok()
-                            .filter(|vector| {
-                                vector.len() == HolographicEncoder::DIMENSIONS
-                                    && vector.iter().all(|value| value.is_finite())
-                            })
-                            .map(|vector| (bytes, vector))
-                    })
-                }),
-                None => None,
-            };
-            match replacement {
-                Some((vector, decoded_vector)) => {
-                    transaction
-                        .execute(
-                            "UPDATE memory_facts
-                             SET hrr_vector = ?1,
-                                 hrr_algebra = 'amari_fhrr',
-                                 hrr_dim = ?2,
-                                 hrr_precision = ?3
-                             WHERE fact_id = ?4",
-                            params![
-                                vector,
-                                HolographicEncoder::DIMENSIONS as i64,
-                                HolographicEncoder::HRR_PRECISION,
-                                legacy_fact_id,
-                            ],
-                        )
-                        .await
-                        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-                    decoded.push(decoded_vector);
-                }
-                None => {
-                    transaction
-                        .execute(
-                            "UPDATE memory_facts
-                             SET hrr_vector = NULL,
-                                 hrr_algebra = 'amari_fhrr',
-                                 hrr_dim = ?1,
-                                 hrr_precision = ?2
-                             WHERE fact_id = ?3",
-                            params![
-                                HolographicEncoder::DIMENSIONS as i64,
-                                HolographicEncoder::HRR_PRECISION,
-                                legacy_fact_id,
-                            ],
-                        )
-                        .await
-                        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-                }
-            }
-        }
-        if decoded.is_empty() {
-            db.delete_memory_v2_bank_in_transaction(transaction, owner, bank_name.as_str())
-                .await
-                .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-        } else {
-            let vector = HolographicEncoder::serialize(&compatibility_average_vectors(&decoded))
-                .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-            db.upsert_memory_v2_bank_in_transaction(
-                transaction,
-                owner,
-                bank_name.as_str(),
-                &vector,
-                decoded.len() as u64,
-                now,
-            )
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-        }
-        if db
-            .clear_memory_v2_bank_dirty_in_transaction(
-                transaction,
-                owner,
-                bank_name.as_str(),
-                dirty_updated_at,
-            )
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-        {
-            rebuilt = rebuilt.saturating_add(1);
-        }
-    }
-    Ok(rebuilt)
-}

@@ -1,7 +1,8 @@
 //! Daemon-owned resumable repair scheduler.
 //!
 //! One loop per project owner drains a single bounded compatibility-memory
-//! self-heal pass (missing-vector repair and dirty-bank rebuild); unlike
+//! self-heal pass (missing-vector repair; the persisted bank projection was
+//! deleted per the Plan 39 Task 7 owner decisions of 2026-08-07); unlike
 //! automation, repair is never configuration-gated.
 //! The loop is driven by an explicit [`MemoryRepairPassDecision`] and retries
 //! on the shared bounded `replay_backoff` curve rather than a fixed delay.
@@ -438,9 +439,8 @@ async fn run_memory_repair_scheduler_loop_with<Tick, TickFuture, Wait, WaitFutur
     }
 }
 
-/// Single bounded self-heal pass: missing-vector repair and dirty-bank
-/// rebuild for compatibility memory. Banks are marked dirty by ordinary
-/// writes; this is continuous derived-state maintenance, not migration, so it
+/// Single bounded self-heal pass: missing-vector repair for compatibility
+/// memory. This is continuous derived-state maintenance, not migration, so it
 /// keeps ticking (on the shared backoff curve) whenever the store reports a
 /// batch cap was saturated and may have more backlog behind it.
 pub(super) async fn run_memory_repair_scheduler_tick(

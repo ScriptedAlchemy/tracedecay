@@ -74,6 +74,15 @@ pub(super) fn compatibility_legacy_timestamp(now: UtcMicros) -> i64 {
     now.0.div_euclid(1_000_000)
 }
 
+/// Inverse of [`compatibility_legacy_timestamp`]: lifts a legacy second-grained
+/// mirror timestamp back into [`UtcMicros`]. Read models that recompute derived
+/// projections from facts need this because the deleted bank rows stored
+/// microseconds while the legacy mirror stores seconds. Out-of-range values
+/// yield `None` rather than a wrapped timestamp.
+pub(super) fn compatibility_legacy_micros(seconds: i64) -> Option<UtcMicros> {
+    seconds.checked_mul(1_000_000).map(UtcMicros)
+}
+
 pub(super) fn project_memory_event_time(now: UtcMicros, offset: i64) -> FactStoreResult<UtcMicros> {
     now.0.checked_add(offset).map(UtcMicros).ok_or_else(|| {
         storage_message(

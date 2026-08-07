@@ -1,34 +1,35 @@
-//! Owner-scoped V2 fact lineage schema and derived-projection writers.
+//! Owner-scoped V2 fact lineage schema.
 
+#[cfg(test)]
 use serde::Serialize;
+#[cfg(test)]
 use tracedecay_domain::FactOwnerV1;
 
 #[cfg(test)]
 use crate::db::engine;
 use crate::db::engine::Executor;
-use crate::errors::{Result, TraceDecayError};
+#[cfg(test)]
+use crate::errors::Result;
+use crate::errors::TraceDecayError;
 
 mod schema;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
 mod types;
-mod writers;
 
 pub(in crate::db) use schema::create_schema;
+#[cfg(test)]
 use types::OwnerKey;
-pub(super) use writers::{
-    clear_memory_v2_bank_dirty_in_transaction, delete_memory_v2_bank_in_transaction,
-    mark_memory_v2_bank_dirty_in_transaction, upsert_memory_v2_bank_in_transaction,
-};
 
+#[cfg(test)]
 const OPERATION: &str = "memory_v2_store_v1";
-const BANK_VECTOR_BYTES: usize = 8 + 2048 * 4;
-const BANK_VECTOR_HEADER: [u8; 8] = 2048_u64.to_le_bytes();
 
 pub(in crate::db) trait MemoryV2Executor: Executor + Sync {}
 
 impl<T> MemoryV2Executor for T where T: Executor + Sync + ?Sized {}
 
+#[cfg(test)]
 fn owner_key(owner: &FactOwnerV1) -> Result<OwnerKey> {
     owner
         .validate()
@@ -44,6 +45,7 @@ fn owner_key(owner: &FactOwnerV1) -> Result<OwnerKey> {
     })
 }
 
+#[cfg(test)]
 fn json_text(value: &(impl Serialize + ?Sized)) -> Result<String> {
     serde_json::to_string(value)
         .map_err(|_| db_message(OPERATION, "canonical JSON encoding failed"))
@@ -73,6 +75,7 @@ fn db_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     }
 }
 
+#[cfg(test)]
 fn db_message(operation: &str, message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Database {
         message: message.into(),

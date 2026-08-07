@@ -11,7 +11,13 @@ use crate::errors::{Result, TraceDecayError};
 
 /// The one schema shape this binary creates and accepts. It is an identity
 /// stamp, not a ladder rung: a store at any other version is refused.
-pub const SCHEMA_VERSION: u32 = 29;
+///
+/// v30 deletes the write-only derived-vector storage (`memory_banks`,
+/// `memory_bank_dirty`, `memory_v2_banks`, `memory_v2_bank_dirty`,
+/// `memory_v2_assertion_vectors`) per the Plan 39 Task 7 owner decisions of
+/// 2026-08-07; holographic recall re-encodes from canonical fact content at
+/// query time.
+pub const SCHEMA_VERSION: u32 = 30;
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
@@ -453,21 +459,6 @@ async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str)
             FOREIGN KEY (entity_id) REFERENCES memory_entities(entity_id) ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS memory_banks (
-            bank_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bank_name TEXT NOT NULL UNIQUE,
-            vector BLOB NOT NULL,
-            hrr_algebra TEXT NOT NULL DEFAULT 'amari_fhrr',
-            hrr_dim INTEGER NOT NULL DEFAULT 2048,
-            fact_count INTEGER NOT NULL DEFAULT 0,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS memory_bank_dirty (
-            bank_name TEXT PRIMARY KEY,
-            updated_at INTEGER NOT NULL DEFAULT 0
-        );
-
         CREATE TABLE IF NOT EXISTS memory_feedback_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             fact_id INTEGER NOT NULL,
@@ -493,8 +484,6 @@ async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str)
             ON memory_entities(entity_type);
         CREATE INDEX IF NOT EXISTS idx_memory_fact_entities_entity_id
             ON memory_fact_entities(entity_id);
-        CREATE INDEX IF NOT EXISTS idx_memory_banks_updated_at
-            ON memory_banks(updated_at);
         CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_fact_id
             ON memory_feedback_events(fact_id);
         CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_created_at

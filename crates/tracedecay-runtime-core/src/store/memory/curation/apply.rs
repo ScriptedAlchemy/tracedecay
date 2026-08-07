@@ -18,10 +18,9 @@ use super::super::projection::{
     project_memory_fact_for_legacy_id_tx, project_memory_required_mapping_tx,
     project_memory_source_for_fact_tx, resolve_project_memory_target_tx,
 };
-use super::super::proposals::project_memory_proposal_category;
 use super::super::repair::{
-    COMPATIBILITY_REPAIR_VECTOR_BATCH, compatibility_rebuild_dirty_banks_tx,
-    compatibility_repair_missing_vectors_tx, compatibility_repair_vector_for_fact_tx,
+    COMPATIBILITY_REPAIR_VECTOR_BATCH, compatibility_repair_missing_vectors_tx,
+    compatibility_repair_vector_for_fact_tx,
 };
 use super::{
     project_memory_add_entity_alias_tx, project_memory_available_curation_fact_tx,
@@ -31,13 +30,12 @@ use super::{
     project_memory_normalize_tags_tx, project_memory_record_oplog_tx,
     project_memory_replay_curation_tx, project_memory_upsert_legacy_relation_tx,
 };
-use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tracedecay_domain::{
-    ActorId, Confidence, FactCategoryV1, FactCurationActionV1, FactEventId, FactId,
+    ActorId, Confidence, FactCurationActionV1, FactEventId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
@@ -48,7 +46,6 @@ use tracedecay_store::{
     ProjectMemoryResult,
 };
 pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactCurationBatchV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1> {
@@ -85,7 +82,6 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
             ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
                 changed.push(
                     project_memory_normalize_tags_tx(
-                        db,
                         transaction,
                         request.owner(),
                         request.actor(),
@@ -99,7 +95,6 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
             ProjectMemoryFactCurationOperationV1::MergeEntities(operation) => {
                 changed.extend(
                     project_memory_merge_entities_tx(
-                        db,
                         transaction,
                         request.owner(),
                         request.actor(),
@@ -112,14 +107,8 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
             }
             ProjectMemoryFactCurationOperationV1::AddAlias(operation) => {
                 changed.extend(
-                    project_memory_add_entity_alias_tx(
-                        db,
-                        transaction,
-                        request.owner(),
-                        operation,
-                        now,
-                    )
-                    .await?,
+                    project_memory_add_entity_alias_tx(transaction, request.owner(), operation, now)
+                        .await?,
                 );
                 aliases_added = aliases_added.saturating_add(1);
             }
@@ -138,7 +127,6 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
             ProjectMemoryFactCurationOperationV1::RepairVector(operation) => {
                 changed.push(
                     compatibility_repair_vector_for_fact_tx(
-                        db,
                         transaction,
                         request.owner(),
                         operation,
@@ -151,14 +139,14 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
         }
     }
     let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
-        db,
         transaction,
         request.owner(),
         COMPATIBILITY_REPAIR_VECTOR_BATCH,
     )
     .await?;
-    let banks_rebuilt =
-        compatibility_rebuild_dirty_banks_tx(db, transaction, request.owner()).await?;
+    // Plan 39 Task 7 (owner decision 2026-08-07, second): the derived bank
+    // projection is deleted, so a curation pass never rebuilds bank rows.
+    let banks_rebuilt = 0_u64;
     let mappings =
         project_memory_curation_mappings_from_ids_tx(transaction, request.owner(), &changed)
             .await?;
@@ -261,30 +249,6 @@ fn project_memory_merge_removal_batch(
         None,
         expected_last_event_id,
     )
-}
-
-async fn compatibility_mirror_category_tx(
-    transaction: &Transaction<'_>,
-    legacy_fact_id: i64,
-) -> FactStoreResult<FactCategoryV1> {
-    let mut rows = transaction
-        .query(
-            "SELECT category FROM memory_facts WHERE fact_id = ?1",
-            params![legacy_fact_id],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility legacy mirror fact is missing",
-            )
-        })?;
-    project_memory_proposal_category(&row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)
 }
 
 async fn project_memory_replay_merge_tx(
@@ -639,7 +603,6 @@ async fn project_memory_rewire_merge_relations_tx(
 }
 
 pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactMergeCommandV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1> {
@@ -702,9 +665,7 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
         )?;
         compatibility_commit_batch_tx(transaction, &batch).await?;
         compatibility_mirror_update_tx(
-            db,
             transaction,
-            request.owner(),
             winner_mapping
                 .legacy_fact_id()
                 .ok_or(FactStoreError::FactMismatch)?,
@@ -758,14 +719,11 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
         loser_ids.push(loser_id.clone());
         loser_legacy_ids.push(mapping.legacy_fact_id());
         if projection.access != PayloadAccessState::Deleted {
-            let category =
-                compatibility_mirror_category_tx(transaction, mapping.legacy_fact_id()).await?;
             pending_deletes.push((
                 loser_id,
                 projection.access,
                 projection.last_event_id.clone(),
                 mapping,
-                category,
             ));
         }
     }
@@ -783,7 +741,7 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
     .await?;
     let mut deleted_ids = Vec::new();
     let mut deleted_losers = Vec::new();
-    for (loser_id, previous_access, expected_last_event_id, mapping, category) in pending_deletes {
+    for (loser_id, previous_access, expected_last_event_id, mapping) in pending_deletes {
         let batch = project_memory_merge_removal_batch(
             request.owner(),
             &loser_id,
@@ -794,15 +752,7 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
             now,
         )?;
         compatibility_commit_batch_tx(transaction, &batch).await?;
-        compatibility_mirror_delete_tx(
-            db,
-            transaction,
-            request.owner(),
-            mapping.legacy_fact_id(),
-            category,
-            now,
-        )
-        .await?;
+        compatibility_mirror_delete_tx(transaction, mapping.legacy_fact_id()).await?;
         // The mirror delete just retired this loser's fixed legacy mapping;
         // the merge outcome carries the mapping captured before the deletion
         // (the only remaining witness of the legacy binding) instead of

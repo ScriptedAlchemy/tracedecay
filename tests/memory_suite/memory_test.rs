@@ -5,7 +5,6 @@
 //!
 //! Shared fixtures live in this parent module; each child pulls them in with `use super::*`.
 
-use rusqlite::OptionalExtension;
 use tempfile::TempDir;
 use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
 use tracedecay::db::Database;
@@ -164,22 +163,6 @@ async fn seed_newer_unrelated_memory_facts(
     transaction.commit().unwrap();
 }
 
-async fn dirty_bank_names(db: &Database) -> Vec<String> {
-    let conn = rusqlite::Connection::open_with_flags(
-        db.database_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let mut statement = conn
-        .prepare("SELECT bank_name FROM memory_bank_dirty ORDER BY bank_name")
-        .unwrap();
-    statement
-        .query_map((), |row| row.get::<_, String>(0))
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-}
-
 async fn entity_id(db: &Database, normalized_name: &str) -> i64 {
     rusqlite::Connection::open_with_flags(
         db.database_path(),
@@ -191,45 +174,6 @@ async fn entity_id(db: &Database, normalized_name: &str) -> i64 {
         rusqlite::params![normalized_name],
         |row| row.get(0),
     )
-    .unwrap()
-}
-
-async fn dirty_bank_updated_at(db: &Database, bank_name: &str) -> i64 {
-    rusqlite::Connection::open_with_flags(
-        db.database_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap()
-    .query_row(
-        "SELECT updated_at FROM memory_bank_dirty WHERE bank_name = ?1",
-        rusqlite::params![bank_name],
-        |row| row.get(0),
-    )
-    .expect("dirty bank should exist")
-}
-
-async fn memory_bank_count(db: &Database) -> i64 {
-    rusqlite::Connection::open_with_flags(
-        db.database_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap()
-    .query_row("SELECT COUNT(*) FROM memory_banks", (), |row| row.get(0))
-    .unwrap()
-}
-
-async fn memory_bank_fact_count(db: &Database, bank_name: &str) -> Option<i64> {
-    rusqlite::Connection::open_with_flags(
-        db.database_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap()
-    .query_row(
-        "SELECT fact_count FROM memory_banks WHERE bank_name = ?1",
-        rusqlite::params![bank_name],
-        |row| row.get(0),
-    )
-    .optional()
     .unwrap()
 }
 

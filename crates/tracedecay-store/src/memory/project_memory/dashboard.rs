@@ -138,7 +138,6 @@ pub enum ProjectMemoryDashboardHrrStateV1 {
     Ready,
     MissingVectors,
     MissingBank,
-    StaleBank,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

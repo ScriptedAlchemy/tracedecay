@@ -461,18 +461,6 @@ pub(super) async fn publish_current_projection(
             .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
         transaction
             .execute(
-                "DELETE FROM memory_v2_assertion_vectors
-                 WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
-                params![
-                    batch.fact_id().as_str(),
-                    owner.kind,
-                    owner.project_id.as_str()
-                ],
-            )
-            .await
-            .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        transaction
-            .execute(
                 "DELETE FROM memory_v2_assertion_payloads
                  WHERE fact_id = ?1 AND owner_kind = ?2 AND project_id = ?3",
                 params![

@@ -21,9 +21,9 @@ use tracedecay_store::{
 
 use super::crud::project_memory_fact_history_tx;
 use super::primitives::{
-    OwnerKey, PROJECT_MEMORY_READ_OPERATION, compatibility_source_store_id, from_json,
-    nonnegative_u64, row_i64, row_optional_i64, row_optional_string, row_string, storage_error,
-    storage_message,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, compatibility_legacy_micros,
+    compatibility_source_store_id, from_json, nonnegative_u64, row_i64, row_optional_i64,
+    row_optional_string, row_string, storage_error, storage_message,
 };
 use super::projection::{
     load_project_memory_projection_tx, load_project_memory_projections_tx,
@@ -435,26 +435,23 @@ async fn dashboard_compatibility_hrr_coverage_tx(
     let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
+            // Plan 39 Task 7 (owner decision 2026-08-07, second): the persisted
+            // bank projection is deleted, so coverage is recomputed from facts.
+            // A category is bank-backed when at least one of its facts carries
+            // canonical FHRR material; freshness is the newest fact update.
             "SELECT legacy_facts.category,
                     COUNT(*),
                     COALESCE(SUM(CASE WHEN legacy_facts.hrr_vector IS NOT NULL THEN 1 ELSE 0 END), 0),
-                    MAX(CASE WHEN banks.bank_name IS NULL THEN 0 ELSE 1 END),
-                    MAX(banks.hrr_dim),
-                    MAX(banks.updated_at),
-                    MAX(CASE WHEN dirty.bank_name IS NULL THEN 0 ELSE 1 END)
+                    MAX(legacy_facts.updated_at),
+                    COALESCE(SUM(CASE WHEN legacy_facts.hrr_vector IS NOT NULL
+                                       AND legacy_facts.hrr_algebra = 'amari_fhrr'
+                                       AND legacy_facts.hrr_dim = ?5
+                                       AND legacy_facts.hrr_precision = ?6
+                                       AND length(legacy_facts.hrr_vector) = ?7
+                                  THEN 1 ELSE 0 END), 0)
              FROM memory_facts AS legacy_facts
              JOIN memory_v2_facts AS mappings
                ON mappings.fact_id = legacy_facts.canonical_fact_id
-             LEFT JOIN memory_v2_banks AS banks
-               ON banks.owner_kind = mappings.owner_kind
-              AND banks.project_id = mappings.project_id
-              AND banks.owner_json = mappings.owner_json
-              AND banks.bank_name = legacy_facts.category
-             LEFT JOIN memory_v2_bank_dirty AS dirty
-               ON dirty.owner_kind = mappings.owner_kind
-              AND dirty.project_id = mappings.project_id
-              AND dirty.owner_json = mappings.owner_json
-              AND dirty.bank_name = legacy_facts.category
              WHERE mappings.owner_kind = ?1
                AND mappings.project_id = ?2
                AND mappings.owner_json = ?3
@@ -467,6 +464,9 @@ async fn dashboard_compatibility_hrr_coverage_tx(
                 key.project_id.as_str(),
                 key.json.as_str(),
                 source_store_id.as_str(),
+                HolographicEncoder::DIMENSIONS as i64,
+                HolographicEncoder::HRR_PRECISION,
+                HolographicEncoder::SERIALIZED_F32_BYTES as i64,
             ],
         )
         .await
@@ -486,14 +486,15 @@ async fn dashboard_compatibility_hrr_coverage_tx(
             row_i64(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
             "dashboard category vector count",
         )?;
-        let has_bank = row_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)? != 0;
-        let dirty = row_i64(&row, 6, PROJECT_MEMORY_READ_OPERATION)? != 0;
+        let canonical_vector_count = nonnegative_u64(
+            row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?,
+            "dashboard category canonical vector count",
+        )?;
+        let has_bank = canonical_vector_count > 0;
         let state = if vector_count < fact_count {
             tracedecay_store::ProjectMemoryDashboardHrrStateV1::MissingVectors
         } else if !has_bank {
             tracedecay_store::ProjectMemoryDashboardHrrStateV1::MissingBank
-        } else if dirty {
-            tracedecay_store::ProjectMemoryDashboardHrrStateV1::StaleBank
         } else {
             tracedecay_store::ProjectMemoryDashboardHrrStateV1::Ready
         };
@@ -507,13 +508,14 @@ async fn dashboard_compatibility_hrr_coverage_tx(
             vector_count,
             coverage_basis_points,
             category,
-            if has_bank { vector_count } else { 0 },
-            dashboard_compatibility_dimension(row_optional_i64(
-                &row,
-                4,
-                PROJECT_MEMORY_READ_OPERATION,
-            )?)?,
-            row_optional_i64(&row, 5, PROJECT_MEMORY_READ_OPERATION)?.map(UtcMicros),
+            if has_bank { canonical_vector_count } else { 0 },
+            has_bank.then_some(HolographicEncoder::DIMENSIONS as u32),
+            if has_bank {
+                row_optional_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)?
+                    .and_then(compatibility_legacy_micros)
+            } else {
+                None
+            },
             state,
         )?);
     }
@@ -538,27 +540,76 @@ fn dashboard_compatibility_memory_bank_from_row(
             row_i64(row, 4, PROJECT_MEMORY_READ_OPERATION)?,
             "dashboard bank bundled fact count",
         )?,
-        row_optional_i64(row, 2, PROJECT_MEMORY_READ_OPERATION)?.map(UtcMicros),
+        row_optional_i64(row, 2, PROJECT_MEMORY_READ_OPERATION)?.and_then(compatibility_legacy_micros),
     )
     .map_err(Into::into)
 }
 
+/// Recomputes the dashboard bank read model directly from eligible facts.
+///
+/// Plan 39 Task 7 (owner decision 2026-08-07, second) deleted the persisted
+/// `memory_v2_banks` rows — stored bank vectors were never read back. Each
+/// category with encodable facts, plus the aggregate `all` bank, is derived
+/// here so the read model keeps its shape without shadow vector storage.
 async fn dashboard_compatibility_memory_banks_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
 ) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardMemoryBankV1>> {
     let key = OwnerKey::new(owner)?;
+    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            "SELECT banks.bank_name, banks.hrr_dim, banks.updated_at,
-                    banks.fact_count, banks.fact_count
-             FROM memory_v2_banks AS banks
-             WHERE banks.owner_kind = ?1
-               AND banks.project_id = ?2
-               AND banks.owner_json = ?3
-             ORDER BY banks.fact_count DESC, banks.bank_name ASC
+            // The bank-eligible fact set is exactly what the deleted rebuild
+            // pass used: an eligible current fact whose mirrored vector is
+            // canonical FHRR material. A quarantined or malformed vector
+            // therefore still never becomes a dashboard bank.
+            "WITH bank_facts AS (
+                 SELECT legacy_facts.category AS category,
+                        legacy_facts.updated_at AS updated_at
+                 FROM memory_facts AS legacy_facts
+                 JOIN memory_v2_facts AS mappings
+                   ON mappings.fact_id = legacy_facts.canonical_fact_id
+                 JOIN memory_v2_current_facts AS current_facts
+                   ON current_facts.fact_id = mappings.fact_id
+                  AND current_facts.owner_kind = mappings.owner_kind
+                  AND current_facts.project_id = mappings.project_id
+                 WHERE mappings.owner_kind = ?1
+                   AND mappings.project_id = ?2
+                   AND mappings.owner_json = ?3
+                   AND ?4 = 'legacy-memory-v1'
+                   AND current_facts.payload_access = 'eligible'
+                   AND legacy_facts.hrr_vector IS NOT NULL
+                   AND legacy_facts.hrr_algebra = 'amari_fhrr'
+                   AND legacy_facts.hrr_dim = ?5
+                   AND legacy_facts.hrr_precision = ?6
+                   AND length(legacy_facts.hrr_vector) = ?7
+             )
+             SELECT bank_name, hrr_dim, updated_at, fact_count, fact_count FROM (
+                 SELECT category AS bank_name,
+                        ?5 AS hrr_dim,
+                        MAX(updated_at) AS updated_at,
+                        COUNT(*) AS fact_count
+                 FROM bank_facts
+                 GROUP BY category
+                 UNION ALL
+                 SELECT 'all' AS bank_name,
+                        ?5 AS hrr_dim,
+                        MAX(updated_at) AS updated_at,
+                        COUNT(*) AS fact_count
+                 FROM bank_facts
+                 HAVING COUNT(*) > 0
+             )
+             ORDER BY fact_count DESC, bank_name ASC
              LIMIT 128",
-            params![key.kind, key.project_id.as_str(), key.json.as_str()],
+            params![
+                key.kind,
+                key.project_id.as_str(),
+                key.json.as_str(),
+                source_store_id.as_str(),
+                HolographicEncoder::DIMENSIONS as i64,
+                HolographicEncoder::HRR_PRECISION,
+                HolographicEncoder::SERIALIZED_F32_BYTES as i64,
+            ],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
@@ -846,17 +897,15 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
         .query(
             // The V1 dashboard reported a fact's graph connections as its
             // entity-link count; parity keeps both columns on that basis.
-            "SELECT mappings.fact_id, legacy_facts.hrr_vector, banks.bank_name,
+            // Plan 39 Task 7 (owner decision 2026-08-07, second): the bank a
+            // point belongs to is its own category, read from the fact rather
+            // than from the deleted `memory_v2_banks` projection.
+            "SELECT mappings.fact_id, legacy_facts.hrr_vector, legacy_facts.category,
                     COUNT(DISTINCT relations.entity_id),
                     COUNT(DISTINCT relations.entity_id)
              FROM memory_facts AS legacy_facts
              JOIN memory_v2_facts AS mappings
                ON mappings.fact_id = legacy_facts.canonical_fact_id
-             LEFT JOIN memory_v2_banks AS banks
-               ON banks.owner_kind = mappings.owner_kind
-              AND banks.project_id = mappings.project_id
-              AND banks.owner_json = mappings.owner_json
-              AND banks.bank_name = legacy_facts.category
              LEFT JOIN memory_fact_entities AS relations
                ON relations.fact_id = legacy_facts.fact_id
              WHERE mappings.owner_kind = ?1
@@ -868,7 +917,7 @@ pub(super) async fn dashboard_project_memory_vector_points_tx(
                     OR legacy_facts.content LIKE ?5 ESCAPE '\\'
                     OR legacy_facts.tags LIKE ?5 ESCAPE '\\'
                )
-             GROUP BY mappings.fact_id, legacy_facts.hrr_vector, banks.bank_name
+             GROUP BY mappings.fact_id, legacy_facts.hrr_vector, legacy_facts.category
              ORDER BY legacy_facts.trust_score DESC,
                       legacy_facts.updated_at DESC,
                       mappings.fact_id ASC

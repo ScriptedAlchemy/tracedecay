@@ -459,9 +459,8 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryFactAddCommandV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactAddOutcomeV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
-            Box::pin(async move { add_project_memory_fact_tx(&db, transaction, &request).await })
+            Box::pin(async move { add_project_memory_fact_tx(transaction, &request).await })
         })
         .await
     }
@@ -470,9 +469,8 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryFactUpdateCommandV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactUpdateOutcomeV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
-            Box::pin(async move { update_project_memory_fact_tx(&db, transaction, &request).await })
+            Box::pin(async move { update_project_memory_fact_tx(transaction, &request).await })
         })
         .await
     }
@@ -481,9 +479,8 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryFactRemoveCommandV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactRemoveOutcomeV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
-            Box::pin(async move { remove_project_memory_fact_tx(&db, transaction, &request).await })
+            Box::pin(async move { remove_project_memory_fact_tx(transaction, &request).await })
         })
         .await
     }
@@ -528,10 +525,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryFactCurationBatchV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
             Box::pin(async move {
-                apply_project_memory_fact_curation_tx(&db, transaction, &request).await
+                apply_project_memory_fact_curation_tx(transaction, &request).await
             })
         })
         .await
@@ -541,9 +537,8 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryFactMergeCommandV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
-            Box::pin(async move { merge_project_memory_facts_tx(&db, transaction, &request).await })
+            Box::pin(async move { merge_project_memory_facts_tx(transaction, &request).await })
         })
         .await
     }
@@ -552,9 +547,8 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryMemoryRepairCommandV1,
     ) -> ProjectMemoryResult<ProjectMemoryMemoryRepairStatsV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
-            Box::pin(async move { repair_project_memory_tx(&db, transaction, &request).await })
+            Box::pin(async move { repair_project_memory_tx(transaction, &request).await })
         })
         .await
     }
@@ -712,10 +706,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryFactProposalPromotionV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
             Box::pin(async move {
-                promote_project_memory_fact_proposal_tx(&db, transaction, &request).await
+                promote_project_memory_fact_proposal_tx(transaction, &request).await
             })
         })
         .await
@@ -725,10 +718,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         request: ProjectMemoryFactProposalPromotionV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactProposalPromotionResultV1> {
-        let db = self.db.clone();
         self.project_memory_write(move |transaction| {
             Box::pin(async move {
-                promote_project_memory_fact_proposal_with_disposition_tx(&db, transaction, &request)
+                promote_project_memory_fact_proposal_with_disposition_tx(transaction, &request)
                     .await
             })
         })

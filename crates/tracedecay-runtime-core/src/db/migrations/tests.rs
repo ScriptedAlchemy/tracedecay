@@ -311,6 +311,11 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "memory_v2_compatibility_operation_receipts",
         "memory_v2_compatibility_banks",
         "memory_v2_compatibility_bank_dirty",
+        // Plan 39 Task 7 (owner decision 2026-08-07, second): the unread
+        // derived-vector storage is deleted, not migrated.
+        "memory_v2_banks",
+        "memory_v2_bank_dirty",
+        "memory_v2_assertion_vectors",
     ] {
         assert!(
             !table_exists(&conn, retired).await,
@@ -320,8 +325,6 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     for table in [
         "memory_v2_operation_receipts",
         "memory_v2_feedback_history",
-        "memory_v2_banks",
-        "memory_v2_bank_dirty",
     ] {
         assert!(table_exists(&conn, table).await, "missing table {table}");
     }

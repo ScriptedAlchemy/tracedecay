@@ -105,7 +105,6 @@ impl MemoryStore<'_> {
                 let fact = self
                     .merge_duplicate_add(closest, &entities, &request.metadata)
                     .await?;
-                self.mark_fact_banks_dirty(fact.category).await?;
                 return Ok(AddFactOutcome {
                     fact: Some(fact),
                     diff: AddFactDiff {
@@ -153,7 +152,6 @@ impl MemoryStore<'_> {
         let fact = self
             .merge_duplicate_add(existing, &entities, &request.metadata)
             .await?;
-        self.mark_fact_banks_dirty(fact.category).await?;
         if pre_existing.is_none() {
             self.log_oplog(
                 "add",
@@ -427,8 +425,6 @@ impl MemoryStore<'_> {
                 "updated fact was not found when reading it back",
             )
         })?;
-        self.mark_fact_banks_dirty(existing.category).await?;
-        self.mark_fact_banks_dirty(updated.category).await?;
         self.log_oplog(
             "update",
             Some(updated.fact_id),
@@ -533,7 +529,6 @@ impl MemoryStore<'_> {
         if changed > 0
             && let Some(fact) = existing
         {
-            self.mark_fact_banks_dirty(fact.category).await?;
             // Deletes log a content hash, never the content itself.
             self.log_oplog(
                 "remove",

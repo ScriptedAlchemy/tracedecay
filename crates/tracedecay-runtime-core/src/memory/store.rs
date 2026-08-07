@@ -463,66 +463,6 @@ impl<'a> MemoryStore<'a> {
             .unwrap_or_default())
     }
 
-    async fn load_bank_vectors(
-        &self,
-        category: Option<MemoryCategory>,
-    ) -> Result<(usize, Vec<Vec<f64>>)> {
-        const PAGE_SIZE: i64 = 512;
-        let sql = if category.is_some() {
-            "SELECT fact_id, hrr_vector
-             FROM memory_facts
-             WHERE category = ?1 AND trust_score >= ?2
-               AND (?3 IS NULL OR fact_id > ?3)
-             ORDER BY fact_id
-             LIMIT ?4"
-        } else {
-            "SELECT fact_id, hrr_vector
-             FROM memory_facts
-             WHERE trust_score >= ?1
-               AND (?2 IS NULL OR fact_id > ?2)
-             ORDER BY fact_id
-             LIMIT ?3"
-        };
-
-        let mut fact_count = 0;
-        let mut vectors = Vec::new();
-        let mut cursor: Option<i64> = None;
-        loop {
-            let mut rows = if let Some(category) = category {
-                self.conn
-                    .query(sql, params![category.as_str(), 0.0, cursor, PAGE_SIZE])
-                    .await
-            } else {
-                self.conn.query(sql, params![0.0, cursor, PAGE_SIZE]).await
-            }
-            .map_err(|e| db_error("load_bank_vectors", e))?;
-
-            let mut page_count = 0;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|e| db_error("load_bank_vectors", e))?
-            {
-                cursor = Some(
-                    row.get::<i64>(0)
-                        .map_err(|e| db_error("load_bank_vectors", e))?,
-                );
-                fact_count += 1;
-                page_count += 1;
-                let value = row
-                    .get::<Value>(1)
-                    .map_err(|e| db_error("load_bank_vectors", e))?;
-                if let Some(vector) = deserialize_vector_value(value, "load_bank_vectors")? {
-                    vectors.push(vector);
-                }
-            }
-            if page_count < PAGE_SIZE {
-                break;
-            }
-        }
-        Ok((fact_count, vectors))
-    }
-
     async fn last_insert_rowid(&self, operation: &str) -> Result<i64> {
         let mut rows = self
             .conn
@@ -578,29 +518,6 @@ impl<'a> MemoryStore<'a> {
         Ok(())
     }
 
-    async fn mark_fact_banks_dirty(&self, category: MemoryCategory) -> Result<()> {
-        self.mark_bank_dirty("all").await?;
-        self.mark_bank_dirty(category.as_str()).await
-    }
-
-    async fn mark_bank_dirty(&self, bank_name: &str) -> Result<()> {
-        // `updated_at` doubles as an optimistic-concurrency token: `rebuild_dirty_banks` only
-        // clears a marker whose value still matches the row it snapshotted. Since
-        // `current_timestamp()` is second-resolution, a re-dirty within the same second as the
-        // snapshot would reuse that value and be silently cleared, dropping the change. Force the
-        // token strictly forward on every mark so same-second re-dirties are always preserved.
-        self.conn
-            .execute(
-                "INSERT INTO memory_bank_dirty (bank_name, updated_at)
-                 VALUES (?1, ?2)
-                 ON CONFLICT(bank_name) DO UPDATE SET
-                     updated_at = max(excluded.updated_at, memory_bank_dirty.updated_at + 1)",
-                params![bank_name, current_timestamp()],
-            )
-            .await
-            .map_err(|e| db_error("mark_bank_dirty", e))?;
-        Ok(())
-    }
 }
 
 fn merge_entities(content: &str, explicit: &[String]) -> Vec<String> {
@@ -783,37 +700,6 @@ fn normalized_limit(limit: usize) -> usize {
     } else {
         limit.min(i64::MAX as usize)
     }
-}
-
-fn average_vectors(vectors: &[Vec<f64>]) -> Vec<f64> {
-    if vectors.is_empty() {
-        return vec![0.0; HolographicEncoder::DIMENSIONS];
-    }
-
-    let mut average = vec![0.0; HolographicEncoder::DIMENSIONS];
-    let mut count = 0.0;
-    for vector in vectors {
-        if vector.len() != HolographicEncoder::DIMENSIONS {
-            continue;
-        }
-        count += 1.0;
-        for (target, value) in average.iter_mut().zip(vector) {
-            *target += value;
-        }
-    }
-    if count > 0.0 {
-        for value in &mut average {
-            *value /= count;
-        }
-    }
-    average
-}
-
-fn normalize_bank_name(bank_name: &str) -> String {
-    bank_name
-        .trim()
-        .to_ascii_lowercase()
-        .replace([' ', '-'], "_")
 }
 
 fn db_error(operation: &str, error: impl fmt::Display) -> TraceDecayError {

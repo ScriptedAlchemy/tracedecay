@@ -29,7 +29,7 @@ use super::{
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
-use crate::db::{Database, publish_fact_feedback_finding_tx};
+use crate::db::publish_fact_feedback_finding_tx;
 use crate::privacy::sanitize_provider_metadata_text;
 use serde_json::{Value, json};
 use tracedecay_domain::{
@@ -619,17 +619,15 @@ pub(in crate::store::memory) struct PromotionAttempt {
 }
 
 pub(in crate::store::memory) async fn promote_project_memory_fact_proposal_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactProposalPromotionV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
     let result =
-        promote_project_memory_fact_proposal_with_disposition_tx(db, transaction, request).await?;
+        promote_project_memory_fact_proposal_with_disposition_tx(transaction, request).await?;
     Ok(result.proposal().clone())
 }
 
 pub(in crate::store::memory) async fn promote_project_memory_fact_proposal_with_disposition_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactProposalPromotionV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactProposalPromotionResultV1> {
@@ -749,7 +747,6 @@ pub(in crate::store::memory) async fn promote_project_memory_fact_proposal_with_
     };
     let source = project_memory_source_label(proposal.request().source())?;
     let (fact_id, assertion_id, event_id) = match compatibility_mirror_insert_tx(
-        db,
         transaction,
         request.owner(),
         &sanitized.payload,

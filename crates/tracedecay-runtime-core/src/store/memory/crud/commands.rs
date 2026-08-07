@@ -24,7 +24,7 @@ use super::{
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
-use crate::db::{Database, tombstone_fact_derivatives_tx};
+use crate::db::tombstone_fact_derivatives_tx;
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
@@ -321,7 +321,6 @@ async fn project_memory_replay_add_tx(
 }
 
 pub(in crate::store::memory) async fn add_project_memory_fact_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactAddCommandV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactAddOutcomeV1> {
@@ -361,7 +360,6 @@ pub(in crate::store::memory) async fn add_project_memory_fact_tx(
     )?;
     let source = project_memory_source_label(request.source())?;
     match compatibility_mirror_insert_tx(
-        db,
         transaction,
         request.owner(),
         &sanitized.payload,
@@ -485,7 +483,6 @@ async fn project_memory_replay_update_tx(
 }
 
 pub(in crate::store::memory) async fn update_project_memory_fact_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactUpdateCommandV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactUpdateOutcomeV1> {
@@ -590,9 +587,7 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
     let mapping =
         project_memory_required_mapping_tx(transaction, request.target().owner(), &fact_id).await?;
     compatibility_mirror_update_tx(
-        db,
         transaction,
-        request.target().owner(),
         mapping.legacy_fact_id(),
         &sanitized.payload,
         &source,
@@ -664,7 +659,6 @@ async fn project_memory_replay_remove_tx(
 }
 
 pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactRemoveCommandV1,
 ) -> ProjectMemoryResult<ProjectMemoryFactRemoveOutcomeV1> {
@@ -710,19 +704,6 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
     };
     let removed = current.access != PayloadAccessState::Deleted;
     let event_id = if removed {
-        let stored =
-            load_current_fact_tx(transaction, &owner_key, request.target().owner(), &fact_id)
-                .await?
-                .ok_or_else(|| {
-                    storage_message(
-                        PROJECT_MEMORY_WRITE_OPERATION,
-                        "compatibility remove target is unavailable",
-                    )
-                })?;
-        let category = stored
-            .payload()
-            .ok_or(FactStoreError::PayloadAccessMismatch)?
-            .category();
         let mapping =
             project_memory_required_mapping_tx(transaction, request.target().owner(), &fact_id)
                 .await?;
@@ -745,15 +726,7 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
             now,
         )?;
         let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-        compatibility_mirror_delete_tx(
-            db,
-            transaction,
-            request.target().owner(),
-            mapping.legacy_fact_id(),
-            category,
-            now,
-        )
-        .await?;
+        compatibility_mirror_delete_tx(transaction, mapping.legacy_fact_id()).await?;
         let canonical_event_id = canonical_receipt.last_event_id().clone();
         tombstone_fact_derivatives_tx(
             transaction,

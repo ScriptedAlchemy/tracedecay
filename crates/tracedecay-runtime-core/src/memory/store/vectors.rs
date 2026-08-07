@@ -1,16 +1,17 @@
-//! Vector and category-bank maintenance operations for `MemoryStore`.
+//! Per-fact derived-vector maintenance for `MemoryStore`.
+//!
+//! Plan 39 Task 7 (owner decision 2026-08-07, second): the persisted category
+//! bank projection (`memory_banks`/`memory_bank_dirty`) was write-only and is
+//! deleted. Recall re-encodes candidate vectors from canonical fact content at
+//! query time; the per-fact stored vectors below leave with `memory_facts` in
+//! the Step 3 legacy-mirror removal.
 
 use crate::db::engine::params;
 
 use crate::errors::Result;
 use crate::memory::encoding::HolographicEncoder;
-use crate::memory::types::MemoryCategory;
-use crate::tracedecay::current_timestamp;
 
-use super::{
-    HRR_ALGEBRA, MemoryStore, average_vectors, db_error, db_message, normalize_bank_name,
-    normalized_limit, parse_category,
-};
+use super::{HRR_ALGEBRA, MemoryStore, db_error, db_message, normalized_limit};
 
 impl MemoryStore<'_> {
     pub async fn compute_missing_vectors(&self, limit: usize) -> Result<usize> {
@@ -74,137 +75,10 @@ impl MemoryStore<'_> {
                     )
                     .await
                     .map_err(|e| db_error("compute_missing_vectors", e))?;
-                self.mark_fact_banks_dirty(fact.category).await?;
             }
         }
 
         Ok(fact_ids.len())
-    }
-
-    pub async fn rebuild_bank(
-        &self,
-        bank_name: &str,
-        category: Option<MemoryCategory>,
-    ) -> Result<usize> {
-        let (fact_count, vectors) = self.load_bank_vectors(category).await?;
-        if vectors.is_empty() {
-            self.conn
-                .execute(
-                    "DELETE FROM memory_banks WHERE bank_name = ?1",
-                    params![bank_name],
-                )
-                .await
-                .map_err(|e| db_error("rebuild_bank", e))?;
-            return Ok(0);
-        }
-
-        let averaged = average_vectors(&vectors);
-        let vector_bytes = HolographicEncoder::serialize(&averaged).map_err(|e| {
-            db_message(
-                "rebuild_bank",
-                format!("failed to serialize bank vector: {e}"),
-            )
-        })?;
-        let normalized_name = normalize_bank_name(bank_name);
-        let now = current_timestamp();
-
-        self.conn
-            .execute(
-                "INSERT INTO memory_banks (
-                    bank_name, vector, hrr_algebra, hrr_dim, fact_count, updated_at
-                 )
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(bank_name) DO UPDATE SET
-                    vector = excluded.vector,
-                    hrr_algebra = excluded.hrr_algebra,
-                    hrr_dim = excluded.hrr_dim,
-                    fact_count = excluded.fact_count,
-                    updated_at = excluded.updated_at",
-                params![
-                    normalized_name,
-                    vector_bytes,
-                    HRR_ALGEBRA,
-                    HolographicEncoder::DIMENSIONS as i64,
-                    fact_count as i64,
-                    now,
-                ],
-            )
-            .await
-            .map_err(|e| db_error("rebuild_bank", e))?;
-
-        Ok(fact_count)
-    }
-
-    pub async fn rebuild_all_banks(&self) -> Result<usize> {
-        let mut categories = Vec::new();
-        let mut rows = self
-            .conn
-            .query("SELECT DISTINCT category FROM memory_facts", ())
-            .await
-            .map_err(|e| db_error("rebuild_all_banks", e))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| db_error("rebuild_all_banks", e))?
-        {
-            let category = row
-                .get::<String>(0)
-                .map_err(|e| db_error("rebuild_all_banks", e))?;
-            categories.push(parse_category(&category, "rebuild_all_banks")?);
-        }
-
-        let mut rebuilt = 0;
-        self.rebuild_bank("all", None).await?;
-        rebuilt += 1;
-        for category in categories {
-            self.rebuild_bank(category.as_str(), Some(category)).await?;
-            rebuilt += 1;
-        }
-        Ok(rebuilt)
-    }
-
-    pub async fn rebuild_dirty_banks(&self) -> Result<usize> {
-        let mut rows = self
-            .conn
-            .query(
-                "SELECT bank_name, updated_at FROM memory_bank_dirty ORDER BY bank_name",
-                (),
-            )
-            .await
-            .map_err(|e| db_error("rebuild_dirty_banks", e))?;
-        let mut dirty_banks = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| db_error("rebuild_dirty_banks", e))?
-        {
-            dirty_banks.push((
-                row.get::<String>(0)
-                    .map_err(|e| db_error("rebuild_dirty_banks", e))?,
-                row.get::<i64>(1)
-                    .map_err(|e| db_error("rebuild_dirty_banks", e))?,
-            ));
-        }
-
-        let mut rebuilt = 0;
-        for (bank_name, dirty_updated_at) in dirty_banks {
-            if bank_name == "all" {
-                self.rebuild_bank("all", None).await?;
-            } else {
-                let category = parse_category(&bank_name, "rebuild_dirty_banks")?;
-                self.rebuild_bank(category.as_str(), Some(category)).await?;
-            }
-            self.conn
-                .execute(
-                    "DELETE FROM memory_bank_dirty
-                     WHERE bank_name = ?1 AND updated_at = ?2",
-                    params![bank_name, dirty_updated_at],
-                )
-                .await
-                .map_err(|e| db_error("rebuild_dirty_banks", e))?;
-            rebuilt += 1;
-        }
-        Ok(rebuilt)
     }
 
     pub(crate) async fn repair_fact_vector_inner(&self, fact_id: i64) -> Result<bool> {
@@ -216,7 +90,6 @@ impl MemoryStore<'_> {
         };
         self.update_fact_vector(fact_id, &fact.content, &fact.entities, "repair_fact_vector")
             .await?;
-        self.mark_fact_banks_dirty(fact.category).await?;
         Ok(true)
     }
 }

@@ -3,7 +3,10 @@
 //! Named production owner: [`crate::store::memory::DatabaseFactStore`]'s
 //! `ProjectMemoryFactStore` implementation. It owns every runtime projection
 //! write and keeps `memory_facts` plus its V1 entities, relations, feedback,
-//! oplog, FTS, and bank rows transactionally aligned with the V2 lineage write.
+//! oplog, and FTS rows transactionally aligned with the V2 lineage write.
+//! Per Plan 39 Task 7 (owner decision 2026-08-07, second) there is no derived
+//! bank projection to keep aligned: those rows are deleted, and recall
+//! re-encodes candidate vectors from canonical content at query time.
 //! Dashboard, retrieval, curation, repair, scheduler, and offline branch-union
 //! consumers may read this projection through that compatibility store; they
 //! do not make the mirror an independent write authority.
@@ -25,7 +28,6 @@ use super::super::projection::{
     project_memory_fact_for_legacy_id_tx, resolve_project_memory_target_tx,
 };
 use super::{DEFAULT_TRUST, PROJECT_MEMORY_RETENTION_CLASS, commit_fact_tx, query_fact_lineage_tx};
-use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::memory::encoding::HolographicEncoder;
@@ -461,21 +463,6 @@ pub(super) async fn compatibility_last_insert_rowid_tx(
     row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)
 }
 
-pub(in crate::store::memory) async fn compatibility_mark_owner_banks_dirty_tx(
-    db: &Database,
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    category: FactCategoryV1,
-    updated_at: UtcMicros,
-) -> FactStoreResult<()> {
-    for bank_name in ["all", project_memory_category_label(category)] {
-        db.mark_memory_v2_bank_dirty_in_transaction(transaction, owner, bank_name, updated_at)
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    }
-    Ok(())
-}
-
 async fn compatibility_mirror_replace_entities_tx(
     transaction: &Transaction<'_>,
     legacy_fact_id: i64,
@@ -569,7 +556,6 @@ pub(super) enum CompatibilityMirrorInsertV1 {
 }
 
 pub(super) async fn compatibility_mirror_insert_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     payload: &FactPayloadV1,
@@ -634,16 +620,11 @@ pub(super) async fn compatibility_mirror_insert_tx(
         timestamp,
     )
     .await?;
-    compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, payload.category(), now)
-        .await?;
     Ok(CompatibilityMirrorInsertV1::Inserted(legacy_fact_id))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(in crate::store::memory) async fn compatibility_mirror_update_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
     legacy_fact_id: i64,
     payload: &FactPayloadV1,
     source: &str,
@@ -684,7 +665,7 @@ pub(in crate::store::memory) async fn compatibility_mirror_update_tx(
         timestamp,
     )
     .await?;
-    compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, payload.category(), now).await
+    Ok(())
 }
 
 pub(super) fn compatibility_legacy_mapping_for_new_fact(
@@ -851,12 +832,8 @@ pub(super) async fn compatibility_active_fact_count_tx(
 }
 
 pub(in crate::store::memory) async fn compatibility_mirror_delete_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
     legacy_fact_id: i64,
-    category: FactCategoryV1,
-    now: UtcMicros,
 ) -> FactStoreResult<()> {
     let mut rows = transaction
         .query(
@@ -901,5 +878,5 @@ pub(in crate::store::memory) async fn compatibility_mirror_delete_tx(
             .await
             .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     }
-    compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, category, now).await
+    Ok(())
 }

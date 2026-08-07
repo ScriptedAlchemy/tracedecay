@@ -25,70 +25,6 @@ async fn add_compatibility_fixture_fact(
         .unwrap()
 }
 
-fn compatibility_owner_scope(owner: &FactOwnerV1) -> (&'static str, String, String) {
-    let (kind, project_id) = match owner {
-        FactOwnerV1::Profile => ("profile", String::new()),
-        FactOwnerV1::Project { project_id } => ("project", project_id.as_str().to_string()),
-    };
-    (kind, project_id, serde_json::to_string(owner).unwrap())
-}
-
-async fn compatibility_bank_rows(
-    db: &Database,
-    owner: &FactOwnerV1,
-) -> Vec<(String, Vec<u8>, i64, i64)> {
-    let (kind, project_id, owner_json) = compatibility_owner_scope(owner);
-    let conn = rusqlite::Connection::open_with_flags(
-        db.database_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let mut statement = conn
-        .prepare(
-            "SELECT bank_name, vector, fact_count, updated_at
-             FROM memory_v2_banks
-             WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
-             ORDER BY bank_name",
-        )
-        .unwrap();
-    statement
-        .query_map(rusqlite::params![kind, project_id, owner_json], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-}
-
-async fn compatibility_dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Vec<(String, i64)> {
-    let (kind, project_id, owner_json) = compatibility_owner_scope(owner);
-    let conn = rusqlite::Connection::open_with_flags(
-        db.database_path(),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let mut statement = conn
-        .prepare(
-            "SELECT bank_name, updated_at
-             FROM memory_v2_bank_dirty
-             WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
-             ORDER BY bank_name",
-        )
-        .unwrap();
-    statement
-        .query_map(rusqlite::params![kind, project_id, owner_json], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap()
-}
-
 #[tokio::test]
 async fn compatibility_repair_rebuilds_only_requested_owner_banks() {
     let (db, _tmp) = make_memory_store().await;
@@ -133,7 +69,10 @@ async fn compatibility_repair_rebuilds_only_requested_owner_banks() {
         .await
         .unwrap();
     assert_eq!(repair_a.missing_vectors_repaired(), 1);
-    assert_eq!(repair_a.banks_rebuilt(), 2);
+    // Plan 39 Task 7 (owner decision 2026-08-07, second): the persisted bank
+    // projection is deleted, so a repair pass never rebuilds bank rows. Bank
+    // counts below are recomputed from bank-eligible facts instead.
+    assert_eq!(repair_a.banks_rebuilt(), 0);
 
     let status_a = memory_a.dashboard_memory_status_v1().await.unwrap();
     let status_b = memory_b.dashboard_memory_status_v1().await.unwrap();
@@ -187,32 +126,20 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     )
     .await;
 
-    assert_eq!(
-        memory_a
-            .dashboard_repair_v1(
-                MemoryOperationContext::generated(&owner_a, "prepare-owner-a-banks", None).unwrap(),
-            )
-            .await
-            .unwrap()
-            .banks_rebuilt(),
-        2
-    );
-    assert_eq!(
-        memory_b
-            .dashboard_repair_v1(
-                MemoryOperationContext::generated(&owner_b, "prepare-owner-b-banks", None).unwrap(),
-            )
-            .await
-            .unwrap()
-            .banks_rebuilt(),
-        2
-    );
+    memory_a
+        .dashboard_repair_v1(
+            MemoryOperationContext::generated(&owner_a, "prepare-owner-a-banks", None).unwrap(),
+        )
+        .await
+        .unwrap();
+    memory_b
+        .dashboard_repair_v1(
+            MemoryOperationContext::generated(&owner_b, "prepare-owner-b-banks", None).unwrap(),
+        )
+        .await
+        .unwrap();
 
     let overview_b_before = memory_b.dashboard_overview_v1(10, 10).await.unwrap();
-    let banks_b_before = compatibility_bank_rows(&db, &owner_b).await;
-    let dirty_b_before = compatibility_dirty_bank_rows(&db, &owner_b).await;
-    assert_eq!(banks_b_before.len(), 2);
-    assert!(dirty_b_before.is_empty());
     assert_eq!(overview_b_before.bank_count, 2);
     assert_eq!(overview_b_before.memory_banks.len(), 2);
     assert_eq!(overview_b_before.hrr_coverage.len(), 1);
@@ -230,16 +157,12 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
             .await
             .unwrap()
     );
-    assert_eq!(
-        memory_a
-            .dashboard_repair_v1(
-                MemoryOperationContext::generated(&owner_a, "rebuild-owner-a-banks", None).unwrap(),
-            )
-            .await
-            .unwrap()
-            .banks_rebuilt(),
-        2
-    );
+    memory_a
+        .dashboard_repair_v1(
+            MemoryOperationContext::generated(&owner_a, "rebuild-owner-a-banks", None).unwrap(),
+        )
+        .await
+        .unwrap();
     assert!(
         memory_a
             .dashboard_overview_v1(10, 10)
@@ -250,11 +173,6 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     );
 
     let overview_b_after = memory_b.dashboard_overview_v1(10, 10).await.unwrap();
-    assert_eq!(compatibility_bank_rows(&db, &owner_b).await, banks_b_before);
-    assert_eq!(
-        compatibility_dirty_bank_rows(&db, &owner_b).await,
-        dirty_b_before
-    );
     assert_eq!(
         overview_b_after.memory_banks,
         overview_b_before.memory_banks

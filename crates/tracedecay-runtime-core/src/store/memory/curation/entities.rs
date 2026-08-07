@@ -1,8 +1,8 @@
 //! Owner-entity resolution, entity merges/aliases, and curation oplog replay.
 
 use super::super::crud::{
-    compatibility_commit_batch_tx, compatibility_mark_owner_banks_dirty_tx,
-    compatibility_mirror_update_tx, compatibility_sanitize_payload, load_current_fact_tx,
+    compatibility_commit_batch_tx, compatibility_mirror_update_tx, compatibility_sanitize_payload,
+    load_current_fact_tx,
 };
 use super::super::envelope::{
     ProjectMemoryOperationReceiptV1, project_memory_receipt_u64, project_memory_target_digest,
@@ -14,13 +14,11 @@ use super::super::primitives::{
 use super::super::projection::{
     project_memory_required_mapping_tx, project_memory_source_for_fact_tx,
 };
-use super::super::proposals::project_memory_proposal_category;
 use super::{
     project_memory_curated_correction_batch, project_memory_curation_evidence_ids_tx,
     project_memory_curation_mappings_from_ids_tx,
     project_memory_record_curated_correction_provenance_tx, project_memory_relation_label,
 };
-use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::memory::entities::normalize_entity;
@@ -235,7 +233,6 @@ async fn project_memory_fact_entities_tx(
 }
 
 pub(super) async fn project_memory_merge_entities_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
@@ -368,9 +365,7 @@ pub(super) async fn project_memory_merge_entities_tx(
             .await?;
         }
         compatibility_mirror_update_tx(
-            db,
             transaction,
-            owner,
             mapping.legacy_fact_id(),
             &sanitized.payload,
             &source,
@@ -383,7 +378,6 @@ pub(super) async fn project_memory_merge_entities_tx(
 }
 
 pub(super) async fn project_memory_add_entity_alias_tx(
-    db: &Database,
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     operation: &ProjectMemoryFactAddAliasV1,
@@ -426,35 +420,11 @@ pub(super) async fn project_memory_add_entity_alias_tx(
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let fact_ids =
-        project_memory_owner_entity_fact_ids_tx(transaction, owner, &[entity_id]).await?;
-    for fact_id in &fact_ids {
-        let mapping = project_memory_required_mapping_tx(transaction, owner, fact_id).await?;
-        let mut rows = transaction
-            .query(
-                "SELECT category FROM memory_facts WHERE fact_id = ?1",
-                params![mapping.legacy_fact_id()],
-            )
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-        let row = rows
-            .next()
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-            .ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility alias fact is missing from the legacy mirror",
-                )
-            })?;
-        let category = project_memory_proposal_category(&row_string(
-            &row,
-            0,
-            PROJECT_MEMORY_WRITE_OPERATION,
-        )?)?;
-        compatibility_mark_owner_banks_dirty_tx(db, transaction, owner, category, now).await?;
-    }
-    Ok(fact_ids)
+    // Plan 39 Task 7 (owner decision 2026-08-07, second): renaming an entity
+    // used to fetch each touched fact's category only to mark its bank
+    // projection dirty. The bank tables are deleted, so the read and the
+    // marking are both gone.
+    project_memory_owner_entity_fact_ids_tx(transaction, owner, &[entity_id]).await
 }
 
 pub(super) fn project_memory_curation_operation_digest(

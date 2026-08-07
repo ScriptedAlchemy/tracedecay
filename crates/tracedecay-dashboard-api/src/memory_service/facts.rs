@@ -188,7 +188,6 @@ pub async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
                 ProjectMemoryDashboardHrrStateV1::Ready => "ready",
                 ProjectMemoryDashboardHrrStateV1::MissingVectors => "missing_vectors",
                 ProjectMemoryDashboardHrrStateV1::MissingBank => "missing_bank",
-                ProjectMemoryDashboardHrrStateV1::StaleBank => "stale_bank",
             };
             json!({
                 "category": coverage.category,

@@ -1,5 +1,5 @@
 use tempfile::TempDir;
-use tracedecay_domain::{FactOwnerV1, UtcMicros};
+use tracedecay_domain::FactOwnerV1;
 
 use crate::db::engine::{Connection, TestConnection, params};
 
@@ -25,13 +25,6 @@ fn owner() -> FactOwnerV1 {
     }
 }
 
-fn bank_vector() -> Vec<u8> {
-    let mut vector = Vec::with_capacity(BANK_VECTOR_BYTES);
-    vector.extend_from_slice(&BANK_VECTOR_HEADER);
-    vector.resize(BANK_VECTOR_BYTES, 0);
-    vector
-}
-
 async fn scalar(conn: &Connection, sql: &str) -> i64 {
     let mut rows = conn.query(sql, ()).await.unwrap();
     rows.next().await.unwrap().unwrap().get(0).unwrap()
@@ -55,6 +48,13 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
         "memory_v2_compatibility_operation_receipts",
         "memory_v2_compatibility_banks",
         "memory_v2_compatibility_bank_dirty",
+        // Plan 39 Task 7 (owner decision 2026-08-07, second): derived vector
+        // storage is deleted, not relocated. Recall re-encodes from canonical
+        // content at query time, so a fresh final store carries no bank rows,
+        // no dirty queue, and no per-assertion vector table.
+        "memory_v2_banks",
+        "memory_v2_bank_dirty",
+        "memory_v2_assertion_vectors",
     ] {
         assert!(
             !table_exists(&conn, legacy).await.unwrap(),
@@ -65,8 +65,6 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
         "memory_v2_operation_receipts",
         "memory_v2_feedback_history",
         "memory_v2_fact_relations",
-        "memory_v2_banks",
-        "memory_v2_bank_dirty",
     ] {
         assert!(
             table_exists(&conn, table).await.unwrap(),
@@ -144,66 +142,6 @@ async fn fact_relations_enforce_owner_evidence_and_identity() {
     );
     assert_eq!(
         scalar(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
-        0
-    );
-}
-
-#[tokio::test]
-async fn bank_writers_enforce_canonical_shape_and_clear_by_generation() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    let owner = owner();
-
-    // Non-canonical vector material and empty banks are refused.
-    assert!(
-        upsert_memory_v2_bank_in_transaction(&conn, &owner, "all", &[1, 2, 3], 1, UtcMicros(10))
-            .await
-            .is_err()
-    );
-    assert!(
-        upsert_memory_v2_bank_in_transaction(
-            &conn,
-            &owner,
-            "all",
-            &bank_vector(),
-            0,
-            UtcMicros(10)
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        mark_memory_v2_bank_dirty_in_transaction(&conn, &owner, "nonsense", UtcMicros(10))
-            .await
-            .is_err()
-    );
-
-    upsert_memory_v2_bank_in_transaction(&conn, &owner, "all", &bank_vector(), 3, UtcMicros(10))
-        .await
-        .unwrap();
-    mark_memory_v2_bank_dirty_in_transaction(&conn, &owner, "all", UtcMicros(20))
-        .await
-        .unwrap();
-    // A stale generation must not clear the dirty marker (compare-and-swap).
-    assert!(
-        !clear_memory_v2_bank_dirty_in_transaction(&conn, &owner, "all", UtcMicros(19))
-            .await
-            .unwrap()
-    );
-    assert!(
-        clear_memory_v2_bank_dirty_in_transaction(&conn, &owner, "all", UtcMicros(20))
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_bank_dirty").await,
-        0
-    );
-    delete_memory_v2_bank_in_transaction(&conn, &owner, "all")
-        .await
-        .unwrap();
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_banks").await,
         0
     );
 }

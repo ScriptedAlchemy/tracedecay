@@ -18,7 +18,6 @@ use super::{DatabaseAuthority, DatabaseAuthorityRole};
 
 mod facade;
 mod integrity;
-mod memory_v2_authority;
 mod pragmas;
 mod query_write;
 mod registry;
