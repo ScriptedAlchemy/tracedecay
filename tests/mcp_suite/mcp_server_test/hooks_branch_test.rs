@@ -490,7 +490,9 @@ async fn hook_route_through_symlinked_workspace_reaches_target() {
 
 #[tokio::test]
 async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
-    let (_env, project, server) = setup_branch_drift_fixture().await;
+    let fixture = setup_branch_drift_fixture().await;
+    let project = fixture.project.clone();
+    let server = Arc::clone(&fixture.server);
 
     // While on main, the feature-only symbol must be invisible.
     let resp = search_via_transport(server.clone(), 1, "feature_only").await;
@@ -531,7 +533,9 @@ async fn tool_calls_reopen_branch_db_after_mid_session_checkout() {
 
 #[tokio::test]
 async fn cross_branch_tools_keep_using_explicit_branch_dbs_after_drift_reopen() {
-    let (_env, project, server) = setup_branch_drift_fixture().await;
+    let fixture = setup_branch_drift_fixture().await;
+    let project = fixture.project.clone();
+    let server = Arc::clone(&fixture.server);
 
     git(&project, &["checkout", "feature"]);
 

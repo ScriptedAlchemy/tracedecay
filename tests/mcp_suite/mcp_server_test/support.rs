@@ -9,7 +9,6 @@ use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::storage::resolve_response_handle_root;
@@ -548,19 +547,31 @@ pub(crate) async fn search_via_transport(server: Arc<McpServer>, id: i64, query:
     tool_call_via_transport(server, id, "tracedecay_search", json!({ "query": query })).await
 }
 
-/// Builds the mid-session branch-switch fixture inside an isolated home.
-///
-/// The fixture writes branch metadata and a seeded branch DB straight into the
-/// profile store, so it must own that profile: run against the developer's or
-/// runner's real `~/.tracedecay` it would both mutate live state and read back
-/// branch rows another project put there. [`crate::common::IsolatedEnv`] also
-/// serializes these tests within one binary, which is why no separate
-/// fixture-local lock is needed.
-pub(crate) async fn setup_branch_drift_fixture()
--> (crate::common::IsolatedEnv, PathBuf, Arc<McpServer>) {
-    let (env, project) = crate::common::IsolatedEnv::acquire().await;
+/// The mid-session branch-switch fixture, mounted on the production
+/// composition so searches serve through the daemon-owned code-index
+/// authority. Dropping the harness before the isolation directory shuts the
+/// composition down cleanly.
+pub(crate) struct BranchDriftFixture {
+    pub(crate) harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+    pub(crate) project: PathBuf,
+    pub(crate) server: Arc<McpServer>,
+    _isolation: crate::support::TestTempDir,
+}
 
-    // main: one committed source file, indexed into the default DB.
+/// Builds the mid-session branch-switch fixture on the production
+/// composition harness inside an isolated profile root.
+///
+/// Branch state goes through the production tracked-branch machinery
+/// (`track_worktree_branch` / `sync_tracked_worktree_branch`): the single
+/// project graph store serves every branch, and each tracked branch seals a
+/// branch-graph generation with exact ref/OID provenance. Hand-seeding
+/// per-branch DB files would fabricate a store shape production no longer
+/// has.
+pub(crate) async fn setup_branch_drift_fixture() -> BranchDriftFixture {
+    let isolation = crate::support::test_temp_dir();
+    let project = isolation.path().join("project");
+
+    // main: one committed source file.
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/lib.rs"),
@@ -568,37 +579,25 @@ pub(crate) async fn setup_branch_drift_fixture()
     )
     .unwrap();
     fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
-    git(&project, &["init"]);
+    git(&project, &["init", "-b", "main"]);
     git(&project, &["config", "user.email", "test@test.com"]);
     git(&project, &["config", "user.name", "Test"]);
     git(&project, &["add", "."]);
     git(&project, &["commit", "-m", "initial"]);
-    git(&project, &["branch", "-M", "main"]);
 
-    // Take the layout from the graph that just created the store. Resolving
-    // the profile layout independently can name a different shard than the one
-    // this project was indexed into (identity resolution and the fallback
-    // directory derivation do not always agree), and the branch seeding below
-    // would then write metadata and a feature DB into a store no reader opens.
-    let layout = {
-        let cg = TraceDecay::init(&project).await.unwrap();
-        cg.index_all().await.unwrap();
-        cg.checkpoint().await.unwrap();
-        cg.store_layout().clone()
-    };
-
-    // Track main + feature, seeding feature's DB from main's.
-    let mut meta = BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
-    save_branch_meta(&layout.data_root, &meta).unwrap();
-    fs::create_dir_all(layout.data_root.join("branches")).unwrap();
-    fs::copy(
-        &layout.graph_db_path,
-        layout.data_root.join("branches/feature.db"),
+    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        vec![project.clone()],
     )
-    .unwrap();
+    .await
+    .expect("branch-drift production composition");
+    let server = harness
+        .server(&project)
+        .expect("branch-drift composition server");
 
-    // feature: add a feature-only symbol and index it into feature's DB.
+    // feature: add a feature-only symbol, then track + seal the branch's
+    // generation through the production branch machinery while the worktree
+    // is checked out on it.
     git(&project, &["checkout", "-b", "feature"]);
     fs::write(
         project.join("src/feat.rs"),
@@ -607,25 +606,41 @@ pub(crate) async fn setup_branch_drift_fixture()
     .unwrap();
     git(&project, &["add", "."]);
     git(&project, &["commit", "-m", "feature work"]);
-    {
-        let cg = TraceDecay::open(&project).await.unwrap();
-        assert_eq!(cg.serving_branch(), Some("feature"));
-        cg.sync().await.unwrap();
-        cg.checkpoint().await.unwrap();
-    }
+    let outcome = harness
+        .track_worktree_branch(&project, &project, "feature")
+        .await
+        .expect("track feature branch");
+    assert_eq!(
+        outcome,
+        tracedecay::branch::BranchAddOutcome::Added,
+        "feature branch tracking must seal a branch generation"
+    );
 
-    // Back on main: start the server pinned to main's DB. Startup catch-up is
-    // unrelated to branch drift and may scan the host's default transcript
-    // profile, so keep this fixture isolated from that background work.
+    // Back on main: seal main's generation from the checked-out worktree so
+    // the server starts pinned to main and explicit main-scoped reads have
+    // exact provenance to serve from.
     git(&project, &["checkout", "main"]);
-    let mut config = tracedecay::config::load_config(&project).expect("load test config");
-    config.sync.session_start_sync = false;
-    tracedecay::config::save_config(&project, &config).expect("disable unrelated catch-up");
-    let cg = TraceDecay::open(&project).await.unwrap();
-    assert_eq!(cg.serving_branch(), Some("main"));
-    let server = McpServer::new(cg, None).await;
+    let (_active, serving, fallback, contains_query) = harness
+        .sync_tracked_worktree_branch(&project, &project, "main", "main_only")
+        .await
+        .expect("seal main branch generation");
+    assert_eq!(serving.as_deref(), Some("main"), "main must serve itself");
+    assert!(!fallback, "main is tracked and must not serve via fallback");
+    assert!(
+        contains_query,
+        "main's sealed generation must contain the main-only symbol"
+    );
 
-    (env, project, server)
+    // Serve the cold-activation window here so the tests' first assertions
+    // are about branch content, not authority warm-up.
+    crate::support::warm_code_index_search(&server, "main_only").await;
+
+    BranchDriftFixture {
+        harness,
+        project,
+        server,
+        _isolation: isolation,
+    }
 }
 
 // ---------------------------------------------------------------------------
