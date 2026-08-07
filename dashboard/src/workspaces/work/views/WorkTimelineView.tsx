@@ -4,12 +4,14 @@ import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
 import { kindColorVars } from '../../../viz/graph/kindColor.ts';
 import { coverageReading } from '../workModel.ts';
+import type { WorkAttemptReading } from '../workAttemptModel.ts';
 import {
   type WorkWeaveLanding,
   type WorkWeaveReading,
   type WorkWeaveThread,
   workWeaveReading,
 } from '../workViewsModel.ts';
+import { WorkExecutionRecord } from './WorkExecutionRecord.tsx';
 import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './WorkViewChannel.tsx';
 
 /**
@@ -57,14 +59,16 @@ const TALLY_CAP = 6;
 
 export function WorkTimelineView({
   snapshot,
+  attempts,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
+  attempts: WorkAttemptReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const reading = workWeaveReading(snapshot.projections);
+  const reading = workWeaveReading(snapshot.projections, attempts);
   const coverage = coverageReading(snapshot.coverage);
 
   const landings = reading.threads.reduce((total, thread) => total + thread.landings.length, 0);
@@ -96,7 +100,9 @@ export function WorkTimelineView({
             Position along a thread is task-id order and not an order of execution. Every
             mark is drawn hollow because an evidence reference is a point: no landing here
             has a start, an end, or a width. Repeated ticks on one mark are repeated
-            crossings of the same landing, which is a retry.
+            crossings of the same landing, which looks like a retry and is not measured as
+            one — the measured retry chains are in the execution record below, read from the
+            attempt list rather than counted off this incidence.
           </p>
 
           {/* The absence sits where an axis would have been drawn, not in a
@@ -113,13 +119,19 @@ export function WorkTimelineView({
         </div>
       </Panel>
 
+      <WorkExecutionRecord reading={reading} selected={selected} onSelect={onSelect} />
+
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
         <UnwovenBand reading={reading} selected={selected} onSelect={onSelect} />
+        {/* Wall clock alone. The attempt-derived channels are drawn in the
+          * execution record, each where its measurement would have been: a
+          * refused attempt read makes all four absent for one reason, and
+          * repeating that one sentence in a ledger as well would print it four
+          * times on a page that has one thing to say. */}
         <ChannelLedger
           legend="Measurements this projection could not take"
           channels={[
             { measure: 'wall-clock spans and durations', channel: reading.wallClock },
-            { measure: 'executor identity per thread', channel: reading.executorIdentity },
           ]}
         />
       </div>

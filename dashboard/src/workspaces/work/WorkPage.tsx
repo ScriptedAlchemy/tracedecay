@@ -6,6 +6,8 @@ import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
 import { WorkTaskActivity } from './WorkTaskActivity.tsx';
 import { resumeCursor, useWorkDelta, useWorkSnapshot } from './workQueries.ts';
+import { useWorkAttempts } from './workViewsQueries.ts';
+import { workAttemptReading, type WorkAttemptReading } from './workAttemptModel.ts';
 import { WorkCausalView } from './views/WorkCausalView.tsx';
 import { WorkDagView } from './views/WorkDagView.tsx';
 import {
@@ -74,11 +76,13 @@ export function workScopeProvenance(scope: DashboardScope): string {
 function WorkProjectionView({
   kind,
   snapshot,
+  attempts,
   selected,
   onSelect,
 }: {
   kind: WorkProjectionKind;
   snapshot: WorkProjectionSnapshotV1;
+  attempts: WorkAttemptReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
@@ -88,7 +92,14 @@ function WorkProjectionView({
     case 'dag':
       return <WorkDagView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
     case 'timeline':
-      return <WorkTimelineView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+      return (
+        <WorkTimelineView
+          snapshot={snapshot}
+          attempts={attempts}
+          selected={selected}
+          onSelect={onSelect}
+        />
+      );
     case 'causal':
       return <WorkCausalView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
     case 'workload':
@@ -105,6 +116,10 @@ export function WorkPage() {
   const [selected, setSelected] = useSelectedTask();
   const [projection, setProjection] = useWorkProjection();
   const snapshot = useWorkSnapshot();
+  // The execution record belongs to the timeline, so the attempt list is read
+  // when that projection is the camera and not on every visit to the page.
+  const attempts = useWorkAttempts(projection === 'timeline');
+  const attemptReading = workAttemptReading(attempts.data);
   const result = snapshot.data;
   const value = result?.outcome === 'value' ? result.value : undefined;
   // Only asked for when the snapshot says it was capped or partial, so a
@@ -192,6 +207,7 @@ export function WorkPage() {
               <WorkProjectionView
                 kind={projection}
                 snapshot={value}
+                attempts={attemptReading}
                 selected={selected}
                 onSelect={setSelected}
               />

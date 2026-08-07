@@ -1,5 +1,13 @@
 import type { WorkProjection } from '../../contracts/index.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
+import {
+  attemptPageOf,
+  type WorkAttemptLineage,
+  type WorkAttemptReading,
+  type WorkCancellationLadder,
+  type WorkExecutorReading,
+  type WorkTerminalObservation,
+} from './workAttemptModel.ts';
 
 /**
  * The four Work projections of plan 11c, derived from the snapshot this build
@@ -8,29 +16,35 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  * Plan 11c maps each projection onto a grammar the app has already proved:
  * the DAG onto transit strata, the timeline onto the loom weave, the causal
  * view onto the disagreement field, and the workload onto cortex aggregation.
- * What it does not do is supply the data — 11c names Plan 32 attempt evidence
- * as the dependency for all four, and that evidence reaches the dashboard as
- * `WorkProductProjectionBundleV1`, a domain type (`work_product_projection.rs`)
- * with no mounted route and no generated dashboard contract in this build.
+ * The data arrives from two reads, and which read a channel comes from is the
+ * thing to keep straight:
  *
- * So this module derives every channel it can prove from `WorkProjection` —
- * which is a great deal more than nothing — and reports each remaining channel
- * as the specific absence it is. That split is the whole design:
+ *   the snapshot        `WorkProjection` — the declared dependency graph, its
+ *                       strata and cycles, the run/task incidence, the evidence
+ *                       each task carries, which tasks no run has touched
+ *   the attempt list    `WorkAttemptV1` — the execution record: who ran what
+ *                       (`requested_route`/`actual_route`), the retry chains,
+ *                       the typed cancellation ladder, and the instant each
+ *                       terminated attempt was observed to finish
  *
- *   proved here      the declared dependency graph, its strata and cycles, the
- *                    run/task incidence, the evidence each task carries, and
- *                    which tasks no run has touched
- *   absent, named    effort, wall-clock, observed execution order, executor
- *                    identity, concurrency
+ * The attempt list is mounted (`operation.work.list_attempts`) and its channels
+ * are live, derived in `workAttemptModel.ts` and bound onto the weave below.
+ * What is still not mounted is the product projection: 11c's effort mass,
+ * concurrency, churn, gating edges and the effort-weighted critical path all
+ * need `WorkProductProjectionBundleV1` (`work_product_projection.rs`), a domain
+ * type with no route and no generated dashboard contract in this build. Those
+ * stay named absences.
+ *
+ * Wall clock stays absent too, and for a reason worth stating precisely rather
+ * than filing under "no data": the attempt record has an end and no start.
+ * `WorkLeaseFenceV1` is `{epoch, lease_id}` and `WorkAttemptProgressV1` is
+ * `{completed, total}` — neither is a clock — so a terminated attempt yields an
+ * instant and never a width. The weave gained an order it can prove and did not
+ * gain a duration, and it says both.
  *
  * A channel is never estimated to fill a gap. 11c is explicit: attempt counts,
  * queue ages and wall-times are real or absent, and a degenerate distribution
  * is said rather than drawn.
- *
- * When the product-graph read is mounted and regenerated into
- * `dashboard/src/contracts/`, the seam is this module: a second derivation
- * builds the same readings with the absent channels filled, and no view
- * component changes. The views consume the readings below, never a wire shape.
  */
 
 /**
@@ -45,18 +59,20 @@ export type WorkChannel<T> =
   | { readonly available: false; readonly state: DomainStateKind; readonly detail: string };
 
 /**
- * The measurements plan 11c asks each projection to encode that this build's
- * contracts do not carry.
+ * The measurements plan 11c asks each projection to encode that no mounted read
+ * in this build can supply.
  *
  * Each is named for the measurement rather than for the route that would
- * supply it, because the gap is in the read model: `WorkProjection` has no
- * timestamp, no effort, and no provider identity anywhere in it.
+ * supply it, because the gap is in the read model rather than in the transport.
+ * Executor identity is deliberately not among them any more: the attempt list
+ * carries `requested_route` and `actual_route`, so a thread that cannot name
+ * its executor now says which attempt read failed it, in
+ * `attemptChannelGap` — a transient reason, not a schema one.
  */
 export type WorkChannelGap =
   | 'effort'
   | 'wall_clock'
   | 'observed_order'
-  | 'executor_identity'
   | 'concurrency'
   | 'churn';
 
@@ -76,17 +92,13 @@ export function channelGap(gap: WorkChannelGap): {
     case 'wall_clock':
       return {
         state: 'unsupported_schema',
-        detail: `WorkProjection carries no timestamp, so no span, duration, or queue age can be drawn — ${CONTRACT_GAP}`,
+        detail:
+          'no span can be drawn: an attempt records the instant it was observed to finish, and nothing anywhere records when it started — WorkLeaseFenceV1 is {epoch, lease_id} and WorkAttemptProgressV1 is {completed, total}, so every mark has an end and never a width',
       };
     case 'observed_order':
       return {
         state: 'unsupported_schema',
-        detail: `observed execution order needs attempt timestamps, which this read has none of — ${CONTRACT_GAP}`,
-      };
-    case 'executor_identity':
-      return {
-        state: 'unsupported_schema',
-        detail: `a run is not an executor: WorkProjection names no provider or agent, so attributed threads are drawn hollow — ${CONTRACT_GAP}`,
+        detail: `this projection is derived from WorkProjection alone, which carries no timestamp, so the order its tasks ran in cannot be read here — the attempt list carries terminal instants and the weave draws them, but nothing binds a task's completion to an attempt's — ${CONTRACT_GAP}`,
       };
     case 'concurrency':
       return {
@@ -413,20 +425,93 @@ export interface WorkWeaveReading {
   readonly unwoven: readonly { readonly taskId: string; readonly title: string }[];
   readonly crossings: number;
   readonly wallClock: WorkChannel<never>;
-  readonly executorIdentity: WorkChannel<never>;
+  readonly executorIdentity: WorkChannel<readonly WorkExecutorReading[]>;
+  readonly observedOrder: WorkChannel<readonly WorkTerminalObservation[]>;
+  readonly retryWeave: WorkChannel<readonly WorkAttemptLineage[]>;
+  readonly cancellationLadder: WorkChannel<WorkCancellationLadder>;
+  /** What the attempt read itself answered, so the view states the page's
+   * coverage and its refusals rather than inferring them from empty channels. */
+  readonly attempts: WorkAttemptReading;
 }
 
 /**
- * The run/task weave.
+ * Why a channel the attempt list would have supplied has no value.
  *
- * Warp threads are runs, because `run_id` is the only executor-shaped identity
- * `WorkProjection` carries — and it is not an executor, which is why the
- * `executorIdentity` channel is absent rather than hue-coded to a name this
- * build would have invented. Landings are tasks. Every span is hollow: an
- * evidence reference is a point with no start, so the weave has ordinal
- * position and no duration at all, which `wallClock` states.
+ * Distinct from `channelGap` on purpose. These are not schema absences — the
+ * contract carries the measurement — so reporting them as `unsupported_schema`
+ * would tell a reader the build cannot do something it can. Each one is the
+ * state the read actually returned, in that state's own words.
  */
-export function workWeaveReading(projections: readonly WorkProjection[]): WorkWeaveReading {
+export function attemptChannelGap(
+  reading: WorkAttemptReading,
+  measure: string,
+): WorkChannel<never> {
+  switch (reading.state) {
+    case 'pending':
+      return {
+        available: false,
+        state: 'loading',
+        detail: `the attempt list has not answered yet, so ${measure} is not drawn`,
+      };
+    case 'refused':
+      return {
+        available: false,
+        state: reading.chip,
+        detail: `${measure} is read from the attempt list, and that read was refused: ${reading.detail}`,
+      };
+    case 'absent':
+      return {
+        available: false,
+        state: 'denied',
+        detail: `the daemon reports no Work attempts in this scope — a typed absence its policy makes indistinguishable from a denial, so ${measure} is neither drawn nor guessed`,
+      };
+    case 'listed':
+      return {
+        available: false,
+        state: 'complete_zero_findings',
+        detail: `the attempt page was read and no attempt on it records ${measure}`,
+      };
+    default: {
+      const unhandled: never = reading;
+      return unhandled;
+    }
+  }
+}
+
+/** A channel that is present exactly when the page proved at least one row of
+ * it, and otherwise carries the read's own reason. */
+function attemptChannel<T>(
+  reading: WorkAttemptReading,
+  measure: string,
+  rows: readonly T[] | undefined,
+): WorkChannel<readonly T[]> {
+  if (rows === undefined || rows.length === 0) return attemptChannelGap(reading, measure);
+  return { available: true, value: rows };
+}
+
+/**
+ * The run/task weave, with the execution record bound onto it.
+ *
+ * Warp threads stay runs and landings stay tasks: that incidence is the
+ * snapshot's reading and the attempt list does not replace it. What the attempt
+ * list replaces is the inference around it. A thread's executor is now read
+ * from `actual_route` instead of being refused, and a retry is now a link in a
+ * recovery chain instead of a second evidence row that merely looked like one —
+ * `retryWeave` is the measured version of `WorkWeaveLanding.crossings`, and the
+ * two are kept side by side rather than one overwriting the other, because they
+ * count different things and disagreeing is informative.
+ *
+ * Every mark stays hollow. The page brought an end instant and no start, so the
+ * weave gained `observedOrder` and did not gain a width; `wallClock` still says
+ * so.
+ *
+ * The attempt argument defaults to `pending` so a caller that has not issued
+ * the read draws the channels as not-yet-answered rather than as absent.
+ */
+export function workWeaveReading(
+  projections: readonly WorkProjection[],
+  attempts: WorkAttemptReading = { state: 'pending' },
+): WorkWeaveReading {
   const threads = new Map<string, Map<string, { crossings: number; terminal: boolean }>>();
   const unwoven: { taskId: string; title: string }[] = [];
 
@@ -466,12 +551,24 @@ export function workWeaveReading(projections: readonly WorkProjection[]): WorkWe
     })
     .sort((a, b) => b.crossings - a.crossings || a.runId.localeCompare(b.runId));
 
+  const page = attemptPageOf(attempts);
   return {
     threads: woven,
     unwoven: unwoven.sort((a, b) => a.taskId.localeCompare(b.taskId)),
     crossings: woven.reduce((total, thread) => total + thread.crossings, 0),
+    // Still absent with the attempt page in hand, and now for a narrower
+    // reason: the record has an end and no start.
     wallClock: absentChannel('wall_clock'),
-    executorIdentity: absentChannel('executor_identity'),
+    executorIdentity: attemptChannel(attempts, 'executor identity', page?.executors),
+    observedOrder: attemptChannel(attempts, 'a terminal instant', page?.terminalOrder),
+    retryWeave: attemptChannel(attempts, 'an attempt chain', page?.lineages),
+    // The ladder is a reading even when every rung is zero: "nothing was
+    // cancelled" is a fact about the page, unlike an empty list of executors.
+    cancellationLadder:
+      page === null
+        ? attemptChannelGap(attempts, 'the cancellation ladder')
+        : { available: true, value: page.ladder },
+    attempts,
   };
 }
 

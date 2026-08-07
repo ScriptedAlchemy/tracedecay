@@ -334,7 +334,6 @@ describe('the absent channels', () => {
     'effort',
     'wall_clock',
     'observed_order',
-    'executor_identity',
     'concurrency',
     'churn',
   ];
@@ -352,5 +351,106 @@ describe('the absent channels', () => {
     for (const gap of gaps) {
       expect(channelGap(gap).state).toBe('unsupported_schema');
     }
+  });
+});
+
+/**
+ * The seam where the execution record meets the weave.
+ *
+ * The weave keeps its own reading of the snapshot whatever the attempt list
+ * says — threads and landings are the snapshot's incidence — and the four
+ * attempt-derived channels resolve independently. What is asserted here is that
+ * the resolution is honest in both directions: a channel goes live only when a
+ * page proved it, and when no page arrived the channel names the state the read
+ * returned rather than reporting a schema absence for a measurement the
+ * contract plainly carries.
+ */
+describe('the attempt channels bound onto the weave', () => {
+  const GRAPH = [
+    projection({ task_id: 'a', title: 'A', runtime_evidence: [evidence('run-1', true)] }),
+  ];
+
+  it('reports a read that has not answered as loading, not as unsupported', () => {
+    const reading = workWeaveReading(GRAPH);
+
+    expect(reading.executorIdentity.available).toBe(false);
+    expect(reading.executorIdentity.available === false && reading.executorIdentity.state).toBe(
+      'loading',
+    );
+    // The snapshot's own reading is unaffected by the attempt read's state.
+    expect(reading.threads).toHaveLength(1);
+  });
+
+  it('carries a refusal through to every channel it fed, with its own state', () => {
+    const reading = workWeaveReading(GRAPH, {
+      state: 'refused',
+      chip: 'conflicting',
+      detail: 'the task moved since it was read',
+    });
+
+    for (const channel of [
+      reading.executorIdentity,
+      reading.observedOrder,
+      reading.retryWeave,
+      reading.cancellationLadder,
+    ]) {
+      expect(channel.available).toBe(false);
+      expect(channel.available === false && channel.state).toBe('conflicting');
+      expect(channel.available === false && channel.detail).toContain('the task moved');
+    }
+  });
+
+  it('goes live on a page that proved the measurement', () => {
+    const reading = workWeaveReading(GRAPH, {
+      state: 'listed',
+      page: {
+        topology: { generation: 'generation-7', task_count: 1 },
+        coverage: { coverage: 'complete', returned: 1 },
+        attemptCount: 1,
+        partial: false,
+        executors: [
+          { providerId: 'codex', routeId: 'route-primary', attempts: 1, diverted: 0, unobserved: 0 },
+        ],
+        lineages: [
+          { taskId: 'a', runId: 'run-1', links: [], restarts: 0, open: false, truncated: false },
+        ],
+        ladder: { requested: 0, acknowledged: 0, escalated: 0, unrecorded: 0 },
+        terminalOrder: [],
+      },
+    });
+
+    expect(reading.executorIdentity.available).toBe(true);
+    expect(reading.retryWeave.available).toBe(true);
+    // A ladder every attempt stayed off is a reading; an empty terminal order
+    // is the absence of one, because an attempt that never terminated records
+    // no instant to place.
+    expect(reading.cancellationLadder.available).toBe(true);
+    expect(reading.observedOrder.available).toBe(false);
+    expect(reading.observedOrder.available === false && reading.observedOrder.state).toBe(
+      'complete_zero_findings',
+    );
+  });
+
+  /** The attempt page brought an end instant and no start, so the one channel
+   * that must NOT go live is the one a reader would most expect to. */
+  it('leaves wall clock absent even with a full page in hand', () => {
+    const reading = workWeaveReading(GRAPH, {
+      state: 'listed',
+      page: {
+        topology: { generation: 'generation-7', task_count: 1 },
+        coverage: { coverage: 'complete', returned: 0 },
+        attemptCount: 0,
+        partial: false,
+        executors: [],
+        lineages: [],
+        ladder: { requested: 0, acknowledged: 0, escalated: 0, unrecorded: 0 },
+        terminalOrder: [],
+      },
+    });
+
+    expect(reading.wallClock.available).toBe(false);
+    expect(reading.wallClock.available === false && reading.wallClock.detail).toContain(
+      'never a width',
+    );
   });
 });

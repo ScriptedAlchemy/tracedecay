@@ -6,6 +6,8 @@ import {
   CreateWorkCommandSchema,
   ReplanDependenciesCommandSchema,
   ReviewProposalRequestV1Schema,
+  WorkAttemptListRequestV1Schema,
+  WorkAttemptListV1Schema,
   WorkProjectionDeltaRequestV1Schema,
   WorkProjectionDeltaV1Schema,
   WorkProjectionSchema,
@@ -15,7 +17,7 @@ import {
 import type { WorkRoute } from "./workApi.ts";
 
 /**
- * The nine Work routes this build can reach, and no others.
+ * The ten Work routes this build can reach, and no others.
  *
  * Each one names a core operation of the canonical `WorkOperation` descriptor
  * (`crates/tracedecay-api/src/work.rs`), which is what the daemon mounts and
@@ -23,8 +25,12 @@ import type { WorkRoute } from "./workApi.ts";
  * same operation id, same path, same request and response contract. They are
  * written out rather than derived because there is no generated route table on
  * the dashboard side, and a route invented here would be a request the daemon
- * has never mounted. Execution is owned by the Workflow runtime and has its
- * own routes; the Work descriptor carries no execution operations.
+ * has never mounted.
+ *
+ * The descriptor mounts fifteen; these are the ten the dashboard has a caller
+ * for. The five it leaves alone are the attempt commands — start, cancel,
+ * resume, and the single-attempt status read — which drive execution rather
+ * than read it, and belong to whichever surface takes on running Work.
  */
 
 export const WORK_SNAPSHOT_ROUTE = {
@@ -39,6 +45,22 @@ export const WORK_DELTA_ROUTE = {
   path: "/api/work/delta",
   request: WorkProjectionDeltaRequestV1Schema,
   response: WorkProjectionDeltaV1Schema,
+} as const satisfies WorkRoute<unknown, unknown>;
+
+/**
+ * The execution record behind the projections.
+ *
+ * Paged like the snapshot, but cursored on the verified topology generation the
+ * page was read under rather than on a sequence: a cursor minted against a
+ * superseded generation is refused (`work.topology_generation_superseded`)
+ * instead of being continued across a topology that moved. Ordering is stable
+ * on (task_id, run_id, attempt_id), which is what makes the resume point exact.
+ */
+export const WORK_LIST_ATTEMPTS_ROUTE = {
+  operation: "operation.work.list_attempts",
+  path: "/api/work/list-attempts",
+  request: WorkAttemptListRequestV1Schema,
+  response: WorkAttemptListV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 /**
