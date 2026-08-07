@@ -811,9 +811,12 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
 
         let db = open_project_session_db(&project).await.unwrap();
         let _ = ingest_global_sources_for_provider(&db, &project, Some(selected_provider)).await;
+        // Two conversational rows; the ui_messages api_req_started record is
+        // uncorrelated usage evidence in the observation family, not a
+        // message row (token accounting left conversational metadata).
         assert_eq!(
             db.session_message_count().await.unwrap(),
-            3,
+            2,
             "{provider}: initial durable message cardinality"
         );
         let prefix_cursor = observation_source_cursor(&db, provider, &session_id, &project)
@@ -878,7 +881,7 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         );
         assert_eq!(
             replay.session_message_count().await.unwrap(),
-            3,
+            2,
             "{provider}: failed projection preserves prior durable cardinality"
         );
         assert!(
@@ -890,10 +893,16 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
         );
 
         set_projection_failure(&replay, false).await;
+        drop(replay);
+
+        // A retry deadline paces re-attempts within the mount that observed
+        // the failure; the reopened mount re-arms the queue so this recovery
+        // pass replays the committed suffix immediately.
+        let recovered = open_project_session_db(&project).await.unwrap();
         let _ =
-            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider)).await;
+            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider)).await;
         assert_eq!(
-            replay
+            recovered
                 .search_session_messages(provider, None, "projection retry suffix", 10)
                 .await
                 .len(),
@@ -901,12 +910,12 @@ async fn cline_like_replacement_projection_replay_is_deterministic() {
             "{provider}: recovered suffix searchable"
         );
         assert_eq!(
-            observation_source_cursor(&replay, provider, &session_id, &project).await,
+            observation_source_cursor(&recovered, provider, &session_id, &project).await,
             Some(committed_cursor),
             "{provider}: retry must not advance the committed observation frontier"
         );
         assert_eq!(
-            ingest_global_sources_for_provider(&replay, &project, Some(selected_provider),)
+            ingest_global_sources_for_provider(&recovered, &project, Some(selected_provider),)
                 .await
                 .messages_upserted,
             0,

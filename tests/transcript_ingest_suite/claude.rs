@@ -12,6 +12,10 @@ use tracedecay::sessions::git_correlation::{
 #[cfg(all(unix, not(target_os = "macos")))]
 use tracedecay::sessions::source::TranscriptSource;
 use tracedecay::storage::PrivateStoreIo;
+use tracedecay_domain::{
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1,
+};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
@@ -444,8 +448,9 @@ async fn claude_transcript_populates_searchable_messages() {
             .any(|hit| hit.message.timestamp == Some(1_767_225_605))
     );
 
-    // Anthropic-style `message.usage` counters land in metadata under the
-    // keys the savings dashboard reads; non-counter fields are dropped.
+    // Anthropic-style `message.usage` counters belong to the immutable
+    // provider-usage observation family now; conversational metadata carries
+    // location evidence only.
     let assistant = results
         .iter()
         .find(|hit| hit.message.role == "assistant")
@@ -459,11 +464,7 @@ async fn claude_transcript_populates_searchable_messages() {
         Some("transcript_record")
     );
     assert!(metadata.get("claude_git_branch").is_none());
-    assert_eq!(metadata["usage"]["input_tokens"], 1200);
-    assert_eq!(metadata["usage"]["output_tokens"], 340);
-    assert_eq!(metadata["usage"]["cache_creation_input_tokens"], 500);
-    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 8000);
-    assert!(metadata["usage"].get("service_tier").is_none());
+    assert!(metadata.get("usage").is_none());
     let user = results
         .iter()
         .find(|hit| hit.message.role == "user")
@@ -493,6 +494,57 @@ async fn claude_transcript_populates_searchable_messages() {
         .await
         .expect("authored Claude content should be in raw LCM storage");
     assert_eq!(raw.content, "The billing pipeline regression is fixed.");
+}
+
+/// Anthropic-style `message.usage` counters land in the immutable
+/// provider-usage observation family through the canonical observation route,
+/// with exact native evidence: the message's own model, per-message delta
+/// semantics, cache-write from `cache_creation_input_tokens`, and unmeasured
+/// counters typed-absent. Non-counter fields (`service_tier`) never survive.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn claude_usage_counters_land_in_provider_usage_observations() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
+    write_claude_transcript(&home, &project, "claude-usage-observations");
+
+    let db = open_project_session_db(&project).await.unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Claude)).await;
+
+    let observations = db.provider_usage_observations("claude").await;
+    assert_eq!(observations.len(), 1);
+    let observation = &observations[0];
+    assert_eq!(observation.session_id.as_str(), "claude-usage-observations");
+    assert_eq!(observation.native_kind, "assistant");
+    assert_eq!(observation.native_field, "message.usage");
+    assert_eq!(observation.native_scope, ProviderUsageScopeV1::Message);
+    assert_eq!(
+        observation.counter_semantics,
+        ProviderUsageCounterSemanticsV1::Delta
+    );
+    assert_eq!(
+        observation.model,
+        ProviderUsageModelV1::Known {
+            model: "claude-opus-4-8".to_owned(),
+        }
+    );
+    assert_eq!(
+        observation.counters,
+        ProviderUsageCountersV1::Known {
+            input_tokens: Some(1200),
+            output_tokens: Some(340),
+            cache_read_tokens: Some(8000),
+            cache_write_tokens: Some(500),
+            reasoning_tokens: None,
+            total_tokens: None,
+        }
+    );
 }
 
 /// Writes a transcript whose assistant turn carries a `thinking` block followed

@@ -595,14 +595,11 @@ async fn codex_rollout_populates_user_and_agent_messages_only() {
         serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["tool_calls"][0]["function"]["name"], "apply_patch");
 
-    // The trailing token_count event's per-turn usage attaches to the
-    // assistant reply it reports on, normalized for the savings dashboard's
-    // additive pricing: input excludes the cached portion (OpenAI input
-    // includes it), which lands in cache_read_input_tokens.
-    assert_eq!(metadata["usage"]["input_tokens"], 14662 - 6528);
-    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 6528);
-    assert_eq!(metadata["usage"]["output_tokens"], 13);
-    assert_eq!(metadata["usage"]["total_tokens"], 14675);
+    // The trailing token_count event no longer attaches per-turn usage to the
+    // reply message: token accounting is the immutable provider-usage
+    // observation family (exact native counters, no cached-input
+    // renormalization), covered by the codex_usage canonical-route tests.
+    assert!(metadata.get("usage").is_none());
     let user = results
         .iter()
         .find(|hit| hit.message.role == "user")

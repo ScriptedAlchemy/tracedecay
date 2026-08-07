@@ -17,12 +17,16 @@ use tracedecay::sessions::hermes::{
 use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 use tracedecay::sessions::source::TranscriptIngestStats;
 use tracedecay::sessions::{SessionProvider, SessionRecord};
-use tracedecay_domain::{MAX_OBSERVATION_RECORD_BYTES, ProjectId};
+use tracedecay_domain::{
+    MAX_OBSERVATION_RECORD_BYTES, ProjectId, ProviderUsageCounterSemanticsV1,
+    ProviderUsageCountersV1, ProviderUsageModelV1, ProviderUsageScopeV1,
+};
 
 use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
-    mark_test_project, observation_source_cursor, open_project_session_db, set_projection_failure,
+    mark_test_project, observation_source_cursor, open_project_session_db,
+    open_sibling_project_session_db, set_projection_failure,
 };
 use crate::support::{
     assert_metadata_path_eq, create_git_repo_with_linked_worktree, init_git_repo,
@@ -349,16 +353,38 @@ async fn hermes_state_db_populates_projection_for_pinned_project() {
         metadata["hermes_session_location_provenance"].as_str(),
         Some("profile_pin")
     );
-    // Session-cumulative token counters from the Hermes sessions table map to
-    // dashboard counter names; zero counters (cache_write) are omitted.
-    assert_eq!(metadata["usage"]["input_tokens"], 96443);
-    assert_eq!(metadata["usage"]["output_tokens"], 3804);
-    assert_eq!(metadata["usage"]["cache_read_input_tokens"], 1_064_960);
-    assert_eq!(metadata["usage"]["reasoning_tokens"], 2061);
-    assert!(
-        metadata["usage"]
-            .get("cache_creation_input_tokens")
-            .is_none()
+    // Session-cumulative token counters from the Hermes sessions table land
+    // in the immutable provider-usage observation family (captured at the
+    // session-usage frontier row), not in session metadata. A native zero
+    // (cache_write) is measured evidence and survives as exactly zero.
+    assert!(metadata.get("usage").is_none());
+    let observations = db.provider_usage_observations("hermes").await;
+    assert_eq!(observations.len(), 1);
+    let usage = &observations[0];
+    assert_eq!(usage.session_id.as_str(), SESSION_ID);
+    assert_eq!(usage.native_kind, "session");
+    assert_eq!(usage.native_field, "sessions.token_counters");
+    assert_eq!(usage.native_scope, ProviderUsageScopeV1::Session);
+    assert_eq!(
+        usage.counter_semantics,
+        ProviderUsageCounterSemanticsV1::Cumulative
+    );
+    assert_eq!(
+        usage.model,
+        ProviderUsageModelV1::Known {
+            model: "gpt-5.5".to_owned(),
+        }
+    );
+    assert_eq!(
+        usage.counters,
+        ProviderUsageCountersV1::Known {
+            input_tokens: Some(96_443),
+            output_tokens: Some(3_804),
+            cache_read_tokens: Some(1_064_960),
+            cache_write_tokens: Some(0),
+            reasoning_tokens: Some(2_061),
+            total_tokens: None,
+        }
     );
 
     // Empty-content assistant tool-call turns project typed ToolInvocation facts
@@ -752,7 +778,7 @@ async fn hermes_shared_sweep_routes_one_source_to_multiple_project_stores() {
     drop(conn);
 
     let first_db = open_project_session_db(&first_project).await.unwrap();
-    let second_db = open_project_session_db(&second_project).await.unwrap();
+    let second_db = open_sibling_project_session_db(&first_db, &second_project).await;
     let first_admission = first_db.runtime().facade();
     let second_admission = second_db.runtime().facade();
     let destinations = [
@@ -1136,7 +1162,7 @@ async fn explicit_tool_route_overrides_session_cwd_without_cross_project_duplica
     assert_eq!(session_stats.messages_upserted, 0);
     assert!(session_db.get_session("hermes", SESSION_ID).await.is_none());
 
-    let tool_db = open_project_session_db(&tool_project).await.unwrap();
+    let tool_db = open_sibling_project_session_db(&session_db, &tool_project).await;
     let tool_stats =
         ingest_homes(&tool_db, std::slice::from_ref(&hermes_home), &tool_project).await;
     assert_eq!(tool_stats.messages_upserted, 4);

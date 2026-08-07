@@ -48,6 +48,22 @@ async fn composer_observation_json_blobs(runtime: &ProjectSessionTestRuntime) ->
         .collect()
 }
 
+/// Extracts `(input_tokens, output_tokens)` from the first uncorrelated-usage
+/// fact inside one durable-observation JSON blob.
+fn uncorrelated_usage_counters(observation_json: &str) -> (Option<u64>, Option<u64>) {
+    let observation: serde_json::Value = serde_json::from_str(observation_json).unwrap();
+    let fact = observation["payload"]["facts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|fact| fact["kind"] == "uncorrelated_usage")
+        .expect("observation blob carries an uncorrelated_usage fact");
+    (
+        fact["input_tokens"].as_u64(),
+        fact["output_tokens"].as_u64(),
+    )
+}
+
 /// Write a `state.vscdb` with the `cursorDiskKV` schema at the real Cursor
 /// path under `home`, populated with the given `(key, value)` rows.
 async fn write_state_vscdb(home: &Path, rows: &[(String, String)]) {
@@ -172,8 +188,22 @@ async fn composer_envelope_and_bubbles_ingest_rows() {
     assert_eq!(message.model.as_deref(), Some("claude-opus-4-8"));
     let meta: serde_json::Value =
         serde_json::from_str(message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_eq!(meta["usage"]["input_tokens"], 1200);
-    assert_eq!(meta["usage"]["output_tokens"], 340);
+    // Token accounting moved to the observation family. A composer bubble's
+    // tokenCount has no native model/scope/semantics evidence, so it survives
+    // as an uncorrelated-usage fact on the durable observation — never as
+    // message metadata, and never as a correlated provider-usage row.
+    assert!(meta.get("usage").is_none());
+    let uncorrelated = composer_observation_json_blobs(&db)
+        .await
+        .into_iter()
+        .find(|blob| blob.contains("uncorrelated_usage"))
+        .expect("bubble tokenCount must survive as uncorrelated usage evidence");
+    let (input_tokens, output_tokens) = uncorrelated_usage_counters(&uncorrelated);
+    assert_eq!((input_tokens, output_tokens), (Some(1200), Some(340)));
+    assert!(
+        db.provider_usage_observations("cursor").await.is_empty(),
+        "uncorrelated usage evidence must not fabricate a correlated row"
+    );
 
     // Reasoning row.
     let reasoning = db

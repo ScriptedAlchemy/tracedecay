@@ -147,6 +147,35 @@ impl HostAdmissionTestRuntimeV1 {
         self.profile_database.savings_history(project, since).await
     }
 
+    /// Reads the registered project's immutable provider-usage observations —
+    /// the canonical accounting authority that replaced per-message usage
+    /// metadata (Plan 26: usage is an observation family, not a turn ledger).
+    #[doc(hidden)]
+    pub async fn project_provider_usage_for_test(
+        &self,
+        provider: Option<&str>,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<tracedecay_domain::ProviderUsageReadV1> {
+        let project_id = self
+            .project_id
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Database {
+                operation: "read registered provider usage test fixture".to_owned(),
+                message: "registered project identity is unavailable".to_owned(),
+            })?;
+        let scope = tracedecay_domain::ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        self.project_database_for_test()?
+            .provider_usage_observations(&scope, provider, session_id, limit)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                operation: "read registered provider usage observations".to_owned(),
+                message,
+            })
+    }
+
     #[doc(hidden)]
     pub fn dashboard_test_authority(
         self: &Arc<Self>,

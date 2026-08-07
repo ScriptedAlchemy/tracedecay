@@ -1,14 +1,24 @@
-//! Codex usage and telemetry: token counters, per-turn usage summation, model
-//! tracking from turn context, and the structured-event row mix.
+//! Codex usage and telemetry: provider-usage observations captured from
+//! `token_count` events by the canonical accounting authority (usage is an
+//! immutable observation family, not conversational message metadata or a
+//! turn ledger), model tracking from turn context, and the structured-event
+//! row mix.
 
 use tempfile::TempDir;
+use tracedecay::sessions::SessionProvider;
 use tracedecay::sessions::codex::CodexSource;
+use tracedecay_domain::{
+    ProviderUsageCounterSemanticsV1, ProviderUsageCountersV1, ProviderUsageModelV1,
+    ProviderUsageScopeV1,
+};
 
 use crate::codex::write_codex_rollout_with_structured_events;
+use crate::common::{EnvVarGuard, GLOBAL_DB_ENV_LOCK};
 use crate::restart_atomicity::{
-    ProjectSessionTestRuntime, open_project_session_db, try_ingest_source,
+    ProjectSessionTestRuntime, ingest_global_sources_for_provider, mark_test_project,
+    open_project_session_db, try_ingest_source,
 };
-use crate::support::setup;
+use crate::support::{init_git_repo, setup};
 
 /// Search this project's Codex messages, then keep only rows of the requested
 /// kind (row text is not always unique to one kind, so filter after the query).
@@ -106,10 +116,21 @@ async fn codex_model_tracks_turn_context_not_model_provider() {
         Some("gpt-5.5")
     );
 }
+/// Counters land through the canonical provider-usage observation authority
+/// with their exact native evidence: a cache-only report keeps input/output
+/// typed-absent (never zero-filled), and reasoning stays a separate counter
+/// instead of being folded into output.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
     let dir = home.join(".codex/sessions/2026/01/01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-01T00-00-40-usage-edge.jsonl");
@@ -172,46 +193,86 @@ async fn codex_usage_preserves_cache_only_total_only_and_reasoning_counters() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
 
+    // Conversational rows never carry usage metadata: token accounting moved
+    // to the immutable provider-usage observation family.
     let hits = db
-        .search_session_messages("codex", None, "Usage edge reply", 10)
+        .search_session_messages("codex", None, "Usage edge", 10)
         .await;
-    let usage_of = |needle: &str| {
-        let hit = hits
-            .iter()
-            .find(|hit| hit.message.text.contains(needle))
-            .unwrap_or_else(|| panic!("message containing {needle:?} should exist"));
-        let metadata: serde_json::Value =
-            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        metadata["usage"].clone()
-    };
+    assert_eq!(hits.len(), 4, "two prompts and two replies are searchable");
+    for hit in &hits {
+        let no_usage = hit
+            .message
+            .metadata_json
+            .as_deref()
+            .map(|metadata| serde_json::from_str::<serde_json::Value>(metadata).unwrap())
+            .is_none_or(|metadata| metadata.get("usage").is_none());
+        assert!(no_usage, "message metadata must not carry usage counters");
+    }
 
-    let cache_only = usage_of("reply one");
-    assert_eq!(cache_only["input_tokens"], 0);
-    assert_eq!(cache_only["output_tokens"], 0);
-    assert_eq!(cache_only["cache_read_input_tokens"], 123);
-    assert_eq!(cache_only["total_tokens"], 123);
+    let observations = db.provider_usage_observations("codex").await;
+    assert_eq!(observations.len(), 2);
+    for observation in &observations {
+        assert_eq!(observation.session_id.as_str(), "usage-edge");
+        assert_eq!(observation.native_kind, "token_count");
+        assert_eq!(observation.native_field, "payload.info.last_token_usage");
+        assert_eq!(
+            observation.counter_semantics,
+            ProviderUsageCounterSemanticsV1::Delta
+        );
+        assert_eq!(observation.native_scope, ProviderUsageScopeV1::Request);
+        // No turn_context in this rollout: the model is typed-unknown, never
+        // inferred from a neighboring message.
+        assert!(matches!(
+            observation.model,
+            ProviderUsageModelV1::Unknown { .. }
+        ));
+    }
 
-    let reasoning = usage_of("reply two");
-    assert_eq!(reasoning["input_tokens"], 10);
-    assert_eq!(reasoning["output_tokens"], 12);
-    assert_eq!(reasoning["reasoning_tokens"], 7);
-    assert_eq!(reasoning["total_tokens"], 22);
+    // Cache-only report: unmeasured counters stay typed-absent, not zero.
+    assert_eq!(
+        observations[0].counters,
+        ProviderUsageCountersV1::Known {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: Some(123),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            total_tokens: Some(123),
+        }
+    );
+    // Reasoning stays its own counter; output is the native 5, not 5 + 7.
+    assert_eq!(
+        observations[1].counters,
+        ProviderUsageCountersV1::Known {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: Some(7),
+            total_tokens: Some(22),
+        }
+    );
 }
 
 /// A turn's tool loop emits one `token_count` per API call (most *before* the
-/// final agent_message); the turn's true cost is the sum. Real rollouts showed
-/// ~64% of input spend in those mid-turn reports. Duplicate reports (cumulative
-/// total did not advance) must not double-count, and one turn's calls must not
-/// leak into another turn's reply.
+/// final agent_message); real rollouts showed ~64% of input spend in those
+/// mid-turn reports. The observation family retains every native report as
+/// immutable evidence — including an exact duplicate, whose unchanged
+/// cumulative checkpoint is what lets read-time derivation skip it — instead
+/// of summing a turn ledger onto the reply message.
 #[tokio::test]
-async fn codex_tool_loop_usage_sums_per_turn_and_skips_duplicates() {
+#[allow(clippy::await_holding_lock)]
+async fn codex_tool_loop_usage_retains_native_reports_and_duplicate_evidence() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
+    let _home = EnvVarGuard::set("HOME", &home);
+    init_git_repo(&project);
+    mark_test_project(&project);
     let dir = home.join(".codex/sessions/2026/01/01");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("rollout-2026-01-01T00-00-00-loop-sess.jsonl");
@@ -274,37 +335,72 @@ async fn codex_tool_loop_usage_sums_per_turn_and_skips_duplicates() {
     std::fs::write(&path, contents).unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let source = CodexSource::with_home(&home);
-    try_ingest_source(&db, &source, &project, None)
-        .await
-        .unwrap();
+    ingest_global_sources_for_provider(&db, &project, Some(SessionProvider::Codex)).await;
 
-    let usage_of = |hits: &[tracedecay::sessions::SessionMessageSearchResult], needle: &str| {
-        let hit = hits
-            .iter()
-            .find(|hit| hit.message.text.contains(needle))
-            .unwrap_or_else(|| panic!("message containing {needle:?} should exist"));
-        let metadata: serde_json::Value =
-            serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        metadata["usage"].clone()
-    };
+    // Replies stay conversational rows without usage metadata.
     let hits = db.search_session_messages("codex", None, "reply", 10).await;
     assert_eq!(hits.len(), 2);
+    for hit in &hits {
+        let no_usage = hit
+            .message
+            .metadata_json
+            .as_deref()
+            .map(|metadata| serde_json::from_str::<serde_json::Value>(metadata).unwrap())
+            .is_none_or(|metadata| metadata.get("usage").is_none());
+        assert!(no_usage, "message metadata must not carry usage counters");
+    }
 
-    // Turn 1 = call1 + final call (duplicate skipped): uncached input
-    // 400 + 500, cached 600 + 1500, output 50 + 100, total 1050 + 2100.
-    let first = usage_of(&hits, "First turn reply");
-    assert_eq!(first["input_tokens"], 900);
-    assert_eq!(first["cache_read_input_tokens"], 2100);
-    assert_eq!(first["output_tokens"], 150);
-    assert_eq!(first["total_tokens"], 3150);
-
-    // Turn 2 stands alone; no cache_read key when nothing was cached.
-    let second = usage_of(&hits, "Second turn reply");
-    assert_eq!(second["input_tokens"], 3000);
-    assert_eq!(second["output_tokens"], 10);
-    assert_eq!(second["total_tokens"], 3010);
-    assert!(second.get("cache_read_input_tokens").is_none());
+    // Every distinct native report survives in order: each `token_count`
+    // yields its per-call delta and the session-cumulative checkpoint. The
+    // byte-identical duplicate report collapses at admission (duplicate
+    // identity with a matching digest is a no-op, exactly-once), so no
+    // downstream reader can double-count it.
+    let observations = db.provider_usage_observations("codex").await;
+    let counters =
+        |input: Option<u64>, cache_read: Option<u64>, output: Option<u64>, total: u64| {
+            ProviderUsageCountersV1::Known {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache_read,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+                total_tokens: Some(total),
+            }
+        };
+    let cumulative = |total: u64| counters(None, None, None, total);
+    let expected = [
+        (
+            ProviderUsageCounterSemanticsV1::Delta,
+            counters(Some(1000), Some(600), Some(50), 1050),
+        ),
+        (
+            ProviderUsageCounterSemanticsV1::Cumulative,
+            cumulative(1050),
+        ),
+        (
+            ProviderUsageCounterSemanticsV1::Delta,
+            counters(Some(2000), Some(1500), Some(100), 2100),
+        ),
+        (
+            ProviderUsageCounterSemanticsV1::Cumulative,
+            cumulative(3150),
+        ),
+        // A native zero is measured evidence, distinct from typed-absent.
+        (
+            ProviderUsageCounterSemanticsV1::Delta,
+            counters(Some(3000), Some(0), Some(10), 3010),
+        ),
+        (
+            ProviderUsageCounterSemanticsV1::Cumulative,
+            cumulative(6160),
+        ),
+    ];
+    assert_eq!(observations.len(), expected.len());
+    for (observation, (semantics, expected_counters)) in observations.iter().zip(&expected) {
+        assert_eq!(observation.session_id.as_str(), "loop-sess");
+        assert_eq!(&observation.counter_semantics, semantics);
+        assert_eq!(&observation.counters, expected_counters);
+    }
 }
 
 #[tokio::test]

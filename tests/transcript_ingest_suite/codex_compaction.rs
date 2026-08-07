@@ -106,13 +106,11 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
         EnvVarGuard::set("USERPROFILE", &home),
     ];
     let project_id = mark_test_project(&project);
-    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
-        .await
-        .unwrap();
-    drop(enrollment);
     // The hook resolves the project root through the initialized-store gate,
-    // exactly like production installs; enrollment alone does not create the
-    // project graph database.
+    // exactly like production installs: `init` creates the project store
+    // first, then daemon enrollment mounts the already-initialized layout
+    // (the canonical enrollment composition itself creates the project graph
+    // database, so init must come first — as it does in a real install).
     let init = tracedecay_command_with_home(&home)
         .arg("init")
         .current_dir(&project)
@@ -124,6 +122,10 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
+    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+        .await
+        .unwrap();
+    drop(enrollment);
     write_codex_rollout_with_compaction(&home, &project, "codex-compact");
 
     let codex_bin = tmp.path().join("codex");

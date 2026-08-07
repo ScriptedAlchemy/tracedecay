@@ -1,12 +1,15 @@
 //! Root composition for host-admission test runtimes.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+use tokio::sync::Mutex as AsyncMutex;
 
 pub use tracedecay_usecases::host_admission::*;
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
+use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_runtime_core::db::DaemonDatabaseScope;
@@ -49,6 +52,19 @@ pub enum SessionTemporalFixtureCountV1 {
     RefreshBatchBindings,
     TemporalGenerations,
 }
+
+/// One daemon session runtime registry per profile root, process-wide.
+///
+/// Production runs exactly one daemon per profile, and the profile
+/// session-relation graph store has a single writer (an exclusive Grafeo file
+/// lock), so a second independent registry on the same profile cannot open
+/// it. Every test-runtime construction path (project, profile, sibling, and
+/// repeated opens of the same project) must therefore join the live registry
+/// for its profile. Entries are weak: when the last runtime for a profile
+/// drops, its registry drops with it and the next open starts fresh.
+static SHARED_TEST_SESSION_REGISTRIES: LazyLock<
+    AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
+> = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
 /// Registered host-admission fixture assembled by the composition root.
 ///
@@ -99,6 +115,72 @@ impl HostAdmissionTestRuntimeV1 {
         )
     }
 
+    /// Mounts a second registered project through this runtime's daemon
+    /// session registry, mirroring production multi-project composition: one
+    /// daemon registry holds the single-writer profile authorities and many
+    /// project mounts. A second independent runtime on the same profile
+    /// cannot exist — the profile session-relation graph has exactly one
+    /// writer.
+    #[doc(hidden)]
+    pub async fn sibling_project(
+        &self,
+        project_root: impl AsRef<Path>,
+        project_id: ProjectId,
+    ) -> Result<Self> {
+        let project_root = project_root.as_ref();
+        prepare_host_admission_test_project_root(project_root, &project_id)?;
+        let registered = self
+            .session_registry
+            .project_sessions(project_id.clone(), [project_root.to_path_buf()])
+            .await?;
+        // The shared registry caches project mounts, so a project that was
+        // mounted before (opened, dropped, reopened while a sibling keeps the
+        // registry alive) already carries its graph runtime; only a first
+        // mount binds one.
+        if registered.project_graph_runtime().is_none() {
+            let project_database = self
+                .session_registry
+                .project_memory(project_id.clone(), [project_root.to_path_buf()])
+                .await?;
+            let graph_runtime = self
+                .session_registry
+                .retain_project_graph_runtime(project_id.clone(), project_database)
+                .await?;
+            let graph_runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(graph_runtime);
+            registered
+                .bind_project_graph_runtime(graph_runtime)
+                .map_err(|_| TraceDecayError::Database {
+                    operation: "bind sibling test runtime project graph".to_owned(),
+                    message: "project graph runtime was already mounted for project sessions"
+                        .to_owned(),
+                })?;
+        }
+        validate_registered_authorities(
+            &self.brain_id,
+            &self.profile_id,
+            Some(&project_id),
+            self.profile_database.as_ref(),
+            self.profile_registered.as_ref(),
+            Some(registered.as_ref()),
+        )?;
+        let database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &self.profile_root,
+            1,
+            "host-admission-test-runtime",
+        )?;
+        Ok(Self {
+            brain_id: self.brain_id.clone(),
+            profile_id: self.profile_id.clone(),
+            profile_root: self.profile_root.clone(),
+            project_id: Some(project_id),
+            profile_database: Arc::clone(&self.profile_database),
+            profile_registered: Arc::clone(&self.profile_registered),
+            project_registered: Some(registered),
+            session_registry: Arc::clone(&self.session_registry),
+            _database_scope: database_scope,
+        })
+    }
+
     async fn open(profile_root: PathBuf, project: Option<(PathBuf, ProjectId)>) -> Result<Self> {
         prepare_host_admission_test_profile_root(&profile_root)?;
         if let Some((project_root, project_id)) = project.as_ref() {
@@ -111,8 +193,23 @@ impl HostAdmissionTestRuntimeV1 {
             1,
             "host-admission-test-runtime",
         )?;
-        let session_registry =
-            Arc::new(DaemonSessionRuntimeRegistryV1::open(identity.clone()).await?);
+        let session_registry = {
+            let profile_key =
+                crate::lifecycle_lease::canonical_or_original(identity.profile_root());
+            // Held across construction so two concurrent opens of one profile
+            // cannot race into two registries (the loser would fail the
+            // exclusive profile session store open).
+            let registries = SHARED_TEST_SESSION_REGISTRIES.lock().await;
+            match registries.get_live(&profile_key) {
+                Some(registry) => registry,
+                None => {
+                    let registry =
+                        Arc::new(DaemonSessionRuntimeRegistryV1::open(identity.clone()).await?);
+                    registries.insert(profile_key, &registry);
+                    registry
+                }
+            }
+        };
         let profile_database = session_registry.profile_database().await?;
         let profile_registered = session_registry.profile_sessions().await?;
         let (project_id, project_registered) = if let Some((project_root, project_id)) = project {
@@ -123,21 +220,26 @@ impl HostAdmissionTestRuntimeV1 {
             // runtime to the registered project-sessions authority before
             // any ingest runs; persist-time git-evidence publication
             // requires that mount, so the canonical test runtime provides
-            // the same composition.
-            let project_database = session_registry
-                .project_memory(project_id.clone(), [project_root])
-                .await?;
-            let graph_runtime = session_registry
-                .retain_project_graph_runtime(project_id.clone(), project_database)
-                .await?;
-            let graph_runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(graph_runtime);
-            registered
-                .bind_project_graph_runtime(graph_runtime)
-                .map_err(|_| TraceDecayError::Database {
-                    operation: "bind test runtime project graph".to_owned(),
-                    message: "project graph runtime was already mounted for project sessions"
-                        .to_owned(),
-                })?;
+            // the same composition. The shared registry caches project
+            // mounts, so a project reopened while its profile registry stays
+            // live already carries its graph runtime; only a first mount
+            // binds one.
+            if registered.project_graph_runtime().is_none() {
+                let project_database = session_registry
+                    .project_memory(project_id.clone(), [project_root])
+                    .await?;
+                let graph_runtime = session_registry
+                    .retain_project_graph_runtime(project_id.clone(), project_database)
+                    .await?;
+                let graph_runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(graph_runtime);
+                registered
+                    .bind_project_graph_runtime(graph_runtime)
+                    .map_err(|_| TraceDecayError::Database {
+                        operation: "bind test runtime project graph".to_owned(),
+                        message: "project graph runtime was already mounted for project sessions"
+                            .to_owned(),
+                    })?;
+            }
             (Some(project_id), Some(registered))
         } else {
             (None, None)

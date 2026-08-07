@@ -124,6 +124,24 @@ impl ProjectSessionTestRuntime {
             .await
             .unwrap()
     }
+
+    /// Known provider-usage observations from the canonical accounting
+    /// authority, in commit order. Panics when the projection has not
+    /// published a watermark: an unpublished authority is not "no usage".
+    pub(super) async fn provider_usage_observations(
+        &self,
+        provider: &str,
+    ) -> Vec<tracedecay_domain::ProviderUsageObservationV1> {
+        match self
+            .runtime
+            .project_provider_usage_for_test(Some(provider), None, 100)
+            .await
+            .unwrap()
+        {
+            tracedecay_domain::ProviderUsageReadV1::Known { observations, .. } => observations,
+            other => panic!("{provider} provider usage read is not Known: {other:?}"),
+        }
+    }
 }
 
 pub(super) async fn open_project_session_db(project: &Path) -> Option<ProjectSessionTestRuntime> {
@@ -140,6 +158,30 @@ pub(super) async fn open_project_session_db(project: &Path) -> Option<ProjectSes
         runtime,
         project_id,
     })
+}
+
+/// Mounts a second project through `primary`'s daemon registry, the way one
+/// production daemon serves many projects. Two independent runtimes on one
+/// profile cannot coexist: the profile session-relation graph is
+/// single-writer.
+pub(super) async fn open_sibling_project_session_db(
+    primary: &ProjectSessionTestRuntime,
+    project: &Path,
+) -> ProjectSessionTestRuntime {
+    let project_id = read_repository_identity_marker(project)
+        .ok()
+        .flatten()
+        .and_then(|marker| ProjectId::new(marker.project_id).ok())
+        .unwrap_or_else(|| mark_test_project(project));
+    let runtime = primary
+        .runtime
+        .sibling_project(project, project_id.clone())
+        .await
+        .expect("sibling project mount through the shared daemon registry");
+    ProjectSessionTestRuntime {
+        runtime,
+        project_id,
+    }
 }
 
 pub(super) async fn try_ingest_source(
