@@ -6,17 +6,17 @@ use tracedecay_application::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, EffectId, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
     ResolvedScope, TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionAuthorityPort,
-    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionLifecycleState,
-    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectJournalStateV1,
-    WorkflowEffectOperationV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
-    WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
-    WorkflowLifecycleOperation,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkHandoffFrontierV1,
+    WorkHandoffLineageV1, WorkflowDefinitionAuthorityPort, WorkflowDefinitionLifecycleCommand,
+    WorkflowDefinitionLifecycleState, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
+    WorkflowEffectJournalStateV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
+    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1,
+    WorkflowEffectSuccessV1, WorkflowLifecycleOperation,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
-    UtcMicros, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
+    UtcMicros, WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef,
+    WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::workflow::{
     WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError,
@@ -83,6 +83,23 @@ fn handoff_scope() -> TaskHandoffScope {
 
 fn token_digest(secret: &str) -> ManifestDigest {
     canonical_sha256(&("tracedecay.application.task-handoff.v1", secret)).unwrap()
+}
+
+fn runtime_frontier() -> WorkHandoffFrontierV1 {
+    WorkHandoffFrontierV1::new(
+        id("task.workflow.runtime-store.prepare"),
+        WorkVersion::new(2).unwrap(),
+        Vec::new(),
+        vec!["whether the prepare step's retry budget is exhausted".to_owned()],
+        vec!["waiting on the run journal to seal the prior attempt".to_owned()],
+        vec!["redeem and start one admitted attempt".to_owned()],
+        WorkHandoffLineageV1 {
+            issued_by: id("actor.workflow.source"),
+            issued_at: UtcMicros(9),
+            prior_frontier_digest: None,
+        },
+    )
+    .unwrap()
 }
 
 fn authority(store: &RegisteredWorkflowStore) -> WorkflowSqliteAuthority {
@@ -424,6 +441,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         token_digest(&secret),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        runtime_frontier(),
     )
     .unwrap();
 
@@ -493,6 +511,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         token_digest(&"e".repeat(48)),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        runtime_frontier(),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &expired).unwrap();
@@ -510,7 +529,9 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     assert_eq!(
         TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(19),)
             .unwrap(),
-        TaskHandoffConsumeOutcome::Consumed
+        TaskHandoffConsumeOutcome::Consumed {
+            frontier: Box::new(runtime_frontier())
+        }
     );
     assert_eq!(
         TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(19),)
@@ -545,13 +566,16 @@ fn definition_source_journal_and_handoff_survive_registered_store_restart() {
         token_digest(&"r".repeat(48)),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        runtime_frontier(),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
     assert_eq!(
         TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(11),)
             .unwrap(),
-        TaskHandoffConsumeOutcome::Consumed
+        TaskHandoffConsumeOutcome::Consumed {
+            frontier: Box::new(runtime_frontier())
+        }
     );
 
     let store = store.restart("workflow-restart");
@@ -584,6 +608,7 @@ fn lost_issue_response_replays_the_exact_committed_terminal() {
         token_digest(&"i".repeat(48)),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        runtime_frontier(),
     )
     .unwrap();
     let identity = effect_identity(
@@ -629,6 +654,7 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
         token_digest(&secret),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        runtime_frontier(),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&workflow_authority, &grant).unwrap();
@@ -665,7 +691,12 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
     assert_eq!(
         retry.terminal().unwrap().outcome(),
         &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(Box::new(
-            TaskHandoffRedeemed { scope }
+            TaskHandoffRedeemed {
+                scope,
+                frontier: runtime_frontier(),
+                frontier_digest: runtime_frontier().digest().unwrap(),
+                redeemed_at: UtcMicros(20),
+            }
         )))
     );
 }
@@ -680,6 +711,7 @@ fn rejected_effect_replays_the_exact_problem_without_reapplying() {
         token_digest(&"p".repeat(48)),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        runtime_frontier(),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
@@ -868,6 +900,7 @@ fn restart_uses_the_reserved_preparation_and_timestamps() {
         token_digest(&"t".repeat(48)),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        runtime_frontier(),
     )
     .unwrap();
     let original = WorkflowEffectPreparedV1::handoff_issue(
@@ -901,6 +934,7 @@ fn restart_uses_the_reserved_preparation_and_timestamps() {
             token_digest(&"t".repeat(48)),
             UtcMicros(40),
             UtcMicros(60_000_040),
+            runtime_frontier(),
         )
         .unwrap(),
     );

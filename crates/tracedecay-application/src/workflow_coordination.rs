@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Display};
 
 use crate::RequestContext;
+use crate::work_handoff_frontier::WorkHandoffFrontierV1;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
@@ -809,6 +810,10 @@ pub struct TaskHandoffGrant {
     token_digest: ManifestDigest,
     issued_at: UtcMicros,
     expires_at: UtcMicros,
+    /// The exact work/evidence frontier this handoff records (Plan 24).
+    frontier: WorkHandoffFrontierV1,
+    /// The canonical digest of `frontier`; lineage chains hold this value.
+    frontier_digest: ManifestDigest,
 }
 
 impl TaskHandoffGrant {
@@ -817,12 +822,18 @@ impl TaskHandoffGrant {
         token_digest: ManifestDigest,
         issued_at: UtcMicros,
         expires_at: UtcMicros,
+        frontier: WorkHandoffFrontierV1,
     ) -> Result<Self, TaskHandoffError> {
+        let frontier_digest = frontier
+            .digest()
+            .map_err(|_| TaskHandoffError::InvalidFrontier)?;
         let grant = Self {
             scope,
             token_digest,
             issued_at,
             expires_at,
+            frontier,
+            frontier_digest,
         };
         grant.validate()?;
         Ok(grant)
@@ -838,6 +849,21 @@ impl TaskHandoffGrant {
         };
         if lifetime_micros != TASK_HANDOFF_LIFETIME_MICROS.0 {
             return Err(TaskHandoffError::InvalidExpiry);
+        }
+        // The frontier is bound to exactly the handed-off task and to the
+        // actor doing the handing off; a frontier for another task or from
+        // another issuer is not this grant's checkpoint evidence.
+        if self.frontier.task_id() != self.scope.task_id()
+            || self.frontier.lineage().issued_by != *self.scope.from_actor_id()
+        {
+            return Err(TaskHandoffError::InvalidFrontier);
+        }
+        let digest = self
+            .frontier
+            .digest()
+            .map_err(|_| TaskHandoffError::InvalidFrontier)?;
+        if digest != self.frontier_digest {
+            return Err(TaskHandoffError::InvalidFrontier);
         }
         Ok(())
     }
@@ -857,6 +883,14 @@ impl TaskHandoffGrant {
     pub fn expires_at(&self) -> &UtcMicros {
         &self.expires_at
     }
+
+    pub fn frontier(&self) -> &WorkHandoffFrontierV1 {
+        &self.frontier
+    }
+
+    pub fn frontier_digest(&self) -> &ManifestDigest {
+        &self.frontier_digest
+    }
 }
 
 impl<'de> Deserialize<'de> for TaskHandoffGrant {
@@ -871,23 +905,34 @@ impl<'de> Deserialize<'de> for TaskHandoffGrant {
             token_digest: ManifestDigest,
             issued_at: UtcMicros,
             expires_at: UtcMicros,
+            frontier: WorkHandoffFrontierV1,
+            frontier_digest: ManifestDigest,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(
+        let grant = Self::new(
             wire.scope,
             wire.token_digest,
             wire.issued_at,
             wire.expires_at,
+            wire.frontier,
         )
-        .map_err(serde::de::Error::custom)
+        .map_err(serde::de::Error::custom)?;
+        if grant.frontier_digest != wire.frontier_digest {
+            return Err(serde::de::Error::custom(TaskHandoffError::InvalidFrontier));
+        }
+        Ok(grant)
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum TaskHandoffConsumeOutcome {
-    Consumed,
+    /// Consumed exactly once; the stored frontier travels with the
+    /// consumption so the redeemer receives the recorded checkpoint.
+    Consumed {
+        frontier: Box<WorkHandoffFrontierV1>,
+    },
     Missing,
     ScopeMismatch,
     Expired,
@@ -903,6 +948,8 @@ pub enum TaskHandoffConsumeOutcome {
 pub struct TaskHandoffIssueRequest {
     pub scope: TaskHandoffScope,
     pub secret: String,
+    /// The exact work/evidence frontier this handoff records (Plan 24).
+    pub frontier: WorkHandoffFrontierV1,
 }
 
 impl fmt::Debug for TaskHandoffIssueRequest {
@@ -911,6 +958,7 @@ impl fmt::Debug for TaskHandoffIssueRequest {
             .debug_struct("TaskHandoffIssueRequest")
             .field("scope", &self.scope)
             .field("secret", &"[REDACTED]")
+            .field("frontier", &self.frontier)
             .finish()
     }
 }
@@ -933,12 +981,23 @@ impl fmt::Debug for TaskHandoffRedeemRequest {
     }
 }
 
-/// Wire response for [`TaskHandoffService::redeem`]: the redeemed scope,
-/// once and only once, for the caller that actually consumed it.
+/// Wire response for [`TaskHandoffService::redeem`]: the redemption receipt,
+/// once and only once, for the caller that actually consumed the grant.
+///
+/// The receipt is checkpoint evidence only. It deliberately carries no
+/// lease, fence, or acceptance authority: redeeming a handoff cannot renew
+/// a lease, establish task acceptance, or mutate graph or runtime state
+/// (Plan 24) — the redeemer must earn runtime authority through the normal
+/// admission and lease paths.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TaskHandoffRedeemed {
     pub scope: TaskHandoffScope,
+    /// The frontier exactly as the issuer recorded it.
+    pub frontier: WorkHandoffFrontierV1,
+    /// The canonical digest of `frontier`, for lineage chaining.
+    pub frontier_digest: ManifestDigest,
+    pub redeemed_at: UtcMicros,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -962,6 +1021,7 @@ pub trait TaskHandoffAuthorityPort: Send + Sync {
 pub enum TaskHandoffError {
     InvalidToken,
     InvalidScope,
+    InvalidFrontier,
     Unauthorized,
     InvalidExpiry,
     Conflict,
@@ -977,6 +1037,9 @@ impl Display for TaskHandoffError {
         match self {
             Self::InvalidToken => formatter.write_str("task handoff token is invalid"),
             Self::InvalidScope => formatter.write_str("task handoff scope is invalid"),
+            Self::InvalidFrontier => {
+                formatter.write_str("task handoff frontier record is invalid for this scope")
+            }
             Self::Unauthorized => formatter.write_str("task handoff actor is unauthorized"),
             Self::InvalidExpiry => formatter.write_str("task handoff expiry is invalid"),
             Self::Conflict => formatter.write_str("task handoff grant conflicts"),
@@ -1011,28 +1074,45 @@ where
         scope: TaskHandoffScope,
         token: &TaskHandoffToken,
         issued_at: UtcMicros,
+        frontier: WorkHandoffFrontierV1,
     ) -> Result<TaskHandoffGrant, TaskHandoffError> {
-        let grant = prepare_task_handoff_issue(context, scope, token, issued_at)?;
+        let grant = prepare_task_handoff_issue(context, scope, token, issued_at, frontier)?;
         self.authority
             .issue(&grant)
             .map_err(handoff_authority_error)?;
         Ok(grant)
     }
 
+    /// Consumes the grant once and answers the redemption receipt.
+    ///
+    /// The receipt carries the recorded frontier and nothing else: this path
+    /// holds no lease authority and touches no attempt, projection, or graph
+    /// state, so a redeemed handoff can never renew a lease or stand in for
+    /// task acceptance.
     pub fn redeem(
         &self,
         context: &RequestContext,
         token: &TaskHandoffToken,
         expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
-    ) -> Result<(), TaskHandoffError> {
+    ) -> Result<TaskHandoffRedeemed, TaskHandoffError> {
         let token_digest = prepare_task_handoff_redeem(context, token, expected_scope)?;
         match self
             .authority
             .consume(&token_digest, expected_scope, consumed_at)
             .map_err(handoff_authority_error)?
         {
-            TaskHandoffConsumeOutcome::Consumed => Ok(()),
+            TaskHandoffConsumeOutcome::Consumed { frontier } => {
+                let frontier_digest = frontier
+                    .digest()
+                    .map_err(|_| TaskHandoffError::InvalidFrontier)?;
+                Ok(TaskHandoffRedeemed {
+                    scope: expected_scope.clone(),
+                    frontier: *frontier,
+                    frontier_digest,
+                    redeemed_at: consumed_at,
+                })
+            }
             TaskHandoffConsumeOutcome::Missing => Err(TaskHandoffError::Missing),
             TaskHandoffConsumeOutcome::ScopeMismatch => Err(TaskHandoffError::ScopeMismatch),
             TaskHandoffConsumeOutcome::Expired => Err(TaskHandoffError::Expired),
@@ -1046,6 +1126,7 @@ pub fn prepare_task_handoff_issue(
     scope: TaskHandoffScope,
     token: &TaskHandoffToken,
     issued_at: UtcMicros,
+    frontier: WorkHandoffFrontierV1,
 ) -> Result<TaskHandoffGrant, TaskHandoffError> {
     if !handoff_scope_matches_context(context, &scope) || context.actor() != scope.from_actor_id() {
         return Err(TaskHandoffError::Unauthorized);
@@ -1056,7 +1137,7 @@ pub fn prepare_task_handoff_issue(
             .checked_add(TASK_HANDOFF_LIFETIME_MICROS.0)
             .ok_or(TaskHandoffError::InvalidExpiry)?,
     );
-    TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at)
+    TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at, frontier)
 }
 
 pub fn prepare_task_handoff_redeem(

@@ -11,12 +11,12 @@ use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
     TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffGrant, TaskHandoffScope,
-    WorkflowDefinitionAuthorityPort,
+    WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowDefinitionAuthorityPort,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
+    WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef,
+    WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId, canonical_sha256,
 };
 
 fn id<T>(value: &str) -> T
@@ -78,6 +78,23 @@ fn token_digest(secret: &str) -> ManifestDigest {
     canonical_sha256(&("tracedecay.application.task-handoff.v1", secret)).unwrap()
 }
 
+fn frontier() -> WorkHandoffFrontierV1 {
+    WorkHandoffFrontierV1::new(
+        id("task.workflow.daemon-restart.prepare"),
+        WorkVersion::new(2).unwrap(),
+        Vec::new(),
+        vec!["whether the prepare output survives compaction".to_owned()],
+        vec!["waiting on the daemon restart under test".to_owned()],
+        vec!["redeem once and continue from the recorded frontier".to_owned()],
+        WorkHandoffLineageV1 {
+            issued_by: id("actor.workflow.source"),
+            issued_at: UtcMicros(9),
+            prior_frontier_digest: None,
+        },
+    )
+    .unwrap()
+}
+
 /// Opens the admitted daemon composition root at `profile_root`/`project_root`.
 ///
 /// Calling this twice at the same paths — dropping the first runtime before
@@ -111,6 +128,7 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
         token_digest(&"s".repeat(48)),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        frontier(),
     )
     .unwrap();
     // --- First admission: definitions and handoff. ---
@@ -126,6 +144,8 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
 
         // Consume the handoff token before the restart, so the restart proves
         // the single-use "consumed" fact durably survives, not just the grant.
+        // The consumption answers the recorded frontier byte-for-byte: the
+        // redeemer receives checkpoint evidence, never lease authority.
         assert_eq!(
             TaskHandoffAuthorityPort::consume(
                 &authority,
@@ -134,7 +154,9 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
                 UtcMicros(11)
             )
             .unwrap(),
-            TaskHandoffConsumeOutcome::Consumed
+            TaskHandoffConsumeOutcome::Consumed {
+                frontier: Box::new(frontier())
+            }
         );
 
         // The runtime — and with it the daemon database scope and every open

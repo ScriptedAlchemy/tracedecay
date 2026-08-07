@@ -1,11 +1,11 @@
 //! Transactional workflow mutations applied from durable preparations.
 
 use tracedecay_application::{
-    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionDisposition,
-    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionOutcome,
-    WorkflowEffectAuthorityErrorV1, WorkflowEffectMutationV1, WorkflowEffectOutcomeV1,
-    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectSuccessV1,
-    WorkflowLifecycleOperation,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkHandoffFrontierV1,
+    WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
+    WorkflowDefinitionTransitionOutcome, WorkflowEffectAuthorityErrorV1, WorkflowEffectMutationV1,
+    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
+    WorkflowEffectSuccessV1, WorkflowLifecycleOperation,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkflowDefinition};
 
@@ -169,16 +169,21 @@ fn apply_handoff_issue(
     }
     let scope_payload =
         encode_json(grant.scope()).map_err(|_| workflow_effect_codec_unavailable())?;
+    let frontier_payload =
+        encode_json(grant.frontier()).map_err(|_| workflow_effect_codec_unavailable())?;
     execute_tx(
         transaction,
         "INSERT INTO workflow_handoffs (
-             token_digest, scope_payload, issued_at, expires_at, consumed
-         ) VALUES (?1, ?2, ?3, ?4, 0)",
+             token_digest, scope_payload, issued_at, expires_at, consumed,
+             frontier_payload, frontier_digest
+         ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
         vec![
             ExactSqlValue::Text(grant.token_digest().as_str().to_owned()),
             ExactSqlValue::Text(scope_payload),
             ExactSqlValue::Integer(grant.issued_at().0),
             ExactSqlValue::Integer(grant.expires_at().0),
+            ExactSqlValue::Text(frontier_payload),
+            ExactSqlValue::Text(grant.frontier_digest().as_str().to_owned()),
         ],
     )
     .map_err(workflow_effect_unavailable)?;
@@ -195,7 +200,8 @@ fn apply_handoff_redeem(
 ) -> Result<WorkflowEffectOutcomeV1, WorkflowEffectAuthorityErrorV1> {
     let rows = query_tx(
         transaction,
-        "SELECT scope_payload, expires_at, consumed FROM workflow_handoffs
+        "SELECT scope_payload, expires_at, consumed, frontier_payload, frontier_digest
+         FROM workflow_handoffs
          WHERE token_digest = ?1",
         vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
     )
@@ -220,6 +226,14 @@ fn apply_handoff_redeem(
             WorkflowEffectProblemV1::InvalidRequest,
         ));
     }
+    let frontier_payload =
+        sql_text(&row.values, 3).ok_or_else(workflow_effect_codec_unavailable)?;
+    let frontier: WorkHandoffFrontierV1 =
+        decode_json(frontier_payload).map_err(|_| workflow_effect_codec_unavailable())?;
+    let frontier_digest_text =
+        sql_text(&row.values, 4).ok_or_else(workflow_effect_codec_unavailable)?;
+    let frontier_digest = ManifestDigest::new(frontier_digest_text.to_owned())
+        .map_err(|_| workflow_effect_codec_unavailable())?;
     let changed = execute_tx_changed(
         transaction,
         "UPDATE workflow_handoffs SET consumed = 1
@@ -230,9 +244,15 @@ fn apply_handoff_redeem(
     if changed != 1 {
         return Err(WorkflowEffectAuthorityErrorV1::InvalidTransition);
     }
+    // The receipt is checkpoint evidence only: the recorded frontier plus
+    // when it was redeemed. No lease, fence, or acceptance state is read or
+    // written on this path, so redemption cannot renew a lease.
     Ok(WorkflowEffectOutcomeV1::Success(
         WorkflowEffectSuccessV1::HandoffRedeemed(Box::new(TaskHandoffRedeemed {
             scope: expected_scope.clone(),
+            frontier,
+            frontier_digest,
+            redeemed_at: consumed_at,
         })),
     ))
 }

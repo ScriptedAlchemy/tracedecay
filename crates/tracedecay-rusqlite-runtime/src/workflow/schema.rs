@@ -292,6 +292,18 @@ const WORKFLOW_HANDOFF_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
         not_null: 1,
         primary_key: 0,
     },
+    WorkflowColumnContractV1 {
+        name: "frontier_payload",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
+    WorkflowColumnContractV1 {
+        name: "frontier_digest",
+        sql_type: "TEXT",
+        not_null: 1,
+        primary_key: 0,
+    },
 ];
 
 const WORKFLOW_SCHEMA_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
@@ -393,7 +405,9 @@ const WORKFLOW_HANDOFFS_SQL_V1: &str = "CREATE TABLE workflow_handoffs (
     scope_payload TEXT NOT NULL,
     issued_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL CHECK (expires_at > issued_at),
-    consumed INTEGER NOT NULL CHECK (consumed IN (0, 1))
+    consumed INTEGER NOT NULL CHECK (consumed IN (0, 1)),
+    frontier_payload TEXT NOT NULL,
+    frontier_digest TEXT NOT NULL
 ) STRICT";
 
 const WORKFLOW_SCHEMA_SQL_V1: &str = "CREATE TABLE workflow_schema (

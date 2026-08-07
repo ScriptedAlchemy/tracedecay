@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
+    TaskHandoffGrant, TaskHandoffScope, WorkHandoffFrontierV1, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
     WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionEntry,
     WorkflowDefinitionTransitionOutcome, WorkflowEffectAuthorityErrorV1,
@@ -490,6 +490,8 @@ fn execute_tx_changed(
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
     fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError> {
         let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
+        let frontier_payload =
+            encode_json(grant.frontier()).map_err(|_| handoff_codec_unavailable())?;
         let transaction = self
             .storage
             .begin_immediate()
@@ -509,13 +511,16 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         execute_tx(
             &transaction,
             "INSERT INTO workflow_handoffs (
-                 token_digest, scope_payload, issued_at, expires_at, consumed
-             ) VALUES (?1, ?2, ?3, ?4, 0)",
+                 token_digest, scope_payload, issued_at, expires_at, consumed,
+                 frontier_payload, frontier_digest
+             ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
             vec![
                 ExactSqlValue::Text(grant.token_digest().as_str().to_owned()),
                 ExactSqlValue::Text(scope_payload),
                 ExactSqlValue::Integer(grant.issued_at().0),
                 ExactSqlValue::Integer(grant.expires_at().0),
+                ExactSqlValue::Text(frontier_payload),
+                ExactSqlValue::Text(grant.frontier_digest().as_str().to_owned()),
             ],
         )
         .map_err(handoff_unavailable)?;
@@ -537,7 +542,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             .map_err(handoff_unavailable)?;
         let rows = query_tx(
             &transaction,
-            "SELECT scope_payload, expires_at, consumed FROM workflow_handoffs
+            "SELECT scope_payload, expires_at, consumed, frontier_payload FROM workflow_handoffs
              WHERE token_digest = ?1",
             vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
         )
@@ -563,6 +568,9 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Replay);
         }
+        let frontier_payload = sql_text(&row.values, 3).ok_or_else(handoff_codec_unavailable)?;
+        let frontier: WorkHandoffFrontierV1 =
+            decode_json(frontier_payload).map_err(|_| handoff_codec_unavailable())?;
         execute_tx(
             &transaction,
             "UPDATE workflow_handoffs SET consumed = 1 WHERE token_digest = ?1 AND consumed = 0",
@@ -571,7 +579,9 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         .map_err(handoff_unavailable)?;
         transaction
             .commit()
-            .map(|_| TaskHandoffConsumeOutcome::Consumed)
+            .map(|_| TaskHandoffConsumeOutcome::Consumed {
+                frontier: Box::new(frontier),
+            })
             .map_err(handoff_unavailable)
     }
 }

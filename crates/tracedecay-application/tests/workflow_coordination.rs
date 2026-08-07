@@ -7,16 +7,16 @@ use tracedecay_application::{
     RequestId, ResolvedScope, TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError,
     TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrant,
     TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffScope, TaskHandoffService,
-    TaskHandoffToken, WorkflowCoordinationError, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
-    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionLifecycleState,
-    WorkflowDefinitionService, WorkflowDefinitionTransitionEntry,
+    TaskHandoffToken, WorkHandoffFrontierV1, WorkHandoffLineageV1, WorkflowCoordinationError,
+    WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
+    WorkflowDefinitionDisposition, WorkflowDefinitionLifecycleCommand,
+    WorkflowDefinitionLifecycleState, WorkflowDefinitionService, WorkflowDefinitionTransitionEntry,
     WorkflowDefinitionTransitionOutcome,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStep, WorkflowStepId, WorktreeId,
+    WorkVersion, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef,
+    WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -380,7 +380,9 @@ impl TaskHandoffAuthorityPort for FakeHandoffAuthority {
             return Ok(TaskHandoffConsumeOutcome::Replay);
         }
         *consumed = true;
-        Ok(TaskHandoffConsumeOutcome::Consumed)
+        Ok(TaskHandoffConsumeOutcome::Consumed {
+            frontier: Box::new(grant.frontier().clone()),
+        })
     }
 }
 
@@ -403,6 +405,30 @@ fn handoff_scope() -> TaskHandoffScope {
 
 fn token(value: char) -> TaskHandoffToken {
     TaskHandoffToken::new(value.to_string().repeat(48)).unwrap()
+}
+
+fn frontier_for(task: &str, issuer: &str) -> WorkHandoffFrontierV1 {
+    WorkHandoffFrontierV1::new(
+        id(task),
+        WorkVersion::new(3).unwrap(),
+        Vec::new(),
+        vec!["whether the second attempt's failure is environmental".to_owned()],
+        vec!["waiting on the exclusive placement of the shared root".to_owned()],
+        vec!["start one recovery attempt against the pinned commit".to_owned()],
+        WorkHandoffLineageV1 {
+            issued_by: id(issuer),
+            issued_at: UtcMicros(9),
+            prior_frontier_digest: None,
+        },
+    )
+    .unwrap()
+}
+
+fn frontier() -> WorkHandoffFrontierV1 {
+    frontier_for(
+        "task.workflow.coordination.prepare",
+        "actor.workflow.source",
+    )
 }
 
 #[test]
@@ -477,6 +503,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
                 scope.clone(),
                 &handoff,
                 UtcMicros(10),
+                frontier(),
             )
             .unwrap_err(),
         TaskHandoffError::Unauthorized
@@ -503,14 +530,20 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
     ] {
         assert_eq!(
             service
-                .issue(&context, scope.clone(), &handoff, UtcMicros(10),)
+                .issue(&context, scope.clone(), &handoff, UtcMicros(10), frontier(),)
                 .unwrap_err(),
             TaskHandoffError::Unauthorized
         );
     }
 
     let grant = service
-        .issue(&issue_context, scope.clone(), &handoff, UtcMicros(10))
+        .issue(
+            &issue_context,
+            scope.clone(),
+            &handoff,
+            UtcMicros(10),
+            frontier(),
+        )
         .unwrap();
     assert_eq!(*grant.issued_at(), UtcMicros(10));
     assert_eq!(*grant.expires_at(), UtcMicros(60_000_010));
@@ -630,9 +663,16 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
             .unwrap_err(),
         TaskHandoffError::Expired
     );
-    service
+    let receipt = service
         .redeem(&redeem_context, &handoff, &scope, UtcMicros(60_000_009))
         .unwrap();
+    // The redemption receipt is checkpoint evidence: exactly the recorded
+    // frontier, its digest, the scope, and when it was redeemed — no lease,
+    // fence, or acceptance authority travels with it.
+    assert_eq!(receipt.scope, scope);
+    assert_eq!(receipt.frontier, frontier());
+    assert_eq!(receipt.frontier_digest, frontier().digest().unwrap());
+    assert_eq!(receipt.redeemed_at, UtcMicros(60_000_009));
     assert_eq!(
         service
             .redeem(&redeem_context, &handoff, &scope, UtcMicros(60_000_009))
@@ -640,9 +680,42 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
         TaskHandoffError::Replay
     );
 
+    // A frontier cut for another task, or recorded by an actor other than
+    // the one handing off, is not this handoff's checkpoint evidence.
+    assert_eq!(
+        service
+            .issue(
+                &issue_context,
+                scope.clone(),
+                &token('w'),
+                UtcMicros(10),
+                frontier_for("task.workflow.coordination.other", "actor.workflow.source"),
+            )
+            .unwrap_err(),
+        TaskHandoffError::InvalidFrontier
+    );
+    assert_eq!(
+        service
+            .issue(
+                &issue_context,
+                scope.clone(),
+                &token('w'),
+                UtcMicros(10),
+                frontier_for("task.workflow.coordination.prepare", "actor.workflow.other"),
+            )
+            .unwrap_err(),
+        TaskHandoffError::InvalidFrontier
+    );
+
     let expired = token('e');
     service
-        .issue(&issue_context, scope.clone(), &expired, UtcMicros(10))
+        .issue(
+            &issue_context,
+            scope.clone(),
+            &expired,
+            UtcMicros(10),
+            frontier(),
+        )
         .unwrap();
     assert_eq!(
         service
@@ -658,6 +731,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
                 scope.clone(),
                 &token('x'),
                 UtcMicros(i64::MAX - 59_999_999),
+                frontier(),
             )
             .unwrap_err(),
         TaskHandoffError::InvalidExpiry
@@ -669,6 +743,7 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
             scope.clone(),
             &token('m'),
             UtcMicros(i64::MAX - 60_000_000),
+            frontier(),
         )
         .unwrap();
     assert_eq!(*boundary.expires_at(), UtcMicros(i64::MAX));
@@ -680,6 +755,7 @@ fn handoff_wire_requests_reject_caller_supplied_identity_and_time() {
     let issue = serde_json::json!({
         "scope": scope,
         "secret": "s".repeat(48),
+        "frontier": serde_json::to_value(frontier()).unwrap(),
     });
     assert!(serde_json::from_value::<TaskHandoffIssueRequest>(issue.clone()).is_ok());
     let mut caller_issued = issue.clone();
@@ -728,11 +804,14 @@ fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
         digest('f'),
         UtcMicros(10),
         UtcMicros(60_000_010),
+        frontier(),
     )
     .unwrap();
     assert_eq!(grant.scope(), &scope);
     assert_eq!(*grant.issued_at(), UtcMicros(10));
     assert_eq!(*grant.expires_at(), UtcMicros(60_000_010));
+    assert_eq!(grant.frontier(), &frontier());
+    assert_eq!(*grant.frontier_digest(), frontier().digest().unwrap());
     let json = serde_json::to_value(&grant).unwrap();
     assert_eq!(json["scope"]["thread_id"], "thread.workflow.coordination");
     assert_eq!(
@@ -757,6 +836,20 @@ fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
     let mut too_long = json.clone();
     too_long["expires_at"] = serde_json::json!(10 + 60_000_001);
     assert!(serde_json::from_value::<TaskHandoffGrant>(too_long).is_err());
+
+    let mut tampered_frontier = json.clone();
+    tampered_frontier["frontier"]["task_id"] = serde_json::json!("task.workflow.tampered");
+    assert!(
+        serde_json::from_value::<TaskHandoffGrant>(tampered_frontier).is_err(),
+        "a frontier rebound to another task must fail closed"
+    );
+
+    let mut tampered_digest = json.clone();
+    tampered_digest["frontier_digest"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    assert!(
+        serde_json::from_value::<TaskHandoffGrant>(tampered_digest).is_err(),
+        "a frontier digest that does not match the frontier must fail closed"
+    );
 
     let mut zero_version = json;
     zero_version["scope"]["definition_version"] = serde_json::json!(0);
