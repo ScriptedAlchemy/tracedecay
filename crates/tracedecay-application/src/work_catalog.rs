@@ -20,7 +20,7 @@ use tracedecay_domain::WorkAttemptV1;
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
     AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
-    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
     ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
     ResumeWorkRunCommand, ReviewProposalRequestV1, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
@@ -28,10 +28,11 @@ use crate::{
     WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
     WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
     WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+    WorkTopologyViewRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 24] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 25] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -105,6 +106,11 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 24] = [
         "use-case.work.hydrate_artifacts",
     ),
     ("views", "capability.work.views", "use-case.work.views"),
+    (
+        "topology",
+        "capability.work.topology",
+        "use-case.work.topology",
+    ),
     (
         "pause_run",
         "capability.work.pause_run",
@@ -228,6 +234,11 @@ pub fn work_executable_binding_registry()
         available::<WorkGraphReadRequestV1, WorkGraphReadV1>(
             "views",
             "/application/work/views",
+            EffectClass::Read,
+        )?,
+        available::<WorkTopologyViewRequestV1, ExecutionTopologyViewV1>(
+            "topology",
+            "/application/work/topology",
             EffectClass::Read,
         )?,
         available::<PauseWorkRunCommand, WorkRunControlV1>(

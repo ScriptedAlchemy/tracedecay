@@ -23,8 +23,8 @@ use tracedecay_application::{
     ApplicationContractError, ApplicationOutcome, ApplicationProblem, AttachRuntimeEvidenceCommand,
     AuthorityReceipt, AuthorizedScopeSet, CancelWorkAttemptCommand, CancellationContext,
     CreateWorkCommand, Deadline, EffectId, EffectReceipt, EffectResult, EvidenceAuthority,
-    EvidenceCoverage, EvidencePacket, EvidenceScore, GenerateProposalRequest,
-    GeneratedWorkProposal, IdempotencyKey, MultiRootExecuteRequestV1,
+    EvidenceCoverage, EvidencePacket, EvidenceScore, ExecutionTopologyViewV1,
+    GenerateProposalRequest, GeneratedWorkProposal, IdempotencyKey, MultiRootExecuteRequestV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
     Omission, OpenInvestigationHandoffRequestV1, OpenInvestigationHandoffResultV1,
     OpenTaskHandoffRequestV1, OpenTaskHandoffResultV1, OperationReceipt, PageRequest, PageState,
@@ -37,12 +37,12 @@ use tracedecay_application::{
     WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
     WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkflowDefinitionActivateRequest,
-    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionDisposition,
-    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
-    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation,
+    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkTopologyViewRequestV1,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -156,6 +156,7 @@ pub(crate) enum DaemonInvocationOperation {
     GitApply,
     NativeIntegrationStackSnapshot,
     NativeIntegrationPreflight,
+    NativeIntegrationApprove,
     NativeIntegrationApply,
     NativeIntegrationStatus,
     NativeIntegrationCancel,
@@ -209,6 +210,7 @@ impl DaemonInvocationOperation {
             Self::GitApply => "git_apply",
             Self::NativeIntegrationStackSnapshot => "stack_snapshot",
             Self::NativeIntegrationPreflight => "preflight_native_integration",
+            Self::NativeIntegrationApprove => "approve_native_integration",
             Self::NativeIntegrationApply => "apply_native_integration",
             Self::NativeIntegrationStatus => "native_integration_status",
             Self::NativeIntegrationCancel => "cancel_native_integration",
@@ -313,6 +315,7 @@ pub(crate) enum WorkApplicationInvocationV1 {
     ListAttempts(WorkAttemptListRequestV1),
     HydrateArtifacts(WorkArtifactHydrationRequestV1),
     Views(WorkGraphReadRequestV1),
+    Topology(WorkTopologyViewRequestV1),
     PauseRun(PauseWorkRunCommand),
     ResumeRun(ResumeWorkRunCommand),
     RunControl(WorkRunControlRequestV1),
@@ -342,6 +345,7 @@ impl WorkApplicationInvocationV1 {
             Self::ListAttempts(_) => "list_attempts",
             Self::HydrateArtifacts(_) => "hydrate_artifacts",
             Self::Views(_) => "views",
+            Self::Topology(_) => "topology",
             Self::PauseRun(_) => "pause_run",
             Self::ResumeRun(_) => "resume_run",
             Self::RunControl(_) => "run_control",
@@ -833,6 +837,7 @@ impl DaemonInvocationRequest {
             }
             crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationPreflight
+            | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApprove
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStatus
             | crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationCancel => {
@@ -1476,6 +1481,9 @@ impl DaemonInvocationRequest {
                 crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationPreflight => {
                     DaemonInvocationOperation::NativeIntegrationPreflight
                 }
+                crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApprove => {
+                    DaemonInvocationOperation::NativeIntegrationApprove
+                }
                 crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationApply => {
                     DaemonInvocationOperation::NativeIntegrationApply
                 }
@@ -1608,6 +1616,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::GitApply
                 | DaemonInvocationOperation::NativeIntegrationStackSnapshot
                 | DaemonInvocationOperation::NativeIntegrationPreflight
+                | DaemonInvocationOperation::NativeIntegrationApprove
                 | DaemonInvocationOperation::NativeIntegrationApply
                 | DaemonInvocationOperation::NativeIntegrationStatus
                 | DaemonInvocationOperation::NativeIntegrationCancel
@@ -2477,6 +2486,7 @@ pub(crate) enum WorkApplicationOutcomeV1 {
     ListAttempts(ApplicationOutcome<WorkAttemptListV1>),
     HydrateArtifacts(ApplicationOutcome<WorkArtifactHydrationV1>),
     Views(ApplicationOutcome<WorkGraphReadV1>),
+    Topology(ApplicationOutcome<ExecutionTopologyViewV1>),
     PauseRun(ApplicationOutcome<WorkRunControlV1>),
     ResumeRun(ApplicationOutcome<WorkRunControlV1>),
     RunControl(ApplicationOutcome<WorkRunControlReadingV1>),

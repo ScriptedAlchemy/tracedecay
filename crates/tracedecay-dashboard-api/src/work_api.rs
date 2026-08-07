@@ -65,6 +65,7 @@ dashboard_work_routes!(
     ListAttempts,
     HydrateArtifacts,
     Views,
+    Topology,
     PauseRun,
     ResumeRun,
     RunControl,

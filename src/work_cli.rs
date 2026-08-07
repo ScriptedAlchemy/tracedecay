@@ -20,7 +20,8 @@ use tracedecay_application::{
     SafeDiagnostic, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
     WorkAttemptListRequestV1, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
     WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1, work_executable_binding_registry,
+    WorkProjectionSnapshotRequestV1, WorkRunControlRequestV1, WorkTopologyViewRequestV1,
+    work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -117,6 +118,9 @@ fn decode_work_invocation(
         WorkOperation::Views => {
             decode::<WorkGraphReadRequestV1>(body).map(WorkApplicationInvocationV1::Views)
         }
+        WorkOperation::Topology => {
+            decode::<WorkTopologyViewRequestV1>(body).map(WorkApplicationInvocationV1::Topology)
+        }
         WorkOperation::PauseRun => {
             decode::<PauseWorkRunCommand>(body).map(WorkApplicationInvocationV1::PauseRun)
         }
@@ -198,6 +202,10 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
                 WorkApplicationOutcomeV1::HydrateArtifacts(_)
             )
             | (WorkOperation::Views, WorkApplicationOutcomeV1::Views(_))
+            | (
+                WorkOperation::Topology,
+                WorkApplicationOutcomeV1::Topology(_)
+            )
             | (
                 WorkOperation::PauseRun,
                 WorkApplicationOutcomeV1::PauseRun(_)
@@ -332,6 +340,7 @@ fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOu
         WorkApplicationOutcomeV1::ListAttempts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::HydrateArtifacts(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Views(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::Topology(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::PauseRun(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ResumeRun(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::RunControl(outcome) => serde_json::to_value(outcome),

@@ -102,6 +102,7 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::ListAttempts(_)
         | WorkApplicationInvocationV1::HydrateArtifacts(_)
         | WorkApplicationInvocationV1::Views(_)
+        | WorkApplicationInvocationV1::Topology(_)
         | WorkApplicationInvocationV1::RunControl(_)
         | WorkApplicationInvocationV1::PlacementPreflight(_)
         | WorkApplicationInvocationV1::PlacementStatus(_) => false,
@@ -566,6 +567,51 @@ fn dispatch_work_application(
             observed_at,
             deadline,
             WorkApplicationOutcomeV1::HydrateArtifacts,
+        ),
+        WorkApplicationInvocationV1::Topology(request) => complete_work_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            tracedecay_application::execution_topology_view(
+                services.attempts(),
+                services.placement(),
+                &registered.work_topology_policy,
+                &context,
+                &request,
+                |authority| {
+                    // The invocation admission already refused cancelled
+                    // requests and this dispatch path carries no live
+                    // cancellation signal, so the bounded topology read runs
+                    // to completion.
+                    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    match services.topology().verified_snapshot(authority, cancelled) {
+                        Ok(topology) => {
+                            let task_count =
+                                u32::try_from(topology.task_count()).map_err(|_| {
+                                    work_topology_unavailable_problem(
+                                        "the verified topology task count overflowed",
+                                    )
+                                })?;
+                            Ok(
+                                tracedecay_application::WorkAttemptTopologyStateV1::Verified(
+                                    tracedecay_application::WorkAttemptTopologyBindingV1 {
+                                        generation: topology.generation().as_str().to_owned(),
+                                        task_count,
+                                    },
+                                ),
+                            )
+                        }
+                        Err(error) => work_topology_problem(error),
+                    }
+                },
+            ),
+            observed_at,
+            deadline,
+            WorkApplicationOutcomeV1::Topology,
         ),
         WorkApplicationInvocationV1::ResumeAttempts(command) => {
             let report = services.attempts().resume(&context, &command);
@@ -1066,7 +1112,13 @@ pub(super) async fn execute_workflow_application(
         ),
         WorkflowApplicationInvocation::HandoffIssue(request) => {
             let prepared = match TaskHandoffToken::new(request.secret).and_then(|token| {
-                prepare_task_handoff_issue(&context, request.scope, &token, observed_at)
+                prepare_task_handoff_issue(
+                    &context,
+                    request.scope,
+                    &token,
+                    observed_at,
+                    request.frontier,
+                )
             }) {
                 Ok(grant) => WorkflowEffectPreparedV1::handoff_issue(input_digest.clone(), grant),
                 Err(error) => WorkflowEffectPreparedV1::problem(
@@ -1888,6 +1940,7 @@ fn task_handoff_problem(error: TaskHandoffError) -> DaemonInvocationProblem {
         }
         TaskHandoffError::InvalidToken
         | TaskHandoffError::InvalidScope
+        | TaskHandoffError::InvalidFrontier
         | TaskHandoffError::Unauthorized
         | TaskHandoffError::InvalidExpiry
         | TaskHandoffError::Conflict

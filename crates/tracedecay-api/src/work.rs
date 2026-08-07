@@ -28,7 +28,7 @@ use serde_json::Value;
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
     ApplicationProblem, AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
-    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
     ReleaseWorkPlacementCommand, ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand,
     ResumeWorkRunCommand, RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
@@ -36,6 +36,7 @@ use tracedecay_application::{
     WorkGraphReadRequestV1, WorkGraphReadV1, WorkPlacementPreflightRequestV1,
     WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
     WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+    WorkTopologyViewRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkPlacementPreflightV1, WorkPlacementV1, WorkProjection,
@@ -71,6 +72,7 @@ pub enum WorkOperation {
     ListAttempts,
     HydrateArtifacts,
     Views,
+    Topology,
     PauseRun,
     ResumeRun,
     RunControl,
@@ -144,6 +146,7 @@ work_operations! {
     ListAttempts: "list_attempts", "list-attempts";
     HydrateArtifacts: "hydrate_artifacts", "hydrate-artifacts";
     Views: "views", "views";
+    Topology: "topology", "topology";
     PauseRun: "pause_run", "pause-run";
     ResumeRun: "resume_run", "resume-run";
     RunControl: "run_control", "run-control";
@@ -155,7 +158,7 @@ work_operations! {
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Snapshot,
         Self::Delta,
         Self::GenerateProposal,
@@ -173,6 +176,7 @@ impl WorkOperation {
         Self::ListAttempts,
         Self::HydrateArtifacts,
         Self::Views,
+        Self::Topology,
         Self::PauseRun,
         Self::ResumeRun,
         Self::RunControl,
@@ -198,6 +202,7 @@ impl WorkOperation {
                 | Self::ListAttempts
                 | Self::HydrateArtifacts
                 | Self::Views
+                | Self::Topology
                 | Self::RunControl
                 | Self::PlacementPreflight
                 | Self::PlacementStatus
@@ -224,6 +229,7 @@ impl WorkOperation {
             Self::ListAttempts => schema_name::<WorkAttemptListRequestV1>(),
             Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationRequestV1>(),
             Self::Views => schema_name::<WorkGraphReadRequestV1>(),
+            Self::Topology => schema_name::<WorkTopologyViewRequestV1>(),
             Self::PauseRun => schema_name::<PauseWorkRunCommand>(),
             Self::ResumeRun => schema_name::<ResumeWorkRunCommand>(),
             Self::RunControl => schema_name::<WorkRunControlRequestV1>(),
@@ -254,6 +260,7 @@ impl WorkOperation {
             Self::ListAttempts => schema_name::<WorkAttemptListV1>(),
             Self::HydrateArtifacts => schema_name::<WorkArtifactHydrationV1>(),
             Self::Views => schema_name::<WorkGraphReadV1>(),
+            Self::Topology => schema_name::<ExecutionTopologyViewV1>(),
             Self::PauseRun | Self::ResumeRun => schema_name::<WorkRunControlV1>(),
             Self::RunControl => schema_name::<WorkRunControlReadingV1>(),
             Self::PlacementPreflight => schema_name::<WorkPlacementPreflightV1>(),
