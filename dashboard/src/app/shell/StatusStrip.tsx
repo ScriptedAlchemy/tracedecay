@@ -1,10 +1,16 @@
 import type { ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   useEventStreamState,
   useProjectionSync,
   type ProjectionSync,
 } from '../../data/sse/useEvents.tsx';
 import { cn } from '../../ui/cn';
+import {
+  cancelQueryActivity,
+  useActiveQueryActivities,
+  useQueryCancellation,
+} from '../../data/query/activity.ts';
 
 /**
  * What the transport is doing, and separately whether the data behind it has
@@ -48,7 +54,7 @@ function feedReading(sync: ProjectionSync): {
 }
 
 /** Telemetry bar for the real `/api/events` connection state. */
-export function StatusStrip() {
+export function StatusStrip({ queryActivity }: { queryActivity?: ReactNode } = {}) {
   const { state } = useEventStreamState();
   const feed = feedReading(useProjectionSync());
   const link =
@@ -59,7 +65,7 @@ export function StatusStrip() {
         : { value: 'down', tone: 'bg-state-offline', live: false };
   return (
     <footer
-      className="flex h-8 shrink-0 items-stretch border-t border-edge-subtle bg-surface-1"
+      className="flex min-h-8 shrink-0 items-stretch border-t border-edge-subtle bg-surface-1"
       aria-label="Status"
     >
       <Cell label="Link">
@@ -98,8 +104,52 @@ export function StatusStrip() {
           )}
         </span>
       </Cell>
+      {queryActivity}
       <span aria-hidden className="flex-1 border-r border-edge-subtle" />
     </footer>
+  );
+}
+
+/** Query-aware cell mounted by Shell, which is inside QueryClientProvider.
+ * Keeping it separate lets the transport strip remain usable in isolation
+ * without inventing a second QueryClient. */
+export function QueryActivityStatus() {
+  const client = useQueryClient();
+  const queryActivities = useActiveQueryActivities();
+  const activeQuery = queryActivities[0];
+  const lastCancellation = useQueryCancellation((entry) => entry.lastCancellation);
+
+  if (activeQuery !== undefined) {
+    return (
+      <Cell label="Query">
+        <span className="td-value max-w-64 truncate text-2xs" role="status">
+          {activeQuery.label}
+        </span>
+        {queryActivities.length > 1 ? (
+          <span className="td-value text-3xs text-text-muted">
+            +{queryActivities.length - 1}
+          </span>
+        ) : null}
+        {activeQuery.cancelable ? (
+          <button
+            type="button"
+            aria-label={`Cancel ${activeQuery.label}`}
+            onClick={() => void cancelQueryActivity(client, activeQuery)}
+            className="flex min-h-[var(--touch-target-min)] min-w-11 items-center justify-center border-l border-edge-subtle px-2 text-2xs uppercase text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          >
+            Cancel
+          </button>
+        ) : null}
+      </Cell>
+    );
+  }
+
+  return lastCancellation === null ? null : (
+    <Cell label="Query">
+      <span className="td-value max-w-72 truncate text-2xs" role="status">
+        cancelled · {lastCancellation.label}
+      </span>
+    </Cell>
   );
 }
 

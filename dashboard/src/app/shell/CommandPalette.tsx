@@ -6,11 +6,17 @@ import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
 import { useProjectRegistry, projectRegistryPayload } from '../../data/query/projectRegistry.ts';
 import { activationFor, useScope } from '../../data/scope/store.ts';
+import { StateChip } from '../../ui/StateChip.tsx';
+import { useInspectorStack } from './inspectorStack.ts';
+import { usePaletteRegistry, type PaletteEntry } from './paletteRegistry.ts';
 
-interface PaletteEntry {
+interface CommandPaletteRow {
   id: string;
   label: string;
   hint: string;
+  keywords?: readonly string[];
+  state?: PaletteEntry['state'];
+  scopeLabel?: string;
   action: () => void;
 }
 
@@ -45,6 +51,8 @@ export function CommandPalette({
 }) {
   const navigate = useNavigate();
   const selectProject = useScope((s) => s.selectProject);
+  const openInspector = useInspectorStack((state) => state.open);
+  const providers = usePaletteRegistry((state) => state.providers);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   // Entities: registered projects become scope-setting results. Fetched only
@@ -55,7 +63,7 @@ export function CommandPalette({
   // too — it used to have a private key that no event named.
   const projects = useProjectRegistry({ enabled: open });
 
-  const entries = useMemo<PaletteEntry[]>(() => {
+  const entries = useMemo<CommandPaletteRow[]>(() => {
     const workspaceEntries = WORKSPACES.map((w) => ({
       id: `nav:${w.path}`,
       label: w.label,
@@ -95,13 +103,46 @@ export function CommandPalette({
             })),
           )
         : [];
-    return [...workspaceEntries, ...projectEntries];
-  }, [navigate, onOpenChange, projects.data, selectProject]);
+    const providerEntries = Object.values(providers).flatMap((provided) =>
+      provided.map((entry) => ({
+        id: `provider:${entry.id}`,
+        label: entry.label,
+        hint: entry.hint,
+        keywords: entry.keywords,
+        state: entry.state,
+        scopeLabel: entry.scopeLabel,
+        action: () => {
+          switch (entry.kind) {
+            case 'navigate':
+              navigate(entry.to);
+              break;
+            case 'inspect':
+              openInspector(entry.inspector);
+              if (entry.to !== undefined) navigate(entry.to);
+              break;
+            case 'legal_action':
+              entry.invoke(entry.reference);
+              break;
+            default: {
+              const exhaustive: never = entry;
+              return exhaustive;
+            }
+          }
+          onOpenChange(false);
+        },
+      })),
+    );
+    return [...workspaceEntries, ...projectEntries, ...providerEntries];
+  }, [navigate, onOpenChange, openInspector, projects.data, providers, selectProject]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return entries;
-    return entries.filter((e) => e.label.toLowerCase().includes(q));
+    return entries.filter(
+      (entry) =>
+        entry.label.toLowerCase().includes(q) ||
+        entry.keywords?.some((keyword) => keyword.toLowerCase().includes(q)),
+    );
   }, [entries, query]);
 
   useEffect(() => setActive(0), [query, open]);
@@ -176,7 +217,7 @@ export function CommandPalette({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Go to workspace or project…"
-              className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-text-muted"
+              className="min-h-[var(--touch-target-min)] w-full bg-transparent text-sm outline-none placeholder:text-text-muted"
               role="combobox"
               aria-expanded="true"
               aria-controls="td-palette-list"
@@ -204,13 +245,20 @@ export function CommandPalette({
                   onMouseEnter={() => setActive(i)}
                   onClick={entry.action}
                   className={cn(
-                    'flex h-9 cursor-pointer items-center justify-between rounded-[var(--radius-chip)] px-2.5 text-sm',
+                    'flex min-h-[var(--touch-target-min)] cursor-pointer items-center justify-between rounded-[var(--radius-chip)] px-2.5 text-sm',
                     i === activeIndex ? 'bg-surface-2 text-text-primary' : 'text-text-secondary',
                   )}
                 >
                   <span>{entry.label}</span>
                   <span className="flex items-center gap-2 text-2xs text-text-muted">
-                    {entry.hint}
+                    {entry.state !== undefined ? (
+                      <StateChip kind={entry.state} detail={entry.hint} />
+                    ) : (
+                      entry.hint
+                    )}
+                    {entry.scopeLabel !== undefined ? (
+                      <span className="font-mono">{entry.scopeLabel}</span>
+                    ) : null}
                     {i === activeIndex ? <CornerDownLeft aria-hidden size={11} /> : null}
                   </span>
                 </li>
