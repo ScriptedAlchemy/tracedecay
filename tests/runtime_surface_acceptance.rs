@@ -2204,8 +2204,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             .expect("managed test-run JSON content"),
     )
     .expect("managed test-run payload");
-    assert_eq!(managed_run["passed"], 1);
-    assert_eq!(managed_run["failed"], 0);
+    assert_eq!(
+        managed_run["passed"], 1,
+        "managed run must pass the one dispatched fixture test: {managed_run}"
+    );
+    assert_eq!(
+        managed_run["failed"], 0,
+        "managed run must report no failures: {managed_run}"
+    );
 
     let test_results = poll_lsp_context(&mut session, &document_uri, "testRunResults", 302).await;
     assert_eq!(
