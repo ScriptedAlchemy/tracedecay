@@ -123,8 +123,10 @@ Move to Grafeo as the sole persisted/query graph and vector projection:
 - workflow-definition DAGs and rebuildable run/attempt topology;
 - LCM summary/source/successor, logical-copy, thread, and agent hierarchy relations;
 - derived memory fact/entity/assertion links and cross-domain retrieval
-  references, without moving fact content or holographic vector banks out of
-  the project-wide memory authority; and
+  references, without moving fact content out of the project-wide memory
+  authority (holographic vector banks may also move here per the Task 7
+  owner decision of 2026-08-07, as rebuildable derivations of that content);
+  and
 - cross-domain relation locators used for bounded authorized traversal.
 
 Keep in SQLite:
@@ -135,7 +137,9 @@ Keep in SQLite:
   watermarks until the corresponding canonical sources are retained;
 - raw session/message content, external payload references, redaction authority, exact evidence spans, and retention/GC journals;
 - project-wide fact content, exact provenance, trust/feedback history,
-  current-fact CAS, deletion/retention state, and holographic-bank authority;
+  current-fact CAS, and deletion/retention state (holographic banks default
+  here today but may relocate to the graph-db vector projection per the
+  Task 7 owner decision of 2026-08-07);
 - immutable Work/workflow event payloads, runtime fencing, execution receipts, and artifact metadata;
 - embedding model manifests, acquisition/install state, generation publication state, and exact source manifests; and
 - telemetry/event accounting and other relational aggregates that do not need graph traversal or vector similarity.
@@ -598,12 +602,22 @@ when the rebuildable Grafeo projection is unavailable.
 - [ ] **Step 2: Project only memory relations into Grafeo**
 
 Keep exact content, provenance, trust history, current-fact CAS, feedback,
-deletion tombstones, retention receipts, FHRR/HRR fact vectors, holographic
-banks, and fact-retrieval scoring in the project-wide SQLite memory store.
-Project only entity/assertion/relation topology and opaque cross-domain
+deletion tombstones, and retention receipts in the project-wide SQLite memory
+store. Project only entity/assertion/relation topology and opaque cross-domain
 retrieval references into graph-db, keyed by the same project-wide typed IDs.
 Grafeo failure may weaken graph-assisted recall truthfully, but must not make
 ordinary holographic fact retrieval unavailable.
+
+Owner decision (2026-08-07): the binding invariant is that project memory
+remains a holographic implementation (FHRR/HRR binding and unbinding, the
+`amari_fhrr` algebra, holographic recall) over durable canonical fact content.
+The FHRR/HRR fact vectors and holographic banks are deterministic derivations
+of that content, so their storage placement is flexible: they may stay in the
+SQLite memory store or move into the graph-db vector projection under the same
+verified-publication protocol as admitted code vectors, provided holographic
+recall behavior is preserved and canonical content never exists only in a
+rebuildable projection. Replacing the holographic algebra itself is out of
+scope of this flexibility.
 
 - [ ] **Step 3: Delete legacy and branch-era memory machinery**
 
