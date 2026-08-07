@@ -244,7 +244,9 @@ const registerDefinitionDescriptor = sdk.OPERATIONS.find(
 );
 if (!registerDefinitionDescriptor ||
     registerDefinitionDescriptor.operationId !== "operation.workflow.register_definition" ||
-    registerDefinitionDescriptor.route !== "/application/workflow/register-definition" ||
+    registerDefinitionDescriptor.transport.kind !== "http" ||
+    registerDefinitionDescriptor.transport.route !== "/application/workflow/register-definition" ||
+    registerDefinitionDescriptor.transport.method !== "POST" ||
     registerDefinitionDescriptor.effect !== "administrative" ||
     registerDefinitionDescriptor.idempotency !== "required" ||
     registerDefinitionDescriptor.bindingId !== "binding.http.workflow.register_definition" ||
