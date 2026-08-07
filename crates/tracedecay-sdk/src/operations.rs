@@ -417,6 +417,3537 @@ pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[
     },
 ];
 #[allow(clippy::all)]
+pub mod apply_native_integration {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Exact one-use apply request.
+
+        Apply accepts only an unexpired preview identity/digest plus a one-use
+        content-bound approval. Arbitrary Git arguments, caller-supplied paths,
+        SHAs, patches, commit lists, messages, environment, or config are
+        unrepresentable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationApplySurfaceRequest",
+        ///  "description": "Exact one-use apply request.\n\nApply accepts only an unexpired preview identity/digest plus a one-use\ncontent-bound approval. Arbitrary Git arguments, caller-supplied paths,\nSHAs, patches, commit lists, messages, environment, or config are\nunrepresentable.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "approval_digest",
+        ///    "approval_id",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "transaction_id"
+        ///  ],
+        ///  "properties": {
+        ///    "approval_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "approval_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationApprovalId"
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///    },
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationApplySurfaceRequest {
+            pub approval_digest: ManifestDigest,
+            pub approval_id: NativeIntegrationApprovalId,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: NativeIntegrationPreviewId,
+            pub transaction_id: NativeIntegrationTransactionId,
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationApprovalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationApprovalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationApprovalId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationApprovalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationApprovalId> for ::std::string::String {
+            fn from(value: NativeIntegrationApprovalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationApprovalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationApprovalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationApprovalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationPreviewId> for ::std::string::String {
+            fn from(value: NativeIntegrationPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///The only Git histories this product operation can create.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only Git histories this product operation can create.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "fast_forward",
+        ///    "two_parent_merge",
+        ///    "cherry_pick_exact_commits"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum MechanicalIntegrationModeV1 {
+            #[serde(rename = "fast_forward")]
+            FastForward,
+            #[serde(rename = "two_parent_merge")]
+            TwoParentMerge,
+            #[serde(rename = "cherry_pick_exact_commits")]
+            CherryPickExactCommits,
+        }
+        impl ::std::fmt::Display for MechanicalIntegrationModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::FastForward => f.write_str("fast_forward"),
+                    Self::TwoParentMerge => f.write_str("two_parent_merge"),
+                    Self::CherryPickExactCommits => f.write_str("cherry_pick_exact_commits"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for MechanicalIntegrationModeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "fast_forward" => Ok(Self::FastForward),
+                    "two_parent_merge" => Ok(Self::TwoParentMerge),
+                    "cherry_pick_exact_commits" => Ok(Self::CherryPickExactCommits),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Durable transaction phase. `RefCommitStarted` is the cancellation boundary.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable transaction phase. `RefCommitStarted` is the cancellation boundary.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "prepared",
+        ///    "candidate_verified",
+        ///    "ref_commit_started",
+        ///    "final_state_verification",
+        ///    "terminal"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationPhaseV1 {
+            #[serde(rename = "prepared")]
+            Prepared,
+            #[serde(rename = "candidate_verified")]
+            CandidateVerified,
+            #[serde(rename = "ref_commit_started")]
+            RefCommitStarted,
+            #[serde(rename = "final_state_verification")]
+            FinalStateVerification,
+            #[serde(rename = "terminal")]
+            Terminal,
+        }
+        impl ::std::fmt::Display for NativeIntegrationPhaseV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Prepared => f.write_str("prepared"),
+                    Self::CandidateVerified => f.write_str("candidate_verified"),
+                    Self::RefCommitStarted => f.write_str("ref_commit_started"),
+                    Self::FinalStateVerification => f.write_str("final_state_verification"),
+                    Self::Terminal => f.write_str("terminal"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPhaseV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "prepared" => Ok(Self::Prepared),
+                    "candidate_verified" => Ok(Self::CandidateVerified),
+                    "ref_commit_started" => Ok(Self::RefCommitStarted),
+                    "final_state_verification" => Ok(Self::FinalStateVerification),
+                    "terminal" => Ok(Self::Terminal),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Truthful preview classification. Only `MechanicalIntegrationEligible`
+        carries apply-eligible evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful preview classification. Only `MechanicalIntegrationEligible`\ncarries apply-eligible evidence.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "$ref": "#/definitions/MechanicalIntegrationModeV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "mechanical_integration_eligible"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "already_integrated"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "conflict_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "conflict_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "native_conflict"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "evidence_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "evidence_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "semantic_review_required"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state", content = "detail")]
+        pub enum NativeIntegrationPreviewDispositionV1 {
+            #[serde(rename = "mechanical_integration_eligible")]
+            MechanicalIntegrationEligible(MechanicalIntegrationModeV1),
+            #[serde(rename = "already_integrated")]
+            AlreadyIntegrated,
+            #[serde(rename = "native_conflict")]
+            NativeConflict { conflict_digest: ManifestDigest },
+            #[serde(rename = "semantic_review_required")]
+            SemanticReviewRequired { evidence_digest: ManifestDigest },
+            #[serde(rename = "partial")]
+            Partial {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+            #[serde(rename = "unavailable")]
+            Unavailable {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+        }
+        impl ::std::convert::From<MechanicalIntegrationModeV1> for NativeIntegrationPreviewDispositionV1 {
+            fn from(value: MechanicalIntegrationModeV1) -> Self {
+                Self::MechanicalIntegrationEligible(value)
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationPreviewId> for ::std::string::String {
+            fn from(value: NativeIntegrationPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Bounded projection of one frozen selection.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one frozen selection.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "destination_ref",
+        ///    "frozen_at",
+        ///    "inventory_epoch",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "selection_digest",
+        ///    "source_ref"
+        ///  ],
+        ///  "properties": {
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "frozen_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "inventory_epoch": {
+        ///      "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "selection_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "source_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationSnapshotProjectionV1 {
+            pub destination_ref: RefId,
+            pub frozen_at: UtcMicros,
+            pub inventory_epoch: WorktreeInventoryEpoch,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub selection_digest: ManifestDigest,
+            pub source_ref: RefId,
+        }
+        ///Bounded projection of one durable transaction status.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one durable transaction status.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "cancellation_requested",
+        ///    "destination_ref",
+        ///    "phase",
+        ///    "phase_revision",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "repository_id",
+        ///    "transaction_id",
+        ///    "updated_at"
+        ///  ],
+        ///  "properties": {
+        ///    "cancellation_requested": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "phase": {
+        ///      "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///    },
+        ///    "phase_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "terminal_outcome": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    },
+        ///    "updated_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStatusProjectionV1 {
+            pub cancellation_requested: bool,
+            pub destination_ref: RefId,
+            pub phase: NativeIntegrationPhaseV1,
+            pub phase_revision: u64,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: NativeIntegrationPreviewId,
+            pub repository_id: RepositoryId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+            pub transaction_id: NativeIntegrationTransactionId,
+            pub updated_at: UtcMicros,
+        }
+        ///One typed result for every native-integration surface operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationSurfaceResultV1",
+        ///  "description": "One typed result for every native-integration surface operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "description": "Bounded projection of one frozen selection.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "destination_ref",
+        ///        "frozen_at",
+        ///        "inventory_epoch",
+        ///        "outcome",
+        ///        "project_id",
+        ///        "repository_id",
+        ///        "selection_digest",
+        ///        "source_ref"
+        ///      ],
+        ///      "properties": {
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "frozen_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "inventory_epoch": {
+        ///          "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "stack_snapshot"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "selection_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "source_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one immutable preview.\n\nCandidate trees, conflict bodies, and ordered commit objects stay behind the\npreview digest: the surface reports identity, classification, and expiry so\na caller can approve exactly this preview and nothing else.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "created_at",
+        ///        "disposition",
+        ///        "expires_at",
+        ///        "ordered_commit_count",
+        ///        "outcome",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "created_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "disposition": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewDispositionV1"
+        ///        },
+        ///        "expires_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "ordered_commit_count": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "preview"
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "selection": {
+        ///          "$ref": "#/definitions/NativeIntegrationSnapshotProjectionV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable terminal receipt.\n\nThe receipt digest and final ref/tree identity are audit metadata; no patch,\nworktree body, or source content crosses this boundary.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "completed_at",
+        ///        "final_ref_tip",
+        ///        "final_tree",
+        ///        "outcome",
+        ///        "receipt_digest",
+        ///        "status",
+        ///        "terminal_outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "completed_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "final_ref_tip": {
+        ///          "type": "string"
+        ///        },
+        ///        "final_tree": {
+        ///          "type": "string"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "receipt"
+        ///        },
+        ///        "receipt_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "status": {
+        ///          "$ref": "#/definitions/NativeIntegrationStatusProjectionV1"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable transaction status.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cancellation_requested",
+        ///        "destination_ref",
+        ///        "outcome",
+        ///        "phase",
+        ///        "phase_revision",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "repository_id",
+        ///        "transaction_id",
+        ///        "updated_at"
+        ///      ],
+        ///      "properties": {
+        ///        "cancellation_requested": {
+        ///          "type": "boolean"
+        ///        },
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "phase": {
+        ///          "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///        },
+        ///        "phase_revision": {
+        ///          "type": "integer",
+        ///          "format": "uint64",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
+        ///        },
+        ///        "transaction_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///        },
+        ///        "updated_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Cancellation disposition. After the native commit point the committed\nreceipt is returned instead of a cancellation claim.",
+        ///      "type": "object",
+        ///      "oneOf": [
+        ///        {
+        ///          "type": "string",
+        ///          "enum": [
+        ///            "cancellation_requested",
+        ///            "commit_point_passed"
+        ///          ]
+        ///        },
+        ///        {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "already_terminal"
+        ///          ],
+        ///          "properties": {
+        ///            "already_terminal": {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      ],
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "cancellation"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "reason"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "reason": {
+        ///          "$ref": "#/definitions/NativeIntegrationSurfaceUnavailableV1"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(untagged, deny_unknown_fields)]
+        pub enum NativeIntegrationSurfaceResultV1 {
+            Variant0 {
+                destination_ref: RefId,
+                frozen_at: UtcMicros,
+                inventory_epoch: WorktreeInventoryEpoch,
+                outcome: ::std::string::String,
+                project_id: ProjectId,
+                repository_id: RepositoryId,
+                selection_digest: ManifestDigest,
+                source_ref: RefId,
+            },
+            Variant1 {
+                created_at: UtcMicros,
+                disposition: NativeIntegrationPreviewDispositionV1,
+                expires_at: UtcMicros,
+                ordered_commit_count: u32,
+                outcome: ::std::string::String,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                selection: NativeIntegrationSnapshotProjectionV1,
+            },
+            Variant2 {
+                completed_at: UtcMicros,
+                final_ref_tip: ::std::string::String,
+                final_tree: ::std::string::String,
+                outcome: ::std::string::String,
+                receipt_digest: ManifestDigest,
+                status: NativeIntegrationStatusProjectionV1,
+                terminal_outcome: NativeIntegrationTerminalOutcomeV1,
+            },
+            Variant3 {
+                cancellation_requested: bool,
+                destination_ref: RefId,
+                outcome: ::std::string::String,
+                phase: NativeIntegrationPhaseV1,
+                phase_revision: u64,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                repository_id: RepositoryId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+                transaction_id: NativeIntegrationTransactionId,
+                updated_at: UtcMicros,
+            },
+            Variant4 {
+                already_terminal: NativeIntegrationTerminalOutcomeV1,
+                outcome: ::std::string::String,
+            },
+            Variant5 {
+                outcome: ::std::string::String,
+                reason: NativeIntegrationSurfaceUnavailableV1,
+            },
+        }
+        /**Why a native-integration operation produced no advancing state.
+
+        Every variant is read-only and truthful. None of them authorizes apply, and
+        a denied or absent target is reported indistinguishably from an unavailable
+        authority so no identity, path, count, or topology leaks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a native-integration operation produced no advancing state.\n\nEvery variant is read-only and truthful. None of them authorizes apply, and\na denied or absent target is reported indistinguishably from an unavailable\nauthority so no identity, path, count, or topology leaks.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "partial",
+        ///        "stale",
+        ///        "denied",
+        ///        "reset_required",
+        ///        "durability_uncertain",
+        ///        "cancelled",
+        ///        "approval_conflict",
+        ///        "transaction_conflict",
+        ///        "recovery_required",
+        ///        "needs_inspection",
+        ///        "unknown_transaction"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "No native-integration runtime authority is mounted for this daemon.",
+        ///      "type": "string",
+        ///      "const": "authority_unmounted"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationSurfaceUnavailableV1 {
+            #[serde(rename = "partial")]
+            Partial,
+            #[serde(rename = "stale")]
+            Stale,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "approval_conflict")]
+            ApprovalConflict,
+            #[serde(rename = "transaction_conflict")]
+            TransactionConflict,
+            #[serde(rename = "recovery_required")]
+            RecoveryRequired,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+            #[serde(rename = "unknown_transaction")]
+            UnknownTransaction,
+            ///No native-integration runtime authority is mounted for this daemon.
+            #[serde(rename = "authority_unmounted")]
+            AuthorityUnmounted,
+        }
+        impl ::std::fmt::Display for NativeIntegrationSurfaceUnavailableV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Partial => f.write_str("partial"),
+                    Self::Stale => f.write_str("stale"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::ApprovalConflict => f.write_str("approval_conflict"),
+                    Self::TransactionConflict => f.write_str("transaction_conflict"),
+                    Self::RecoveryRequired => f.write_str("recovery_required"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                    Self::UnknownTransaction => f.write_str("unknown_transaction"),
+                    Self::AuthorityUnmounted => f.write_str("authority_unmounted"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationSurfaceUnavailableV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial" => Ok(Self::Partial),
+                    "stale" => Ok(Self::Stale),
+                    "denied" => Ok(Self::Denied),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "approval_conflict" => Ok(Self::ApprovalConflict),
+                    "transaction_conflict" => Ok(Self::TransactionConflict),
+                    "recovery_required" => Ok(Self::RecoveryRequired),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    "unknown_transaction" => Ok(Self::UnknownTransaction),
+                    "authority_unmounted" => Ok(Self::AuthorityUnmounted),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///The only truthful terminal outcomes after recovery.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only truthful terminal outcomes after recovery.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "committed",
+        ///    "aborted_no_change",
+        ///    "rolled_back",
+        ///    "needs_inspection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationTerminalOutcomeV1 {
+            #[serde(rename = "committed")]
+            Committed,
+            #[serde(rename = "aborted_no_change")]
+            AbortedNoChange,
+            #[serde(rename = "rolled_back")]
+            RolledBack,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+        }
+        impl ::std::fmt::Display for NativeIntegrationTerminalOutcomeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Committed => f.write_str("committed"),
+                    Self::AbortedNoChange => f.write_str("aborted_no_change"),
+                    Self::RolledBack => f.write_str("rolled_back"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTerminalOutcomeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "committed" => Ok(Self::Committed),
+                    "aborted_no_change" => Ok(Self::AbortedNoChange),
+                    "rolled_back" => Ok(Self::RolledBack),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Why a preflight cannot authorize apply.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a preflight cannot authorize apply.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "partial_evidence",
+        ///    "stale_scope",
+        ///    "denied",
+        ///    "native_state_unavailable",
+        ///    "reset_required",
+        ///    "durability_uncertain",
+        ///    "unsupported_hooks",
+        ///    "signing_required",
+        ///    "destination_occupied"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationUnavailabilityV1 {
+            #[serde(rename = "partial_evidence")]
+            PartialEvidence,
+            #[serde(rename = "stale_scope")]
+            StaleScope,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "native_state_unavailable")]
+            NativeStateUnavailable,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "unsupported_hooks")]
+            UnsupportedHooks,
+            #[serde(rename = "signing_required")]
+            SigningRequired,
+            #[serde(rename = "destination_occupied")]
+            DestinationOccupied,
+        }
+        impl ::std::fmt::Display for NativeIntegrationUnavailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::PartialEvidence => f.write_str("partial_evidence"),
+                    Self::StaleScope => f.write_str("stale_scope"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::NativeStateUnavailable => f.write_str("native_state_unavailable"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::UnsupportedHooks => f.write_str("unsupported_hooks"),
+                    Self::SigningRequired => f.write_str("signing_required"),
+                    Self::DestinationOccupied => f.write_str("destination_occupied"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationUnavailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial_evidence" => Ok(Self::PartialEvidence),
+                    "stale_scope" => Ok(Self::StaleScope),
+                    "denied" => Ok(Self::Denied),
+                    "native_state_unavailable" => Ok(Self::NativeStateUnavailable),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "unsupported_hooks" => Ok(Self::UnsupportedHooks),
+                    "signing_required" => Ok(Self::SigningRequired),
+                    "destination_occupied" => Ok(Self::DestinationOccupied),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic epoch of the worktree inventory frozen into a stack revision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic epoch of the worktree inventory frozen into a stack revision.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorktreeInventoryEpoch(pub u64);
+        impl ::std::ops::Deref for WorktreeInventoryEpoch {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventoryEpoch> for u64 {
+            fn from(value: WorktreeInventoryEpoch) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorktreeInventoryEpoch {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventoryEpoch {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventoryEpoch {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::NativeIntegrationApplySurfaceRequest;
+    pub type Result = result::NativeIntegrationSurfaceResultV1;
+}
+typed_operation!(
+    ApplyNativeIntegration,
+    apply_native_integration,
+    "operation.application.apply_native_integration",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_apply_native_integration"
+    },
+    "binding.mcp.apply_native_integration.v1",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeEffect,
+        CancellationPoint::EffectInFlight,
+        CancellationPoint::AfterCommit
+    ],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.application.native-integration.apply.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod cancel_native_integration {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`NativeIntegrationCancelSurfaceRequest`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationCancelSurfaceRequest",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "transaction_id"
+        ///  ],
+        ///  "properties": {
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationCancelSurfaceRequest {
+            pub transaction_id: NativeIntegrationTransactionId,
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///The only Git histories this product operation can create.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only Git histories this product operation can create.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "fast_forward",
+        ///    "two_parent_merge",
+        ///    "cherry_pick_exact_commits"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum MechanicalIntegrationModeV1 {
+            #[serde(rename = "fast_forward")]
+            FastForward,
+            #[serde(rename = "two_parent_merge")]
+            TwoParentMerge,
+            #[serde(rename = "cherry_pick_exact_commits")]
+            CherryPickExactCommits,
+        }
+        impl ::std::fmt::Display for MechanicalIntegrationModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::FastForward => f.write_str("fast_forward"),
+                    Self::TwoParentMerge => f.write_str("two_parent_merge"),
+                    Self::CherryPickExactCommits => f.write_str("cherry_pick_exact_commits"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for MechanicalIntegrationModeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "fast_forward" => Ok(Self::FastForward),
+                    "two_parent_merge" => Ok(Self::TwoParentMerge),
+                    "cherry_pick_exact_commits" => Ok(Self::CherryPickExactCommits),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Durable transaction phase. `RefCommitStarted` is the cancellation boundary.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable transaction phase. `RefCommitStarted` is the cancellation boundary.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "prepared",
+        ///    "candidate_verified",
+        ///    "ref_commit_started",
+        ///    "final_state_verification",
+        ///    "terminal"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationPhaseV1 {
+            #[serde(rename = "prepared")]
+            Prepared,
+            #[serde(rename = "candidate_verified")]
+            CandidateVerified,
+            #[serde(rename = "ref_commit_started")]
+            RefCommitStarted,
+            #[serde(rename = "final_state_verification")]
+            FinalStateVerification,
+            #[serde(rename = "terminal")]
+            Terminal,
+        }
+        impl ::std::fmt::Display for NativeIntegrationPhaseV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Prepared => f.write_str("prepared"),
+                    Self::CandidateVerified => f.write_str("candidate_verified"),
+                    Self::RefCommitStarted => f.write_str("ref_commit_started"),
+                    Self::FinalStateVerification => f.write_str("final_state_verification"),
+                    Self::Terminal => f.write_str("terminal"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPhaseV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "prepared" => Ok(Self::Prepared),
+                    "candidate_verified" => Ok(Self::CandidateVerified),
+                    "ref_commit_started" => Ok(Self::RefCommitStarted),
+                    "final_state_verification" => Ok(Self::FinalStateVerification),
+                    "terminal" => Ok(Self::Terminal),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Truthful preview classification. Only `MechanicalIntegrationEligible`
+        carries apply-eligible evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful preview classification. Only `MechanicalIntegrationEligible`\ncarries apply-eligible evidence.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "$ref": "#/definitions/MechanicalIntegrationModeV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "mechanical_integration_eligible"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "already_integrated"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "conflict_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "conflict_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "native_conflict"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "evidence_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "evidence_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "semantic_review_required"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state", content = "detail")]
+        pub enum NativeIntegrationPreviewDispositionV1 {
+            #[serde(rename = "mechanical_integration_eligible")]
+            MechanicalIntegrationEligible(MechanicalIntegrationModeV1),
+            #[serde(rename = "already_integrated")]
+            AlreadyIntegrated,
+            #[serde(rename = "native_conflict")]
+            NativeConflict { conflict_digest: ManifestDigest },
+            #[serde(rename = "semantic_review_required")]
+            SemanticReviewRequired { evidence_digest: ManifestDigest },
+            #[serde(rename = "partial")]
+            Partial {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+            #[serde(rename = "unavailable")]
+            Unavailable {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+        }
+        impl ::std::convert::From<MechanicalIntegrationModeV1> for NativeIntegrationPreviewDispositionV1 {
+            fn from(value: MechanicalIntegrationModeV1) -> Self {
+                Self::MechanicalIntegrationEligible(value)
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationPreviewId> for ::std::string::String {
+            fn from(value: NativeIntegrationPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Bounded projection of one frozen selection.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one frozen selection.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "destination_ref",
+        ///    "frozen_at",
+        ///    "inventory_epoch",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "selection_digest",
+        ///    "source_ref"
+        ///  ],
+        ///  "properties": {
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "frozen_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "inventory_epoch": {
+        ///      "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "selection_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "source_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationSnapshotProjectionV1 {
+            pub destination_ref: RefId,
+            pub frozen_at: UtcMicros,
+            pub inventory_epoch: WorktreeInventoryEpoch,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub selection_digest: ManifestDigest,
+            pub source_ref: RefId,
+        }
+        ///Bounded projection of one durable transaction status.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one durable transaction status.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "cancellation_requested",
+        ///    "destination_ref",
+        ///    "phase",
+        ///    "phase_revision",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "repository_id",
+        ///    "transaction_id",
+        ///    "updated_at"
+        ///  ],
+        ///  "properties": {
+        ///    "cancellation_requested": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "phase": {
+        ///      "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///    },
+        ///    "phase_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "terminal_outcome": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    },
+        ///    "updated_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStatusProjectionV1 {
+            pub cancellation_requested: bool,
+            pub destination_ref: RefId,
+            pub phase: NativeIntegrationPhaseV1,
+            pub phase_revision: u64,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: NativeIntegrationPreviewId,
+            pub repository_id: RepositoryId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+            pub transaction_id: NativeIntegrationTransactionId,
+            pub updated_at: UtcMicros,
+        }
+        ///One typed result for every native-integration surface operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationSurfaceResultV1",
+        ///  "description": "One typed result for every native-integration surface operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "description": "Bounded projection of one frozen selection.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "destination_ref",
+        ///        "frozen_at",
+        ///        "inventory_epoch",
+        ///        "outcome",
+        ///        "project_id",
+        ///        "repository_id",
+        ///        "selection_digest",
+        ///        "source_ref"
+        ///      ],
+        ///      "properties": {
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "frozen_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "inventory_epoch": {
+        ///          "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "stack_snapshot"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "selection_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "source_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one immutable preview.\n\nCandidate trees, conflict bodies, and ordered commit objects stay behind the\npreview digest: the surface reports identity, classification, and expiry so\na caller can approve exactly this preview and nothing else.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "created_at",
+        ///        "disposition",
+        ///        "expires_at",
+        ///        "ordered_commit_count",
+        ///        "outcome",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "created_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "disposition": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewDispositionV1"
+        ///        },
+        ///        "expires_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "ordered_commit_count": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "preview"
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "selection": {
+        ///          "$ref": "#/definitions/NativeIntegrationSnapshotProjectionV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable terminal receipt.\n\nThe receipt digest and final ref/tree identity are audit metadata; no patch,\nworktree body, or source content crosses this boundary.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "completed_at",
+        ///        "final_ref_tip",
+        ///        "final_tree",
+        ///        "outcome",
+        ///        "receipt_digest",
+        ///        "status",
+        ///        "terminal_outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "completed_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "final_ref_tip": {
+        ///          "type": "string"
+        ///        },
+        ///        "final_tree": {
+        ///          "type": "string"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "receipt"
+        ///        },
+        ///        "receipt_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "status": {
+        ///          "$ref": "#/definitions/NativeIntegrationStatusProjectionV1"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable transaction status.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cancellation_requested",
+        ///        "destination_ref",
+        ///        "outcome",
+        ///        "phase",
+        ///        "phase_revision",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "repository_id",
+        ///        "transaction_id",
+        ///        "updated_at"
+        ///      ],
+        ///      "properties": {
+        ///        "cancellation_requested": {
+        ///          "type": "boolean"
+        ///        },
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "phase": {
+        ///          "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///        },
+        ///        "phase_revision": {
+        ///          "type": "integer",
+        ///          "format": "uint64",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
+        ///        },
+        ///        "transaction_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///        },
+        ///        "updated_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Cancellation disposition. After the native commit point the committed\nreceipt is returned instead of a cancellation claim.",
+        ///      "type": "object",
+        ///      "oneOf": [
+        ///        {
+        ///          "type": "string",
+        ///          "enum": [
+        ///            "cancellation_requested",
+        ///            "commit_point_passed"
+        ///          ]
+        ///        },
+        ///        {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "already_terminal"
+        ///          ],
+        ///          "properties": {
+        ///            "already_terminal": {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      ],
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "cancellation"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "reason"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "reason": {
+        ///          "$ref": "#/definitions/NativeIntegrationSurfaceUnavailableV1"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(untagged, deny_unknown_fields)]
+        pub enum NativeIntegrationSurfaceResultV1 {
+            Variant0 {
+                destination_ref: RefId,
+                frozen_at: UtcMicros,
+                inventory_epoch: WorktreeInventoryEpoch,
+                outcome: ::std::string::String,
+                project_id: ProjectId,
+                repository_id: RepositoryId,
+                selection_digest: ManifestDigest,
+                source_ref: RefId,
+            },
+            Variant1 {
+                created_at: UtcMicros,
+                disposition: NativeIntegrationPreviewDispositionV1,
+                expires_at: UtcMicros,
+                ordered_commit_count: u32,
+                outcome: ::std::string::String,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                selection: NativeIntegrationSnapshotProjectionV1,
+            },
+            Variant2 {
+                completed_at: UtcMicros,
+                final_ref_tip: ::std::string::String,
+                final_tree: ::std::string::String,
+                outcome: ::std::string::String,
+                receipt_digest: ManifestDigest,
+                status: NativeIntegrationStatusProjectionV1,
+                terminal_outcome: NativeIntegrationTerminalOutcomeV1,
+            },
+            Variant3 {
+                cancellation_requested: bool,
+                destination_ref: RefId,
+                outcome: ::std::string::String,
+                phase: NativeIntegrationPhaseV1,
+                phase_revision: u64,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                repository_id: RepositoryId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+                transaction_id: NativeIntegrationTransactionId,
+                updated_at: UtcMicros,
+            },
+            Variant4 {
+                already_terminal: NativeIntegrationTerminalOutcomeV1,
+                outcome: ::std::string::String,
+            },
+            Variant5 {
+                outcome: ::std::string::String,
+                reason: NativeIntegrationSurfaceUnavailableV1,
+            },
+        }
+        /**Why a native-integration operation produced no advancing state.
+
+        Every variant is read-only and truthful. None of them authorizes apply, and
+        a denied or absent target is reported indistinguishably from an unavailable
+        authority so no identity, path, count, or topology leaks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a native-integration operation produced no advancing state.\n\nEvery variant is read-only and truthful. None of them authorizes apply, and\na denied or absent target is reported indistinguishably from an unavailable\nauthority so no identity, path, count, or topology leaks.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "partial",
+        ///        "stale",
+        ///        "denied",
+        ///        "reset_required",
+        ///        "durability_uncertain",
+        ///        "cancelled",
+        ///        "approval_conflict",
+        ///        "transaction_conflict",
+        ///        "recovery_required",
+        ///        "needs_inspection",
+        ///        "unknown_transaction"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "No native-integration runtime authority is mounted for this daemon.",
+        ///      "type": "string",
+        ///      "const": "authority_unmounted"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationSurfaceUnavailableV1 {
+            #[serde(rename = "partial")]
+            Partial,
+            #[serde(rename = "stale")]
+            Stale,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "approval_conflict")]
+            ApprovalConflict,
+            #[serde(rename = "transaction_conflict")]
+            TransactionConflict,
+            #[serde(rename = "recovery_required")]
+            RecoveryRequired,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+            #[serde(rename = "unknown_transaction")]
+            UnknownTransaction,
+            ///No native-integration runtime authority is mounted for this daemon.
+            #[serde(rename = "authority_unmounted")]
+            AuthorityUnmounted,
+        }
+        impl ::std::fmt::Display for NativeIntegrationSurfaceUnavailableV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Partial => f.write_str("partial"),
+                    Self::Stale => f.write_str("stale"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::ApprovalConflict => f.write_str("approval_conflict"),
+                    Self::TransactionConflict => f.write_str("transaction_conflict"),
+                    Self::RecoveryRequired => f.write_str("recovery_required"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                    Self::UnknownTransaction => f.write_str("unknown_transaction"),
+                    Self::AuthorityUnmounted => f.write_str("authority_unmounted"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationSurfaceUnavailableV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial" => Ok(Self::Partial),
+                    "stale" => Ok(Self::Stale),
+                    "denied" => Ok(Self::Denied),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "approval_conflict" => Ok(Self::ApprovalConflict),
+                    "transaction_conflict" => Ok(Self::TransactionConflict),
+                    "recovery_required" => Ok(Self::RecoveryRequired),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    "unknown_transaction" => Ok(Self::UnknownTransaction),
+                    "authority_unmounted" => Ok(Self::AuthorityUnmounted),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///The only truthful terminal outcomes after recovery.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only truthful terminal outcomes after recovery.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "committed",
+        ///    "aborted_no_change",
+        ///    "rolled_back",
+        ///    "needs_inspection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationTerminalOutcomeV1 {
+            #[serde(rename = "committed")]
+            Committed,
+            #[serde(rename = "aborted_no_change")]
+            AbortedNoChange,
+            #[serde(rename = "rolled_back")]
+            RolledBack,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+        }
+        impl ::std::fmt::Display for NativeIntegrationTerminalOutcomeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Committed => f.write_str("committed"),
+                    Self::AbortedNoChange => f.write_str("aborted_no_change"),
+                    Self::RolledBack => f.write_str("rolled_back"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTerminalOutcomeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "committed" => Ok(Self::Committed),
+                    "aborted_no_change" => Ok(Self::AbortedNoChange),
+                    "rolled_back" => Ok(Self::RolledBack),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Why a preflight cannot authorize apply.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a preflight cannot authorize apply.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "partial_evidence",
+        ///    "stale_scope",
+        ///    "denied",
+        ///    "native_state_unavailable",
+        ///    "reset_required",
+        ///    "durability_uncertain",
+        ///    "unsupported_hooks",
+        ///    "signing_required",
+        ///    "destination_occupied"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationUnavailabilityV1 {
+            #[serde(rename = "partial_evidence")]
+            PartialEvidence,
+            #[serde(rename = "stale_scope")]
+            StaleScope,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "native_state_unavailable")]
+            NativeStateUnavailable,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "unsupported_hooks")]
+            UnsupportedHooks,
+            #[serde(rename = "signing_required")]
+            SigningRequired,
+            #[serde(rename = "destination_occupied")]
+            DestinationOccupied,
+        }
+        impl ::std::fmt::Display for NativeIntegrationUnavailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::PartialEvidence => f.write_str("partial_evidence"),
+                    Self::StaleScope => f.write_str("stale_scope"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::NativeStateUnavailable => f.write_str("native_state_unavailable"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::UnsupportedHooks => f.write_str("unsupported_hooks"),
+                    Self::SigningRequired => f.write_str("signing_required"),
+                    Self::DestinationOccupied => f.write_str("destination_occupied"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationUnavailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial_evidence" => Ok(Self::PartialEvidence),
+                    "stale_scope" => Ok(Self::StaleScope),
+                    "denied" => Ok(Self::Denied),
+                    "native_state_unavailable" => Ok(Self::NativeStateUnavailable),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "unsupported_hooks" => Ok(Self::UnsupportedHooks),
+                    "signing_required" => Ok(Self::SigningRequired),
+                    "destination_occupied" => Ok(Self::DestinationOccupied),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic epoch of the worktree inventory frozen into a stack revision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic epoch of the worktree inventory frozen into a stack revision.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorktreeInventoryEpoch(pub u64);
+        impl ::std::ops::Deref for WorktreeInventoryEpoch {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventoryEpoch> for u64 {
+            fn from(value: WorktreeInventoryEpoch) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorktreeInventoryEpoch {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventoryEpoch {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventoryEpoch {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::NativeIntegrationCancelSurfaceRequest;
+    pub type Result = result::NativeIntegrationSurfaceResultV1;
+}
+typed_operation!(
+    CancelNativeIntegration,
+    cancel_native_integration,
+    "operation.application.cancel_native_integration",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_cancel_native_integration"
+    },
+    "binding.mcp.cancel_native_integration.v1",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeEffect,
+        CancellationPoint::EffectInFlight,
+        CancellationPoint::AfterCommit
+    ],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.application.native-integration.cancel.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod application_configuration_audit {
     pub mod request {
         /// Error types.
@@ -48151,6 +51682,6671 @@ typed_operation!(
     1
 );
 #[allow(clippy::all)]
+pub mod native_integration_status {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///`NativeIntegrationStatusSurfaceRequest`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationStatusSurfaceRequest",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "transaction_id"
+        ///  ],
+        ///  "properties": {
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStatusSurfaceRequest {
+            pub transaction_id: NativeIntegrationTransactionId,
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///The only Git histories this product operation can create.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only Git histories this product operation can create.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "fast_forward",
+        ///    "two_parent_merge",
+        ///    "cherry_pick_exact_commits"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum MechanicalIntegrationModeV1 {
+            #[serde(rename = "fast_forward")]
+            FastForward,
+            #[serde(rename = "two_parent_merge")]
+            TwoParentMerge,
+            #[serde(rename = "cherry_pick_exact_commits")]
+            CherryPickExactCommits,
+        }
+        impl ::std::fmt::Display for MechanicalIntegrationModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::FastForward => f.write_str("fast_forward"),
+                    Self::TwoParentMerge => f.write_str("two_parent_merge"),
+                    Self::CherryPickExactCommits => f.write_str("cherry_pick_exact_commits"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for MechanicalIntegrationModeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "fast_forward" => Ok(Self::FastForward),
+                    "two_parent_merge" => Ok(Self::TwoParentMerge),
+                    "cherry_pick_exact_commits" => Ok(Self::CherryPickExactCommits),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Durable transaction phase. `RefCommitStarted` is the cancellation boundary.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable transaction phase. `RefCommitStarted` is the cancellation boundary.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "prepared",
+        ///    "candidate_verified",
+        ///    "ref_commit_started",
+        ///    "final_state_verification",
+        ///    "terminal"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationPhaseV1 {
+            #[serde(rename = "prepared")]
+            Prepared,
+            #[serde(rename = "candidate_verified")]
+            CandidateVerified,
+            #[serde(rename = "ref_commit_started")]
+            RefCommitStarted,
+            #[serde(rename = "final_state_verification")]
+            FinalStateVerification,
+            #[serde(rename = "terminal")]
+            Terminal,
+        }
+        impl ::std::fmt::Display for NativeIntegrationPhaseV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Prepared => f.write_str("prepared"),
+                    Self::CandidateVerified => f.write_str("candidate_verified"),
+                    Self::RefCommitStarted => f.write_str("ref_commit_started"),
+                    Self::FinalStateVerification => f.write_str("final_state_verification"),
+                    Self::Terminal => f.write_str("terminal"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPhaseV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "prepared" => Ok(Self::Prepared),
+                    "candidate_verified" => Ok(Self::CandidateVerified),
+                    "ref_commit_started" => Ok(Self::RefCommitStarted),
+                    "final_state_verification" => Ok(Self::FinalStateVerification),
+                    "terminal" => Ok(Self::Terminal),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Truthful preview classification. Only `MechanicalIntegrationEligible`
+        carries apply-eligible evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful preview classification. Only `MechanicalIntegrationEligible`\ncarries apply-eligible evidence.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "$ref": "#/definitions/MechanicalIntegrationModeV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "mechanical_integration_eligible"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "already_integrated"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "conflict_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "conflict_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "native_conflict"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "evidence_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "evidence_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "semantic_review_required"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state", content = "detail")]
+        pub enum NativeIntegrationPreviewDispositionV1 {
+            #[serde(rename = "mechanical_integration_eligible")]
+            MechanicalIntegrationEligible(MechanicalIntegrationModeV1),
+            #[serde(rename = "already_integrated")]
+            AlreadyIntegrated,
+            #[serde(rename = "native_conflict")]
+            NativeConflict { conflict_digest: ManifestDigest },
+            #[serde(rename = "semantic_review_required")]
+            SemanticReviewRequired { evidence_digest: ManifestDigest },
+            #[serde(rename = "partial")]
+            Partial {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+            #[serde(rename = "unavailable")]
+            Unavailable {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+        }
+        impl ::std::convert::From<MechanicalIntegrationModeV1> for NativeIntegrationPreviewDispositionV1 {
+            fn from(value: MechanicalIntegrationModeV1) -> Self {
+                Self::MechanicalIntegrationEligible(value)
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationPreviewId> for ::std::string::String {
+            fn from(value: NativeIntegrationPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Bounded projection of one frozen selection.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one frozen selection.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "destination_ref",
+        ///    "frozen_at",
+        ///    "inventory_epoch",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "selection_digest",
+        ///    "source_ref"
+        ///  ],
+        ///  "properties": {
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "frozen_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "inventory_epoch": {
+        ///      "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "selection_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "source_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationSnapshotProjectionV1 {
+            pub destination_ref: RefId,
+            pub frozen_at: UtcMicros,
+            pub inventory_epoch: WorktreeInventoryEpoch,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub selection_digest: ManifestDigest,
+            pub source_ref: RefId,
+        }
+        ///Bounded projection of one durable transaction status.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one durable transaction status.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "cancellation_requested",
+        ///    "destination_ref",
+        ///    "phase",
+        ///    "phase_revision",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "repository_id",
+        ///    "transaction_id",
+        ///    "updated_at"
+        ///  ],
+        ///  "properties": {
+        ///    "cancellation_requested": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "phase": {
+        ///      "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///    },
+        ///    "phase_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "terminal_outcome": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    },
+        ///    "updated_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStatusProjectionV1 {
+            pub cancellation_requested: bool,
+            pub destination_ref: RefId,
+            pub phase: NativeIntegrationPhaseV1,
+            pub phase_revision: u64,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: NativeIntegrationPreviewId,
+            pub repository_id: RepositoryId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+            pub transaction_id: NativeIntegrationTransactionId,
+            pub updated_at: UtcMicros,
+        }
+        ///One typed result for every native-integration surface operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationSurfaceResultV1",
+        ///  "description": "One typed result for every native-integration surface operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "description": "Bounded projection of one frozen selection.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "destination_ref",
+        ///        "frozen_at",
+        ///        "inventory_epoch",
+        ///        "outcome",
+        ///        "project_id",
+        ///        "repository_id",
+        ///        "selection_digest",
+        ///        "source_ref"
+        ///      ],
+        ///      "properties": {
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "frozen_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "inventory_epoch": {
+        ///          "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "stack_snapshot"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "selection_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "source_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one immutable preview.\n\nCandidate trees, conflict bodies, and ordered commit objects stay behind the\npreview digest: the surface reports identity, classification, and expiry so\na caller can approve exactly this preview and nothing else.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "created_at",
+        ///        "disposition",
+        ///        "expires_at",
+        ///        "ordered_commit_count",
+        ///        "outcome",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "created_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "disposition": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewDispositionV1"
+        ///        },
+        ///        "expires_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "ordered_commit_count": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "preview"
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "selection": {
+        ///          "$ref": "#/definitions/NativeIntegrationSnapshotProjectionV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable terminal receipt.\n\nThe receipt digest and final ref/tree identity are audit metadata; no patch,\nworktree body, or source content crosses this boundary.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "completed_at",
+        ///        "final_ref_tip",
+        ///        "final_tree",
+        ///        "outcome",
+        ///        "receipt_digest",
+        ///        "status",
+        ///        "terminal_outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "completed_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "final_ref_tip": {
+        ///          "type": "string"
+        ///        },
+        ///        "final_tree": {
+        ///          "type": "string"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "receipt"
+        ///        },
+        ///        "receipt_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "status": {
+        ///          "$ref": "#/definitions/NativeIntegrationStatusProjectionV1"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable transaction status.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cancellation_requested",
+        ///        "destination_ref",
+        ///        "outcome",
+        ///        "phase",
+        ///        "phase_revision",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "repository_id",
+        ///        "transaction_id",
+        ///        "updated_at"
+        ///      ],
+        ///      "properties": {
+        ///        "cancellation_requested": {
+        ///          "type": "boolean"
+        ///        },
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "phase": {
+        ///          "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///        },
+        ///        "phase_revision": {
+        ///          "type": "integer",
+        ///          "format": "uint64",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
+        ///        },
+        ///        "transaction_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///        },
+        ///        "updated_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Cancellation disposition. After the native commit point the committed\nreceipt is returned instead of a cancellation claim.",
+        ///      "type": "object",
+        ///      "oneOf": [
+        ///        {
+        ///          "type": "string",
+        ///          "enum": [
+        ///            "cancellation_requested",
+        ///            "commit_point_passed"
+        ///          ]
+        ///        },
+        ///        {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "already_terminal"
+        ///          ],
+        ///          "properties": {
+        ///            "already_terminal": {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      ],
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "cancellation"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "reason"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "reason": {
+        ///          "$ref": "#/definitions/NativeIntegrationSurfaceUnavailableV1"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(untagged, deny_unknown_fields)]
+        pub enum NativeIntegrationSurfaceResultV1 {
+            Variant0 {
+                destination_ref: RefId,
+                frozen_at: UtcMicros,
+                inventory_epoch: WorktreeInventoryEpoch,
+                outcome: ::std::string::String,
+                project_id: ProjectId,
+                repository_id: RepositoryId,
+                selection_digest: ManifestDigest,
+                source_ref: RefId,
+            },
+            Variant1 {
+                created_at: UtcMicros,
+                disposition: NativeIntegrationPreviewDispositionV1,
+                expires_at: UtcMicros,
+                ordered_commit_count: u32,
+                outcome: ::std::string::String,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                selection: NativeIntegrationSnapshotProjectionV1,
+            },
+            Variant2 {
+                completed_at: UtcMicros,
+                final_ref_tip: ::std::string::String,
+                final_tree: ::std::string::String,
+                outcome: ::std::string::String,
+                receipt_digest: ManifestDigest,
+                status: NativeIntegrationStatusProjectionV1,
+                terminal_outcome: NativeIntegrationTerminalOutcomeV1,
+            },
+            Variant3 {
+                cancellation_requested: bool,
+                destination_ref: RefId,
+                outcome: ::std::string::String,
+                phase: NativeIntegrationPhaseV1,
+                phase_revision: u64,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                repository_id: RepositoryId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+                transaction_id: NativeIntegrationTransactionId,
+                updated_at: UtcMicros,
+            },
+            Variant4 {
+                already_terminal: NativeIntegrationTerminalOutcomeV1,
+                outcome: ::std::string::String,
+            },
+            Variant5 {
+                outcome: ::std::string::String,
+                reason: NativeIntegrationSurfaceUnavailableV1,
+            },
+        }
+        /**Why a native-integration operation produced no advancing state.
+
+        Every variant is read-only and truthful. None of them authorizes apply, and
+        a denied or absent target is reported indistinguishably from an unavailable
+        authority so no identity, path, count, or topology leaks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a native-integration operation produced no advancing state.\n\nEvery variant is read-only and truthful. None of them authorizes apply, and\na denied or absent target is reported indistinguishably from an unavailable\nauthority so no identity, path, count, or topology leaks.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "partial",
+        ///        "stale",
+        ///        "denied",
+        ///        "reset_required",
+        ///        "durability_uncertain",
+        ///        "cancelled",
+        ///        "approval_conflict",
+        ///        "transaction_conflict",
+        ///        "recovery_required",
+        ///        "needs_inspection",
+        ///        "unknown_transaction"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "No native-integration runtime authority is mounted for this daemon.",
+        ///      "type": "string",
+        ///      "const": "authority_unmounted"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationSurfaceUnavailableV1 {
+            #[serde(rename = "partial")]
+            Partial,
+            #[serde(rename = "stale")]
+            Stale,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "approval_conflict")]
+            ApprovalConflict,
+            #[serde(rename = "transaction_conflict")]
+            TransactionConflict,
+            #[serde(rename = "recovery_required")]
+            RecoveryRequired,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+            #[serde(rename = "unknown_transaction")]
+            UnknownTransaction,
+            ///No native-integration runtime authority is mounted for this daemon.
+            #[serde(rename = "authority_unmounted")]
+            AuthorityUnmounted,
+        }
+        impl ::std::fmt::Display for NativeIntegrationSurfaceUnavailableV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Partial => f.write_str("partial"),
+                    Self::Stale => f.write_str("stale"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::ApprovalConflict => f.write_str("approval_conflict"),
+                    Self::TransactionConflict => f.write_str("transaction_conflict"),
+                    Self::RecoveryRequired => f.write_str("recovery_required"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                    Self::UnknownTransaction => f.write_str("unknown_transaction"),
+                    Self::AuthorityUnmounted => f.write_str("authority_unmounted"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationSurfaceUnavailableV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial" => Ok(Self::Partial),
+                    "stale" => Ok(Self::Stale),
+                    "denied" => Ok(Self::Denied),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "approval_conflict" => Ok(Self::ApprovalConflict),
+                    "transaction_conflict" => Ok(Self::TransactionConflict),
+                    "recovery_required" => Ok(Self::RecoveryRequired),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    "unknown_transaction" => Ok(Self::UnknownTransaction),
+                    "authority_unmounted" => Ok(Self::AuthorityUnmounted),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///The only truthful terminal outcomes after recovery.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only truthful terminal outcomes after recovery.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "committed",
+        ///    "aborted_no_change",
+        ///    "rolled_back",
+        ///    "needs_inspection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationTerminalOutcomeV1 {
+            #[serde(rename = "committed")]
+            Committed,
+            #[serde(rename = "aborted_no_change")]
+            AbortedNoChange,
+            #[serde(rename = "rolled_back")]
+            RolledBack,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+        }
+        impl ::std::fmt::Display for NativeIntegrationTerminalOutcomeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Committed => f.write_str("committed"),
+                    Self::AbortedNoChange => f.write_str("aborted_no_change"),
+                    Self::RolledBack => f.write_str("rolled_back"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTerminalOutcomeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "committed" => Ok(Self::Committed),
+                    "aborted_no_change" => Ok(Self::AbortedNoChange),
+                    "rolled_back" => Ok(Self::RolledBack),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Why a preflight cannot authorize apply.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a preflight cannot authorize apply.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "partial_evidence",
+        ///    "stale_scope",
+        ///    "denied",
+        ///    "native_state_unavailable",
+        ///    "reset_required",
+        ///    "durability_uncertain",
+        ///    "unsupported_hooks",
+        ///    "signing_required",
+        ///    "destination_occupied"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationUnavailabilityV1 {
+            #[serde(rename = "partial_evidence")]
+            PartialEvidence,
+            #[serde(rename = "stale_scope")]
+            StaleScope,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "native_state_unavailable")]
+            NativeStateUnavailable,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "unsupported_hooks")]
+            UnsupportedHooks,
+            #[serde(rename = "signing_required")]
+            SigningRequired,
+            #[serde(rename = "destination_occupied")]
+            DestinationOccupied,
+        }
+        impl ::std::fmt::Display for NativeIntegrationUnavailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::PartialEvidence => f.write_str("partial_evidence"),
+                    Self::StaleScope => f.write_str("stale_scope"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::NativeStateUnavailable => f.write_str("native_state_unavailable"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::UnsupportedHooks => f.write_str("unsupported_hooks"),
+                    Self::SigningRequired => f.write_str("signing_required"),
+                    Self::DestinationOccupied => f.write_str("destination_occupied"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationUnavailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial_evidence" => Ok(Self::PartialEvidence),
+                    "stale_scope" => Ok(Self::StaleScope),
+                    "denied" => Ok(Self::Denied),
+                    "native_state_unavailable" => Ok(Self::NativeStateUnavailable),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "unsupported_hooks" => Ok(Self::UnsupportedHooks),
+                    "signing_required" => Ok(Self::SigningRequired),
+                    "destination_occupied" => Ok(Self::DestinationOccupied),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic epoch of the worktree inventory frozen into a stack revision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic epoch of the worktree inventory frozen into a stack revision.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorktreeInventoryEpoch(pub u64);
+        impl ::std::ops::Deref for WorktreeInventoryEpoch {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventoryEpoch> for u64 {
+            fn from(value: WorktreeInventoryEpoch) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorktreeInventoryEpoch {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventoryEpoch {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventoryEpoch {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::NativeIntegrationStatusSurfaceRequest;
+    pub type Result = result::NativeIntegrationSurfaceResultV1;
+}
+typed_operation!(
+    NativeIntegrationStatus,
+    native_integration_status,
+    "operation.application.native_integration_status",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_native_integration_status"
+    },
+    "binding.mcp.native_integration_status.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.application.native-integration.status.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod preflight_native_integration {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `BranchStackId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `BranchStackId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct BranchStackId(pub ::std::string::String);
+        impl ::std::ops::Deref for BranchStackId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<BranchStackId> for ::std::string::String {
+            fn from(value: BranchStackId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for BranchStackId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for BranchStackId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for BranchStackId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `BranchStackRevisionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `BranchStackRevisionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct BranchStackRevisionId(pub ::std::string::String);
+        impl ::std::ops::Deref for BranchStackRevisionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<BranchStackRevisionId> for ::std::string::String {
+            fn from(value: BranchStackRevisionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for BranchStackRevisionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for BranchStackRevisionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for BranchStackRevisionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///The only Git histories this product operation can create.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only Git histories this product operation can create.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "fast_forward",
+        ///    "two_parent_merge",
+        ///    "cherry_pick_exact_commits"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum MechanicalIntegrationModeV1 {
+            #[serde(rename = "fast_forward")]
+            FastForward,
+            #[serde(rename = "two_parent_merge")]
+            TwoParentMerge,
+            #[serde(rename = "cherry_pick_exact_commits")]
+            CherryPickExactCommits,
+        }
+        impl ::std::fmt::Display for MechanicalIntegrationModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::FastForward => f.write_str("fast_forward"),
+                    Self::TwoParentMerge => f.write_str("two_parent_merge"),
+                    Self::CherryPickExactCommits => f.write_str("cherry_pick_exact_commits"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for MechanicalIntegrationModeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "fast_forward" => Ok(Self::FastForward),
+                    "two_parent_merge" => Ok(Self::TwoParentMerge),
+                    "cherry_pick_exact_commits" => Ok(Self::CherryPickExactCommits),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Explicit direction of one integration. Stack meaning is never inferred.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Explicit direction of one integration. Stack meaning is never inferred.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "propagate_dependency_to_dependent",
+        ///    "land_dependent_into_dependency",
+        ///    "integrate_independent_branch"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationDirectionV1 {
+            #[serde(rename = "propagate_dependency_to_dependent")]
+            PropagateDependencyToDependent,
+            #[serde(rename = "land_dependent_into_dependency")]
+            LandDependentIntoDependency,
+            #[serde(rename = "integrate_independent_branch")]
+            IntegrateIndependentBranch,
+        }
+        impl ::std::fmt::Display for NativeIntegrationDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::PropagateDependencyToDependent => {
+                        f.write_str("propagate_dependency_to_dependent")
+                    }
+                    Self::LandDependentIntoDependency => {
+                        f.write_str("land_dependent_into_dependency")
+                    }
+                    Self::IntegrateIndependentBranch => f.write_str("integrate_independent_branch"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "propagate_dependency_to_dependent" => Ok(Self::PropagateDependencyToDependent),
+                    "land_dependent_into_dependency" => Ok(Self::LandDependentIntoDependency),
+                    "integrate_independent_branch" => Ok(Self::IntegrateIndependentBranch),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Exact semantic evidence revisions joined to native conflict evidence.
+
+        Mirrors [`super::NativeIntegrationEvidenceRevisionsV1`] on the wire; the
+        application type stays the single validation authority.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Exact semantic evidence revisions joined to native conflict evidence.\n\nMirrors [`super::NativeIntegrationEvidenceRevisionsV1`] on the wire; the\napplication type stays the single validation authority.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "graph_revision_digest",
+        ///    "migration_revision_digest",
+        ///    "schema_revision_digest",
+        ///    "test_revision_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "graph_revision_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "migration_revision_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "schema_revision_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "test_revision_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationEvidenceRevisionsWireV1 {
+            pub graph_revision_digest: ManifestDigest,
+            pub migration_revision_digest: ManifestDigest,
+            pub schema_revision_digest: ManifestDigest,
+            pub test_revision_digest: ManifestDigest,
+        }
+        /**Read-only preflight over one frozen snapshot identity.
+
+        `preferred_mode` selects only one of the three fixed mechanical encodings.
+        It cannot change topology, commit order, or the commit set.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationPreflightSurfaceRequest",
+        ///  "description": "Read-only preflight over one frozen snapshot identity.\n\n`preferred_mode` selects only one of the three fixed mechanical encodings.\nIt cannot change topology, commit order, or the commit set.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence",
+        ///    "snapshot"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence": {
+        ///      "$ref": "#/definitions/NativeIntegrationEvidenceRevisionsWireV1"
+        ///    },
+        ///    "preferred_mode": {
+        ///      "default": null,
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/MechanicalIntegrationModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "snapshot": {
+        ///      "$ref": "#/definitions/NativeIntegrationStackSnapshotSurfaceRequest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationPreflightSurfaceRequest {
+            pub evidence: NativeIntegrationEvidenceRevisionsWireV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub preferred_mode: ::std::option::Option<MechanicalIntegrationModeV1>,
+            pub snapshot: NativeIntegrationStackSnapshotSurfaceRequest,
+        }
+        /**Caller-visible selection proof. The topology authority resolves it into an
+        immutable domain selection and never discovers roots or edges.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Caller-visible selection proof. The topology authority resolves it into an\nimmutable domain selection and never discovers roots or edges.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "binding",
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "binding": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "destination_node_id",
+        ///            "direction",
+        ///            "revision_digest",
+        ///            "revision_id",
+        ///            "source_node_id",
+        ///            "stack_id"
+        ///          ],
+        ///          "properties": {
+        ///            "destination_node_id": {
+        ///              "$ref": "#/definitions/StackNodeId"
+        ///            },
+        ///            "direction": {
+        ///              "$ref": "#/definitions/NativeIntegrationDirectionV1"
+        ///            },
+        ///            "revision_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            },
+        ///            "revision_id": {
+        ///              "$ref": "#/definitions/BranchStackRevisionId"
+        ///            },
+        ///            "source_node_id": {
+        ///              "$ref": "#/definitions/StackNodeId"
+        ///            },
+        ///            "stack_id": {
+        ///              "$ref": "#/definitions/BranchStackId"
+        ///            }
+        ///          }
+        ///        },
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "declared_stack_edge"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "binding",
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "binding": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "proposal_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "proposal_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "independent_branch"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "binding")]
+        pub enum NativeIntegrationSelectionBindingV1 {
+            #[serde(rename = "declared_stack_edge")]
+            DeclaredStackEdge {
+                destination_node_id: StackNodeId,
+                direction: NativeIntegrationDirectionV1,
+                revision_digest: ManifestDigest,
+                revision_id: BranchStackRevisionId,
+                source_node_id: StackNodeId,
+                stack_id: BranchStackId,
+            },
+            #[serde(rename = "independent_branch")]
+            IndependentBranch { proposal_digest: ManifestDigest },
+        }
+        /**Exact caller-supplied identity frozen by `stack_snapshot`.
+
+        This is the Plan 36 step 1 binding: the exact authorized `ProjectId`,
+        `RepositoryId`, source/destination worktree and ref identity, the frozen
+        inventory snapshot/epoch, the scope/grant/policy revisions, and either an
+        independent-branch proposal digest or the exact stack/revision/node/edge
+        binding. Nothing here can be inferred from a path, CWD, branch display
+        name, free-form SHA, or provider topology.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Exact caller-supplied identity frozen by `stack_snapshot`.\n\nThis is the Plan 36 step 1 binding: the exact authorized `ProjectId`,\n`RepositoryId`, source/destination worktree and ref identity, the frozen\ninventory snapshot/epoch, the scope/grant/policy revisions, and either an\nindependent-branch proposal digest or the exact stack/revision/node/edge\nbinding. Nothing here can be inferred from a path, CWD, branch display\nname, free-form SHA, or provider topology.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authorized_scope_set_digest",
+        ///    "destination",
+        ///    "grant_digest",
+        ///    "inventory_epoch",
+        ///    "inventory_snapshot_id",
+        ///    "policy_digest",
+        ///    "selection",
+        ///    "source"
+        ///  ],
+        ///  "properties": {
+        ///    "authorized_scope_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "destination": {
+        ///      "$ref": "#/definitions/ResolvedScope"
+        ///    },
+        ///    "grant_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "inventory_epoch": {
+        ///      "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///    },
+        ///    "inventory_snapshot_id": {
+        ///      "$ref": "#/definitions/WorktreeInventorySnapshotId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "selection": {
+        ///      "$ref": "#/definitions/NativeIntegrationSelectionBindingV1"
+        ///    },
+        ///    "source": {
+        ///      "$ref": "#/definitions/ResolvedScope"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStackSnapshotSurfaceRequest {
+            pub authorized_scope_set_digest: ManifestDigest,
+            pub destination: ResolvedScope,
+            pub grant_digest: ManifestDigest,
+            pub inventory_epoch: WorktreeInventoryEpoch,
+            pub inventory_snapshot_id: WorktreeInventorySnapshotId,
+            pub policy_digest: ManifestDigest,
+            pub selection: NativeIntegrationSelectionBindingV1,
+            pub source: ResolvedScope,
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**The resolved resolved configuration scope is one exact project/repository/worktree root.
+
+        Paths, CWDs, labels, and mutable branch spellings are deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The resolved resolved configuration scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "scope_digest",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "reference": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ResolvedScope {
+            pub project_id: ProjectId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub reference: ::std::option::Option<RefId>,
+            pub repository_id: RepositoryId,
+            pub scope_digest: ManifestDigest,
+            pub worktree_id: WorktreeId,
+        }
+        ///Strongly typed canonical identity: `StackNodeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `StackNodeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct StackNodeId(pub ::std::string::String);
+        impl ::std::ops::Deref for StackNodeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<StackNodeId> for ::std::string::String {
+            fn from(value: StackNodeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for StackNodeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for StackNodeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for StackNodeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic epoch of the worktree inventory frozen into a stack revision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic epoch of the worktree inventory frozen into a stack revision.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorktreeInventoryEpoch(pub u64);
+        impl ::std::ops::Deref for WorktreeInventoryEpoch {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventoryEpoch> for u64 {
+            fn from(value: WorktreeInventoryEpoch) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorktreeInventoryEpoch {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventoryEpoch {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventoryEpoch {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeInventorySnapshotId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeInventorySnapshotId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeInventorySnapshotId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeInventorySnapshotId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventorySnapshotId> for ::std::string::String {
+            fn from(value: WorktreeInventorySnapshotId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeInventorySnapshotId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventorySnapshotId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventorySnapshotId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///The only Git histories this product operation can create.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only Git histories this product operation can create.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "fast_forward",
+        ///    "two_parent_merge",
+        ///    "cherry_pick_exact_commits"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum MechanicalIntegrationModeV1 {
+            #[serde(rename = "fast_forward")]
+            FastForward,
+            #[serde(rename = "two_parent_merge")]
+            TwoParentMerge,
+            #[serde(rename = "cherry_pick_exact_commits")]
+            CherryPickExactCommits,
+        }
+        impl ::std::fmt::Display for MechanicalIntegrationModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::FastForward => f.write_str("fast_forward"),
+                    Self::TwoParentMerge => f.write_str("two_parent_merge"),
+                    Self::CherryPickExactCommits => f.write_str("cherry_pick_exact_commits"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for MechanicalIntegrationModeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "fast_forward" => Ok(Self::FastForward),
+                    "two_parent_merge" => Ok(Self::TwoParentMerge),
+                    "cherry_pick_exact_commits" => Ok(Self::CherryPickExactCommits),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Durable transaction phase. `RefCommitStarted` is the cancellation boundary.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable transaction phase. `RefCommitStarted` is the cancellation boundary.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "prepared",
+        ///    "candidate_verified",
+        ///    "ref_commit_started",
+        ///    "final_state_verification",
+        ///    "terminal"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationPhaseV1 {
+            #[serde(rename = "prepared")]
+            Prepared,
+            #[serde(rename = "candidate_verified")]
+            CandidateVerified,
+            #[serde(rename = "ref_commit_started")]
+            RefCommitStarted,
+            #[serde(rename = "final_state_verification")]
+            FinalStateVerification,
+            #[serde(rename = "terminal")]
+            Terminal,
+        }
+        impl ::std::fmt::Display for NativeIntegrationPhaseV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Prepared => f.write_str("prepared"),
+                    Self::CandidateVerified => f.write_str("candidate_verified"),
+                    Self::RefCommitStarted => f.write_str("ref_commit_started"),
+                    Self::FinalStateVerification => f.write_str("final_state_verification"),
+                    Self::Terminal => f.write_str("terminal"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPhaseV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "prepared" => Ok(Self::Prepared),
+                    "candidate_verified" => Ok(Self::CandidateVerified),
+                    "ref_commit_started" => Ok(Self::RefCommitStarted),
+                    "final_state_verification" => Ok(Self::FinalStateVerification),
+                    "terminal" => Ok(Self::Terminal),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Truthful preview classification. Only `MechanicalIntegrationEligible`
+        carries apply-eligible evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful preview classification. Only `MechanicalIntegrationEligible`\ncarries apply-eligible evidence.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "$ref": "#/definitions/MechanicalIntegrationModeV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "mechanical_integration_eligible"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "already_integrated"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "conflict_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "conflict_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "native_conflict"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "evidence_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "evidence_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "semantic_review_required"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state", content = "detail")]
+        pub enum NativeIntegrationPreviewDispositionV1 {
+            #[serde(rename = "mechanical_integration_eligible")]
+            MechanicalIntegrationEligible(MechanicalIntegrationModeV1),
+            #[serde(rename = "already_integrated")]
+            AlreadyIntegrated,
+            #[serde(rename = "native_conflict")]
+            NativeConflict { conflict_digest: ManifestDigest },
+            #[serde(rename = "semantic_review_required")]
+            SemanticReviewRequired { evidence_digest: ManifestDigest },
+            #[serde(rename = "partial")]
+            Partial {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+            #[serde(rename = "unavailable")]
+            Unavailable {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+        }
+        impl ::std::convert::From<MechanicalIntegrationModeV1> for NativeIntegrationPreviewDispositionV1 {
+            fn from(value: MechanicalIntegrationModeV1) -> Self {
+                Self::MechanicalIntegrationEligible(value)
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationPreviewId> for ::std::string::String {
+            fn from(value: NativeIntegrationPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Bounded projection of one frozen selection.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one frozen selection.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "destination_ref",
+        ///    "frozen_at",
+        ///    "inventory_epoch",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "selection_digest",
+        ///    "source_ref"
+        ///  ],
+        ///  "properties": {
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "frozen_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "inventory_epoch": {
+        ///      "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "selection_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "source_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationSnapshotProjectionV1 {
+            pub destination_ref: RefId,
+            pub frozen_at: UtcMicros,
+            pub inventory_epoch: WorktreeInventoryEpoch,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub selection_digest: ManifestDigest,
+            pub source_ref: RefId,
+        }
+        ///Bounded projection of one durable transaction status.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one durable transaction status.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "cancellation_requested",
+        ///    "destination_ref",
+        ///    "phase",
+        ///    "phase_revision",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "repository_id",
+        ///    "transaction_id",
+        ///    "updated_at"
+        ///  ],
+        ///  "properties": {
+        ///    "cancellation_requested": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "phase": {
+        ///      "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///    },
+        ///    "phase_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "terminal_outcome": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    },
+        ///    "updated_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStatusProjectionV1 {
+            pub cancellation_requested: bool,
+            pub destination_ref: RefId,
+            pub phase: NativeIntegrationPhaseV1,
+            pub phase_revision: u64,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: NativeIntegrationPreviewId,
+            pub repository_id: RepositoryId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+            pub transaction_id: NativeIntegrationTransactionId,
+            pub updated_at: UtcMicros,
+        }
+        ///One typed result for every native-integration surface operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationSurfaceResultV1",
+        ///  "description": "One typed result for every native-integration surface operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "description": "Bounded projection of one frozen selection.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "destination_ref",
+        ///        "frozen_at",
+        ///        "inventory_epoch",
+        ///        "outcome",
+        ///        "project_id",
+        ///        "repository_id",
+        ///        "selection_digest",
+        ///        "source_ref"
+        ///      ],
+        ///      "properties": {
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "frozen_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "inventory_epoch": {
+        ///          "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "stack_snapshot"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "selection_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "source_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one immutable preview.\n\nCandidate trees, conflict bodies, and ordered commit objects stay behind the\npreview digest: the surface reports identity, classification, and expiry so\na caller can approve exactly this preview and nothing else.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "created_at",
+        ///        "disposition",
+        ///        "expires_at",
+        ///        "ordered_commit_count",
+        ///        "outcome",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "created_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "disposition": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewDispositionV1"
+        ///        },
+        ///        "expires_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "ordered_commit_count": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "preview"
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "selection": {
+        ///          "$ref": "#/definitions/NativeIntegrationSnapshotProjectionV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable terminal receipt.\n\nThe receipt digest and final ref/tree identity are audit metadata; no patch,\nworktree body, or source content crosses this boundary.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "completed_at",
+        ///        "final_ref_tip",
+        ///        "final_tree",
+        ///        "outcome",
+        ///        "receipt_digest",
+        ///        "status",
+        ///        "terminal_outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "completed_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "final_ref_tip": {
+        ///          "type": "string"
+        ///        },
+        ///        "final_tree": {
+        ///          "type": "string"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "receipt"
+        ///        },
+        ///        "receipt_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "status": {
+        ///          "$ref": "#/definitions/NativeIntegrationStatusProjectionV1"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable transaction status.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cancellation_requested",
+        ///        "destination_ref",
+        ///        "outcome",
+        ///        "phase",
+        ///        "phase_revision",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "repository_id",
+        ///        "transaction_id",
+        ///        "updated_at"
+        ///      ],
+        ///      "properties": {
+        ///        "cancellation_requested": {
+        ///          "type": "boolean"
+        ///        },
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "phase": {
+        ///          "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///        },
+        ///        "phase_revision": {
+        ///          "type": "integer",
+        ///          "format": "uint64",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
+        ///        },
+        ///        "transaction_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///        },
+        ///        "updated_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Cancellation disposition. After the native commit point the committed\nreceipt is returned instead of a cancellation claim.",
+        ///      "type": "object",
+        ///      "oneOf": [
+        ///        {
+        ///          "type": "string",
+        ///          "enum": [
+        ///            "cancellation_requested",
+        ///            "commit_point_passed"
+        ///          ]
+        ///        },
+        ///        {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "already_terminal"
+        ///          ],
+        ///          "properties": {
+        ///            "already_terminal": {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      ],
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "cancellation"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "reason"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "reason": {
+        ///          "$ref": "#/definitions/NativeIntegrationSurfaceUnavailableV1"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(untagged, deny_unknown_fields)]
+        pub enum NativeIntegrationSurfaceResultV1 {
+            Variant0 {
+                destination_ref: RefId,
+                frozen_at: UtcMicros,
+                inventory_epoch: WorktreeInventoryEpoch,
+                outcome: ::std::string::String,
+                project_id: ProjectId,
+                repository_id: RepositoryId,
+                selection_digest: ManifestDigest,
+                source_ref: RefId,
+            },
+            Variant1 {
+                created_at: UtcMicros,
+                disposition: NativeIntegrationPreviewDispositionV1,
+                expires_at: UtcMicros,
+                ordered_commit_count: u32,
+                outcome: ::std::string::String,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                selection: NativeIntegrationSnapshotProjectionV1,
+            },
+            Variant2 {
+                completed_at: UtcMicros,
+                final_ref_tip: ::std::string::String,
+                final_tree: ::std::string::String,
+                outcome: ::std::string::String,
+                receipt_digest: ManifestDigest,
+                status: NativeIntegrationStatusProjectionV1,
+                terminal_outcome: NativeIntegrationTerminalOutcomeV1,
+            },
+            Variant3 {
+                cancellation_requested: bool,
+                destination_ref: RefId,
+                outcome: ::std::string::String,
+                phase: NativeIntegrationPhaseV1,
+                phase_revision: u64,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                repository_id: RepositoryId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+                transaction_id: NativeIntegrationTransactionId,
+                updated_at: UtcMicros,
+            },
+            Variant4 {
+                already_terminal: NativeIntegrationTerminalOutcomeV1,
+                outcome: ::std::string::String,
+            },
+            Variant5 {
+                outcome: ::std::string::String,
+                reason: NativeIntegrationSurfaceUnavailableV1,
+            },
+        }
+        /**Why a native-integration operation produced no advancing state.
+
+        Every variant is read-only and truthful. None of them authorizes apply, and
+        a denied or absent target is reported indistinguishably from an unavailable
+        authority so no identity, path, count, or topology leaks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a native-integration operation produced no advancing state.\n\nEvery variant is read-only and truthful. None of them authorizes apply, and\na denied or absent target is reported indistinguishably from an unavailable\nauthority so no identity, path, count, or topology leaks.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "partial",
+        ///        "stale",
+        ///        "denied",
+        ///        "reset_required",
+        ///        "durability_uncertain",
+        ///        "cancelled",
+        ///        "approval_conflict",
+        ///        "transaction_conflict",
+        ///        "recovery_required",
+        ///        "needs_inspection",
+        ///        "unknown_transaction"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "No native-integration runtime authority is mounted for this daemon.",
+        ///      "type": "string",
+        ///      "const": "authority_unmounted"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationSurfaceUnavailableV1 {
+            #[serde(rename = "partial")]
+            Partial,
+            #[serde(rename = "stale")]
+            Stale,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "approval_conflict")]
+            ApprovalConflict,
+            #[serde(rename = "transaction_conflict")]
+            TransactionConflict,
+            #[serde(rename = "recovery_required")]
+            RecoveryRequired,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+            #[serde(rename = "unknown_transaction")]
+            UnknownTransaction,
+            ///No native-integration runtime authority is mounted for this daemon.
+            #[serde(rename = "authority_unmounted")]
+            AuthorityUnmounted,
+        }
+        impl ::std::fmt::Display for NativeIntegrationSurfaceUnavailableV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Partial => f.write_str("partial"),
+                    Self::Stale => f.write_str("stale"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::ApprovalConflict => f.write_str("approval_conflict"),
+                    Self::TransactionConflict => f.write_str("transaction_conflict"),
+                    Self::RecoveryRequired => f.write_str("recovery_required"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                    Self::UnknownTransaction => f.write_str("unknown_transaction"),
+                    Self::AuthorityUnmounted => f.write_str("authority_unmounted"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationSurfaceUnavailableV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial" => Ok(Self::Partial),
+                    "stale" => Ok(Self::Stale),
+                    "denied" => Ok(Self::Denied),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "approval_conflict" => Ok(Self::ApprovalConflict),
+                    "transaction_conflict" => Ok(Self::TransactionConflict),
+                    "recovery_required" => Ok(Self::RecoveryRequired),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    "unknown_transaction" => Ok(Self::UnknownTransaction),
+                    "authority_unmounted" => Ok(Self::AuthorityUnmounted),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///The only truthful terminal outcomes after recovery.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only truthful terminal outcomes after recovery.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "committed",
+        ///    "aborted_no_change",
+        ///    "rolled_back",
+        ///    "needs_inspection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationTerminalOutcomeV1 {
+            #[serde(rename = "committed")]
+            Committed,
+            #[serde(rename = "aborted_no_change")]
+            AbortedNoChange,
+            #[serde(rename = "rolled_back")]
+            RolledBack,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+        }
+        impl ::std::fmt::Display for NativeIntegrationTerminalOutcomeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Committed => f.write_str("committed"),
+                    Self::AbortedNoChange => f.write_str("aborted_no_change"),
+                    Self::RolledBack => f.write_str("rolled_back"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTerminalOutcomeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "committed" => Ok(Self::Committed),
+                    "aborted_no_change" => Ok(Self::AbortedNoChange),
+                    "rolled_back" => Ok(Self::RolledBack),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Why a preflight cannot authorize apply.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a preflight cannot authorize apply.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "partial_evidence",
+        ///    "stale_scope",
+        ///    "denied",
+        ///    "native_state_unavailable",
+        ///    "reset_required",
+        ///    "durability_uncertain",
+        ///    "unsupported_hooks",
+        ///    "signing_required",
+        ///    "destination_occupied"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationUnavailabilityV1 {
+            #[serde(rename = "partial_evidence")]
+            PartialEvidence,
+            #[serde(rename = "stale_scope")]
+            StaleScope,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "native_state_unavailable")]
+            NativeStateUnavailable,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "unsupported_hooks")]
+            UnsupportedHooks,
+            #[serde(rename = "signing_required")]
+            SigningRequired,
+            #[serde(rename = "destination_occupied")]
+            DestinationOccupied,
+        }
+        impl ::std::fmt::Display for NativeIntegrationUnavailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::PartialEvidence => f.write_str("partial_evidence"),
+                    Self::StaleScope => f.write_str("stale_scope"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::NativeStateUnavailable => f.write_str("native_state_unavailable"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::UnsupportedHooks => f.write_str("unsupported_hooks"),
+                    Self::SigningRequired => f.write_str("signing_required"),
+                    Self::DestinationOccupied => f.write_str("destination_occupied"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationUnavailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial_evidence" => Ok(Self::PartialEvidence),
+                    "stale_scope" => Ok(Self::StaleScope),
+                    "denied" => Ok(Self::Denied),
+                    "native_state_unavailable" => Ok(Self::NativeStateUnavailable),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "unsupported_hooks" => Ok(Self::UnsupportedHooks),
+                    "signing_required" => Ok(Self::SigningRequired),
+                    "destination_occupied" => Ok(Self::DestinationOccupied),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic epoch of the worktree inventory frozen into a stack revision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic epoch of the worktree inventory frozen into a stack revision.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorktreeInventoryEpoch(pub u64);
+        impl ::std::ops::Deref for WorktreeInventoryEpoch {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventoryEpoch> for u64 {
+            fn from(value: WorktreeInventoryEpoch) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorktreeInventoryEpoch {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventoryEpoch {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventoryEpoch {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::NativeIntegrationPreflightSurfaceRequest;
+    pub type Result = result::NativeIntegrationSurfaceResultV1;
+}
+typed_operation!(
+    PreflightNativeIntegration,
+    preflight_native_integration,
+    "operation.application.preflight_native_integration",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_preflight_native_integration"
+    },
+    "binding.mcp.preflight_native_integration.v1",
+    EffectClass::Preview,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.application.native-integration.preflight.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod stack_snapshot {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `BranchStackId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `BranchStackId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct BranchStackId(pub ::std::string::String);
+        impl ::std::ops::Deref for BranchStackId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<BranchStackId> for ::std::string::String {
+            fn from(value: BranchStackId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for BranchStackId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for BranchStackId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for BranchStackId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `BranchStackRevisionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `BranchStackRevisionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct BranchStackRevisionId(pub ::std::string::String);
+        impl ::std::ops::Deref for BranchStackRevisionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<BranchStackRevisionId> for ::std::string::String {
+            fn from(value: BranchStackRevisionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for BranchStackRevisionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for BranchStackRevisionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for BranchStackRevisionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Explicit direction of one integration. Stack meaning is never inferred.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Explicit direction of one integration. Stack meaning is never inferred.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "propagate_dependency_to_dependent",
+        ///    "land_dependent_into_dependency",
+        ///    "integrate_independent_branch"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationDirectionV1 {
+            #[serde(rename = "propagate_dependency_to_dependent")]
+            PropagateDependencyToDependent,
+            #[serde(rename = "land_dependent_into_dependency")]
+            LandDependentIntoDependency,
+            #[serde(rename = "integrate_independent_branch")]
+            IntegrateIndependentBranch,
+        }
+        impl ::std::fmt::Display for NativeIntegrationDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::PropagateDependencyToDependent => {
+                        f.write_str("propagate_dependency_to_dependent")
+                    }
+                    Self::LandDependentIntoDependency => {
+                        f.write_str("land_dependent_into_dependency")
+                    }
+                    Self::IntegrateIndependentBranch => f.write_str("integrate_independent_branch"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "propagate_dependency_to_dependent" => Ok(Self::PropagateDependencyToDependent),
+                    "land_dependent_into_dependency" => Ok(Self::LandDependentIntoDependency),
+                    "integrate_independent_branch" => Ok(Self::IntegrateIndependentBranch),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Caller-visible selection proof. The topology authority resolves it into an
+        immutable domain selection and never discovers roots or edges.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Caller-visible selection proof. The topology authority resolves it into an\nimmutable domain selection and never discovers roots or edges.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "binding",
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "binding": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "destination_node_id",
+        ///            "direction",
+        ///            "revision_digest",
+        ///            "revision_id",
+        ///            "source_node_id",
+        ///            "stack_id"
+        ///          ],
+        ///          "properties": {
+        ///            "destination_node_id": {
+        ///              "$ref": "#/definitions/StackNodeId"
+        ///            },
+        ///            "direction": {
+        ///              "$ref": "#/definitions/NativeIntegrationDirectionV1"
+        ///            },
+        ///            "revision_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            },
+        ///            "revision_id": {
+        ///              "$ref": "#/definitions/BranchStackRevisionId"
+        ///            },
+        ///            "source_node_id": {
+        ///              "$ref": "#/definitions/StackNodeId"
+        ///            },
+        ///            "stack_id": {
+        ///              "$ref": "#/definitions/BranchStackId"
+        ///            }
+        ///          }
+        ///        },
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "declared_stack_edge"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "binding",
+        ///        "kind"
+        ///      ],
+        ///      "properties": {
+        ///        "binding": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "proposal_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "proposal_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "independent_branch"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", content = "binding")]
+        pub enum NativeIntegrationSelectionBindingV1 {
+            #[serde(rename = "declared_stack_edge")]
+            DeclaredStackEdge {
+                destination_node_id: StackNodeId,
+                direction: NativeIntegrationDirectionV1,
+                revision_digest: ManifestDigest,
+                revision_id: BranchStackRevisionId,
+                source_node_id: StackNodeId,
+                stack_id: BranchStackId,
+            },
+            #[serde(rename = "independent_branch")]
+            IndependentBranch { proposal_digest: ManifestDigest },
+        }
+        /**Exact caller-supplied identity frozen by `stack_snapshot`.
+
+        This is the Plan 36 step 1 binding: the exact authorized `ProjectId`,
+        `RepositoryId`, source/destination worktree and ref identity, the frozen
+        inventory snapshot/epoch, the scope/grant/policy revisions, and either an
+        independent-branch proposal digest or the exact stack/revision/node/edge
+        binding. Nothing here can be inferred from a path, CWD, branch display
+        name, free-form SHA, or provider topology.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationStackSnapshotSurfaceRequest",
+        ///  "description": "Exact caller-supplied identity frozen by `stack_snapshot`.\n\nThis is the Plan 36 step 1 binding: the exact authorized `ProjectId`,\n`RepositoryId`, source/destination worktree and ref identity, the frozen\ninventory snapshot/epoch, the scope/grant/policy revisions, and either an\nindependent-branch proposal digest or the exact stack/revision/node/edge\nbinding. Nothing here can be inferred from a path, CWD, branch display\nname, free-form SHA, or provider topology.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "authorized_scope_set_digest",
+        ///    "destination",
+        ///    "grant_digest",
+        ///    "inventory_epoch",
+        ///    "inventory_snapshot_id",
+        ///    "policy_digest",
+        ///    "selection",
+        ///    "source"
+        ///  ],
+        ///  "properties": {
+        ///    "authorized_scope_set_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "destination": {
+        ///      "$ref": "#/definitions/ResolvedScope"
+        ///    },
+        ///    "grant_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "inventory_epoch": {
+        ///      "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///    },
+        ///    "inventory_snapshot_id": {
+        ///      "$ref": "#/definitions/WorktreeInventorySnapshotId"
+        ///    },
+        ///    "policy_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "selection": {
+        ///      "$ref": "#/definitions/NativeIntegrationSelectionBindingV1"
+        ///    },
+        ///    "source": {
+        ///      "$ref": "#/definitions/ResolvedScope"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStackSnapshotSurfaceRequest {
+            pub authorized_scope_set_digest: ManifestDigest,
+            pub destination: ResolvedScope,
+            pub grant_digest: ManifestDigest,
+            pub inventory_epoch: WorktreeInventoryEpoch,
+            pub inventory_snapshot_id: WorktreeInventorySnapshotId,
+            pub policy_digest: ManifestDigest,
+            pub selection: NativeIntegrationSelectionBindingV1,
+            pub source: ResolvedScope,
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**The resolved resolved configuration scope is one exact project/repository/worktree root.
+
+        Paths, CWDs, labels, and mutable branch spellings are deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The resolved resolved configuration scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "scope_digest",
+        ///    "worktree_id"
+        ///  ],
+        ///  "properties": {
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "reference": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree_id": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct ResolvedScope {
+            pub project_id: ProjectId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub reference: ::std::option::Option<RefId>,
+            pub repository_id: RepositoryId,
+            pub scope_digest: ManifestDigest,
+            pub worktree_id: WorktreeId,
+        }
+        ///Strongly typed canonical identity: `StackNodeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `StackNodeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct StackNodeId(pub ::std::string::String);
+        impl ::std::ops::Deref for StackNodeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<StackNodeId> for ::std::string::String {
+            fn from(value: StackNodeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for StackNodeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for StackNodeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for StackNodeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic epoch of the worktree inventory frozen into a stack revision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic epoch of the worktree inventory frozen into a stack revision.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorktreeInventoryEpoch(pub u64);
+        impl ::std::ops::Deref for WorktreeInventoryEpoch {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventoryEpoch> for u64 {
+            fn from(value: WorktreeInventoryEpoch) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorktreeInventoryEpoch {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventoryEpoch {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventoryEpoch {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeInventorySnapshotId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeInventorySnapshotId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeInventorySnapshotId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeInventorySnapshotId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventorySnapshotId> for ::std::string::String {
+            fn from(value: WorktreeInventorySnapshotId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeInventorySnapshotId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventorySnapshotId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventorySnapshotId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///The only Git histories this product operation can create.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only Git histories this product operation can create.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "fast_forward",
+        ///    "two_parent_merge",
+        ///    "cherry_pick_exact_commits"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum MechanicalIntegrationModeV1 {
+            #[serde(rename = "fast_forward")]
+            FastForward,
+            #[serde(rename = "two_parent_merge")]
+            TwoParentMerge,
+            #[serde(rename = "cherry_pick_exact_commits")]
+            CherryPickExactCommits,
+        }
+        impl ::std::fmt::Display for MechanicalIntegrationModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::FastForward => f.write_str("fast_forward"),
+                    Self::TwoParentMerge => f.write_str("two_parent_merge"),
+                    Self::CherryPickExactCommits => f.write_str("cherry_pick_exact_commits"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for MechanicalIntegrationModeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "fast_forward" => Ok(Self::FastForward),
+                    "two_parent_merge" => Ok(Self::TwoParentMerge),
+                    "cherry_pick_exact_commits" => Ok(Self::CherryPickExactCommits),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for MechanicalIntegrationModeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Durable transaction phase. `RefCommitStarted` is the cancellation boundary.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable transaction phase. `RefCommitStarted` is the cancellation boundary.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "prepared",
+        ///    "candidate_verified",
+        ///    "ref_commit_started",
+        ///    "final_state_verification",
+        ///    "terminal"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationPhaseV1 {
+            #[serde(rename = "prepared")]
+            Prepared,
+            #[serde(rename = "candidate_verified")]
+            CandidateVerified,
+            #[serde(rename = "ref_commit_started")]
+            RefCommitStarted,
+            #[serde(rename = "final_state_verification")]
+            FinalStateVerification,
+            #[serde(rename = "terminal")]
+            Terminal,
+        }
+        impl ::std::fmt::Display for NativeIntegrationPhaseV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Prepared => f.write_str("prepared"),
+                    Self::CandidateVerified => f.write_str("candidate_verified"),
+                    Self::RefCommitStarted => f.write_str("ref_commit_started"),
+                    Self::FinalStateVerification => f.write_str("final_state_verification"),
+                    Self::Terminal => f.write_str("terminal"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPhaseV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "prepared" => Ok(Self::Prepared),
+                    "candidate_verified" => Ok(Self::CandidateVerified),
+                    "ref_commit_started" => Ok(Self::RefCommitStarted),
+                    "final_state_verification" => Ok(Self::FinalStateVerification),
+                    "terminal" => Ok(Self::Terminal),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationPhaseV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Truthful preview classification. Only `MechanicalIntegrationEligible`
+        carries apply-eligible evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Truthful preview classification. Only `MechanicalIntegrationEligible`\ncarries apply-eligible evidence.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "$ref": "#/definitions/MechanicalIntegrationModeV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "mechanical_integration_eligible"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "already_integrated"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "conflict_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "conflict_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "native_conflict"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "evidence_digest"
+        ///          ],
+        ///          "properties": {
+        ///            "evidence_digest": {
+        ///              "$ref": "#/definitions/ManifestDigest"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "semantic_review_required"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "detail",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "detail": {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "reason"
+        ///          ],
+        ///          "properties": {
+        ///            "reason": {
+        ///              "$ref": "#/definitions/NativeIntegrationUnavailabilityV1"
+        ///            }
+        ///          }
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state", content = "detail")]
+        pub enum NativeIntegrationPreviewDispositionV1 {
+            #[serde(rename = "mechanical_integration_eligible")]
+            MechanicalIntegrationEligible(MechanicalIntegrationModeV1),
+            #[serde(rename = "already_integrated")]
+            AlreadyIntegrated,
+            #[serde(rename = "native_conflict")]
+            NativeConflict { conflict_digest: ManifestDigest },
+            #[serde(rename = "semantic_review_required")]
+            SemanticReviewRequired { evidence_digest: ManifestDigest },
+            #[serde(rename = "partial")]
+            Partial {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+            #[serde(rename = "unavailable")]
+            Unavailable {
+                reason: NativeIntegrationUnavailabilityV1,
+            },
+        }
+        impl ::std::convert::From<MechanicalIntegrationModeV1> for NativeIntegrationPreviewDispositionV1 {
+            fn from(value: MechanicalIntegrationModeV1) -> Self {
+                Self::MechanicalIntegrationEligible(value)
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationPreviewId> for ::std::string::String {
+            fn from(value: NativeIntegrationPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Bounded projection of one frozen selection.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one frozen selection.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "destination_ref",
+        ///    "frozen_at",
+        ///    "inventory_epoch",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "selection_digest",
+        ///    "source_ref"
+        ///  ],
+        ///  "properties": {
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "frozen_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "inventory_epoch": {
+        ///      "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "selection_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "source_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationSnapshotProjectionV1 {
+            pub destination_ref: RefId,
+            pub frozen_at: UtcMicros,
+            pub inventory_epoch: WorktreeInventoryEpoch,
+            pub project_id: ProjectId,
+            pub repository_id: RepositoryId,
+            pub selection_digest: ManifestDigest,
+            pub source_ref: RefId,
+        }
+        ///Bounded projection of one durable transaction status.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded projection of one durable transaction status.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "cancellation_requested",
+        ///    "destination_ref",
+        ///    "phase",
+        ///    "phase_revision",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "repository_id",
+        ///    "transaction_id",
+        ///    "updated_at"
+        ///  ],
+        ///  "properties": {
+        ///    "cancellation_requested": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "destination_ref": {
+        ///      "$ref": "#/definitions/RefId"
+        ///    },
+        ///    "phase": {
+        ///      "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///    },
+        ///    "phase_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "terminal_outcome": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///    },
+        ///    "updated_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct NativeIntegrationStatusProjectionV1 {
+            pub cancellation_requested: bool,
+            pub destination_ref: RefId,
+            pub phase: NativeIntegrationPhaseV1,
+            pub phase_revision: u64,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: NativeIntegrationPreviewId,
+            pub repository_id: RepositoryId,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+            pub transaction_id: NativeIntegrationTransactionId,
+            pub updated_at: UtcMicros,
+        }
+        ///One typed result for every native-integration surface operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "NativeIntegrationSurfaceResultV1",
+        ///  "description": "One typed result for every native-integration surface operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "description": "Bounded projection of one frozen selection.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "destination_ref",
+        ///        "frozen_at",
+        ///        "inventory_epoch",
+        ///        "outcome",
+        ///        "project_id",
+        ///        "repository_id",
+        ///        "selection_digest",
+        ///        "source_ref"
+        ///      ],
+        ///      "properties": {
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "frozen_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "inventory_epoch": {
+        ///          "$ref": "#/definitions/WorktreeInventoryEpoch"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "stack_snapshot"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "selection_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "source_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one immutable preview.\n\nCandidate trees, conflict bodies, and ordered commit objects stay behind the\npreview digest: the surface reports identity, classification, and expiry so\na caller can approve exactly this preview and nothing else.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "created_at",
+        ///        "disposition",
+        ///        "expires_at",
+        ///        "ordered_commit_count",
+        ///        "outcome",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "created_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "disposition": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewDispositionV1"
+        ///        },
+        ///        "expires_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "ordered_commit_count": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "preview"
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "selection": {
+        ///          "$ref": "#/definitions/NativeIntegrationSnapshotProjectionV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable terminal receipt.\n\nThe receipt digest and final ref/tree identity are audit metadata; no patch,\nworktree body, or source content crosses this boundary.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "completed_at",
+        ///        "final_ref_tip",
+        ///        "final_tree",
+        ///        "outcome",
+        ///        "receipt_digest",
+        ///        "status",
+        ///        "terminal_outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "completed_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "final_ref_tip": {
+        ///          "type": "string"
+        ///        },
+        ///        "final_tree": {
+        ///          "type": "string"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "receipt"
+        ///        },
+        ///        "receipt_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "status": {
+        ///          "$ref": "#/definitions/NativeIntegrationStatusProjectionV1"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Bounded projection of one durable transaction status.",
+        ///      "type": "object",
+        ///      "required": [
+        ///        "cancellation_requested",
+        ///        "destination_ref",
+        ///        "outcome",
+        ///        "phase",
+        ///        "phase_revision",
+        ///        "preview_digest",
+        ///        "preview_id",
+        ///        "repository_id",
+        ///        "transaction_id",
+        ///        "updated_at"
+        ///      ],
+        ///      "properties": {
+        ///        "cancellation_requested": {
+        ///          "type": "boolean"
+        ///        },
+        ///        "destination_ref": {
+        ///          "$ref": "#/definitions/RefId"
+        ///        },
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "phase": {
+        ///          "$ref": "#/definitions/NativeIntegrationPhaseV1"
+        ///        },
+        ///        "phase_revision": {
+        ///          "type": "integer",
+        ///          "format": "uint64",
+        ///          "minimum": 0.0
+        ///        },
+        ///        "preview_digest": {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        "preview_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationPreviewId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        },
+        ///        "terminal_outcome": {
+        ///          "anyOf": [
+        ///            {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            },
+        ///            {
+        ///              "type": "null"
+        ///            }
+        ///          ]
+        ///        },
+        ///        "transaction_id": {
+        ///          "$ref": "#/definitions/NativeIntegrationTransactionId"
+        ///        },
+        ///        "updated_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "description": "Cancellation disposition. After the native commit point the committed\nreceipt is returned instead of a cancellation claim.",
+        ///      "type": "object",
+        ///      "oneOf": [
+        ///        {
+        ///          "type": "string",
+        ///          "enum": [
+        ///            "cancellation_requested",
+        ///            "commit_point_passed"
+        ///          ]
+        ///        },
+        ///        {
+        ///          "type": "object",
+        ///          "required": [
+        ///            "already_terminal"
+        ///          ],
+        ///          "properties": {
+        ///            "already_terminal": {
+        ///              "$ref": "#/definitions/NativeIntegrationTerminalOutcomeV1"
+        ///            }
+        ///          }
+        ///        }
+        ///      ],
+        ///      "required": [
+        ///        "outcome"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "cancellation"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "outcome",
+        ///        "reason"
+        ///      ],
+        ///      "properties": {
+        ///        "outcome": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        },
+        ///        "reason": {
+        ///          "$ref": "#/definitions/NativeIntegrationSurfaceUnavailableV1"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(untagged, deny_unknown_fields)]
+        pub enum NativeIntegrationSurfaceResultV1 {
+            Variant0 {
+                destination_ref: RefId,
+                frozen_at: UtcMicros,
+                inventory_epoch: WorktreeInventoryEpoch,
+                outcome: ::std::string::String,
+                project_id: ProjectId,
+                repository_id: RepositoryId,
+                selection_digest: ManifestDigest,
+                source_ref: RefId,
+            },
+            Variant1 {
+                created_at: UtcMicros,
+                disposition: NativeIntegrationPreviewDispositionV1,
+                expires_at: UtcMicros,
+                ordered_commit_count: u32,
+                outcome: ::std::string::String,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                selection: NativeIntegrationSnapshotProjectionV1,
+            },
+            Variant2 {
+                completed_at: UtcMicros,
+                final_ref_tip: ::std::string::String,
+                final_tree: ::std::string::String,
+                outcome: ::std::string::String,
+                receipt_digest: ManifestDigest,
+                status: NativeIntegrationStatusProjectionV1,
+                terminal_outcome: NativeIntegrationTerminalOutcomeV1,
+            },
+            Variant3 {
+                cancellation_requested: bool,
+                destination_ref: RefId,
+                outcome: ::std::string::String,
+                phase: NativeIntegrationPhaseV1,
+                phase_revision: u64,
+                preview_digest: ManifestDigest,
+                preview_id: NativeIntegrationPreviewId,
+                repository_id: RepositoryId,
+                #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+                terminal_outcome: ::std::option::Option<NativeIntegrationTerminalOutcomeV1>,
+                transaction_id: NativeIntegrationTransactionId,
+                updated_at: UtcMicros,
+            },
+            Variant4 {
+                already_terminal: NativeIntegrationTerminalOutcomeV1,
+                outcome: ::std::string::String,
+            },
+            Variant5 {
+                outcome: ::std::string::String,
+                reason: NativeIntegrationSurfaceUnavailableV1,
+            },
+        }
+        /**Why a native-integration operation produced no advancing state.
+
+        Every variant is read-only and truthful. None of them authorizes apply, and
+        a denied or absent target is reported indistinguishably from an unavailable
+        authority so no identity, path, count, or topology leaks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a native-integration operation produced no advancing state.\n\nEvery variant is read-only and truthful. None of them authorizes apply, and\na denied or absent target is reported indistinguishably from an unavailable\nauthority so no identity, path, count, or topology leaks.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "partial",
+        ///        "stale",
+        ///        "denied",
+        ///        "reset_required",
+        ///        "durability_uncertain",
+        ///        "cancelled",
+        ///        "approval_conflict",
+        ///        "transaction_conflict",
+        ///        "recovery_required",
+        ///        "needs_inspection",
+        ///        "unknown_transaction"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "No native-integration runtime authority is mounted for this daemon.",
+        ///      "type": "string",
+        ///      "const": "authority_unmounted"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationSurfaceUnavailableV1 {
+            #[serde(rename = "partial")]
+            Partial,
+            #[serde(rename = "stale")]
+            Stale,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "approval_conflict")]
+            ApprovalConflict,
+            #[serde(rename = "transaction_conflict")]
+            TransactionConflict,
+            #[serde(rename = "recovery_required")]
+            RecoveryRequired,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+            #[serde(rename = "unknown_transaction")]
+            UnknownTransaction,
+            ///No native-integration runtime authority is mounted for this daemon.
+            #[serde(rename = "authority_unmounted")]
+            AuthorityUnmounted,
+        }
+        impl ::std::fmt::Display for NativeIntegrationSurfaceUnavailableV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Partial => f.write_str("partial"),
+                    Self::Stale => f.write_str("stale"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::ApprovalConflict => f.write_str("approval_conflict"),
+                    Self::TransactionConflict => f.write_str("transaction_conflict"),
+                    Self::RecoveryRequired => f.write_str("recovery_required"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                    Self::UnknownTransaction => f.write_str("unknown_transaction"),
+                    Self::AuthorityUnmounted => f.write_str("authority_unmounted"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationSurfaceUnavailableV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial" => Ok(Self::Partial),
+                    "stale" => Ok(Self::Stale),
+                    "denied" => Ok(Self::Denied),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "approval_conflict" => Ok(Self::ApprovalConflict),
+                    "transaction_conflict" => Ok(Self::TransactionConflict),
+                    "recovery_required" => Ok(Self::RecoveryRequired),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    "unknown_transaction" => Ok(Self::UnknownTransaction),
+                    "authority_unmounted" => Ok(Self::AuthorityUnmounted),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationSurfaceUnavailableV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///The only truthful terminal outcomes after recovery.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only truthful terminal outcomes after recovery.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "committed",
+        ///    "aborted_no_change",
+        ///    "rolled_back",
+        ///    "needs_inspection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationTerminalOutcomeV1 {
+            #[serde(rename = "committed")]
+            Committed,
+            #[serde(rename = "aborted_no_change")]
+            AbortedNoChange,
+            #[serde(rename = "rolled_back")]
+            RolledBack,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+        }
+        impl ::std::fmt::Display for NativeIntegrationTerminalOutcomeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Committed => f.write_str("committed"),
+                    Self::AbortedNoChange => f.write_str("aborted_no_change"),
+                    Self::RolledBack => f.write_str("rolled_back"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTerminalOutcomeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "committed" => Ok(Self::Committed),
+                    "aborted_no_change" => Ok(Self::AbortedNoChange),
+                    "rolled_back" => Ok(Self::RolledBack),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationTerminalOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `NativeIntegrationTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `NativeIntegrationTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct NativeIntegrationTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for NativeIntegrationTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<NativeIntegrationTransactionId> for ::std::string::String {
+            fn from(value: NativeIntegrationTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for NativeIntegrationTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for NativeIntegrationTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Why a preflight cannot authorize apply.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a preflight cannot authorize apply.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "partial_evidence",
+        ///    "stale_scope",
+        ///    "denied",
+        ///    "native_state_unavailable",
+        ///    "reset_required",
+        ///    "durability_uncertain",
+        ///    "unsupported_hooks",
+        ///    "signing_required",
+        ///    "destination_occupied"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum NativeIntegrationUnavailabilityV1 {
+            #[serde(rename = "partial_evidence")]
+            PartialEvidence,
+            #[serde(rename = "stale_scope")]
+            StaleScope,
+            #[serde(rename = "denied")]
+            Denied,
+            #[serde(rename = "native_state_unavailable")]
+            NativeStateUnavailable,
+            #[serde(rename = "reset_required")]
+            ResetRequired,
+            #[serde(rename = "durability_uncertain")]
+            DurabilityUncertain,
+            #[serde(rename = "unsupported_hooks")]
+            UnsupportedHooks,
+            #[serde(rename = "signing_required")]
+            SigningRequired,
+            #[serde(rename = "destination_occupied")]
+            DestinationOccupied,
+        }
+        impl ::std::fmt::Display for NativeIntegrationUnavailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::PartialEvidence => f.write_str("partial_evidence"),
+                    Self::StaleScope => f.write_str("stale_scope"),
+                    Self::Denied => f.write_str("denied"),
+                    Self::NativeStateUnavailable => f.write_str("native_state_unavailable"),
+                    Self::ResetRequired => f.write_str("reset_required"),
+                    Self::DurabilityUncertain => f.write_str("durability_uncertain"),
+                    Self::UnsupportedHooks => f.write_str("unsupported_hooks"),
+                    Self::SigningRequired => f.write_str("signing_required"),
+                    Self::DestinationOccupied => f.write_str("destination_occupied"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for NativeIntegrationUnavailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "partial_evidence" => Ok(Self::PartialEvidence),
+                    "stale_scope" => Ok(Self::StaleScope),
+                    "denied" => Ok(Self::Denied),
+                    "native_state_unavailable" => Ok(Self::NativeStateUnavailable),
+                    "reset_required" => Ok(Self::ResetRequired),
+                    "durability_uncertain" => Ok(Self::DurabilityUncertain),
+                    "unsupported_hooks" => Ok(Self::UnsupportedHooks),
+                    "signing_required" => Ok(Self::SigningRequired),
+                    "destination_occupied" => Ok(Self::DestinationOccupied),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for NativeIntegrationUnavailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RefId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RefId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RefId(pub ::std::string::String);
+        impl ::std::ops::Deref for RefId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RefId> for ::std::string::String {
+            fn from(value: RefId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RefId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RefId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RefId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Monotonic epoch of the worktree inventory frozen into a stack revision.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Monotonic epoch of the worktree inventory frozen into a stack revision.",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorktreeInventoryEpoch(pub u64);
+        impl ::std::ops::Deref for WorktreeInventoryEpoch {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeInventoryEpoch> for u64 {
+            fn from(value: WorktreeInventoryEpoch) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorktreeInventoryEpoch {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeInventoryEpoch {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorktreeInventoryEpoch {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorktreeInventoryEpoch {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::NativeIntegrationStackSnapshotSurfaceRequest;
+    pub type Result = result::NativeIntegrationSurfaceResultV1;
+}
+typed_operation!(
+    StackSnapshot,
+    stack_snapshot,
+    "operation.application.stack_snapshot",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_stack_snapshot"
+    },
+    "binding.mcp.stack_snapshot.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.application.native-integration.stack-snapshot.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod handoff_open_investigation_handoff {
     pub mod request {
         /// Error types.
@@ -80508,6 +90704,4418 @@ typed_operation!(
     1
 );
 #[allow(clippy::all)]
+pub mod work_views {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkGraphReadModeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "mode"
+        ///      ],
+        ///      "properties": {
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "current"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "mode",
+        ///        "valid_at"
+        ///      ],
+        ///      "properties": {
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "as_of"
+        ///        },
+        ///        "valid_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "from_valid_at",
+        ///        "mode",
+        ///        "through_valid_at"
+        ///      ],
+        ///      "properties": {
+        ///        "from_valid_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "evolution"
+        ///        },
+        ///        "through_valid_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "from_observed_at",
+        ///        "mode",
+        ///        "through_observed_at"
+        ///      ],
+        ///      "properties": {
+        ///        "from_observed_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "forensic"
+        ///        },
+        ///        "through_observed_at": {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "mode")]
+        pub enum WorkGraphReadModeV1 {
+            #[serde(rename = "current")]
+            Current,
+            #[serde(rename = "as_of")]
+            AsOf { valid_at: UtcMicros },
+            #[serde(rename = "evolution")]
+            Evolution {
+                from_valid_at: UtcMicros,
+                through_valid_at: UtcMicros,
+            },
+            #[serde(rename = "forensic")]
+            Forensic {
+                from_observed_at: UtcMicros,
+                through_observed_at: UtcMicros,
+            },
+        }
+        ///`WorkGraphReadRequestV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkGraphReadRequestV1",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "mode",
+        ///    "observed_at",
+        ///    "selection"
+        ///  ],
+        ///  "properties": {
+        ///    "continuation": {
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "mode": {
+        ///      "$ref": "#/definitions/WorkGraphReadModeV1"
+        ///    },
+        ///    "observed_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "selection": {
+        ///      "$ref": "#/definitions/WorkProductSelectionScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkGraphReadRequestV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub continuation: ::std::option::Option<::std::string::String>,
+            pub mode: WorkGraphReadModeV1,
+            pub observed_at: UtcMicros,
+            pub selection: WorkProductSelectionScopeV1,
+        }
+        ///`WorkProductAuthorizedRelationScopeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "project_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "project"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "project_id",
+        ///        "repository_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "repository"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", deny_unknown_fields)]
+        pub enum WorkProductAuthorizedRelationScopeV1 {
+            #[serde(rename = "project")]
+            Project { project_id: ProjectId },
+            #[serde(rename = "repository")]
+            Repository {
+                project_id: ProjectId,
+                repository_id: RepositoryId,
+            },
+        }
+        /**The relation subset selected for one request. `ProfileOwnedNoGit` is an
+        explicit no-Git selection, not an empty set that bypasses authorization.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The relation subset selected for one request. `ProfileOwnedNoGit` is an\nexplicit no-Git selection, not an empty set that bypasses authorization.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "selection": {
+        ///          "type": "string",
+        ///          "const": "profile_owned_no_git"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "relation_scopes",
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "relation_scopes": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkProductAuthorizedRelationScopeV1"
+        ///          },
+        ///          "uniqueItems": true
+        ///        },
+        ///        "selection": {
+        ///          "type": "string",
+        ///          "const": "relations"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "selection", content = "relation_scopes")]
+        pub enum WorkProductSelectionScopeV1 {
+            #[serde(rename = "profile_owned_no_git")]
+            ProfileOwnedNoGit,
+            #[serde(rename = "relations")]
+            Relations(Vec<WorkProductAuthorizedRelationScopeV1>),
+        }
+        impl ::std::convert::From<Vec<WorkProductAuthorizedRelationScopeV1>>
+            for WorkProductSelectionScopeV1
+        {
+            fn from(value: Vec<WorkProductAuthorizedRelationScopeV1>) -> Self {
+                Self::Relations(value)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `ActorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ActorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ActorId(pub ::std::string::String);
+        impl ::std::ops::Deref for ActorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ActorId> for ::std::string::String {
+            fn from(value: ActorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ActorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ActorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ActorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `AttemptId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `AttemptId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct AttemptId(pub ::std::string::String);
+        impl ::std::ops::Deref for AttemptId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<AttemptId> for ::std::string::String {
+            fn from(value: AttemptId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for AttemptId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for AttemptId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for AttemptId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Owner identity resolved by the registered profile authority. It is never
+        accepted from a Work request.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Owner identity resolved by the registered profile authority. It is never\naccepted from a Work request.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "owner_brain_id",
+        ///    "owner_profile_id",
+        ///    "selection"
+        ///  ],
+        ///  "properties": {
+        ///    "owner_brain_id": {
+        ///      "$ref": "#/definitions/BrainId"
+        ///    },
+        ///    "owner_profile_id": {
+        ///      "$ref": "#/definitions/UserProfileId"
+        ///    },
+        ///    "selection": {
+        ///      "$ref": "#/definitions/WorkProductSelectionScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct AuthorizedWorkProductScopeV1 {
+            pub owner_brain_id: BrainId,
+            pub owner_profile_id: UserProfileId,
+            pub selection: WorkProductSelectionScopeV1,
+        }
+        ///Strongly typed canonical identity: `BrainId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `BrainId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct BrainId(pub ::std::string::String);
+        impl ::std::ops::Deref for BrainId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<BrainId> for ::std::string::String {
+            fn from(value: BrainId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for BrainId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for BrainId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for BrainId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectionGenerationId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectionGenerationId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectionGenerationId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectionGenerationId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectionGenerationId> for ::std::string::String {
+            fn from(value: ProjectionGenerationId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectionGenerationId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectionGenerationId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectionGenerationId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProposalId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProposalId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProposalId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProposalId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProposalId> for ::std::string::String {
+            fn from(value: ProposalId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProposalId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProposalId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProposalId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProviderId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProviderId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProviderId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProviderId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProviderId> for ::std::string::String {
+            fn from(value: ProviderId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProviderId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProviderId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProviderId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RetrievalAnchorId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RetrievalAnchorId(pub ::std::string::String);
+        impl ::std::ops::Deref for RetrievalAnchorId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RetrievalAnchorId> for ::std::string::String {
+            fn from(value: RetrievalAnchorId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RetrievalAnchorId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RetrievalAnchorId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RetrievalAnchorId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RunId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RunId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RunId(pub ::std::string::String);
+        impl ::std::ops::Deref for RunId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RunId> for ::std::string::String {
+            fn from(value: RunId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RunId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RunId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RunId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`TaskEvidenceLinkV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "anchor_id",
+        ///    "evidence_digest",
+        ///    "link_id",
+        ///    "observed_at",
+        ///    "revision",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "anchor_id": {
+        ///      "$ref": "#/definitions/RetrievalAnchorId"
+        ///    },
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "link_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "observed_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct TaskEvidenceLinkV1 {
+            pub anchor_id: RetrievalAnchorId,
+            pub evidence_digest: ManifestDigest,
+            pub link_id: ::std::string::String,
+            pub observed_at: UtcMicros,
+            pub revision: u64,
+            pub task_id: TaskId,
+        }
+        ///Strongly typed canonical identity: `TaskId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `TaskId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct TaskId(pub ::std::string::String);
+        impl ::std::ops::Deref for TaskId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<TaskId> for ::std::string::String {
+            fn from(value: TaskId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for TaskId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for TaskId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for TaskId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `UserProfileId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `UserProfileId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct UserProfileId(pub ::std::string::String);
+        impl ::std::ops::Deref for UserProfileId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UserProfileId> for ::std::string::String {
+            fn from(value: UserProfileId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for UserProfileId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UserProfileId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for UserProfileId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///One exact verified graph snapshot identity.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One exact verified graph snapshot identity.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "event_sequence",
+        ///    "graph_version",
+        ///    "recovered_graph_digest",
+        ///    "source_watermark"
+        ///  ],
+        ///  "properties": {
+        ///    "event_sequence": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "recovered_graph_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "source_watermark": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct VerifiedWorkGraphVersionV1 {
+            pub event_sequence: u64,
+            pub graph_version: u64,
+            pub recovered_graph_digest: ManifestDigest,
+            pub source_watermark: ::std::collections::HashMap<::std::string::String, u64>,
+        }
+        ///`WorkAcceptanceCriterionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "criterion_id",
+        ///    "description",
+        ///    "evidence_required"
+        ///  ],
+        ///  "properties": {
+        ///    "criterion_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "description": {
+        ///      "type": "string"
+        ///    },
+        ///    "evidence_required": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAcceptanceCriterionV1 {
+            pub criterion_id: ::std::string::String,
+            pub description: ::std::string::String,
+            pub evidence_required: bool,
+        }
+        ///`WorkAttemptIdentityV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "attempt_id",
+        ///    "run_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "attempt_id": {
+        ///      "$ref": "#/definitions/AttemptId"
+        ///    },
+        ///    "run_id": {
+        ///      "$ref": "#/definitions/RunId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkAttemptIdentityV1 {
+            pub attempt_id: AttemptId,
+            pub run_id: RunId,
+            pub task_id: TaskId,
+        }
+        ///`WorkAttemptStateV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "leased",
+        ///    "running",
+        ///    "cancellation_requested",
+        ///    "cancellation_acknowledged",
+        ///    "cancellation_escalated",
+        ///    "recovery_required",
+        ///    "succeeded",
+        ///    "failed",
+        ///    "timed_out",
+        ///    "cancelled"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkAttemptStateV1 {
+            #[serde(rename = "leased")]
+            Leased,
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "cancellation_requested")]
+            CancellationRequested,
+            #[serde(rename = "cancellation_acknowledged")]
+            CancellationAcknowledged,
+            #[serde(rename = "cancellation_escalated")]
+            CancellationEscalated,
+            #[serde(rename = "recovery_required")]
+            RecoveryRequired,
+            #[serde(rename = "succeeded")]
+            Succeeded,
+            #[serde(rename = "failed")]
+            Failed,
+            #[serde(rename = "timed_out")]
+            TimedOut,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+        }
+        impl ::std::fmt::Display for WorkAttemptStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Leased => f.write_str("leased"),
+                    Self::Running => f.write_str("running"),
+                    Self::CancellationRequested => f.write_str("cancellation_requested"),
+                    Self::CancellationAcknowledged => f.write_str("cancellation_acknowledged"),
+                    Self::CancellationEscalated => f.write_str("cancellation_escalated"),
+                    Self::RecoveryRequired => f.write_str("recovery_required"),
+                    Self::Succeeded => f.write_str("succeeded"),
+                    Self::Failed => f.write_str("failed"),
+                    Self::TimedOut => f.write_str("timed_out"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkAttemptStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "leased" => Ok(Self::Leased),
+                    "running" => Ok(Self::Running),
+                    "cancellation_requested" => Ok(Self::CancellationRequested),
+                    "cancellation_acknowledged" => Ok(Self::CancellationAcknowledged),
+                    "cancellation_escalated" => Ok(Self::CancellationEscalated),
+                    "recovery_required" => Ok(Self::RecoveryRequired),
+                    "succeeded" => Ok(Self::Succeeded),
+                    "failed" => Ok(Self::Failed),
+                    "timed_out" => Ok(Self::TimedOut),
+                    "cancelled" => Ok(Self::Cancelled),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkAttemptStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkAttemptStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkAttemptStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkCausalProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "candidate_edges",
+        ///    "graph_version"
+        ///  ],
+        ///  "properties": {
+        ///    "candidate_edges": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkDagEdgeV1"
+        ///      }
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkCausalProjectionV1 {
+            pub candidate_edges: ::std::vec::Vec<WorkDagEdgeV1>,
+            pub graph_version: u64,
+        }
+        ///`WorkCriticalPathProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "graph_version",
+        ///    "task_ids",
+        ///    "total_effort"
+        ///  ],
+        ///  "properties": {
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "task_ids": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      }
+        ///    },
+        ///    "total_effort": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkCriticalPathProjectionV1 {
+            pub graph_version: u64,
+            pub task_ids: ::std::vec::Vec<TaskId>,
+            pub total_effort: u32,
+        }
+        ///`WorkDagEdgeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "dependency",
+        ///    "dependent"
+        ///  ],
+        ///  "properties": {
+        ///    "dependency": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "dependent": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkDagEdgeV1 {
+            pub dependency: TaskId,
+            pub dependent: TaskId,
+        }
+        ///`WorkDagProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "gating_edges",
+        ///    "graph_version",
+        ///    "task_ids"
+        ///  ],
+        ///  "properties": {
+        ///    "gating_edges": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkDagEdgeV1"
+        ///      }
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "task_ids": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkDagProjectionV1 {
+            pub gating_edges: ::std::vec::Vec<WorkDagEdgeV1>,
+            pub graph_version: u64,
+            pub task_ids: ::std::vec::Vec<TaskId>,
+        }
+        ///`WorkGraphReadV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkGraphReadV1",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "authorized_scope",
+        ///        "mode",
+        ///        "snapshot"
+        ///      ],
+        ///      "properties": {
+        ///        "authorized_scope": {
+        ///          "$ref": "#/definitions/AuthorizedWorkProductScopeV1"
+        ///        },
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "current"
+        ///        },
+        ///        "snapshot": {
+        ///          "$ref": "#/definitions/WorkGraphVersionEntryV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "authorized_scope",
+        ///        "mode",
+        ///        "snapshot"
+        ///      ],
+        ///      "properties": {
+        ///        "authorized_scope": {
+        ///          "$ref": "#/definitions/AuthorizedWorkProductScopeV1"
+        ///        },
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "as_of"
+        ///        },
+        ///        "snapshot": {
+        ///          "$ref": "#/definitions/WorkGraphVersionEntryV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "authorized_scope",
+        ///        "mode",
+        ///        "timeline"
+        ///      ],
+        ///      "properties": {
+        ///        "authorized_scope": {
+        ///          "$ref": "#/definitions/AuthorizedWorkProductScopeV1"
+        ///        },
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "evolution"
+        ///        },
+        ///        "timeline": {
+        ///          "$ref": "#/definitions/WorkGraphTimelineV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "authorized_scope",
+        ///        "mode",
+        ///        "timeline"
+        ///      ],
+        ///      "properties": {
+        ///        "authorized_scope": {
+        ///          "$ref": "#/definitions/AuthorizedWorkProductScopeV1"
+        ///        },
+        ///        "mode": {
+        ///          "type": "string",
+        ///          "const": "forensic"
+        ///        },
+        ///        "timeline": {
+        ///          "$ref": "#/definitions/WorkGraphTimelineV1"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "mode")]
+        pub enum WorkGraphReadV1 {
+            #[serde(rename = "current")]
+            Current {
+                authorized_scope: AuthorizedWorkProductScopeV1,
+                snapshot: WorkGraphVersionEntryV1,
+            },
+            #[serde(rename = "as_of")]
+            AsOf {
+                authorized_scope: AuthorizedWorkProductScopeV1,
+                snapshot: WorkGraphVersionEntryV1,
+            },
+            #[serde(rename = "evolution")]
+            Evolution {
+                authorized_scope: AuthorizedWorkProductScopeV1,
+                timeline: WorkGraphTimelineV1,
+            },
+            #[serde(rename = "forensic")]
+            Forensic {
+                authorized_scope: AuthorizedWorkProductScopeV1,
+                timeline: WorkGraphTimelineV1,
+            },
+        }
+        ///`WorkGraphTimelineCoverageV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "coverage",
+        ///        "returned"
+        ///      ],
+        ///      "properties": {
+        ///        "coverage": {
+        ///          "type": "string",
+        ///          "const": "complete"
+        ///        },
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "continuation",
+        ///        "coverage",
+        ///        "returned"
+        ///      ],
+        ///      "properties": {
+        ///        "continuation": {
+        ///          "type": "string"
+        ///        },
+        ///        "coverage": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        },
+        ///        "returned": {
+        ///          "type": "integer",
+        ///          "format": "uint32",
+        ///          "minimum": 0.0
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "coverage")]
+        pub enum WorkGraphTimelineCoverageV1 {
+            #[serde(rename = "complete")]
+            Complete { returned: u32 },
+            #[serde(rename = "partial")]
+            Partial {
+                continuation: ::std::string::String,
+                returned: u32,
+            },
+        }
+        ///`WorkGraphTimelineV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "entries"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/WorkGraphTimelineCoverageV1"
+        ///    },
+        ///    "entries": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkGraphVersionEntryV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkGraphTimelineV1 {
+            pub coverage: WorkGraphTimelineCoverageV1,
+            pub entries: ::std::vec::Vec<WorkGraphVersionEntryV1>,
+        }
+        /**One immutable graph version and every Work projection derived from that
+        same version at the caller's explicit observation time.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One immutable graph version and every Work projection derived from that\nsame version at the caller's explicit observation time.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "graph",
+        ///    "observed_at",
+        ///    "projected_at",
+        ///    "projections",
+        ///    "runtime",
+        ///    "valid_at",
+        ///    "verified_version"
+        ///  ],
+        ///  "properties": {
+        ///    "graph": {
+        ///      "$ref": "#/definitions/WorkProductGraphV1"
+        ///    },
+        ///    "observed_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "projected_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "projections": {
+        ///      "$ref": "#/definitions/WorkProductProjectionBundleV1"
+        ///    },
+        ///    "runtime": {
+        ///      "$ref": "#/definitions/WorkRuntimeProjectionV1"
+        ///    },
+        ///    "valid_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "verified_version": {
+        ///      "$ref": "#/definitions/VerifiedWorkGraphVersionV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkGraphVersionEntryV1 {
+            pub graph: WorkProductGraphV1,
+            pub observed_at: UtcMicros,
+            pub projected_at: UtcMicros,
+            pub projections: WorkProductProjectionBundleV1,
+            pub runtime: WorkRuntimeProjectionV1,
+            pub valid_at: UtcMicros,
+            pub verified_version: VerifiedWorkGraphVersionV1,
+        }
+        ///`WorkHandoffV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence_frontier",
+        ///    "from_actor",
+        ///    "handed_off_at",
+        ///    "handoff_id",
+        ///    "task_id",
+        ///    "to_actor",
+        ///    "unknowns"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence_frontier": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "from_actor": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "handed_off_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "handoff_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "to_actor": {
+        ///      "$ref": "#/definitions/ActorId"
+        ///    },
+        ///    "unknowns": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      },
+        ///      "uniqueItems": true
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkHandoffV1 {
+            pub evidence_frontier: Vec<::std::string::String>,
+            pub from_actor: ActorId,
+            pub handed_off_at: UtcMicros,
+            pub handoff_id: ::std::string::String,
+            pub task_id: TaskId,
+            pub to_actor: ActorId,
+            pub unknowns: Vec<::std::string::String>,
+        }
+        ///`WorkHierarchyV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "initiative_id",
+        ///    "milestone_id",
+        ///    "plan_id"
+        ///  ],
+        ///  "properties": {
+        ///    "initiative_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "milestone_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "plan_id": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkHierarchyV1 {
+            pub initiative_id: ::std::string::String,
+            pub milestone_id: ::std::string::String,
+            pub plan_id: ::std::string::String,
+        }
+        ///`WorkInitiativeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "created_at",
+        ///    "id",
+        ///    "title"
+        ///  ],
+        ///  "properties": {
+        ///    "created_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "id": {
+        ///      "type": "string"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkInitiativeV1 {
+            pub created_at: UtcMicros,
+            pub id: ::std::string::String,
+            pub title: ::std::string::String,
+        }
+        ///`WorkItemInputV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "acceptance_criteria",
+        ///    "causal_candidates",
+        ///    "created_at",
+        ///    "dependencies",
+        ///    "effort",
+        ///    "hierarchy",
+        ///    "informational_relations",
+        ///    "task_id",
+        ///    "title",
+        ///    "updated_at"
+        ///  ],
+        ///  "properties": {
+        ///    "acceptance_criteria": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkAcceptanceCriterionV1"
+        ///      }
+        ///    },
+        ///    "causal_candidates": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "created_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "deadline": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "effort": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "hierarchy": {
+        ///      "$ref": "#/definitions/WorkHierarchyV1"
+        ///    },
+        ///    "informational_relations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "scheduled_at": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    },
+        ///    "updated_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkItemInputV1 {
+            pub acceptance_criteria: ::std::vec::Vec<WorkAcceptanceCriterionV1>,
+            pub causal_candidates: Vec<TaskId>,
+            pub created_at: UtcMicros,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub deadline: ::std::option::Option<UtcMicros>,
+            pub dependencies: Vec<TaskId>,
+            pub effort: u32,
+            pub hierarchy: WorkHierarchyV1,
+            pub informational_relations: Vec<TaskId>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub scheduled_at: ::std::option::Option<UtcMicros>,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+            pub updated_at: UtcMicros,
+        }
+        ///`WorkItemV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "accepted_attempts",
+        ///    "accepted_criteria",
+        ///    "evidence_links",
+        ///    "handoffs",
+        ///    "input"
+        ///  ],
+        ///  "properties": {
+        ///    "accepted_at": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "accepted_attempts": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "type": "string"
+        ///      }
+        ///    },
+        ///    "accepted_criteria": {
+        ///      "type": "object",
+        ///      "additionalProperties": {
+        ///        "type": "string"
+        ///      }
+        ///    },
+        ///    "accepted_proposal": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ProposalId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "accepted_route": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorkRouteDecisionV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "archived_at": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "evidence_links": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "handoffs": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkHandoffV1"
+        ///      }
+        ///    },
+        ///    "input": {
+        ///      "$ref": "#/definitions/WorkItemInputV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkItemV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_at: ::std::option::Option<UtcMicros>,
+            pub accepted_attempts:
+                ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+            pub accepted_criteria:
+                ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_proposal: ::std::option::Option<ProposalId>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub accepted_route: ::std::option::Option<WorkRouteDecisionV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub archived_at: ::std::option::Option<UtcMicros>,
+            pub evidence_links: Vec<::std::string::String>,
+            pub handoffs: ::std::vec::Vec<WorkHandoffV1>,
+            pub input: WorkItemInputV1,
+        }
+        ///`WorkKanbanCardV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "effort",
+        ///    "lane",
+        ///    "legal_actions",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "effort": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "lane": {
+        ///      "$ref": "#/definitions/WorkTimelineLaneV1"
+        ///    },
+        ///    "legal_actions": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkLegalActionV1"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkKanbanCardV1 {
+            pub effort: u32,
+            pub lane: WorkTimelineLaneV1,
+            pub legal_actions: Vec<WorkLegalActionV1>,
+            pub task_id: TaskId,
+        }
+        ///`WorkKanbanProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "cards",
+        ///    "graph_version"
+        ///  ],
+        ///  "properties": {
+        ///    "cards": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkKanbanCardV1"
+        ///      }
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkKanbanProjectionV1 {
+            pub cards: ::std::vec::Vec<WorkKanbanCardV1>,
+            pub graph_version: u64,
+        }
+        ///`WorkLegalActionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "view_evidence",
+        ///    "generate_proposal",
+        ///    "accept_proposal",
+        ///    "link_accepted_attempt",
+        ///    "accept_task",
+        ///    "handoff",
+        ///    "archive"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkLegalActionV1 {
+            #[serde(rename = "view_evidence")]
+            ViewEvidence,
+            #[serde(rename = "generate_proposal")]
+            GenerateProposal,
+            #[serde(rename = "accept_proposal")]
+            AcceptProposal,
+            #[serde(rename = "link_accepted_attempt")]
+            LinkAcceptedAttempt,
+            #[serde(rename = "accept_task")]
+            AcceptTask,
+            #[serde(rename = "handoff")]
+            Handoff,
+            #[serde(rename = "archive")]
+            Archive,
+        }
+        impl ::std::fmt::Display for WorkLegalActionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::ViewEvidence => f.write_str("view_evidence"),
+                    Self::GenerateProposal => f.write_str("generate_proposal"),
+                    Self::AcceptProposal => f.write_str("accept_proposal"),
+                    Self::LinkAcceptedAttempt => f.write_str("link_accepted_attempt"),
+                    Self::AcceptTask => f.write_str("accept_task"),
+                    Self::Handoff => f.write_str("handoff"),
+                    Self::Archive => f.write_str("archive"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkLegalActionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "view_evidence" => Ok(Self::ViewEvidence),
+                    "generate_proposal" => Ok(Self::GenerateProposal),
+                    "accept_proposal" => Ok(Self::AcceptProposal),
+                    "link_accepted_attempt" => Ok(Self::LinkAcceptedAttempt),
+                    "accept_task" => Ok(Self::AcceptTask),
+                    "handoff" => Ok(Self::Handoff),
+                    "archive" => Ok(Self::Archive),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkLegalActionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkLegalActionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkLegalActionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkMilestoneV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "created_at",
+        ///    "id",
+        ///    "plan_id",
+        ///    "title"
+        ///  ],
+        ///  "properties": {
+        ///    "created_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "id": {
+        ///      "type": "string"
+        ///    },
+        ///    "plan_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkMilestoneV1 {
+            pub created_at: UtcMicros,
+            pub id: ::std::string::String,
+            pub plan_id: ::std::string::String,
+            pub title: ::std::string::String,
+        }
+        ///`WorkPlanV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "created_at",
+        ///    "id",
+        ///    "initiative_id",
+        ///    "title"
+        ///  ],
+        ///  "properties": {
+        ///    "created_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "id": {
+        ///      "type": "string"
+        ///    },
+        ///    "initiative_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkPlanV1 {
+            pub created_at: UtcMicros,
+            pub id: ::std::string::String,
+            pub initiative_id: ::std::string::String,
+            pub title: ::std::string::String,
+        }
+        ///`WorkProductAuthorizedRelationScopeV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "project_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "project"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "kind",
+        ///        "project_id",
+        ///        "repository_id"
+        ///      ],
+        ///      "properties": {
+        ///        "kind": {
+        ///          "type": "string",
+        ///          "const": "repository"
+        ///        },
+        ///        "project_id": {
+        ///          "$ref": "#/definitions/ProjectId"
+        ///        },
+        ///        "repository_id": {
+        ///          "$ref": "#/definitions/RepositoryId"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "kind", deny_unknown_fields)]
+        pub enum WorkProductAuthorizedRelationScopeV1 {
+            #[serde(rename = "project")]
+            Project { project_id: ProjectId },
+            #[serde(rename = "repository")]
+            Repository {
+                project_id: ProjectId,
+                repository_id: RepositoryId,
+            },
+        }
+        ///`WorkProductGraphV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "evidence",
+        ///    "initiatives",
+        ///    "items",
+        ///    "milestones",
+        ///    "plans",
+        ///    "proposal_decisions",
+        ///    "relation_replan_decisions",
+        ///    "version"
+        ///  ],
+        ///  "properties": {
+        ///    "evidence": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskEvidenceLinkV1"
+        ///      }
+        ///    },
+        ///    "initiatives": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkInitiativeV1"
+        ///      }
+        ///    },
+        ///    "items": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkItemV1"
+        ///      }
+        ///    },
+        ///    "milestones": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkMilestoneV1"
+        ///      }
+        ///    },
+        ///    "plans": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkPlanV1"
+        ///      }
+        ///    },
+        ///    "proposal_decisions": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkProposalDecisionV1"
+        ///      }
+        ///    },
+        ///    "relation_replan_decisions": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkRelationReplanDecisionV1"
+        ///      }
+        ///    },
+        ///    "version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProductGraphV1 {
+            pub evidence: ::std::vec::Vec<TaskEvidenceLinkV1>,
+            pub initiatives: ::std::vec::Vec<WorkInitiativeV1>,
+            pub items: ::std::vec::Vec<WorkItemV1>,
+            pub milestones: ::std::vec::Vec<WorkMilestoneV1>,
+            pub plans: ::std::vec::Vec<WorkPlanV1>,
+            pub proposal_decisions: ::std::vec::Vec<WorkProposalDecisionV1>,
+            pub relation_replan_decisions: ::std::vec::Vec<WorkRelationReplanDecisionV1>,
+            pub version: u64,
+        }
+        ///`WorkProductProjectionBundleV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "causal",
+        ///    "critical_path",
+        ///    "dag",
+        ///    "graph_version",
+        ///    "kanban",
+        ///    "runtime",
+        ///    "timeline",
+        ///    "workload"
+        ///  ],
+        ///  "properties": {
+        ///    "causal": {
+        ///      "$ref": "#/definitions/WorkCausalProjectionV1"
+        ///    },
+        ///    "critical_path": {
+        ///      "$ref": "#/definitions/WorkCriticalPathProjectionV1"
+        ///    },
+        ///    "dag": {
+        ///      "$ref": "#/definitions/WorkDagProjectionV1"
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "kanban": {
+        ///      "$ref": "#/definitions/WorkKanbanProjectionV1"
+        ///    },
+        ///    "runtime": {
+        ///      "$ref": "#/definitions/WorkRuntimeProjectionV1"
+        ///    },
+        ///    "timeline": {
+        ///      "$ref": "#/definitions/WorkTimelineProjectionV1"
+        ///    },
+        ///    "workload": {
+        ///      "$ref": "#/definitions/WorkWorkloadProjectionV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProductProjectionBundleV1 {
+            pub causal: WorkCausalProjectionV1,
+            pub critical_path: WorkCriticalPathProjectionV1,
+            pub dag: WorkDagProjectionV1,
+            pub graph_version: u64,
+            pub kanban: WorkKanbanProjectionV1,
+            pub runtime: WorkRuntimeProjectionV1,
+            pub timeline: WorkTimelineProjectionV1,
+            pub workload: WorkWorkloadProjectionV1,
+        }
+        /**The relation subset selected for one request. `ProfileOwnedNoGit` is an
+        explicit no-Git selection, not an empty set that bypasses authorization.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The relation subset selected for one request. `ProfileOwnedNoGit` is an\nexplicit no-Git selection, not an empty set that bypasses authorization.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "selection": {
+        ///          "type": "string",
+        ///          "const": "profile_owned_no_git"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "relation_scopes",
+        ///        "selection"
+        ///      ],
+        ///      "properties": {
+        ///        "relation_scopes": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkProductAuthorizedRelationScopeV1"
+        ///          },
+        ///          "uniqueItems": true
+        ///        },
+        ///        "selection": {
+        ///          "type": "string",
+        ///          "const": "relations"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "selection", content = "relation_scopes")]
+        pub enum WorkProductSelectionScopeV1 {
+            #[serde(rename = "profile_owned_no_git")]
+            ProfileOwnedNoGit,
+            #[serde(rename = "relations")]
+            Relations(Vec<WorkProductAuthorizedRelationScopeV1>),
+        }
+        impl ::std::convert::From<Vec<WorkProductAuthorizedRelationScopeV1>>
+            for WorkProductSelectionScopeV1
+        {
+            fn from(value: Vec<WorkProductAuthorizedRelationScopeV1>) -> Self {
+                Self::Relations(value)
+            }
+        }
+        ///`WorkProjectionSequenceV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkProjectionSequenceV1",
+        ///  "type": "integer",
+        ///  "format": "uint64",
+        ///  "minimum": 0.0
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct WorkProjectionSequenceV1(pub u64);
+        impl ::std::ops::Deref for WorkProjectionSequenceV1 {
+            type Target = u64;
+            fn deref(&self) -> &u64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProjectionSequenceV1> for u64 {
+            fn from(value: WorkProjectionSequenceV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<u64> for WorkProjectionSequenceV1 {
+            fn from(value: u64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProjectionSequenceV1 {
+            type Err = <u64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProjectionSequenceV1 {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for WorkProjectionSequenceV1 {
+            type Error = <u64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for WorkProjectionSequenceV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProposalDecisionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "decided_at",
+        ///    "disposition",
+        ///    "proposal"
+        ///  ],
+        ///  "properties": {
+        ///    "decided_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "disposition": {
+        ///      "$ref": "#/definitions/WorkProposalDispositionV1"
+        ///    },
+        ///    "proposal": {
+        ///      "$ref": "#/definitions/WorkProposalV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProposalDecisionV1 {
+            pub decided_at: UtcMicros,
+            pub disposition: WorkProposalDispositionV1,
+            pub proposal: WorkProposalV1,
+        }
+        ///`WorkProposalDispositionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "accepted",
+        ///    "rejected",
+        ///    "superseded"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkProposalDispositionV1 {
+            #[serde(rename = "accepted")]
+            Accepted,
+            #[serde(rename = "rejected")]
+            Rejected,
+            #[serde(rename = "superseded")]
+            Superseded,
+        }
+        impl ::std::fmt::Display for WorkProposalDispositionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Accepted => f.write_str("accepted"),
+                    Self::Rejected => f.write_str("rejected"),
+                    Self::Superseded => f.write_str("superseded"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkProposalDispositionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "accepted" => Ok(Self::Accepted),
+                    "rejected" => Ok(Self::Rejected),
+                    "superseded" => Ok(Self::Superseded),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkProposalDispositionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkProposalV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "based_on_version",
+        ///    "children",
+        ///    "evidence_digest",
+        ///    "explanation",
+        ///    "proposal_id",
+        ///    "route",
+        ///    "shape",
+        ///    "sizing",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "based_on_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "children": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkProposedChildV1"
+        ///      }
+        ///    },
+        ///    "evidence_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "explanation": {
+        ///      "type": "string"
+        ///    },
+        ///    "proposal_id": {
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
+        ///    "route": {
+        ///      "$ref": "#/definitions/WorkRouteDecisionV1"
+        ///    },
+        ///    "shape": {
+        ///      "$ref": "#/definitions/WorkShapeAssessmentV1"
+        ///    },
+        ///    "sizing": {
+        ///      "$ref": "#/definitions/WorkSizingV1"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProposalV1 {
+            pub based_on_version: u64,
+            pub children: ::std::vec::Vec<WorkProposedChildV1>,
+            pub evidence_digest: ManifestDigest,
+            pub explanation: ::std::string::String,
+            pub proposal_id: ProposalId,
+            pub route: WorkRouteDecisionV1,
+            pub shape: WorkShapeAssessmentV1,
+            pub sizing: WorkSizingV1,
+            pub task_id: TaskId,
+        }
+        ///`WorkProposedChildV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "dependencies",
+        ///    "effort",
+        ///    "task_id",
+        ///    "title"
+        ///  ],
+        ///  "properties": {
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "effort": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "title": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProposedChildV1 {
+            pub dependencies: Vec<TaskId>,
+            pub effort: u32,
+            pub task_id: TaskId,
+            pub title: ::std::string::String,
+        }
+        ///Strongly typed canonical identity: `WorkProviderRouteId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkProviderRouteId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkProviderRouteId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkProviderRouteId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkProviderRouteId> for ::std::string::String {
+            fn from(value: WorkProviderRouteId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkProviderRouteId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkProviderRouteId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkProviderRouteId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkProviderRouteV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "provider_id",
+        ///    "route_id"
+        ///  ],
+        ///  "properties": {
+        ///    "provider_id": {
+        ///      "$ref": "#/definitions/ProviderId"
+        ///    },
+        ///    "route_id": {
+        ///      "$ref": "#/definitions/WorkProviderRouteId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkProviderRouteV1 {
+            pub provider_id: ProviderId,
+            pub route_id: WorkProviderRouteId,
+        }
+        ///`WorkRelationReplanDecisionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "decided_at",
+        ///    "disposition",
+        ///    "proposal"
+        ///  ],
+        ///  "properties": {
+        ///    "decided_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "disposition": {
+        ///      "$ref": "#/definitions/WorkProposalDispositionV1"
+        ///    },
+        ///    "proposal": {
+        ///      "$ref": "#/definitions/WorkRelationReplanProposalV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkRelationReplanDecisionV1 {
+            pub decided_at: UtcMicros,
+            pub disposition: WorkProposalDispositionV1,
+            pub proposal: WorkRelationReplanProposalV1,
+        }
+        ///`WorkRelationReplanProposalV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "based_on_version",
+        ///    "causal_candidates",
+        ///    "dependencies",
+        ///    "informational_relations",
+        ///    "payload_digest",
+        ///    "proposal_id",
+        ///    "task_id"
+        ///  ],
+        ///  "properties": {
+        ///    "based_on_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "causal_candidates": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "dependencies": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "informational_relations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/TaskId"
+        ///      },
+        ///      "uniqueItems": true
+        ///    },
+        ///    "payload_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "proposal_id": {
+        ///      "$ref": "#/definitions/ProposalId"
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkRelationReplanProposalV1 {
+            pub based_on_version: u64,
+            pub causal_candidates: Vec<TaskId>,
+            pub dependencies: Vec<TaskId>,
+            pub informational_relations: Vec<TaskId>,
+            pub payload_digest: ManifestDigest,
+            pub proposal_id: ProposalId,
+            pub task_id: TaskId,
+        }
+        ///`WorkRouteDecisionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "alternatives",
+        ///        "decision",
+        ///        "exclusions",
+        ///        "fallback",
+        ///        "recommended"
+        ///      ],
+        ///      "properties": {
+        ///        "alternatives": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkProviderRouteV1"
+        ///          }
+        ///        },
+        ///        "decision": {
+        ///          "type": "string",
+        ///          "const": "selected"
+        ///        },
+        ///        "exclusions": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "type": "string"
+        ///          },
+        ///          "uniqueItems": true
+        ///        },
+        ///        "fallback": {
+        ///          "type": "string"
+        ///        },
+        ///        "recommended": {
+        ///          "$ref": "#/definitions/WorkProviderRouteV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "decision",
+        ///        "reason"
+        ///      ],
+        ///      "properties": {
+        ///        "decision": {
+        ///          "type": "string",
+        ///          "const": "abstained"
+        ///        },
+        ///        "reason": {
+        ///          "type": "string"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "decision")]
+        pub enum WorkRouteDecisionV1 {
+            #[serde(rename = "selected")]
+            Selected {
+                alternatives: ::std::vec::Vec<WorkProviderRouteV1>,
+                exclusions: Vec<::std::string::String>,
+                fallback: ::std::string::String,
+                recommended: WorkProviderRouteV1,
+            },
+            #[serde(rename = "abstained")]
+            Abstained { reason: ::std::string::String },
+        }
+        ///`WorkRuntimeAttemptProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "identity",
+        ///    "state"
+        ///  ],
+        ///  "properties": {
+        ///    "identity": {
+        ///      "$ref": "#/definitions/WorkAttemptIdentityV1"
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/WorkAttemptStateV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkRuntimeAttemptProjectionV1 {
+            pub identity: WorkAttemptIdentityV1,
+            pub state: WorkAttemptStateV1,
+        }
+        ///`WorkRuntimeProjectionCoverageV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "coverage"
+        ///      ],
+        ///      "properties": {
+        ///        "coverage": {
+        ///          "type": "string",
+        ///          "const": "complete"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "coverage",
+        ///        "unavailable_attempts"
+        ///      ],
+        ///      "properties": {
+        ///        "coverage": {
+        ///          "type": "string",
+        ///          "const": "partial"
+        ///        },
+        ///        "unavailable_attempts": {
+        ///          "type": "array",
+        ///          "items": {
+        ///            "$ref": "#/definitions/WorkAttemptIdentityV1"
+        ///          },
+        ///          "uniqueItems": true
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "coverage"
+        ///      ],
+        ///      "properties": {
+        ///        "coverage": {
+        ///          "type": "string",
+        ///          "const": "unavailable"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "coverage", content = "unavailable_attempts")]
+        pub enum WorkRuntimeProjectionCoverageV1 {
+            #[serde(rename = "complete")]
+            Complete,
+            #[serde(rename = "partial")]
+            Partial(Vec<WorkAttemptIdentityV1>),
+            #[serde(rename = "unavailable")]
+            Unavailable,
+        }
+        impl ::std::convert::From<Vec<WorkAttemptIdentityV1>> for WorkRuntimeProjectionCoverageV1 {
+            fn from(value: Vec<WorkAttemptIdentityV1>) -> Self {
+                Self::Partial(value)
+            }
+        }
+        ///`WorkRuntimeProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "attempts",
+        ///    "coverage",
+        ///    "generation_id",
+        ///    "graph_version",
+        ///    "observed_at",
+        ///    "sequence"
+        ///  ],
+        ///  "properties": {
+        ///    "attempts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkRuntimeAttemptProjectionV1"
+        ///      }
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/WorkRuntimeProjectionCoverageV1"
+        ///    },
+        ///    "generation_id": {
+        ///      "$ref": "#/definitions/ProjectionGenerationId"
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "observed_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "sequence": {
+        ///      "$ref": "#/definitions/WorkProjectionSequenceV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkRuntimeProjectionV1 {
+            pub attempts: ::std::vec::Vec<WorkRuntimeAttemptProjectionV1>,
+            pub coverage: WorkRuntimeProjectionCoverageV1,
+            pub generation_id: ProjectionGenerationId,
+            pub graph_version: u64,
+            pub observed_at: UtcMicros,
+            pub sequence: WorkProjectionSequenceV1,
+        }
+        ///`WorkScoreKindV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "ordinal",
+        ///    "heuristic",
+        ///    "calibrated_range"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkScoreKindV1 {
+            #[serde(rename = "ordinal")]
+            Ordinal,
+            #[serde(rename = "heuristic")]
+            Heuristic,
+            #[serde(rename = "calibrated_range")]
+            CalibratedRange,
+        }
+        impl ::std::fmt::Display for WorkScoreKindV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Ordinal => f.write_str("ordinal"),
+                    Self::Heuristic => f.write_str("heuristic"),
+                    Self::CalibratedRange => f.write_str("calibrated_range"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkScoreKindV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "ordinal" => Ok(Self::Ordinal),
+                    "heuristic" => Ok(Self::Heuristic),
+                    "calibrated_range" => Ok(Self::CalibratedRange),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkScoreKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkScoreKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkScoreKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkShapeAssessmentV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "ambiguity",
+        ///    "blast_radius",
+        ///    "complexity",
+        ///    "integration_overhead",
+        ///    "score_kind"
+        ///  ],
+        ///  "properties": {
+        ///    "ambiguity": {
+        ///      "type": "integer",
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    },
+        ///    "blast_radius": {
+        ///      "type": "integer",
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    },
+        ///    "complexity": {
+        ///      "type": "integer",
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    },
+        ///    "integration_overhead": {
+        ///      "type": "integer",
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    },
+        ///    "score_kind": {
+        ///      "$ref": "#/definitions/WorkScoreKindV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkShapeAssessmentV1 {
+            pub ambiguity: u8,
+            pub blast_radius: u8,
+            pub complexity: u8,
+            pub integration_overhead: u8,
+            pub score_kind: WorkScoreKindV1,
+        }
+        ///`WorkSizingV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "high",
+        ///    "likely",
+        ///    "low",
+        ///    "score_kind"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "type": "string"
+        ///    },
+        ///    "high": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "likely": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "low": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "score_kind": {
+        ///      "$ref": "#/definitions/WorkScoreKindV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkSizingV1 {
+            pub coverage: ::std::string::String,
+            pub high: u32,
+            pub likely: u32,
+            pub low: u32,
+            pub score_kind: WorkScoreKindV1,
+        }
+        ///`WorkTimelineEntryV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "created_at",
+        ///    "task_id",
+        ///    "updated_at"
+        ///  ],
+        ///  "properties": {
+        ///    "created_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "deadline": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "scheduled_at": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/UtcMicros"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "task_id": {
+        ///      "$ref": "#/definitions/TaskId"
+        ///    },
+        ///    "updated_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkTimelineEntryV1 {
+            pub created_at: UtcMicros,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub deadline: ::std::option::Option<UtcMicros>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub scheduled_at: ::std::option::Option<UtcMicros>,
+            pub task_id: TaskId,
+            pub updated_at: UtcMicros,
+        }
+        ///`WorkTimelineLaneV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "triage",
+        ///    "todo",
+        ///    "scheduled",
+        ///    "ready",
+        ///    "running",
+        ///    "blocked",
+        ///    "review",
+        ///    "done",
+        ///    "archived",
+        ///    "cancelled",
+        ///    "unavailable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkTimelineLaneV1 {
+            #[serde(rename = "triage")]
+            Triage,
+            #[serde(rename = "todo")]
+            Todo,
+            #[serde(rename = "scheduled")]
+            Scheduled,
+            #[serde(rename = "ready")]
+            Ready,
+            #[serde(rename = "running")]
+            Running,
+            #[serde(rename = "blocked")]
+            Blocked,
+            #[serde(rename = "review")]
+            Review,
+            #[serde(rename = "done")]
+            Done,
+            #[serde(rename = "archived")]
+            Archived,
+            #[serde(rename = "cancelled")]
+            Cancelled,
+            #[serde(rename = "unavailable")]
+            Unavailable,
+        }
+        impl ::std::fmt::Display for WorkTimelineLaneV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Triage => f.write_str("triage"),
+                    Self::Todo => f.write_str("todo"),
+                    Self::Scheduled => f.write_str("scheduled"),
+                    Self::Ready => f.write_str("ready"),
+                    Self::Running => f.write_str("running"),
+                    Self::Blocked => f.write_str("blocked"),
+                    Self::Review => f.write_str("review"),
+                    Self::Done => f.write_str("done"),
+                    Self::Archived => f.write_str("archived"),
+                    Self::Cancelled => f.write_str("cancelled"),
+                    Self::Unavailable => f.write_str("unavailable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkTimelineLaneV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "triage" => Ok(Self::Triage),
+                    "todo" => Ok(Self::Todo),
+                    "scheduled" => Ok(Self::Scheduled),
+                    "ready" => Ok(Self::Ready),
+                    "running" => Ok(Self::Running),
+                    "blocked" => Ok(Self::Blocked),
+                    "review" => Ok(Self::Review),
+                    "done" => Ok(Self::Done),
+                    "archived" => Ok(Self::Archived),
+                    "cancelled" => Ok(Self::Cancelled),
+                    "unavailable" => Ok(Self::Unavailable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkTimelineLaneV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkTimelineLaneV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkTimelineLaneV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///`WorkTimelineProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "entries",
+        ///    "graph_version"
+        ///  ],
+        ///  "properties": {
+        ///    "entries": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkTimelineEntryV1"
+        ///      }
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkTimelineProjectionV1 {
+            pub entries: ::std::vec::Vec<WorkTimelineEntryV1>,
+            pub graph_version: u64,
+        }
+        ///`WorkWorkloadProjectionV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "graph_version",
+        ///    "total_effort"
+        ///  ],
+        ///  "properties": {
+        ///    "actual_concurrency": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "blocked_effort": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "graph_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "ready_effort": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "requested_concurrency": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "running_effort": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "total_effort": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkWorkloadProjectionV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub actual_concurrency: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub blocked_effort: ::std::option::Option<u32>,
+            pub graph_version: u64,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub ready_effort: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub requested_concurrency: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub running_effort: ::std::option::Option<u32>,
+            pub total_effort: u32,
+        }
+    }
+    pub type Request = request::WorkGraphReadRequestV1;
+    pub type Result = result::WorkGraphReadV1;
+}
+typed_operation!(
+    WorkViews,
+    work_views,
+    "operation.work.views",
+    OperationTransport::Http {
+        route: "/application/work/views"
+    },
+    "binding.http.work.views",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    30000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Partial
+    ],
+    "schema.work.views.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod workflow_activate_definition {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Wire request for [`WorkflowDefinitionService::activate`].
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowDefinitionActivateRequest",
+        ///  "description": "Wire request for [`WorkflowDefinitionService::activate`].",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "expected_revision"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "expected_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinitionActivateRequest {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: ::std::num::NonZeroU64,
+            pub expected_revision: ::std::num::NonZeroU64,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Revisioned lifecycle disposition of one definition version.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowDefinitionDisposition",
+        ///  "description": "Revisioned lifecycle disposition of one definition version.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "revision",
+        ///    "state",
+        ///    "transitioned_at"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionLifecycleState"
+        ///    },
+        ///    "transitioned_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinitionDisposition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: ::std::num::NonZeroU64,
+            pub revision: ::std::num::NonZeroU64,
+            pub state: WorkflowDefinitionLifecycleState,
+            pub transitioned_at: UtcMicros,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Durable lifecycle disposition of one immutable workflow definition version.
+
+        Plan 32 ("Typed workflow definitions"): "Lifecycle retains candidate,
+validate, activate, retire, reject, list, get, diff, and history operations
+through the same application surfaces." The definition payload itself stays
+        immutable — "Editing creates a new version; admitted runs remain pinned" —
+        so the disposition is a separate revisioned aggregate keyed by the same
+        definition identity.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable lifecycle disposition of one immutable workflow definition version.\n\nPlan 32 (\"Typed workflow definitions\"): \"Lifecycle retains candidate,\nvalidate, activate, retire, reject, list, get, diff, and history operations\nthrough the same application surfaces.\" The definition payload itself stays\nimmutable — \"Editing creates a new version; admitted runs remain pinned\" —\nso the disposition is a separate revisioned aggregate keyed by the same\ndefinition identity.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "candidate",
+        ///    "validated",
+        ///    "active",
+        ///    "retired",
+        ///    "rejected"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowDefinitionLifecycleState {
+            #[serde(rename = "candidate")]
+            Candidate,
+            #[serde(rename = "validated")]
+            Validated,
+            #[serde(rename = "active")]
+            Active,
+            #[serde(rename = "retired")]
+            Retired,
+            #[serde(rename = "rejected")]
+            Rejected,
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionLifecycleState {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Candidate => f.write_str("candidate"),
+                    Self::Validated => f.write_str("validated"),
+                    Self::Active => f.write_str("active"),
+                    Self::Retired => f.write_str("retired"),
+                    Self::Rejected => f.write_str("rejected"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionLifecycleState {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "candidate" => Ok(Self::Candidate),
+                    "validated" => Ok(Self::Validated),
+                    "active" => Ok(Self::Active),
+                    "retired" => Ok(Self::Retired),
+                    "rejected" => Ok(Self::Rejected),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+    }
+    pub type Request = request::WorkflowDefinitionActivateRequest;
+    pub type Result = result::WorkflowDefinitionDisposition;
+}
+typed_operation!(
+    WorkflowActivateDefinition,
+    workflow_activate_definition,
+    "operation.workflow.activate_definition",
+    OperationTransport::Http {
+        route: "/application/workflow/activate-definition"
+    },
+    "binding.http.workflow.activate_definition",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.workflow.activate_definition.result",
+    1
+);
+#[allow(clippy::all)]
 pub mod workflow_definition_history {
     pub mod request {
         /// Error types.
@@ -86469,6 +101077,862 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.workflow.register_definition.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod workflow_reject_definition {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Wire request for [`WorkflowDefinitionService::reject`].
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowDefinitionRejectRequest",
+        ///  "description": "Wire request for [`WorkflowDefinitionService::reject`].",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "expected_revision"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "expected_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinitionRejectRequest {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: ::std::num::NonZeroU64,
+            pub expected_revision: ::std::num::NonZeroU64,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Revisioned lifecycle disposition of one definition version.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowDefinitionDisposition",
+        ///  "description": "Revisioned lifecycle disposition of one definition version.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "revision",
+        ///    "state",
+        ///    "transitioned_at"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionLifecycleState"
+        ///    },
+        ///    "transitioned_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinitionDisposition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: ::std::num::NonZeroU64,
+            pub revision: ::std::num::NonZeroU64,
+            pub state: WorkflowDefinitionLifecycleState,
+            pub transitioned_at: UtcMicros,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Durable lifecycle disposition of one immutable workflow definition version.
+
+        Plan 32 ("Typed workflow definitions"): "Lifecycle retains candidate,
+validate, activate, retire, reject, list, get, diff, and history operations
+through the same application surfaces." The definition payload itself stays
+        immutable — "Editing creates a new version; admitted runs remain pinned" —
+        so the disposition is a separate revisioned aggregate keyed by the same
+        definition identity.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable lifecycle disposition of one immutable workflow definition version.\n\nPlan 32 (\"Typed workflow definitions\"): \"Lifecycle retains candidate,\nvalidate, activate, retire, reject, list, get, diff, and history operations\nthrough the same application surfaces.\" The definition payload itself stays\nimmutable — \"Editing creates a new version; admitted runs remain pinned\" —\nso the disposition is a separate revisioned aggregate keyed by the same\ndefinition identity.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "candidate",
+        ///    "validated",
+        ///    "active",
+        ///    "retired",
+        ///    "rejected"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowDefinitionLifecycleState {
+            #[serde(rename = "candidate")]
+            Candidate,
+            #[serde(rename = "validated")]
+            Validated,
+            #[serde(rename = "active")]
+            Active,
+            #[serde(rename = "retired")]
+            Retired,
+            #[serde(rename = "rejected")]
+            Rejected,
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionLifecycleState {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Candidate => f.write_str("candidate"),
+                    Self::Validated => f.write_str("validated"),
+                    Self::Active => f.write_str("active"),
+                    Self::Retired => f.write_str("retired"),
+                    Self::Rejected => f.write_str("rejected"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionLifecycleState {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "candidate" => Ok(Self::Candidate),
+                    "validated" => Ok(Self::Validated),
+                    "active" => Ok(Self::Active),
+                    "retired" => Ok(Self::Retired),
+                    "rejected" => Ok(Self::Rejected),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+    }
+    pub type Request = request::WorkflowDefinitionRejectRequest;
+    pub type Result = result::WorkflowDefinitionDisposition;
+}
+typed_operation!(
+    WorkflowRejectDefinition,
+    workflow_reject_definition,
+    "operation.workflow.reject_definition",
+    OperationTransport::Http {
+        route: "/application/workflow/reject-definition"
+    },
+    "binding.http.workflow.reject_definition",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.workflow.reject_definition.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod workflow_retire_definition {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Wire request for [`WorkflowDefinitionService::retire`].
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowDefinitionRetireRequest",
+        ///  "description": "Wire request for [`WorkflowDefinitionService::retire`].",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "expected_revision"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "expected_revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinitionRetireRequest {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: ::std::num::NonZeroU64,
+            pub expected_revision: ::std::num::NonZeroU64,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Revisioned lifecycle disposition of one definition version.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "WorkflowDefinitionDisposition",
+        ///  "description": "Revisioned lifecycle disposition of one definition version.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "definition_id",
+        ///    "definition_version",
+        ///    "revision",
+        ///    "state",
+        ///    "transitioned_at"
+        ///  ],
+        ///  "properties": {
+        ///    "definition_id": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionId"
+        ///    },
+        ///    "definition_version": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "revision": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 1.0
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/WorkflowDefinitionLifecycleState"
+        ///    },
+        ///    "transitioned_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkflowDefinitionDisposition {
+            pub definition_id: WorkflowDefinitionId,
+            pub definition_version: ::std::num::NonZeroU64,
+            pub revision: ::std::num::NonZeroU64,
+            pub state: WorkflowDefinitionLifecycleState,
+            pub transitioned_at: UtcMicros,
+        }
+        ///Strongly typed canonical identity: `WorkflowDefinitionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkflowDefinitionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkflowDefinitionId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkflowDefinitionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkflowDefinitionId> for ::std::string::String {
+            fn from(value: WorkflowDefinitionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkflowDefinitionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Durable lifecycle disposition of one immutable workflow definition version.
+
+        Plan 32 ("Typed workflow definitions"): "Lifecycle retains candidate,
+validate, activate, retire, reject, list, get, diff, and history operations
+through the same application surfaces." The definition payload itself stays
+        immutable — "Editing creates a new version; admitted runs remain pinned" —
+        so the disposition is a separate revisioned aggregate keyed by the same
+        definition identity.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Durable lifecycle disposition of one immutable workflow definition version.\n\nPlan 32 (\"Typed workflow definitions\"): \"Lifecycle retains candidate,\nvalidate, activate, retire, reject, list, get, diff, and history operations\nthrough the same application surfaces.\" The definition payload itself stays\nimmutable — \"Editing creates a new version; admitted runs remain pinned\" —\nso the disposition is a separate revisioned aggregate keyed by the same\ndefinition identity.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "candidate",
+        ///    "validated",
+        ///    "active",
+        ///    "retired",
+        ///    "rejected"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum WorkflowDefinitionLifecycleState {
+            #[serde(rename = "candidate")]
+            Candidate,
+            #[serde(rename = "validated")]
+            Validated,
+            #[serde(rename = "active")]
+            Active,
+            #[serde(rename = "retired")]
+            Retired,
+            #[serde(rename = "rejected")]
+            Rejected,
+        }
+        impl ::std::fmt::Display for WorkflowDefinitionLifecycleState {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Candidate => f.write_str("candidate"),
+                    Self::Validated => f.write_str("validated"),
+                    Self::Active => f.write_str("active"),
+                    Self::Retired => f.write_str("retired"),
+                    Self::Rejected => f.write_str("rejected"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for WorkflowDefinitionLifecycleState {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "candidate" => Ok(Self::Candidate),
+                    "validated" => Ok(Self::Validated),
+                    "active" => Ok(Self::Active),
+                    "retired" => Ok(Self::Retired),
+                    "rejected" => Ok(Self::Rejected),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for WorkflowDefinitionLifecycleState {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+    }
+    pub type Request = request::WorkflowDefinitionRetireRequest;
+    pub type Result = result::WorkflowDefinitionDisposition;
+}
+typed_operation!(
+    WorkflowRetireDefinition,
+    workflow_retire_definition,
+    "operation.workflow.retire_definition",
+    OperationTransport::Http {
+        route: "/application/workflow/retire-definition"
+    },
+    "binding.http.workflow.retire_definition",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    false,
+    &[],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.workflow.retire_definition.result",
     1
 );
 #[allow(clippy::all)]
