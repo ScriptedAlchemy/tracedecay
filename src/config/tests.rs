@@ -1323,9 +1323,13 @@ mod runtime_configuration_cutover {
         let layout = crate::storage::resolve_layout_for_current_profile(root.path())
             .expect("resolve store layout");
         std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        // Write the opposite of the typed registry default so the stale input
+        // stays distinguishable from the canonical resolution regardless of
+        // the default's polarity.
+        let stale_auto_watch = !TraceDecayConfig::default().sync.auto_watch;
         std::fs::write(
             &layout.config_path,
-            r#"{"sync":{"auto_watch":false},"max_file_size":7}"#,
+            format!(r#"{{"sync":{{"auto_watch":{stale_auto_watch}}},"max_file_size":7}}"#),
         )
         .expect("write stale config.json input");
 
@@ -1354,8 +1358,9 @@ mod runtime_configuration_cutover {
             "configuration.initial.canonical.v1",
             "fresh stores publish the sole canonical initial revision"
         );
-        assert!(
+        assert_eq!(
             pinned.config.sync.auto_watch,
+            TraceDecayConfig::default().sync.auto_watch,
             "stale config.json input must not enter the final configuration authority"
         );
         assert_eq!(
