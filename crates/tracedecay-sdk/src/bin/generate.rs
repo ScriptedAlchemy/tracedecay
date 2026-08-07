@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::error::Error;
 use std::fmt::Write as _;
@@ -10,9 +10,10 @@ use schemars::schema::RootSchema;
 use serde_json::Value;
 use tracedecay_application::sdk_executable_binding_registry;
 use tracedecay_tool_catalog::{
-    DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
-    SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
-    SdkTransportBindingV1,
+    CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
+    ExecutableUnavailableDispositionV1, IdempotencyContract, ReceiptContract,
+    ReconciliationContract, SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1,
+    SdkExecutableBindingV1, SdkTransportBindingV1, TerminalState,
 };
 
 const HEADER: &str = concat!(
@@ -43,9 +44,14 @@ struct Operation {
     request_schema: Schema,
     result_schema: Schema,
     cancellation: Value,
+    cancellable: bool,
+    cancellation_points: Vec<CancellationPoint>,
     deadline: Value,
     maximum_deadline_millis: u64,
     deadline_behavior: DeadlineBehavior,
+    reconciliation: ReconciliationContract,
+    receipt: ReceiptContract,
+    terminal_states: Vec<TerminalState>,
 }
 
 struct Schema {
@@ -173,9 +179,17 @@ fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation,
             body: binding.result_schema().body().clone(),
         },
         cancellation: serde_json::to_value(binding.cancellation())?,
+        cancellable: matches!(
+            binding.cancellation(),
+            CancellationContract::Cooperative { .. }
+        ),
+        cancellation_points: binding.cancellation().points().to_vec(),
         deadline: serde_json::to_value(binding.deadline())?,
         maximum_deadline_millis: binding.deadline().maximum_millis(),
         deadline_behavior: binding.deadline().behavior(),
+        reconciliation: binding.reconciliation(),
+        receipt: binding.receipt(),
+        terminal_states: binding.terminal_states().states().to_vec(),
     })
 }
 
@@ -200,14 +214,44 @@ fn type_name(value: &str) -> String {
         .collect()
 }
 
-fn render_schema_type(schema: &Value) -> Result<String, Box<dyn Error>> {
-    render_schema_type_at(schema, schema, &mut BTreeSet::new())
+/// A canonical definition rendered as a named TypeScript alias because it is
+/// referenced recursively and cannot be inlined.
+struct NamedSchemaType {
+    definition: Value,
+    rendered: String,
+}
+
+/// Derives the TypeScript alias name for a recursive canonical reference from
+/// its final JSON-pointer segment (e.g. `#/$defs/AnalyzerStructuredValueV1`).
+fn reference_type_name(reference: &str) -> Result<String, Box<dyn Error>> {
+    let raw = reference
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .replace("~1", "/")
+        .replace("~0", "~");
+    let name = type_name(&raw);
+    if name.is_empty() {
+        return Err(format!(
+            "recursive canonical JSON Schema reference '{reference}' has no usable type name"
+        )
+        .into());
+    }
+    Ok(name)
+}
+
+fn render_schema_type(
+    schema: &Value,
+    named: &mut BTreeMap<String, NamedSchemaType>,
+) -> Result<String, Box<dyn Error>> {
+    render_schema_type_at(schema, schema, &mut BTreeSet::new(), named)
 }
 
 fn render_schema_type_at(
     root: &Value,
     schema: &Value,
     resolving: &mut BTreeSet<String>,
+    named: &mut BTreeMap<String, NamedSchemaType>,
 ) -> Result<String, Box<dyn Error>> {
     if let Value::Bool(accepts) = schema {
         return Ok(if *accepts { "unknown" } else { "never" }.to_owned());
@@ -230,10 +274,42 @@ fn render_schema_type_at(
     }
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
         if !resolving.insert(reference.to_owned()) {
-            return Err(format!("cyclic canonical JSON Schema reference: {reference}").into());
+            // A recursive canonical reference cannot be inlined; emit one
+            // named TypeScript alias for the definition and refer to it by
+            // name at every recursive occurrence.
+            let name = reference_type_name(reference)?;
+            let target = resolve_local_ref(root, reference)?;
+            match named.get(&name) {
+                Some(existing) if existing.definition == *target => {}
+                Some(_) => {
+                    return Err(format!(
+                        "recursive canonical JSON Schema reference '{reference}' collides with \
+                         a different definition already named '{name}'"
+                    )
+                    .into());
+                }
+                None => {
+                    // Publish the placeholder first so the definition body's
+                    // own recursive occurrences resolve to the alias name.
+                    named.insert(
+                        name.clone(),
+                        NamedSchemaType {
+                            definition: target.clone(),
+                            rendered: String::new(),
+                        },
+                    );
+                    let mut rendering = BTreeSet::from([reference.to_owned()]);
+                    let rendered = render_schema_type_at(root, target, &mut rendering, named)?;
+                    named
+                        .get_mut(&name)
+                        .ok_or("recursive schema rendering lost its named alias slot")?
+                        .rendered = rendered;
+                }
+            }
+            return Ok(name);
         }
         let target = resolve_local_ref(root, reference)?;
-        let rendered = render_schema_type_at(root, target, resolving);
+        let rendered = render_schema_type_at(root, target, resolving, named);
         resolving.remove(reference);
         return rendered;
     }
@@ -257,7 +333,7 @@ fn render_schema_type_at(
             }
             return variants
                 .iter()
-                .map(|variant| render_schema_type_at(root, variant, resolving))
+                .map(|variant| render_schema_type_at(root, variant, resolving, named))
                 .collect::<Result<Vec<_>, _>>()
                 .map(|variants| variants.join(" | "));
         }
@@ -268,7 +344,7 @@ fn render_schema_type_at(
         }
         return parts
             .iter()
-            .map(|part| render_schema_type_at(root, part, resolving))
+            .map(|part| render_schema_type_at(root, part, resolving, named))
             .collect::<Result<Vec<_>, _>>()
             .map(|parts| parts.join(" & "));
     }
@@ -279,7 +355,7 @@ fn render_schema_type_at(
             .map(|schema_type| {
                 let mut variant = object.clone();
                 variant.insert("type".to_owned(), schema_type.clone());
-                render_schema_type_at(root, &Value::Object(variant), resolving)
+                render_schema_type_at(root, &Value::Object(variant), resolving, named)
             })
             .collect::<Result<Vec<_>, _>>()
             .map(|variants| variants.join(" | "));
@@ -295,14 +371,14 @@ fn render_schema_type_at(
             if let Some(prefix) = object.get("prefixItems").and_then(Value::as_array) {
                 let items = prefix
                     .iter()
-                    .map(|item| render_schema_type_at(root, item, resolving))
+                    .map(|item| render_schema_type_at(root, item, resolving, named))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(format!("readonly [{}]", items.join(", ")));
             }
             let item = object
                 .get("items")
                 .filter(|items| !matches!(items, Value::Bool(true)))
-                .map(|items| render_schema_type_at(root, items, resolving))
+                .map(|items| render_schema_type_at(root, items, resolving, named))
                 .transpose()?
                 .unwrap_or_else(|| "unknown".to_owned());
             let item = if item.contains(" | ") || item.contains(" & ") {
@@ -312,11 +388,11 @@ fn render_schema_type_at(
             };
             Ok(format!("readonly {item}[]"))
         }
-        Some("object") => render_object_type(root, object, resolving),
+        Some("object") => render_object_type(root, object, resolving, named),
         None if object.contains_key("properties")
             || object.contains_key("additionalProperties") =>
         {
-            render_object_type(root, object, resolving)
+            render_object_type(root, object, resolving, named)
         }
         None => Ok("unknown".to_owned()),
         Some(other) => Err(format!("unsupported canonical JSON Schema type: {other}").into()),
@@ -327,6 +403,7 @@ fn render_object_type(
     root: &Value,
     schema: &serde_json::Map<String, Value>,
     resolving: &mut BTreeSet<String>,
+    named: &mut BTreeMap<String, NamedSchemaType>,
 ) -> Result<String, Box<dyn Error>> {
     let required = schema
         .get("required")
@@ -341,7 +418,7 @@ fn render_object_type(
     let mut fields = Vec::new();
     if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
         for (name, property) in properties {
-            let property_type = render_schema_type_at(root, property, resolving)?;
+            let property_type = render_schema_type_at(root, property, resolving, named)?;
             let optional = if required.contains(name.as_str()) {
                 ""
             } else {
@@ -357,7 +434,7 @@ fn render_object_type(
         Some(Value::Bool(false)) => {}
         Some(Value::Object(_)) => {
             let additional =
-                render_schema_type_at(root, &schema["additionalProperties"], resolving)?;
+                render_schema_type_at(root, &schema["additionalProperties"], resolving, named)?;
             fields.push(format!("readonly [key: string]: {additional}"));
         }
         _ => fields.push("readonly [key: string]: unknown".to_owned()),
@@ -411,16 +488,21 @@ fn render_operations(
          \x20 readonly resultSchema: { schemaId: string; revision: number };\n\
          \x20 readonly cancellation: CanonicalCancellation;\n\
          \x20 readonly deadline: { maximum_millis: number; behavior: \"reject_before_admission\" | \"return_operation_receipt\" | \"return_effect_receipt\" };\n\
+         \x20 readonly reconciliation: \"not_required\" | \"required\";\n\
+         \x20 readonly receipt: \"operation\" | \"durable_effect\";\n\
+         \x20 readonly terminalStates: readonly (\"completed\" | \"cancelled\" | \"timed_out\" | \"failed\" | \"unavailable\" | \"effect_unknown\" | \"partial\")[];\n\
          \x20 readonly decodeRequest: Decoder<Request>; readonly decodeResult: Decoder<Result>;\n\
          \x20 readonly decodeSuccess: Decoder<HttpSuccessEnvelope<Result>>;\n}\n\n",
     );
+    let mut named = BTreeMap::new();
+    let mut operation_types = String::new();
     for operation in operations {
-        let request_type = render_schema_type(&operation.request_schema.body)?;
-        let result_type = render_schema_type(&operation.result_schema.body)?;
+        let request_type = render_schema_type(&operation.request_schema.body, &mut named)?;
+        let result_type = render_schema_type(&operation.result_schema.body, &mut named)?;
         let request_schema = serde_json::to_string(&operation.request_schema.body)?;
         let result_schema = serde_json::to_string(&operation.result_schema.body)?;
         emit!(
-            out,
+            operation_types,
             "export type {0}Request = {1};\n\
              export type {0}Result = {2};\n\
              const {3}RequestSchema = {4} as const satisfies CanonicalJsonSchema;\n\
@@ -435,6 +517,26 @@ fn render_operations(
             result_schema,
         );
     }
+    for operation in operations {
+        for suffix in ["Request", "Result"] {
+            let alias = format!("{}{suffix}", operation.type_name);
+            if named.contains_key(&alias) {
+                return Err(format!(
+                    "recursive canonical definition '{alias}' collides with the generated \
+                     {suffix} type of operation '{}'",
+                    operation.operation_id
+                )
+                .into());
+            }
+        }
+    }
+    for (name, named_type) in &named {
+        emit!(out, "export type {name} = {};", named_type.rendered);
+    }
+    if !named.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&operation_types);
     if operations.is_empty() {
         out.push_str("export const OPERATIONS = [] as const;\n\n");
     } else {
@@ -445,9 +547,9 @@ fn render_operations(
             out,
             "  {{ operation: {0}, operationId: {1}, route: {2}, method: \"POST\", effect: {3}, idempotency: {4}, bindingId: {5},\n\
              \x20   requestSchema: {{ schemaId: {6}, revision: {7} }}, resultSchema: {{ schemaId: {8}, revision: {9} }},\n\
-             \x20   cancellation: {10}, deadline: {11},\n\
-             \x20   decodeRequest: decode{12}Request, decodeResult: decode{12}Result,\n\
-             \x20   decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {5}, {8}, {9}, decode{12}Result) }},",
+             \x20   cancellation: {10}, deadline: {11}, reconciliation: {12}, receipt: {13}, terminalStates: {14},\n\
+             \x20   decodeRequest: decode{15}Request, decodeResult: decode{15}Result,\n\
+             \x20   decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {5}, {8}, {9}, {14}, {10}, {13}, {12}, decode{15}Result) }},",
             quote(&operation.name),
             quote(&operation.operation_id),
             quote(&operation.route),
@@ -460,6 +562,9 @@ fn render_operations(
             operation.result_schema.revision,
             serde_json::to_string(&operation.cancellation)?,
             serde_json::to_string(&operation.deadline)?,
+            serde_json::to_string(&operation.reconciliation)?,
+            serde_json::to_string(&operation.receipt)?,
+            serde_json::to_string(&operation.terminal_states)?,
             operation.type_name
         );
     }
@@ -506,7 +611,7 @@ fn render_rust_operations(
         "//! Generated typed public operation descriptors. DO NOT EDIT.\n\n\
          use serde::Serialize;\n\
          use serde::de::DeserializeOwned;\n\
-         use tracedecay_tool_catalog::{DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract};\n\n\
+         use tracedecay_tool_catalog::{CancellationPoint, DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract, ReceiptContract, ReconciliationContract, TerminalState};\n\n\
          #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
          pub struct UnavailableOperationCapability {\n\
          \x20   pub operation: &'static str,\n\
@@ -521,13 +626,18 @@ fn render_rust_operations(
          \x20   const BINDING_ID: &'static str;\n\
          \x20   const EFFECT: EffectClass;\n\
          \x20   const IDEMPOTENCY: IdempotencyContract;\n\
+         \x20   const CANCELLABLE: bool;\n\
+         \x20   const CANCELLATION_POINTS: &'static [CancellationPoint];\n\
          \x20   const MAXIMUM_DEADLINE_MILLIS: u64;\n\
          \x20   const DEADLINE_BEHAVIOR: DeadlineBehavior;\n\
+         \x20   const RECONCILIATION: ReconciliationContract;\n\
+         \x20   const RECEIPT: ReceiptContract;\n\
+         \x20   const TERMINAL_STATES: &'static [TerminalState];\n\
          \x20   const RESULT_SCHEMA_ID: &'static str;\n\
          \x20   const RESULT_SCHEMA_REVISION: u32;\n\
          }\n\n\
          macro_rules! typed_operation {\n\
-         \x20   ($name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal, $effect:expr, $idempotency:expr, $maximum_deadline:literal, $deadline_behavior:expr, $schema:literal, $revision:literal) => {\n\
+         \x20   ($name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal, $effect:expr, $idempotency:expr, $cancellable:literal, $cancellation_points:expr, $maximum_deadline:literal, $deadline_behavior:expr, $reconciliation:expr, $receipt:expr, $terminal_states:expr, $schema:literal, $revision:literal) => {\n\
          \x20       #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n\
          \x20       pub struct $name;\n\
          \x20       impl TypedOperation for $name {\n\
@@ -538,8 +648,13 @@ fn render_rust_operations(
          \x20           const BINDING_ID: &'static str = $binding;\n\
          \x20           const EFFECT: EffectClass = $effect;\n\
          \x20           const IDEMPOTENCY: IdempotencyContract = $idempotency;\n\
+         \x20           const CANCELLABLE: bool = $cancellable;\n\
+         \x20           const CANCELLATION_POINTS: &'static [CancellationPoint] = $cancellation_points;\n\
          \x20           const MAXIMUM_DEADLINE_MILLIS: u64 = $maximum_deadline;\n\
          \x20           const DEADLINE_BEHAVIOR: DeadlineBehavior = $deadline_behavior;\n\
+         \x20           const RECONCILIATION: ReconciliationContract = $reconciliation;\n\
+         \x20           const RECEIPT: ReceiptContract = $receipt;\n\
+         \x20           const TERMINAL_STATES: &'static [TerminalState] = $terminal_states;\n\
          \x20           const RESULT_SCHEMA_ID: &'static str = $schema;\n\
          \x20           const RESULT_SCHEMA_REVISION: u32 = $revision;\n\
          \x20       }\n\
@@ -561,6 +676,18 @@ fn render_rust_operations(
         let module = operation.name.clone();
         let (request_source, request_type) = typify_schema(&operation.request_schema.body)?;
         let (result_source, result_type) = typify_schema(&operation.result_schema.body)?;
+        let cancellation_points = operation
+            .cancellation_points
+            .iter()
+            .map(|point| format!("CancellationPoint::{point:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let terminal_states = operation
+            .terminal_states
+            .iter()
+            .map(|state| format!("TerminalState::{state:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         emit!(
             out,
             "#[allow(clippy::all)]\n\
@@ -571,7 +698,7 @@ fn render_rust_operations(
              \x20   pub type Result = result::{result_type};\n\
              }}\n\
              typed_operation!(\n\
-             \x20   {marker}, {module}, {operation_id:?}, {route:?}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, {schema:?}, {revision}\n\
+             \x20   {marker}, {module}, {operation_id:?}, {route:?}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {cancellable}, &[{cancellation_points}], {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, ReconciliationContract::{reconciliation:?}, ReceiptContract::{receipt:?}, &[{terminal_states}], {schema:?}, {revision}\n\
              );\n",
             marker = type_name(&operation.name),
             operation_id = operation.operation_id,
@@ -579,8 +706,13 @@ fn render_rust_operations(
             binding = operation.binding,
             effect = operation.effect,
             idempotency = operation.idempotency,
+            cancellable = operation.cancellable,
+            cancellation_points = cancellation_points,
             maximum_deadline = operation.maximum_deadline_millis,
             deadline_behavior = operation.deadline_behavior,
+            reconciliation = operation.reconciliation,
+            receipt = operation.receipt,
+            terminal_states = terminal_states,
             schema = operation.result_schema.id,
             revision = operation.result_schema.revision,
         );
@@ -674,8 +806,8 @@ function validateCanonicalSchema(value: unknown, schemaValue: unknown, root: Can
   if (Array.isArray(expected) && !expected.some((candidate) => typeof candidate === "string" && schemaTypeMatches(value, candidate))) throw new TypeError(`${path} has no canonical type`);
   if (typeof value === "string") { if (typeof schema.minLength === "number" && value.length < schema.minLength) throw new TypeError(`${path} is shorter than minLength`); if (typeof schema.maxLength === "number" && value.length > schema.maxLength) throw new TypeError(`${path} exceeds maxLength`); if (typeof schema.pattern === "string" && !new RegExp(schema.pattern, "u").test(value)) throw new TypeError(`${path} does not match the canonical pattern`); }
   if (typeof value === "number") { if (schema.type === "integer") { if (schema.format === "uint32" && (value < 0 || value > 4_294_967_295)) throw new TypeError(`${path} is outside uint32`); if (schema.format === "uint64" && (value < 0 || value > Number.MAX_SAFE_INTEGER)) throw new TypeError(`${path} is outside safely representable uint64`); if (schema.format === "int64" && (value < Number.MIN_SAFE_INTEGER || value > Number.MAX_SAFE_INTEGER)) throw new TypeError(`${path} is outside safely representable int64`); } if (typeof schema.minimum === "number" && value < schema.minimum) throw new TypeError(`${path} is below minimum`); if (typeof schema.maximum === "number" && value > schema.maximum) throw new TypeError(`${path} exceeds maximum`); }
-  if (Array.isArray(value)) { if (typeof schema.minItems === "number" && value.length < schema.minItems) throw new TypeError(`${path} has too few items`); if (typeof schema.maxItems === "number" && value.length > schema.maxItems) throw new TypeError(`${path} has too many items`); if (schema.uniqueItems === true) { const seen = new Set<string>(); for (const item of value) { const key = canonicalJsonKey(item); if (seen.has(key)) throw new TypeError(`${path} contains duplicate items`); seen.add(key); } } if (Array.isArray(schema.prefixItems)) schema.prefixItems.forEach((item, index) => { if (index < value.length) validateCanonicalSchema(value[index], item, root, `${path}[${index}]`, new Set(resolving)); }); if (schema.items !== undefined && !Array.isArray(schema.prefixItems)) value.forEach((item, index) => validateCanonicalSchema(item, schema.items, root, `${path}[${index}]`, new Set(resolving))); }
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) { const object = value as Record<string, unknown>; const properties = schema.properties === undefined ? {} : schemaObject(schema.properties, `${path}.properties`); if (Array.isArray(schema.required)) for (const key of schema.required) if (typeof key === "string" && !(key in object)) throw new TypeError(`${path}.${key} is required`); for (const [key, propertyValue] of Object.entries(object)) { if (key in properties) validateCanonicalSchema(propertyValue, properties[key], root, `${path}.${key}`, new Set(resolving)); else if (schema.additionalProperties === false) throw new TypeError(`${path}.${key} is not allowed`); else if (typeof schema.additionalProperties === "object") validateCanonicalSchema(propertyValue, schema.additionalProperties, root, `${path}.${key}`, new Set(resolving)); } }
+  if (Array.isArray(value)) { if (typeof schema.minItems === "number" && value.length < schema.minItems) throw new TypeError(`${path} has too few items`); if (typeof schema.maxItems === "number" && value.length > schema.maxItems) throw new TypeError(`${path} has too many items`); if (schema.uniqueItems === true) { const seen = new Set<string>(); for (const item of value) { const key = canonicalJsonKey(item); if (seen.has(key)) throw new TypeError(`${path} contains duplicate items`); seen.add(key); } } if (Array.isArray(schema.prefixItems)) schema.prefixItems.forEach((item, index) => { if (index < value.length) validateCanonicalSchema(value[index], item, root, `${path}[${index}]`, new Set()); }); if (schema.items !== undefined && !Array.isArray(schema.prefixItems)) value.forEach((item, index) => validateCanonicalSchema(item, schema.items, root, `${path}[${index}]`, new Set())); }
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) { const object = value as Record<string, unknown>; const properties = schema.properties === undefined ? {} : schemaObject(schema.properties, `${path}.properties`); if (Array.isArray(schema.required)) for (const key of schema.required) if (typeof key === "string" && !(key in object)) throw new TypeError(`${path}.${key} is required`); for (const [key, propertyValue] of Object.entries(object)) { if (key in properties) validateCanonicalSchema(propertyValue, properties[key], root, `${path}.${key}`, new Set()); else if (schema.additionalProperties === false) throw new TypeError(`${path}.${key} is not allowed`); else if (typeof schema.additionalProperties === "object") validateCanonicalSchema(propertyValue, schema.additionalProperties, root, `${path}.${key}`, new Set()); } }
 }
 export function decodeCanonicalSchema<T>(value: unknown, schema: CanonicalJsonSchema): T { validateCanonicalSchema(value, schema, schema, "value", new Set()); return value as T; }
 function record(value: unknown, field: string): Record<string, unknown> { if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`malformed canonical envelope: ${field} must be an object`); return value as Record<string, unknown>; }
@@ -684,10 +816,10 @@ function number(value: unknown, field: string): number { if (typeof value !== "n
 function array(value: unknown, field: string): unknown[] { if (!Array.isArray(value)) throw new TypeError(`malformed canonical envelope: ${field} must be an array`); return value; }
 function nullableNumber(value: unknown, field: string): number | null { return value === null ? null : number(value, field); }
 function nullableString(value: unknown, field: string): string | null { return value === null ? null : string(value, field); }
-function receipt(value: unknown): OperationReceipt { const result = record(value, "outcome.value.execution"); number(result.started_at, "execution.started_at"); number(result.ended_at, "execution.ended_at"); if (!("effective_deadline" in result) || !("cancellation" in result)) throw new TypeError("malformed canonical envelope: receipt fields are required"); const budget = record(result.budget, "execution.budget"); number(budget.units_consumed, "budget.units_consumed"); number(budget.bytes_consumed, "budget.bytes_consumed"); number(budget.elapsed_micros, "budget.elapsed_micros"); string(result.termination, "execution.termination"); return result as unknown as OperationReceipt; }
+function receipt(value: unknown, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation): OperationReceipt { const result = record(value, "outcome.value.execution"); number(result.started_at, "execution.started_at"); number(result.ended_at, "execution.ended_at"); if (!("effective_deadline" in result) || !("cancellation" in result)) throw new TypeError("malformed canonical envelope: receipt fields are required"); const budget = record(result.budget, "execution.budget"); number(budget.units_consumed, "budget.units_consumed"); number(budget.bytes_consumed, "budget.bytes_consumed"); number(budget.elapsed_micros, "budget.elapsed_micros"); const termination = string(result.termination, "execution.termination"); if (!legalTerminations.includes(termination)) throw new TypeError(`malformed canonical envelope: termination ${termination} is not legal for this operation`); if (result.cancellation !== null) { const contract = record(cancellationContract, "operation.cancellation"); const mode = string(contract.mode, "operation.cancellation.mode"); if (mode === "not_cancellable") throw new TypeError("malformed canonical envelope: non-cancellable operation returned cancellation evidence"); const observation = record(result.cancellation, "execution.cancellation"); const stage = string(observation.stage, "execution.cancellation.stage"); const points = array(contract.points, "operation.cancellation.points"); if (!points.includes(stage)) throw new TypeError(`malformed canonical envelope: cancellation stage ${stage} is not legal for this operation`); } return result as unknown as OperationReceipt; }
 function page(value: unknown): PageState { const result = record(value, "outcome.value.page"); string(result.sort_contract_id, "page.sort_contract_id"); const revision = number(result.sort_revision, "page.sort_revision"); if (!Number.isInteger(revision) || revision < 1) throw new TypeError("malformed canonical envelope: page sort_revision must be positive"); nullableNumber(result.total, "page.total"); const returned = number(result.returned, "page.returned"); if (!Number.isInteger(returned) || returned < 0) throw new TypeError("malformed canonical envelope: page returned must be non-negative"); nullableString(result.cursor, "page.cursor"); nullableNumber(result.expires_at, "page.expires_at"); return result as PageState; }
-function outcome<T>(kind: string, value: unknown, decode: Decoder<T>): EvidencePacket<T> | PreviewResult<T> | EffectResult<T> { const result = record(value, "outcome.value"); if (!("payload" in result)) throw new TypeError("malformed canonical envelope: outcome.value.payload is required"); receipt(result.execution); if (kind === "evidence") { record(result.temporal, "temporal"); record(result.authority, "authority"); array(result.evidence_authorities, "evidence_authorities"); record(result.coverage, "coverage"); array(result.omissions, "omissions"); array(result.scores, "scores"); array(result.contributions, "contributions"); page(result.page); } else if (kind === "preview") { string(result.preview_id, "preview_id"); string(result.preview_digest, "preview_digest"); string(result.effect_class, "effect_class"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); } else if (kind === "effect") { string(result.effect_id, "effect_id"); string(result.effect_class, "effect_class"); string(result.idempotency_key, "idempotency_key"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); string(result.reconciliation, "reconciliation"); record(result.receipt, "receipt"); } else throw new TypeError(`malformed canonical envelope: unsupported outcome ${kind}`); return { ...result, payload: result.payload === null ? null : decode(result.payload) } as unknown as EvidencePacket<T> | PreviewResult<T> | EffectResult<T>; }
-export function decodeHttpSuccessEnvelope<T>(value: unknown, binding: string, schema: string, revision: number, decode: Decoder<T>): HttpSuccessEnvelope<T> { const envelope = record(value, "success envelope"); if (string(envelope.binding_id, "binding_id") !== binding) throw new TypeError("malformed canonical envelope: binding mismatch"); const contract = record(envelope.contract, "contract"); if (string(contract.schema_id, "contract.schema_id") !== schema || number(contract.schema_revision, "contract.schema_revision") !== revision) throw new TypeError("malformed canonical envelope: result contract mismatch"); string(envelope.request_id, "request_id"); record(envelope.scope, "scope"); const outer = record(envelope.outcome, "outcome"); const kind = string(outer.outcome, "outcome.outcome"); return { ...envelope, outcome: { ...outer, outcome: kind, value: outcome(kind, outer.value, decode) } } as unknown as HttpSuccessEnvelope<T>; }
+function outcome<T>(kind: string, value: unknown, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation, receiptContract: "operation" | "durable_effect", reconciliationContract: "not_required" | "required", decode: Decoder<T>): EvidencePacket<T> | PreviewResult<T> | EffectResult<T> { const result = record(value, "outcome.value"); if (!("payload" in result)) throw new TypeError("malformed canonical envelope: outcome.value.payload is required"); const lifecycleShapeIsLegal = (receiptContract === "durable_effect" && reconciliationContract === "required" && kind === "effect") || (receiptContract === "operation" && reconciliationContract === "not_required" && (kind === "evidence" || kind === "preview")); if (!lifecycleShapeIsLegal) throw new TypeError(`malformed canonical envelope: outcome ${kind} is outside the operation receipt contract`); receipt(result.execution, legalTerminations, cancellationContract); if (kind === "evidence") { record(result.temporal, "temporal"); record(result.authority, "authority"); array(result.evidence_authorities, "evidence_authorities"); record(result.coverage, "coverage"); array(result.omissions, "omissions"); array(result.scores, "scores"); array(result.contributions, "contributions"); page(result.page); } else if (kind === "preview") { string(result.preview_id, "preview_id"); string(result.preview_digest, "preview_digest"); string(result.effect_class, "effect_class"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); } else if (kind === "effect") { string(result.effect_id, "effect_id"); string(result.effect_class, "effect_class"); string(result.idempotency_key, "idempotency_key"); record(result.authority, "authority"); string(result.expected_state, "expected_state"); string(result.reconciliation, "reconciliation"); record(result.receipt, "receipt"); } else throw new TypeError(`malformed canonical envelope: unsupported outcome ${kind}`); return { ...result, payload: result.payload === null ? null : decode(result.payload) } as unknown as EvidencePacket<T> | PreviewResult<T> | EffectResult<T>; }
+export function decodeHttpSuccessEnvelope<T>(value: unknown, binding: string, schema: string, revision: number, legalTerminations: readonly string[], cancellationContract: CanonicalCancellation, receiptContract: "operation" | "durable_effect", reconciliationContract: "not_required" | "required", decode: Decoder<T>): HttpSuccessEnvelope<T> { const envelope = record(value, "success envelope"); if (string(envelope.binding_id, "binding_id") !== binding) throw new TypeError("malformed canonical envelope: binding mismatch"); const contract = record(envelope.contract, "contract"); if (string(contract.schema_id, "contract.schema_id") !== schema || number(contract.schema_revision, "contract.schema_revision") !== revision) throw new TypeError("malformed canonical envelope: result contract mismatch"); string(envelope.request_id, "request_id"); record(envelope.scope, "scope"); const outer = record(envelope.outcome, "outcome"); const kind = string(outer.outcome, "outcome.outcome"); return { ...envelope, outcome: { ...outer, outcome: kind, value: outcome(kind, outer.value, legalTerminations, cancellationContract, receiptContract, reconciliationContract, decode) } } as unknown as HttpSuccessEnvelope<T>; }
 "##
     )
 }
@@ -737,14 +869,17 @@ fn quote(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use serde_json::json;
-    use tracedecay_tool_catalog::SdkExecutableBindingRegistryV1;
+    use tracedecay_tool_catalog::{
+        CancellationPoint, DeadlineBehavior, EffectClass, IdempotencyContract, ReceiptContract,
+        ReconciliationContract, SdkExecutableBindingRegistryV1, TerminalState,
+    };
 
     use super::{
         canonical_application_registry, canonical_operations, canonical_unavailable_operations,
-        render_operations, render_schema_type,
+        render_operations, render_rust_operations, render_schema_type,
     };
 
     #[test]
@@ -761,7 +896,7 @@ mod tests {
         });
 
         assert_eq!(
-            render_schema_type(&schema).unwrap(),
+            render_schema_type(&schema, &mut BTreeMap::new()).unwrap(),
             "{ readonly name: string; readonly state: \"available\" | \"partial\" | \"unavailable\"; readonly tags?: readonly string[] }"
         );
     }
@@ -773,7 +908,42 @@ mod tests {
             "unevaluatedProperties": false
         });
 
-        assert!(render_schema_type(&schema).is_err());
+        assert!(render_schema_type(&schema, &mut BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn recursive_schema_reference_renders_one_named_alias() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "settings": { "$ref": "#/$defs/StructuredValue" }
+            },
+            "required": ["settings"],
+            "additionalProperties": false,
+            "$defs": {
+                "StructuredValue": {
+                    "oneOf": [
+                        { "type": "string" },
+                        {
+                            "type": "object",
+                            "additionalProperties": { "$ref": "#/$defs/StructuredValue" }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let mut named = BTreeMap::new();
+        let rendered = render_schema_type(&schema, &mut named).unwrap();
+        assert_eq!(
+            rendered,
+            "{ readonly settings: string | { readonly [key: string]: StructuredValue } }"
+        );
+        assert_eq!(named.len(), 1);
+        assert_eq!(
+            named.get("StructuredValue").unwrap().rendered,
+            "string | { readonly [key: string]: StructuredValue }"
+        );
     }
 
     #[test]
@@ -818,5 +988,101 @@ mod tests {
                 .iter()
                 .all(|operation| !operation.route.is_empty())
         );
+    }
+
+    #[test]
+    fn canonical_sdk_registry_generates_every_configuration_contract() {
+        let registry = canonical_application_registry().unwrap();
+        let operations = canonical_operations(&registry).unwrap();
+        let unavailable = canonical_unavailable_operations(&registry);
+        let configuration = operations
+            .iter()
+            .filter(|operation| {
+                operation
+                    .operation_id
+                    .starts_with("operation.application.configuration_")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(configuration.len(), 13);
+        assert!(unavailable.iter().all(|operation| {
+            !operation
+                .operation_id
+                .starts_with("operation.application.configuration_")
+        }));
+        for operation in configuration {
+            assert!(
+                operation
+                    .route
+                    .starts_with("/application/configuration/configuration_")
+            );
+            assert!(operation.binding.starts_with("binding.http.configuration_"));
+            assert_eq!(operation.maximum_deadline_millis, 15_000);
+            if operation.effect == EffectClass::ConfigurationWrite {
+                assert_eq!(operation.idempotency, IdempotencyContract::Required);
+                assert!(!operation.cancellable);
+                assert!(operation.cancellation_points.is_empty());
+                assert_eq!(
+                    operation.deadline_behavior,
+                    DeadlineBehavior::ReturnEffectReceipt
+                );
+                assert_eq!(operation.reconciliation, ReconciliationContract::Required);
+                assert_eq!(operation.receipt, ReceiptContract::DurableEffect);
+                assert_eq!(
+                    operation.terminal_states,
+                    [
+                        TerminalState::Completed,
+                        TerminalState::TimedOut,
+                        TerminalState::Failed,
+                        TerminalState::EffectUnknown,
+                        TerminalState::Partial,
+                    ]
+                );
+            } else {
+                assert_eq!(operation.idempotency, IdempotencyContract::NotRequired);
+                assert!(operation.cancellable);
+                assert_eq!(
+                    operation.cancellation_points,
+                    [
+                        CancellationPoint::BeforeAdmission,
+                        CancellationPoint::BeforeRead,
+                        CancellationPoint::DuringRead,
+                    ]
+                );
+                assert_eq!(
+                    operation.deadline_behavior,
+                    DeadlineBehavior::ReturnOperationReceipt
+                );
+                assert_eq!(
+                    operation.reconciliation,
+                    ReconciliationContract::NotRequired
+                );
+                assert_eq!(operation.receipt, ReceiptContract::Operation);
+                assert_eq!(
+                    operation.terminal_states,
+                    [
+                        TerminalState::Completed,
+                        TerminalState::Cancelled,
+                        TerminalState::TimedOut,
+                        TerminalState::Failed,
+                        TerminalState::Partial,
+                    ]
+                );
+            }
+        }
+
+        let generated = render_operations(&operations, &unavailable).unwrap();
+        assert!(generated.contains("operation: \"application_configuration_set\""));
+        assert!(
+            generated
+                .contains("route: \"/application/configuration/configuration_protected_apply\"")
+        );
+
+        let generated_rust = render_rust_operations(&operations, &unavailable).unwrap();
+        assert!(generated_rust.contains("pub struct ApplicationConfigurationSet"));
+        assert!(generated_rust.contains("const CANCELLABLE: bool = false"));
+        assert!(generated_rust.contains("ReconciliationContract::Required"));
+        assert!(generated_rust.contains("ReceiptContract::DurableEffect"));
+        assert!(generated_rust.contains("TerminalState::EffectUnknown"));
     }
 }

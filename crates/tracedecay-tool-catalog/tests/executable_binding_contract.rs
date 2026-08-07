@@ -184,6 +184,10 @@ fn executable_binding_wire_is_deterministic_and_keeps_stable_names() {
     assert_eq!(value["deadline"]["behavior"], "return_operation_receipt");
     assert_eq!(value["reconciliation"], "not_required");
     assert_eq!(value["receipt"], "operation");
+    assert_eq!(
+        value["terminal_states"]["states"],
+        serde_json::json!(["completed", "cancelled", "timed_out", "failed", "partial"])
+    );
 }
 
 #[test]

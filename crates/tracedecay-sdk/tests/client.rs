@@ -156,11 +156,15 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
         .unwrap();
 
     assert_eq!(
-        serde_json::to_value(local_result.result).unwrap()[0]["definition_id"],
+        local_result.envelope["outcome"]["value"]["execution"]["effective_deadline"]["expires_at"],
+        3
+    );
+    assert_eq!(
+        serde_json::to_value(&local_result.result).unwrap()[0]["definition_id"],
         "workflow.sdk"
     );
     assert_eq!(
-        serde_json::to_value(remote_result.result).unwrap()[0]["definition_id"],
+        serde_json::to_value(&remote_result.result).unwrap()[0]["definition_id"],
         "workflow.sdk"
     );
     let requests = server.join().unwrap();
@@ -295,6 +299,66 @@ fn typed_result_rejects_malformed_payloads() {
             .contains("POST /projects/project.sdk/application/workflow/list-definitions HTTP/1.1")
     );
     assert!(!requests[0].contains("/application/workflow/list-definitions?"));
+}
+
+#[test]
+fn typed_result_rejects_a_terminal_outside_the_operation_contract() {
+    let mut body = list_definitions_success();
+    body["value"]["outcome"]["value"]["execution"]["termination"] = json!("effect_unknown");
+    let response = json_response("200 OK", body);
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
+
+    let error = client
+        .execute::<WorkflowListDefinitions>(&request)
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ClientError::Protocol { message, .. }
+                if message.contains("outside the operation.workflow.list_definitions contract")
+        ),
+        "the generated operation terminal contract must reject illegal daemon outcomes"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn typed_result_rejects_a_cancellation_stage_outside_the_operation_contract() {
+    let mut body = list_definitions_success();
+    body["value"]["outcome"]["value"]["execution"]["termination"] = json!("cancelled");
+    body["value"]["outcome"]["value"]["execution"]["cancellation"] = json!({
+        "stage": "effect_in_flight",
+        "observed_at": 2
+    });
+    let response = json_response("200 OK", body);
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let request =
+        serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!({}))
+            .unwrap();
+
+    let error = client
+        .execute::<WorkflowListDefinitions>(&request)
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ClientError::Protocol { message, .. }
+                if message.contains("cancellation stage effect_in_flight outside")
+        ),
+        "the generated operation cancellation contract must reject illegal daemon evidence"
+    );
+    server.join().unwrap();
 }
 
 #[test]

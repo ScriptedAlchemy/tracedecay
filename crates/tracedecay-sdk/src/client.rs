@@ -12,6 +12,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tracedecay_tool_catalog::{
+    CancellationPoint, ReceiptContract, ReconciliationContract, TerminalState,
+};
 
 use crate::operations::TypedOperation;
 
@@ -204,6 +207,114 @@ impl Client {
                 ),
             });
         }
+        let outcome = response
+            .envelope()
+            .get("outcome")
+            .ok_or_else(|| ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!("daemon omitted the {} outcome", Operation::OPERATION_ID),
+            })?;
+        let outcome_kind = outcome
+            .get("outcome")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!("daemon omitted the {} outcome kind", Operation::OPERATION_ID),
+            })?;
+        let lifecycle_shape_is_legal = matches!(
+            (
+                Operation::RECEIPT,
+                Operation::RECONCILIATION,
+                outcome_kind
+            ),
+            (
+                ReceiptContract::Operation,
+                ReconciliationContract::NotRequired,
+                "evidence" | "preview"
+            ) | (
+                ReceiptContract::DurableEffect,
+                ReconciliationContract::Required,
+                "effect"
+            )
+        );
+        if !lifecycle_shape_is_legal {
+            return Err(ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!(
+                    "daemon returned outcome {outcome_kind} outside the {} receipt contract",
+                    Operation::OPERATION_ID
+                ),
+            });
+        }
+        let execution = outcome
+            .get("value")
+            .and_then(|value| value.get("execution"))
+            .ok_or_else(|| ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!(
+                    "daemon omitted the {} execution receipt",
+                    Operation::OPERATION_ID
+                ),
+            })?;
+        let termination = execution
+            .get("termination")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!(
+                    "daemon omitted the {} terminal state",
+                    Operation::OPERATION_ID
+                ),
+            })?;
+        if !Operation::TERMINAL_STATES
+            .iter()
+            .copied()
+            .any(|state| terminal_state_name(state) == termination)
+        {
+            return Err(ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!(
+                    "daemon returned terminal state {termination} outside the {} contract",
+                    Operation::OPERATION_ID
+                ),
+            });
+        }
+        if let Some(cancellation) = execution.get("cancellation")
+            && !cancellation.is_null()
+        {
+            if !Operation::CANCELLABLE {
+                return Err(ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon returned cancellation evidence for non-cancellable {}",
+                        Operation::OPERATION_ID
+                    ),
+                });
+            }
+            let stage = cancellation
+                .get("stage")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon returned malformed cancellation evidence for {}",
+                        Operation::OPERATION_ID
+                    ),
+                })?;
+            if !Operation::CANCELLATION_POINTS
+                .iter()
+                .copied()
+                .any(|point| cancellation_point_name(point) == stage)
+            {
+                return Err(ClientError::Protocol {
+                    status: Some(response.status()),
+                    message: format!(
+                        "daemon returned cancellation stage {stage} outside the {} contract",
+                        Operation::OPERATION_ID
+                    ),
+                });
+            }
+        }
         let payload = response
             .payload()
             .cloned()
@@ -230,7 +341,11 @@ impl Client {
                 message: "daemon omitted the application request ID".into(),
             })?
             .to_owned();
-        Ok(TypedResponse { request_id, result })
+        Ok(TypedResponse {
+            request_id,
+            result,
+            envelope: response.envelope,
+        })
     }
 
     fn request_route(
@@ -403,11 +518,38 @@ impl Client {
     }
 }
 
-/// One typed operation result with its lifecycle correlation identity.
+const fn terminal_state_name(state: TerminalState) -> &'static str {
+    match state {
+        TerminalState::Completed => "completed",
+        TerminalState::Cancelled => "cancelled",
+        TerminalState::TimedOut => "timed_out",
+        TerminalState::Failed => "failed",
+        TerminalState::Unavailable => "unavailable",
+        TerminalState::EffectUnknown => "effect_unknown",
+        TerminalState::Partial => "partial",
+    }
+}
+
+const fn cancellation_point_name(point: CancellationPoint) -> &'static str {
+    match point {
+        CancellationPoint::BeforeAdmission => "before_admission",
+        CancellationPoint::BeforeRead => "before_read",
+        CancellationPoint::DuringRead => "during_read",
+        CancellationPoint::BeforeEffect => "before_effect",
+        CancellationPoint::EffectInFlight => "effect_in_flight",
+        CancellationPoint::Reconciling => "reconciling",
+        CancellationPoint::AfterCommit => "after_commit",
+    }
+}
+
+/// One typed operation result with its lifecycle correlation identity and
+/// validated canonical envelope.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedResponse<Result> {
     pub request_id: String,
     pub result: Result,
+    /// The validated success envelope, including operation/effect receipts.
+    pub envelope: Value,
 }
 
 /// A decoded successful application envelope.

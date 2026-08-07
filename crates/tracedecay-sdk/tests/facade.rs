@@ -110,6 +110,33 @@ fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
 }
 
 #[test]
+fn configuration_family_is_http_mounted_and_not_generated_as_unavailable() {
+    let registry = application::sdk_executable_binding_registry().expect("canonical SDK registry");
+    let unavailable = UNAVAILABLE_OPERATIONS
+        .iter()
+        .map(|operation| operation.operation_id)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for operation in application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES {
+        let operation_id = format!("operation.application.{operation}");
+        let binding = registry
+            .get(&operation::OperationId::new(operation_id.clone()).expect("operation ID"))
+            .and_then(|availability| availability.binding())
+            .expect("mounted configuration operation");
+        assert_eq!(
+            binding.sdk_method().as_str(),
+            format!("application_{operation}")
+        );
+        assert!(matches!(
+            binding.transport(),
+            operation::SdkTransportBindingV1::Http { route_path }
+                if route_path == &format!("/application/configuration/{operation}")
+        ));
+        assert!(!unavailable.contains(operation_id.as_str()));
+    }
+}
+
+#[test]
 fn generated_unavailable_operations_match_the_canonical_sdk_registry() {
     let registry = application::sdk_executable_binding_registry().expect("canonical SDK registry");
     let expected = registry

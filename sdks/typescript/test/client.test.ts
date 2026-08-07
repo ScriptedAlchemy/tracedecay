@@ -423,6 +423,112 @@ describe("TraceDecayClient generated operation bindings", () => {
       behavior: "return_effect_receipt",
     });
   });
+
+  it("publishes every configuration operation with its effect lifecycle", () => {
+    const expected = [
+      "configuration_list",
+      "configuration_explain",
+      "configuration_get",
+      "configuration_set",
+      "configuration_unset",
+      "configuration_batch",
+      "configuration_write_credential",
+      "configuration_observed_state",
+      "configuration_protected_preview",
+      "configuration_protected_apply",
+      "configuration_rollback_preview",
+      "configuration_rollback_apply",
+      "configuration_audit",
+    ]
+      .map((operation) => `application_${operation}`)
+      .sort();
+    const configuration = OPERATIONS.filter((operation) =>
+      operation.operation.startsWith("application_configuration_"),
+    );
+
+    expect(configuration.map((operation) => operation.operation)).toEqual(expected);
+    expect(
+      UNAVAILABLE_OPERATIONS.some((operation) =>
+        operation.operation.startsWith("application_configuration_"),
+      ),
+    ).toBe(false);
+    for (const operation of configuration) {
+      expect(operation.route).toBe(
+        `/application/configuration/${operation.operation.replace(
+          /^application_/,
+          "",
+        )}`,
+      );
+      expect(operation.bindingId).toBe(
+        `binding.http.${operation.operation.replace(/^application_/, "")}.v1`,
+      );
+      expect(operation.deadline.maximum_millis).toBe(15_000);
+      if (operation.effect === "configuration_write") {
+        expect(operation.idempotency).toBe("required");
+        expect(operation.cancellation).toEqual({ mode: "not_cancellable" });
+        expect(operation.deadline.behavior).toBe("return_effect_receipt");
+        expect(operation.reconciliation).toBe("required");
+        expect(operation.receipt).toBe("durable_effect");
+        expect(operation.terminalStates).toEqual([
+          "completed",
+          "timed_out",
+          "failed",
+          "effect_unknown",
+          "partial",
+        ]);
+      } else {
+        expect(operation.idempotency).toBe("not_required");
+        expect(operation.cancellation).toEqual({
+          mode: "cooperative",
+          points: ["before_admission", "before_read", "during_read"],
+        });
+        expect(operation.deadline.behavior).toBe("return_operation_receipt");
+        expect(operation.reconciliation).toBe("not_required");
+        expect(operation.receipt).toBe("operation");
+        expect(operation.terminalStates).toEqual([
+          "completed",
+          "cancelled",
+          "timed_out",
+          "failed",
+          "partial",
+        ]);
+      }
+    }
+  });
+
+  it("rejects an operation-illegal terminal before decoding its payload", () => {
+    const descriptor = OPERATIONS.find(
+      (operation) => operation.operation === "application_configuration_set",
+    );
+    expect(descriptor).toBeDefined();
+    const response = successEnvelope({});
+    response.value.binding_id = "binding.http.configuration_set.v1";
+    response.value.contract = {
+      schema_id: "schema.application.configuration.configuration_set.result",
+      schema_revision: 1,
+    };
+    response.value.outcome = {
+      outcome: "effect",
+      value: {
+        effect_id: "effect.configuration.sdk",
+        effect_class: "configuration_write",
+        idempotency_key: "configuration.idempotency.sdk",
+        authority: {},
+        expected_state: "configuration.revision.sdk",
+        reconciliation: "required",
+        receipt: {},
+        payload: {},
+        execution: {
+          ...structuredClone(RECEIPT),
+          termination: "cancelled",
+        },
+      },
+    };
+
+    expect(() => descriptor?.decodeSuccess(response.value)).toThrow(
+      /termination cancelled is not legal for this operation/,
+    );
+  });
 });
 
 describe("TraceDecayClient transport envelopes", () => {

@@ -8,7 +8,7 @@ use crate::binding::SurfaceOperationName;
 use crate::id::{BindingId, CapabilityId, CatalogDigest, CodecBindingKey, OperationId, ServiceId};
 use crate::manifest::{
     CancellationContract, CapabilityManifestV1, DeadlineContract, EffectClass, IdempotencyContract,
-    ReceiptContract, ReconciliationContract, SchemaRef,
+    ReceiptContract, ReconciliationContract, SchemaRef, TerminalStateContract,
 };
 use crate::validation::CatalogValidationError;
 
@@ -188,6 +188,7 @@ pub struct ExecutableBindingV1 {
     deadline: DeadlineContract,
     reconciliation: ReconciliationContract,
     receipt: ReceiptContract,
+    terminal_states: TerminalStateContract,
 }
 
 impl ExecutableBindingV1 {
@@ -281,6 +282,7 @@ impl ExecutableBindingV1 {
             deadline: manifest.deadline().clone(),
             reconciliation: manifest.reconciliation(),
             receipt: manifest.receipt(),
+            terminal_states: manifest.terminal_states().clone(),
         })
     }
 
@@ -334,6 +336,10 @@ impl ExecutableBindingV1 {
 
     pub const fn receipt(&self) -> ReceiptContract {
         self.receipt
+    }
+
+    pub fn terminal_states(&self) -> &TerminalStateContract {
+        &self.terminal_states
     }
 }
 
@@ -565,6 +571,10 @@ impl SdkExecutableBindingV1 {
 
     pub const fn receipt(&self) -> ReceiptContract {
         self.executable.receipt()
+    }
+
+    pub fn terminal_states(&self) -> &TerminalStateContract {
+        self.executable.terminal_states()
     }
 }
 
