@@ -181,6 +181,7 @@ fn evidence(attempt: &WorkAttemptV1) -> WorkAttemptEvidenceRecordV1 {
         outcome: WorkAttemptProviderOutcomeV1::Exited { code: 0 },
         stdout: None,
         stderr: None,
+        provider_fallback: None,
         observed_at: UtcMicros(500),
     }
 }
