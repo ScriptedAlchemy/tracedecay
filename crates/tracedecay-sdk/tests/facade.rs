@@ -1,5 +1,6 @@
 use tracedecay_sdk::operations::{
-    TypedOperation, UNAVAILABLE_OPERATIONS, WorkCreate, WorkflowRegisterDefinition,
+    GitStatus, OperationTransport, TypedOperation, UNAVAILABLE_OPERATIONS, WorkCreate,
+    WorkflowRegisterDefinition,
 };
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
@@ -59,7 +60,12 @@ fn work_create_descriptor_matches_the_mounted_binding() {
         .and_then(|availability| availability.binding())
         .expect("mounted Work create binding");
 
-    assert_eq!(WorkCreate::ROUTE, "/application/work/create");
+    assert_eq!(
+        WorkCreate::TRANSPORT,
+        OperationTransport::Http {
+            route: "/application/work/create"
+        }
+    );
     assert_eq!(WorkCreate::BINDING_ID, "binding.http.work.create");
     assert_eq!(WorkCreate::EFFECT, binding.effect());
     assert_eq!(WorkCreate::IDEMPOTENCY, binding.idempotency());
@@ -79,8 +85,10 @@ fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
         .expect("mounted workflow register-definition binding");
 
     assert_eq!(
-        WorkflowRegisterDefinition::ROUTE,
-        "/application/workflow/register-definition"
+        WorkflowRegisterDefinition::TRANSPORT,
+        OperationTransport::Http {
+            route: "/application/workflow/register-definition"
+        }
     );
     assert_eq!(
         WorkflowRegisterDefinition::BINDING_ID,
@@ -241,4 +249,24 @@ fn canonical_operation_receipt_round_trips() {
 
     let canonical: tracedecay_application::OperationReceipt = decoded;
     let _: application::OperationReceipt = canonical;
+}
+
+#[test]
+fn git_status_descriptor_matches_the_canonical_mcp_sdk_binding() {
+    let registry = application::sdk_executable_binding_registry().expect("SDK registry");
+    let binding = registry
+        .get(&operation::OperationId::new(GitStatus::OPERATION_ID).unwrap())
+        .and_then(|availability| availability.binding())
+        .expect("Git status SDK binding");
+
+    assert_eq!(binding.sdk_method().as_str(), "git_status");
+    assert_eq!(binding.binding_id().as_str(), GitStatus::BINDING_ID);
+    assert_eq!(GitStatus::EFFECT, binding.effect());
+    assert_eq!(GitStatus::IDEMPOTENCY, binding.idempotency());
+    assert_eq!(
+        GitStatus::TRANSPORT,
+        OperationTransport::McpTool {
+            tool_name: "tracedecay_git_status"
+        }
+    );
 }

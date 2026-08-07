@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::io::{BufRead, BufReader};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -16,7 +17,7 @@ use tracedecay_tool_catalog::{
     CancellationPoint, ReceiptContract, ReconciliationContract, TerminalState,
 };
 
-use crate::operations::TypedOperation;
+use crate::operations::{OperationTransport, TypedOperation};
 
 const MAX_OPAQUE_BYTES: usize = 4_096;
 const MAX_REQUEST_ID_BYTES: usize = 512;
@@ -42,6 +43,14 @@ pub struct ConnectionSettings {
     base_url: String,
     project_id: String,
     token: String,
+}
+
+/// Caller-owned bridge used by generated MCP-backed SDK operations.
+///
+/// The SDK owns canonical request/result types and selects the tool name from
+/// its executable binding. Hosts own connection lifecycle and MCP framing.
+pub trait McpToolTransport: fmt::Debug + Send + Sync {
+    fn call_tool(&self, tool_name: &str, request: &Value) -> Result<Value, ClientError>;
 }
 
 impl ConnectionMode {
@@ -82,6 +91,7 @@ pub struct ClientBuilder {
     mode: ConnectionMode,
     origin: Option<String>,
     timeout: Duration,
+    mcp_transport: Option<Arc<dyn McpToolTransport>>,
 }
 
 impl ClientBuilder {
@@ -92,6 +102,12 @@ impl ClientBuilder {
 
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Attach the caller's MCP transport for generated MCP tool operations.
+    pub fn mcp_transport(mut self, transport: Arc<dyn McpToolTransport>) -> Self {
+        self.mcp_transport = Some(transport);
         self
     }
 
@@ -133,6 +149,7 @@ impl ClientBuilder {
             application_root,
             authorization,
             origin: origin_value,
+            mcp_transport: self.mcp_transport,
         })
     }
 }
@@ -144,6 +161,7 @@ pub struct Client {
     application_root: String,
     authorization: HeaderValue,
     origin: HeaderValue,
+    mcp_transport: Option<Arc<dyn McpToolTransport>>,
 }
 
 impl Client {
@@ -152,6 +170,7 @@ impl Client {
             mode,
             origin: None,
             timeout: Duration::from_secs(30),
+            mcp_transport: None,
         }
     }
 
@@ -166,6 +185,46 @@ impl Client {
         Operation::Result: DeserializeOwned,
     {
         self.execute_with_options::<Operation>(request, OperationRequestOptions::default())
+    }
+
+    /// Invoke one generated MCP tool operation through the caller-owned bridge.
+    ///
+    /// The MCP host owns admission, deadline, and cancellation framing, so the
+    /// typed HTTP lifecycle checks do not apply here: the transport returns the
+    /// operation's typed result payload directly.
+    pub fn execute_mcp<Operation>(
+        &self,
+        request: &Operation::Request,
+    ) -> Result<Operation::Result, ClientError>
+    where
+        Operation: TypedOperation,
+        Operation::Request: Serialize,
+        Operation::Result: DeserializeOwned,
+    {
+        let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
+            status: None,
+            message: format!("typed request could not be encoded: {error}"),
+        })?;
+        let OperationTransport::McpTool { tool_name } = Operation::TRANSPORT else {
+            return Err(ClientError::UnsupportedTransport {
+                operation_id: Operation::OPERATION_ID,
+                transport: "http",
+            });
+        };
+        let transport = self
+            .mcp_transport
+            .as_ref()
+            .ok_or(ClientError::MissingMcpTransport {
+                operation_id: Operation::OPERATION_ID,
+            })?;
+        let response = transport.call_tool(tool_name, &request)?;
+        serde_json::from_value(response).map_err(|error| ClientError::Protocol {
+            status: None,
+            message: format!(
+                "MCP tool {tool_name} returned a malformed {} result: {error}",
+                Operation::OPERATION_ID
+            ),
+        })
     }
 
     /// Invoke one typed operation with explicit transport controls.
@@ -183,7 +242,13 @@ impl Client {
             status: None,
             message: format!("typed request could not be encoded: {error}"),
         })?;
-        let response = self.request_route(Operation::ROUTE, &request, options)?;
+        let OperationTransport::Http { route } = Operation::TRANSPORT else {
+            return Err(ClientError::UnsupportedTransport {
+                operation_id: Operation::OPERATION_ID,
+                transport: "mcp_tool",
+            });
+        };
+        let response = self.request_route(route, &request, options)?;
         let binding = response
             .envelope()
             .get("binding_id")
@@ -1403,6 +1468,13 @@ pub enum ClientError {
     InvalidConfiguration(String),
     InvalidRequest(String),
     Transport(String),
+    MissingMcpTransport {
+        operation_id: &'static str,
+    },
+    UnsupportedTransport {
+        operation_id: &'static str,
+        transport: &'static str,
+    },
     Authentication(u16),
     Protocol {
         status: Option<u16>,
@@ -1425,6 +1497,16 @@ impl fmt::Display for ClientError {
             }
             Self::InvalidRequest(message) => write!(formatter, "invalid request: {message}"),
             Self::Transport(message) => write!(formatter, "transport failure: {message}"),
+            Self::MissingMcpTransport { operation_id } => {
+                write!(formatter, "{operation_id} requires an MCP tool transport")
+            }
+            Self::UnsupportedTransport {
+                operation_id,
+                transport,
+            } => write!(
+                formatter,
+                "{operation_id} is not mounted on this execution path; use its {transport} transport"
+            ),
             Self::Authentication(status) => {
                 write!(formatter, "daemon authentication failed with HTTP {status}")
             }

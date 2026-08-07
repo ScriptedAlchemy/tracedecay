@@ -1,16 +1,38 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::{Value, json};
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ClientError, ConnectionMode, OperationRequestOptions,
-    StreamOptions, StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, McpToolTransport,
+    OperationRequestOptions, StreamOptions, StreamResume,
 };
 use tracedecay_sdk::operation::DeadlineBehavior;
 use tracedecay_sdk::operations::{
-    TypedOperation, WorkflowListDefinitions, WorkflowRegisterDefinition,
+    GitStatus, TypedOperation, WorkflowListDefinitions, WorkflowRegisterDefinition,
 };
+
+#[derive(Debug, Default)]
+struct RecordingMcpTransport {
+    calls: Mutex<Vec<(String, Value)>>,
+    response: Mutex<Option<Value>>,
+}
+
+impl McpToolTransport for RecordingMcpTransport {
+    fn call_tool(&self, tool_name: &str, request: &Value) -> Result<Value, ClientError> {
+        self.calls
+            .lock()
+            .expect("test MCP calls lock")
+            .push((tool_name.to_owned(), request.clone()));
+        Ok(self
+            .response
+            .lock()
+            .expect("test MCP response lock")
+            .clone()
+            .unwrap_or(json!({})))
+    }
+}
 
 fn request(stream: &mut TcpStream) -> String {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -240,8 +262,10 @@ fn typed_workflow_descriptors_retain_canonical_contract_identity() {
         "operation.workflow.register_definition"
     );
     assert_eq!(
-        WorkflowRegisterDefinition::ROUTE,
-        "/application/workflow/register-definition"
+        WorkflowRegisterDefinition::TRANSPORT,
+        tracedecay_sdk::operations::OperationTransport::Http {
+            route: "/application/workflow/register-definition"
+        }
     );
     assert_eq!(
         WorkflowRegisterDefinition::BINDING_ID,
@@ -462,4 +486,88 @@ fn malformed_sse_events_are_protocol_errors() {
         ));
         server.join().unwrap();
     }
+}
+
+#[test]
+fn generated_mcp_descriptor_uses_the_injected_tool_transport() {
+    let mcp = Arc::new(RecordingMcpTransport::default());
+    let client = Client::builder(ConnectionMode::local(
+        "http://127.0.0.1:43123",
+        "project.sdk",
+        "sdk-token",
+    ))
+    .mcp_transport(mcp.clone())
+    .build()
+    .expect("client configuration");
+    let request =
+        serde_json::from_value::<<GitStatus as TypedOperation>::Request>(json!({})).unwrap();
+
+    let error = client
+        .execute_mcp::<GitStatus>(&request)
+        .expect_err("malformed MCP result must fail closed");
+
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    assert_eq!(
+        *mcp.calls.lock().expect("test MCP calls lock"),
+        vec![("tracedecay_git_status".to_owned(), json!({}))]
+    );
+}
+
+#[test]
+fn mcp_operations_refuse_the_http_execution_path_with_a_typed_error() {
+    let client = Client::builder(ConnectionMode::local(
+        "http://127.0.0.1:43123",
+        "project.sdk",
+        "sdk-token",
+    ))
+    .build()
+    .expect("client configuration");
+    let request =
+        serde_json::from_value::<<GitStatus as TypedOperation>::Request>(json!({})).unwrap();
+
+    let error = client
+        .execute::<GitStatus>(&request)
+        .expect_err("MCP-bound operations must not invent an HTTP route");
+    assert!(matches!(
+        error,
+        ClientError::UnsupportedTransport { operation_id, .. }
+            if operation_id == GitStatus::OPERATION_ID
+    ));
+
+    let error = client
+        .execute_mcp::<GitStatus>(&request)
+        .expect_err("an absent MCP transport is a typed denial, not a panic");
+    assert!(matches!(
+        error,
+        ClientError::MissingMcpTransport { operation_id }
+            if operation_id == GitStatus::OPERATION_ID
+    ));
+}
+
+#[test]
+fn http_operations_refuse_the_mcp_execution_path_with_a_typed_error() {
+    let mcp = Arc::new(RecordingMcpTransport::default());
+    let client = Client::builder(ConnectionMode::local(
+        "http://127.0.0.1:43123",
+        "project.sdk",
+        "sdk-token",
+    ))
+    .mcp_transport(mcp.clone())
+    .build()
+    .expect("client configuration");
+
+    let error = client
+        .execute_mcp::<WorkflowListDefinitions>(
+            &serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(
+                json!({}),
+            )
+            .unwrap(),
+        )
+        .expect_err("HTTP-bound operations must not reach the MCP bridge");
+    assert!(matches!(
+        error,
+        ClientError::UnsupportedTransport { operation_id, .. }
+            if operation_id == WorkflowListDefinitions::OPERATION_ID
+    ));
+    assert!(mcp.calls.lock().expect("test MCP calls lock").is_empty());
 }

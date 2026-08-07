@@ -7,10 +7,11 @@
 use std::collections::BTreeSet;
 
 use tracedecay_tool_catalog::{
-    BindingStatus, BindingSurface, CatalogContributionV1, CatalogValidationError,
-    ExecutableBindingAvailabilityV1, ExecutableUnavailableDispositionV1, OperationId,
-    RouteExposureV1, SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1,
-    SdkExecutableBindingV1, SdkTransportBindingV1, SurfaceBindingV1, SurfaceOperationName,
+    BindingStatus, BindingSurface, CapabilityId, CatalogContributionV1, CatalogValidationError,
+    CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingV1,
+    ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1, ServiceId,
+    SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
+    SdkTransportBindingV1, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use crate::{
@@ -128,18 +129,59 @@ fn project_mcp_availability(
             disposition: ExecutableUnavailableDispositionV1::CapabilityDisabled,
         });
     }
-    if contribution
-        .executable_schema(surface.capability_id())
-        .is_none()
-    {
+    let Some(schema) = contribution.executable_schema(surface.capability_id()) else {
         return Ok(SdkExecutableBindingAvailabilityV1::Unavailable {
             operation_id,
             disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
         });
-    }
-    Ok(SdkExecutableBindingAvailabilityV1::Unavailable {
+    };
+    // A schema-backed callable MCP operation is executable through the
+    // official SDK MCP transport: the generated SDK selects the mounted tool
+    // name while the caller's host owns connection lifecycle and framing.
+    let executable = ExecutableBindingV1::daemon_owned(
+        manifest,
         operation_id,
-        disposition: ExecutableUnavailableDispositionV1::HostUnsupported,
+        mcp_service_id(surface.capability_id())?,
+        schema.request_schema().clone(),
+        schema.result_schema().clone(),
+        CodecBindingKey::new(format!(
+            "codec.application.{}.json.v1",
+            surface.operation().as_str()
+        ))
+        .map_err(|_| CatalogValidationError::InvalidValue {
+            field: "SDK MCP codec binding",
+            reason: "operation spelling cannot form a canonical codec key",
+        })?,
+        RouteExposureV1::Internal,
+    )?;
+    let binding = SdkExecutableBindingV1::new(
+        executable,
+        surface.binding_id().clone(),
+        surface.operation().clone(),
+        SdkTransportBindingV1::McpTool {
+            tool_name: format!("tracedecay_{}", surface.operation().as_str()),
+        },
+    )?;
+    Ok(SdkExecutableBindingAvailabilityV1::available(binding))
+}
+
+/// The daemon service family that owns one MCP-bound application capability
+/// (`capability.application.git.status` -> `service.application.git`).
+fn mcp_service_id(capability_id: &CapabilityId) -> Result<ServiceId, CatalogValidationError> {
+    let family = capability_id
+        .as_str()
+        .strip_prefix("capability.application.")
+        .and_then(|rest| rest.split('.').next())
+        .filter(|family| !family.is_empty())
+        .ok_or(CatalogValidationError::InvalidValue {
+            field: "SDK MCP service family",
+            reason: "capability is not rooted at capability.application.",
+        })?;
+    ServiceId::new(format!("service.application.{family}")).map_err(|_| {
+        CatalogValidationError::InvalidValue {
+            field: "SDK MCP service ID",
+            reason: "capability family cannot form a canonical service identifier",
+        }
     })
 }
 
@@ -342,18 +384,27 @@ mod tests {
                     .find(|manifest| manifest.capability_id() == surface.capability_id())
                     .expect("binding manifest");
                 let availability = registry.get(&operation_id).expect("SDK availability");
+                let schema_backed = contribution
+                    .executable_schema(surface.capability_id())
+                    .is_some();
                 if availability.binding().is_some() {
+                    assert!(
+                        manifest.availability().is_callable() && schema_backed,
+                        "{} may only be available when callable and schema-backed",
+                        operation_id.as_str()
+                    );
                     continue;
                 }
                 let expected_disposition = if !manifest.availability().is_callable() {
                     ExecutableUnavailableDispositionV1::CapabilityDisabled
-                } else if contribution
-                    .executable_schema(surface.capability_id())
-                    .is_none()
-                {
-                    ExecutableUnavailableDispositionV1::SchemaUnavailable
                 } else {
-                    ExecutableUnavailableDispositionV1::HostUnsupported
+                    assert!(
+                        !schema_backed,
+                        "{} is callable and schema-backed, so the SDK MCP transport must \
+                         project it as available",
+                        operation_id.as_str()
+                    );
+                    ExecutableUnavailableDispositionV1::SchemaUnavailable
                 };
                 assert!(matches!(
                     availability,
@@ -367,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_backed_catalog_binding_remains_unavailable_without_a_sdk_mcp_transport() {
+    fn schema_backed_catalog_binding_projects_its_mcp_tool_transport() {
         let contribution = git_surface_catalog_contribution().expect("Git contribution");
         let manifest = contribution
             .capabilities()
@@ -395,12 +446,18 @@ mod tests {
         let availability =
             project_mcp_availability(&contribution, surface).expect("SDK projection");
 
+        let binding = availability
+            .binding()
+            .expect("schema-backed callable Git status must be SDK-available");
+        assert_eq!(binding.sdk_method().as_str(), "git_status");
         assert!(matches!(
-            availability,
-            SdkExecutableBindingAvailabilityV1::Unavailable {
-                disposition: ExecutableUnavailableDispositionV1::HostUnsupported,
-                ..
-            }
+            binding.transport(),
+            SdkTransportBindingV1::McpTool { tool_name } if tool_name == "tracedecay_git_status"
+        ));
+        assert!(matches!(
+            binding.binding().owner(),
+            tracedecay_tool_catalog::ExecutionOwnerV1::DaemonOwned { service_id }
+                if service_id.as_str() == "service.application.git"
         ));
     }
 }

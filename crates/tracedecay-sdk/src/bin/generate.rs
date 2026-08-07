@@ -37,7 +37,7 @@ struct Operation {
     name: String,
     operation_id: String,
     type_name: String,
-    route: String,
+    transport: OperationTransport,
     binding: String,
     effect: EffectClass,
     idempotency: IdempotencyContract,
@@ -52,6 +52,11 @@ struct Operation {
     reconciliation: ReconciliationContract,
     receipt: ReceiptContract,
     terminal_states: Vec<TerminalState>,
+}
+
+enum OperationTransport {
+    Http { route: String },
+    McpTool { tool_name: String },
 }
 
 struct Schema {
@@ -144,17 +149,19 @@ const fn unavailable_disposition(disposition: ExecutableUnavailableDispositionV1
 
 fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation, Box<dyn Error>> {
     let operation_id = binding.operation_id().as_str();
-    let SdkTransportBindingV1::Http { route_path } = binding.transport() else {
-        return Err(format!(
-            "SDK operation {operation_id} is not mounted on the typed daemon HTTP transport"
-        )
-        .into());
+    let transport = match binding.transport() {
+        SdkTransportBindingV1::Http { route_path } => OperationTransport::Http {
+            route: route_path.clone(),
+        },
+        SdkTransportBindingV1::McpTool { tool_name } => OperationTransport::McpTool {
+            tool_name: tool_name.clone(),
+        },
     };
     Ok(Operation {
         type_name: type_name(operation_id),
         name: binding.sdk_method().as_str().to_owned(),
         operation_id: operation_id.to_owned(),
-        route: route_path.clone(),
+        transport,
         binding: binding.binding_id().as_str().to_owned(),
         effect: binding.effect(),
         idempotency: binding.idempotency(),
@@ -481,7 +488,7 @@ fn render_operations(
     out.push_str(
         "import { decodeCanonicalSchema, decodeHttpSuccessEnvelope, type CanonicalCancellation, type CanonicalJsonSchema, type Decoder, type HttpSuccessEnvelope } from \"./types\";\n\n\
          export interface OperationDescriptor<Name extends string, Request, Result> {\n\
-         \x20 readonly operation: Name; readonly operationId: string; readonly route: string; readonly method: \"POST\";\n\
+         \x20 readonly operation: Name; readonly operationId: string;\n\
          \x20 readonly effect: string; readonly idempotency: string;\n\
          \x20 readonly bindingId: string;\n\
          \x20 readonly requestSchema: { schemaId: string; revision: number };\n\
@@ -492,7 +499,13 @@ fn render_operations(
          \x20 readonly receipt: \"operation\" | \"durable_effect\";\n\
          \x20 readonly terminalStates: readonly (\"completed\" | \"cancelled\" | \"timed_out\" | \"failed\" | \"unavailable\" | \"effect_unknown\" | \"partial\")[];\n\
          \x20 readonly decodeRequest: Decoder<Request>; readonly decodeResult: Decoder<Result>;\n\
-         \x20 readonly decodeSuccess: Decoder<HttpSuccessEnvelope<Result>>;\n}\n\n",
+         }\n\
+         export interface HttpOperationTransport { readonly kind: \"http\"; readonly route: string; readonly method: \"POST\" }\n\
+         export interface McpToolOperationTransport { readonly kind: \"mcp_tool\"; readonly toolName: string }\n\
+         export type OperationTransport = HttpOperationTransport | McpToolOperationTransport;\n\
+         export type HttpOperationDescriptor<Name extends string, Request, Result> = OperationDescriptor<Name, Request, Result> & { readonly transport: HttpOperationTransport; readonly decodeSuccess: Decoder<HttpSuccessEnvelope<Result>> };\n\
+         export type McpToolOperationDescriptor<Name extends string, Request, Result> = OperationDescriptor<Name, Request, Result> & { readonly transport: McpToolOperationTransport };\n\
+         export type AvailableOperationDescriptor<Name extends string, Request, Result> = HttpOperationDescriptor<Name, Request, Result> | McpToolOperationDescriptor<Name, Request, Result>;\n\n",
     );
     let mut named = BTreeMap::new();
     let mut operation_types = String::new();
@@ -543,16 +556,38 @@ fn render_operations(
         out.push_str("export const OPERATIONS = [\n");
     }
     for operation in operations {
+        let transport = match &operation.transport {
+            OperationTransport::Http { route } => format!(
+                "{{ kind: \"http\", route: {}, method: \"POST\" }}",
+                quote(route)
+            ),
+            OperationTransport::McpTool { tool_name } => {
+                format!("{{ kind: \"mcp_tool\", toolName: {} }}", quote(tool_name))
+            }
+        };
+        let success_decoder = match &operation.transport {
+            OperationTransport::Http { .. } => format!(
+                ",\n    decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {}, {}, {}, {}, {}, {}, {}, decode{}Result)",
+                quote(&operation.binding),
+                quote(&operation.result_schema.id),
+                operation.result_schema.revision,
+                serde_json::to_string(&operation.terminal_states)?,
+                serde_json::to_string(&operation.cancellation)?,
+                serde_json::to_string(&operation.receipt)?,
+                serde_json::to_string(&operation.reconciliation)?,
+                operation.type_name,
+            ),
+            OperationTransport::McpTool { .. } => String::new(),
+        };
         emit!(
             out,
-            "  {{ operation: {0}, operationId: {1}, route: {2}, method: \"POST\", effect: {3}, idempotency: {4}, bindingId: {5},\n\
+            "  {{ operation: {0}, operationId: {1}, transport: {2}, effect: {3}, idempotency: {4}, bindingId: {5},\n\
              \x20   requestSchema: {{ schemaId: {6}, revision: {7} }}, resultSchema: {{ schemaId: {8}, revision: {9} }},\n\
              \x20   cancellation: {10}, deadline: {11}, reconciliation: {12}, receipt: {13}, terminalStates: {14},\n\
-             \x20   decodeRequest: decode{15}Request, decodeResult: decode{15}Result,\n\
-             \x20   decodeSuccess: (value: unknown) => decodeHttpSuccessEnvelope(value, {5}, {8}, {9}, {14}, {10}, {13}, {12}, decode{15}Result) }},",
+             \x20   decodeRequest: decode{15}Request, decodeResult: decode{15}Result{16} }},",
             quote(&operation.name),
             quote(&operation.operation_id),
-            quote(&operation.route),
+            transport,
             serde_json::to_string(&operation.effect)?,
             serde_json::to_string(&operation.idempotency)?,
             quote(&operation.binding),
@@ -565,7 +600,8 @@ fn render_operations(
             serde_json::to_string(&operation.reconciliation)?,
             serde_json::to_string(&operation.receipt)?,
             serde_json::to_string(&operation.terminal_states)?,
-            operation.type_name
+            operation.type_name,
+            success_decoder,
         );
     }
     if !operations.is_empty() {
@@ -574,12 +610,14 @@ fn render_operations(
     out.push_str(
         "export type Operation = (typeof OPERATIONS)[number];\n\
          export type OperationName = Operation extends { readonly operation: infer Name extends string } ? Name : never;\n\
-         export type OperationRoute = Operation extends { readonly route: infer Route extends string } ? Route : never;\n\
+         export type OperationRoute = Extract<Operation[\"transport\"], { readonly kind: \"http\" }>[\"route\"];\n\
+         export type OperationTransportKind = Operation[\"transport\"][\"kind\"];\n\
          export type OperationEffect = Operation extends { readonly effect: infer Effect extends string } ? Effect : never;\n\
          export type OperationIdempotency = Operation extends { readonly idempotency: infer Idempotency extends string } ? Idempotency : never;\n\
          export type OperationByName<Name extends OperationName> = Extract<Operation, { operation: Name }>;\n\
          export type RequestFor<Name extends OperationName> = OperationByName<Name> extends OperationDescriptor<string, infer Request, unknown> ? Request : never;\n\
-         export type ResultFor<Name extends OperationName> = OperationByName<Name> extends OperationDescriptor<string, unknown, infer Result> ? Result : never;\n\n",
+         export type ResultFor<Name extends OperationName> = OperationByName<Name> extends OperationDescriptor<string, unknown, infer Result> ? Result : never;\n\
+         export type ResponseFor<Name extends OperationName> = OperationByName<Name> extends { readonly transport: HttpOperationTransport } ? HttpSuccessEnvelope<ResultFor<Name>> : ResultFor<Name>;\n\n",
     );
     out.push_str(
         "export type UnavailableDisposition = \"service_not_registered\" | \"schema_unavailable\" | \"codec_unavailable\" | \"route_unavailable\" | \"capability_disabled\" | \"host_unsupported\";\n\
@@ -618,11 +656,16 @@ fn render_rust_operations(
          \x20   pub operation_id: &'static str,\n\
          \x20   pub disposition: ExecutableUnavailableDispositionV1,\n\
          }\n\n\
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         pub enum OperationTransport {\n\
+         \x20   Http { route: &'static str },\n\
+         \x20   McpTool { tool_name: &'static str },\n\
+         }\n\n\
          pub trait TypedOperation {\n\
          \x20   type Request: Serialize;\n\
          \x20   type Result: DeserializeOwned;\n\n\
          \x20   const OPERATION_ID: &'static str;\n\
-         \x20   const ROUTE: &'static str;\n\
+         \x20   const TRANSPORT: OperationTransport;\n\
          \x20   const BINDING_ID: &'static str;\n\
          \x20   const EFFECT: EffectClass;\n\
          \x20   const IDEMPOTENCY: IdempotencyContract;\n\
@@ -637,14 +680,14 @@ fn render_rust_operations(
          \x20   const RESULT_SCHEMA_REVISION: u32;\n\
          }\n\n\
          macro_rules! typed_operation {\n\
-         \x20   ($name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal, $effect:expr, $idempotency:expr, $cancellable:literal, $cancellation_points:expr, $maximum_deadline:literal, $deadline_behavior:expr, $reconciliation:expr, $receipt:expr, $terminal_states:expr, $schema:literal, $revision:literal) => {\n\
+         \x20   ($name:ident, $module:ident, $operation:literal, $transport:expr, $binding:literal, $effect:expr, $idempotency:expr, $cancellable:literal, $cancellation_points:expr, $maximum_deadline:literal, $deadline_behavior:expr, $reconciliation:expr, $receipt:expr, $terminal_states:expr, $schema:literal, $revision:literal) => {\n\
          \x20       #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n\
          \x20       pub struct $name;\n\
          \x20       impl TypedOperation for $name {\n\
          \x20           type Request = $module::Request;\n\
          \x20           type Result = $module::Result;\n\
          \x20           const OPERATION_ID: &'static str = $operation;\n\
-         \x20           const ROUTE: &'static str = $route;\n\
+         \x20           const TRANSPORT: OperationTransport = $transport;\n\
          \x20           const BINDING_ID: &'static str = $binding;\n\
          \x20           const EFFECT: EffectClass = $effect;\n\
          \x20           const IDEMPOTENCY: IdempotencyContract = $idempotency;\n\
@@ -688,6 +731,14 @@ fn render_rust_operations(
             .map(|state| format!("TerminalState::{state:?}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let transport = match &operation.transport {
+            OperationTransport::Http { route } => {
+                format!("OperationTransport::Http {{ route: {route:?} }}")
+            }
+            OperationTransport::McpTool { tool_name } => {
+                format!("OperationTransport::McpTool {{ tool_name: {tool_name:?} }}")
+            }
+        };
         emit!(
             out,
             "#[allow(clippy::all)]\n\
@@ -698,11 +749,11 @@ fn render_rust_operations(
              \x20   pub type Result = result::{result_type};\n\
              }}\n\
              typed_operation!(\n\
-             \x20   {marker}, {module}, {operation_id:?}, {route:?}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {cancellable}, &[{cancellation_points}], {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, ReconciliationContract::{reconciliation:?}, ReceiptContract::{receipt:?}, &[{terminal_states}], {schema:?}, {revision}\n\
+             \x20   {marker}, {module}, {operation_id:?}, {transport}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {cancellable}, &[{cancellation_points}], {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, ReconciliationContract::{reconciliation:?}, ReceiptContract::{receipt:?}, &[{terminal_states}], {schema:?}, {revision}\n\
              );\n",
             marker = type_name(&operation.name),
             operation_id = operation.operation_id,
-            route = operation.route,
+            transport = transport,
             binding = operation.binding,
             effect = operation.effect,
             idempotency = operation.idempotency,
@@ -828,7 +879,7 @@ fn render_index() -> String {
     format!(
         "{HEADER}\
          export {{ TraceDecayAbortError, TraceDecayAuthenticationError, TraceDecayCancelledError, TraceDecayClient, TraceDecayConflictError, TraceDecayDeniedError, TraceDecayDisconnectedError, TraceDecayInvalidRequestError, TraceDecayMalformedResponseError, TraceDecayProblemError, TraceDecayProtocolError, TraceDecaySaturatedError, TraceDecayStaleError, TraceDecayTimedOutError, TraceDecayTransportError, TraceDecayUnavailableError, TraceDecayUnsupportedError, createClient }} from \"./client\";\n\
-         export type {{ ClientOptions, OperationCancellation, OperationRequestOptions, OperationStreamEvent, OperationStreamOptions, OperationStreamResume, PageOptions }} from \"./client\";\n\
+         export type {{ ClientOptions, McpToolAdapter, OperationCancellation, OperationRequestOptions, OperationStreamEvent, OperationStreamOptions, OperationStreamResume, PageOptions }} from \"./client\";\n\
          export * from \"./operations\";\n\
          export * from \"./types\";\n"
     )
@@ -878,9 +929,17 @@ mod tests {
     };
 
     use super::{
-        canonical_application_registry, canonical_operations, canonical_unavailable_operations,
-        render_operations, render_rust_operations, render_schema_type,
+        OperationTransport, canonical_application_registry, canonical_operations,
+        canonical_unavailable_operations, render_operations, render_rust_operations,
+        render_schema_type,
     };
+
+    fn http_route(operation: &super::Operation) -> Option<&str> {
+        match &operation.transport {
+            OperationTransport::Http { route } => Some(route.as_str()),
+            OperationTransport::McpTool { .. } => None,
+        }
+    }
 
     #[test]
     fn schema_body_drives_typescript_request_and_result_types() {
@@ -980,14 +1039,40 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!workflows.is_empty());
         assert!(workflows.iter().all(|operation| {
-            operation.route.starts_with("/application/workflow/")
+            http_route(operation)
+                .is_some_and(|route| route.starts_with("/application/workflow/"))
                 && operation.binding.starts_with("binding.http.workflow.")
         }));
-        assert!(
-            operations
-                .iter()
-                .all(|operation| !operation.route.is_empty())
-        );
+        assert!(operations.iter().all(|operation| match &operation.transport {
+            OperationTransport::Http { route } => !route.is_empty(),
+            OperationTransport::McpTool { tool_name } => !tool_name.is_empty(),
+        }));
+    }
+
+    #[test]
+    fn canonical_sdk_registry_keeps_git_on_its_mcp_tool_transport() {
+        let registry = canonical_application_registry().unwrap();
+        let operations = canonical_operations(&registry).unwrap();
+        let git_status = operations
+            .iter()
+            .find(|operation| operation.operation_id == "operation.application.git_status")
+            .expect("Git status SDK operation");
+
+        assert_eq!(git_status.name, "git_status");
+        assert!(matches!(
+            &git_status.transport,
+            OperationTransport::McpTool { tool_name } if tool_name == "tracedecay_git_status"
+        ));
+        for operation in ["git_diff", "git_history", "git_blame", "git_hunks", "git_preview", "git_apply"] {
+            let operation_id = format!("operation.application.{operation}");
+            assert!(
+                operations.iter().any(|candidate| {
+                    candidate.operation_id == operation_id
+                        && matches!(&candidate.transport, OperationTransport::McpTool { .. })
+                }),
+                "{operation_id} must generate an MCP tool transport"
+            );
+        }
     }
 
     #[test]
@@ -1012,9 +1097,9 @@ mod tests {
         }));
         for operation in configuration {
             assert!(
-                operation
-                    .route
-                    .starts_with("/application/configuration/configuration_")
+                http_route(operation).is_some_and(
+                    |route| route.starts_with("/application/configuration/configuration_")
+                )
             );
             assert!(operation.binding.starts_with("binding.http.configuration_"));
             assert_eq!(operation.maximum_deadline_millis, 15_000);
@@ -1079,8 +1164,19 @@ mod tests {
         );
 
         let generated_rust = render_rust_operations(&operations, &unavailable).unwrap();
-        assert!(generated_rust.contains("pub struct ApplicationConfigurationSet"));
-        assert!(generated_rust.contains("const CANCELLABLE: bool = false"));
+        // The typed_operation! macro owns descriptor expansion, so the
+        // rendered source carries one macro invocation per operation rather
+        // than literal expanded structs; assert the invocation shape.
+        assert!(generated_rust.contains("pub mod application_configuration_set"));
+        let configuration_set = generated_rust
+            .split("typed_operation!")
+            .find(|invocation| invocation.contains("ApplicationConfigurationSet"))
+            .expect("configuration_set typed operation invocation");
+        assert!(configuration_set.contains("EffectClass::ConfigurationWrite"));
+        assert!(configuration_set.contains("IdempotencyContract::Required"));
+        // The lone boolean macro argument is CANCELLABLE; writes are not
+        // cancellable.
+        assert!(configuration_set.contains("false"));
         assert!(generated_rust.contains("ReconciliationContract::Required"));
         assert!(generated_rust.contains("ReceiptContract::DurableEffect"));
         assert!(generated_rust.contains("TerminalState::EffectUnknown"));

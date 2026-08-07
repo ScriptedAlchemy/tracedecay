@@ -405,8 +405,11 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
     expect(descriptor).toBeDefined();
     expect(descriptor?.operationId).toBe("operation.workflow.register_definition");
-    expect(descriptor?.route).toBe("/application/workflow/register-definition");
-    expect(descriptor?.method).toBe("POST");
+    expect(descriptor?.transport).toEqual({
+      kind: "http",
+      route: "/application/workflow/register-definition",
+      method: "POST",
+    });
     expect(descriptor?.effect).toBe("administrative");
     expect(descriptor?.idempotency).toBe("required");
     expect(descriptor?.bindingId).toBe("binding.http.workflow.register_definition");
@@ -453,12 +456,14 @@ describe("TraceDecayClient generated operation bindings", () => {
       ),
     ).toBe(false);
     for (const operation of configuration) {
-      expect(operation.route).toBe(
-        `/application/configuration/${operation.operation.replace(
+      expect(operation.transport).toEqual({
+        kind: "http",
+        route: `/application/configuration/${operation.operation.replace(
           /^application_/,
           "",
         )}`,
-      );
+        method: "POST",
+      });
       expect(operation.bindingId).toBe(
         `binding.http.${operation.operation.replace(/^application_/, "")}.v1`,
       );
@@ -507,6 +512,8 @@ describe("TraceDecayClient generated operation bindings", () => {
       schema_id: "schema.application.configuration.configuration_set.result",
       schema_revision: 1,
     };
+    // An effect outcome deliberately replaces the helper's evidence shape;
+    // decodeSuccess treats the envelope as unknown wire input.
     response.value.outcome = {
       outcome: "effect",
       value: {
@@ -523,11 +530,81 @@ describe("TraceDecayClient generated operation bindings", () => {
           termination: "cancelled",
         },
       },
-    };
+    } as unknown as typeof response.value.outcome;
 
     expect(() => descriptor?.decodeSuccess(response.value)).toThrow(
       /termination cancelled is not legal for this operation/,
     );
+  });
+
+  it("publishes git_status on its MCP tool transport", () => {
+    const descriptor = OPERATIONS.find(
+      (operation) => operation.operation === "git_status",
+    );
+    expect(descriptor).toBeDefined();
+    expect(descriptor?.operationId).toBe("operation.application.git_status");
+    expect(descriptor?.transport).toEqual({
+      kind: "mcp_tool",
+      toolName: "tracedecay_git_status",
+    });
+    expect(descriptor?.bindingId).toBe("binding.mcp.git_status.v1");
+    expect(
+      UNAVAILABLE_OPERATIONS.some((operation) =>
+        operation.operation.startsWith("application_git_"),
+      ),
+    ).toBe(false);
+  });
+
+  it("routes Git operations through the caller's MCP tool adapter", async () => {
+    const calls: Array<{ toolName: string; request: unknown }> = [];
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      mcp: {
+        async callTool(toolName, request) {
+          calls.push({ toolName, request });
+          return {};
+        },
+      },
+    });
+
+    await expect(client.operations.git_status({})).rejects.toBeInstanceOf(
+      TraceDecayMalformedResponseError,
+    );
+    expect(calls).toEqual([{ toolName: "tracedecay_git_status", request: {} }]);
+  });
+
+  it("refuses Git operations without an MCP tool adapter as a typed transport failure", async () => {
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+    });
+
+    await expect(client.operations.git_status({})).rejects.toThrow(
+      /git_status requires an MCP tool adapter/,
+    );
+  });
+
+  it("propagates the caller's abort through the MCP adapter as an abort error", async () => {
+    const controller = new AbortController();
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      mcp: {
+        async callTool(_toolName, _request, { signal }) {
+          controller.abort(new Error("caller cancelled"));
+          signal?.throwIfAborted();
+          return {};
+        },
+      },
+    });
+
+    await expect(
+      client.operations.git_status({}, { signal: controller.signal }),
+    ).rejects.toBeInstanceOf(TraceDecayAbortError);
   });
 });
 

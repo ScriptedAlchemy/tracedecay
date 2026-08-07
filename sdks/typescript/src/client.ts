@@ -1,8 +1,10 @@
 import {
   OPERATIONS,
-  type OperationDescriptor,
+  type AvailableOperationDescriptor,
+  type HttpOperationDescriptor,
   type OperationName,
   type RequestFor,
+  type ResponseFor,
   type ResultFor,
 } from "./operations";
 import type {
@@ -21,6 +23,16 @@ export interface ClientOptions {
   token: string;
   origin?: string;
   fetch?: FetchImplementation;
+  mcp?: McpToolAdapter;
+}
+
+/** Adapter owned by the caller's MCP host for generated MCP tool bindings. */
+export interface McpToolAdapter {
+  callTool(
+    toolName: string,
+    request: unknown,
+    options: { signal?: AbortSignal },
+  ): Promise<unknown>;
 }
 
 export interface PageOptions {
@@ -38,7 +50,7 @@ export interface OperationRequestOptions {
 export type OperationMethod<Name extends OperationName> = (
   request: RequestFor<Name>,
   options?: OperationRequestOptions,
-) => Promise<HttpSuccessEnvelope<ResultFor<Name>>>;
+) => Promise<ResponseFor<Name>>;
 
 export type OperationMethods = {
   readonly [Name in OperationName]: OperationMethod<Name>;
@@ -165,6 +177,12 @@ const UTF8_ENCODER = new TextEncoder();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isHttpOperationDescriptor<Request, Result>(
+  descriptor: AvailableOperationDescriptor<string, Request, Result>,
+): descriptor is HttpOperationDescriptor<string, Request, Result> {
+  return descriptor.transport.kind === "http";
 }
 
 function isSafeUnsignedInteger(value: unknown): value is number {
@@ -688,6 +706,7 @@ export class TraceDecayClient {
   private readonly token: string;
   private readonly origin: string;
   private readonly doFetch: FetchImplementation;
+  private readonly mcp: McpToolAdapter | undefined;
 
   constructor(options: ClientOptions) {
     const baseUrl = new URL(options.baseUrl);
@@ -708,16 +727,17 @@ export class TraceDecayClient {
     this.token = options.token;
     this.origin = options.origin ?? baseUrl.origin;
     this.doFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.mcp = options.mcp;
 
     const methods: Record<
       string,
       (
         request: unknown,
         requestOptions?: OperationRequestOptions,
-      ) => Promise<HttpSuccessEnvelope<unknown>>
+      ) => Promise<unknown>
     > = {};
     for (
-      const descriptor of OPERATIONS as readonly OperationDescriptor<
+      const descriptor of OPERATIONS as readonly AvailableOperationDescriptor<
         string,
         unknown,
         unknown
@@ -824,12 +844,49 @@ export class TraceDecayClient {
   }
 
   async #requestOperation<Request, Result>(
-    descriptor: OperationDescriptor<string, Request, Result>,
+    descriptor: AvailableOperationDescriptor<string, Request, Result>,
     request: unknown,
     options: OperationRequestOptions = {},
-  ): Promise<HttpSuccessEnvelope<Result>> {
-    const url = this.operationUrl(descriptor.route, options.page);
+  ): Promise<HttpSuccessEnvelope<Result> | Result> {
     const decodedRequest = descriptor.decodeRequest(request);
+    if (!isHttpOperationDescriptor(descriptor)) {
+      if (options.page !== undefined || options.deadlineMicros !== undefined) {
+        throw new TraceDecayProtocolError(
+          `${descriptor.operation} does not accept HTTP transport options`,
+        );
+      }
+      if (this.mcp === undefined) {
+        throw new TraceDecayTransportError(
+          `${descriptor.operation} requires an MCP tool adapter`,
+        );
+      }
+      let response: unknown;
+      try {
+        response = await this.mcp.callTool(
+          descriptor.transport.toolName,
+          decodedRequest,
+          { signal: options.signal },
+        );
+      } catch (cause) {
+        if (options.signal?.aborted) {
+          throw new TraceDecayAbortError(options.signal.reason ?? cause);
+        }
+        throw new TraceDecayTransportError(
+          `MCP tool ${descriptor.transport.toolName} failed`,
+          cause,
+        );
+      }
+      try {
+        return descriptor.decodeResult(response);
+      } catch (cause) {
+        throw new TraceDecayMalformedResponseError(
+          `MCP tool ${descriptor.transport.toolName} returned an invalid ${descriptor.operation} result`,
+          { payload: { response, cause } },
+        );
+      }
+    }
+
+    const url = this.operationUrl(descriptor.transport.route, options.page);
     const body = JSON.stringify(decodedRequest);
     if (body === undefined) {
       throw new TraceDecayProtocolError(
@@ -855,7 +912,7 @@ export class TraceDecayClient {
     const response = await this.fetchResponse(
       url,
       {
-        method: descriptor.method,
+        method: descriptor.transport.method,
         headers,
         body,
         signal: options.signal,
