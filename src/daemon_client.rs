@@ -858,7 +858,11 @@ pub(crate) fn application_response(
             }
         }
         crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
-            return Err(invocation_error_from_problem(&problem));
+            // The daemon already resolved this invocation to a typed problem
+            // (e.g. `configuration.conflict`); carry it whole so surface
+            // adapters republish that diagnostic instead of refabricating a
+            // generic one.
+            return Err(InvocationError::Problem(Box::new(problem)));
         }
         crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
             return Err(match problem {

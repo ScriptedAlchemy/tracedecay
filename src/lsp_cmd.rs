@@ -412,16 +412,20 @@ fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationErr
 
 fn lsp_invocation_error(error: InvocationError) -> tracedecay::errors::TraceDecayError {
     let message = match error {
-        InvocationError::Cancelled => "LSP gateway request was cancelled",
-        InvocationError::DeadlineExceeded => "LSP gateway request deadline elapsed",
-        InvocationError::Denied => "LSP gateway request was not authorized",
-        InvocationError::InvalidRequest => "LSP gateway request was invalid",
-        InvocationError::Conflict => "LSP gateway request conflicted with current state",
-        InvocationError::Unavailable => "LSP gateway authority is unavailable",
+        InvocationError::Cancelled => "LSP gateway request was cancelled".to_owned(),
+        InvocationError::DeadlineExceeded => "LSP gateway request deadline elapsed".to_owned(),
+        InvocationError::Denied => "LSP gateway request was not authorized".to_owned(),
+        InvocationError::InvalidRequest => "LSP gateway request was invalid".to_owned(),
+        InvocationError::Conflict => "LSP gateway request conflicted with current state".to_owned(),
+        InvocationError::Unavailable => "LSP gateway authority is unavailable".to_owned(),
+        InvocationError::Problem(problem) => match problem.diagnostic() {
+            Some(diagnostic) => {
+                format!("LSP gateway request failed: {}", diagnostic.code)
+            }
+            None => format!("LSP gateway request failed: {:?}", problem.kind()),
+        },
     };
-    tracedecay::errors::TraceDecayError::Config {
-        message: message.to_owned(),
-    }
+    tracedecay::errors::TraceDecayError::Config { message }
 }
 
 fn bridge_error(phase: &str, error: impl std::fmt::Debug) -> tracedecay::errors::TraceDecayError {

@@ -294,7 +294,11 @@ impl ApplicationInvocation {
     }
 }
 
-/// Non-disclosing invocation failure.
+/// Invocation failure. Bare variants describe failures raised before the
+/// daemon produced an authoritative answer; once the daemon has answered with
+/// a typed [`ApplicationProblem`], that problem IS the failure and must reach
+/// the caller intact — `SafeDiagnostic` is already the sanctioned disclosure
+/// surface, so carrying it here discloses nothing new.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InvocationError {
     Unavailable,
@@ -303,6 +307,10 @@ pub enum InvocationError {
     DeadlineExceeded,
     InvalidRequest,
     Conflict,
+    /// The daemon's own typed problem, carried whole so surface adapters
+    /// republish the authoritative diagnostic (e.g. `configuration.conflict`)
+    /// instead of fabricating a generic one.
+    Problem(Box<ApplicationProblem>),
 }
 
 impl From<ApplicationContractError> for InvocationError {
@@ -312,8 +320,8 @@ impl From<ApplicationContractError> for InvocationError {
 }
 
 impl From<ApplicationProblem> for InvocationError {
-    fn from(_problem: ApplicationProblem) -> Self {
-        Self::Unavailable
+    fn from(problem: ApplicationProblem) -> Self {
+        Self::Problem(Box::new(problem))
     }
 }
 

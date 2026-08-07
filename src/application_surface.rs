@@ -1059,6 +1059,11 @@ async fn invoke_work_operation(
             ListAttempts,
             tracedecay_application::WorkAttemptListV1
         ),
+        WorkOperation::HydrateArtifacts => core!(
+            tracedecay_application::WorkArtifactHydrationRequestV1,
+            HydrateArtifacts,
+            tracedecay_application::WorkArtifactHydrationV1
+        ),
         WorkOperation::Views => core!(
             tracedecay_application::WorkGraphReadRequestV1,
             Views,
@@ -1861,6 +1866,25 @@ fn operation_event_error_from_invocation(
         | tracedecay_application::InvocationError::Unavailable => {
             OperationEventError::ResumeUnavailable
         }
+        tracedecay_application::InvocationError::Problem(problem) => match problem.kind() {
+            tracedecay_application::ApplicationProblemKind::NotFoundOrNotAuthorized => {
+                OperationEventError::NotFoundOrNotAuthorized
+            }
+            tracedecay_application::ApplicationProblemKind::Cancelled
+            | tracedecay_application::ApplicationProblemKind::TimedOut => {
+                OperationEventError::RequestNotAdmitted
+            }
+            tracedecay_application::ApplicationProblemKind::Conflict
+            | tracedecay_application::ApplicationProblemKind::Stale => {
+                OperationEventError::InvalidFrontier
+            }
+            tracedecay_application::ApplicationProblemKind::InvalidRequest
+            | tracedecay_application::ApplicationProblemKind::Unsupported
+            | tracedecay_application::ApplicationProblemKind::Unavailable
+            | tracedecay_application::ApplicationProblemKind::Saturated => {
+                OperationEventError::ResumeUnavailable
+            }
+        },
     }
 }
 
@@ -4352,6 +4376,10 @@ fn invocation_contract_problem(
                 "The application service for this operation is unavailable",
             )?)
         }
+        // The daemon's typed problem is the authority; republishing it keeps
+        // its diagnostic (e.g. `configuration.conflict`) intact instead of
+        // substituting a generic surface code.
+        tracedecay_application::InvocationError::Problem(problem) => *problem,
     })
 }
 
