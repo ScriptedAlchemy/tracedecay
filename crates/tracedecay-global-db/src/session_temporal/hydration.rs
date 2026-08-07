@@ -1055,6 +1055,7 @@ async fn resolve_summary(
     })))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn summary_has_provider_evidence(
     conn: &TemporalSqlRead<'_>,
     relation_store: &SessionRelationGraphStore,

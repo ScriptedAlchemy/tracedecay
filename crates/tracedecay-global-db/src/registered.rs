@@ -1229,20 +1229,6 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
-fn configuration_schema_error(
-    operation: &str,
-    error: super::configuration::ConfigurationSchemaError,
-) -> TraceDecayError {
-    match error {
-        super::configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-            TraceDecayError::reset_required("configuration", reason)
-        }
-        super::configuration::ConfigurationSchemaError::Storage(error) => {
-            registered_error(operation, error)
-        }
-    }
-}
-
 fn workflow_storage_error(
     error: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError,
 ) -> TraceDecayError {

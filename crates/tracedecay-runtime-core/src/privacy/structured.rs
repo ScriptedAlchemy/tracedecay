@@ -165,7 +165,7 @@ fn validate_expansion(
                     .map(|child| (child, depth.saturating_add(1))),
             ),
             Value::Array(values) => {
-                stack.extend(values.iter().map(|child| (child, depth.saturating_add(1))))
+                stack.extend(values.iter().map(|child| (child, depth.saturating_add(1))));
             }
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }

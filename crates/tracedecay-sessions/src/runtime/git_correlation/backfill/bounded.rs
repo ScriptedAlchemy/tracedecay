@@ -729,6 +729,7 @@ async fn dry_run_native_history(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dry_run_segment(
     project_path: &std::path::Path,
     window_start: i64,

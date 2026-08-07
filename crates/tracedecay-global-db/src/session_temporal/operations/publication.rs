@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
@@ -37,51 +36,44 @@ impl<'a, E> GlobalDbLcmSummaryPublication<'a, E> {
             relation_projection: Mutex::new(relation_projection),
         }
     }
-
-    pub(crate) fn relation_projection(&self) -> Result<SessionRelationProjection, LcmError> {
-        self.relation_projection
-            .lock()
-            .map(|projection| projection.clone())
-            .map_err(|_| LcmError::Db("session relation publication lock poisoned".to_owned()))
-    }
 }
 
 impl<E> LcmSummaryPublicationPort for GlobalDbLcmSummaryPublication<'_, E>
 where
     E: Executor,
 {
-    fn publish_immutable_summary(
+    async fn publish_immutable_summary(
         &self,
         publication: LcmImmutableSummaryPublication,
-    ) -> impl Future<Output = Result<LcmSummaryPublicationReceipt, LcmError>> {
-        async move {
-            let mut projection = self
-                .relation_projection
-                .lock()
-                .map_err(|_| LcmError::Db("session relation publication lock poisoned".to_owned()))?
-                .clone();
-            let receipt =
-                publish_immutable_summary(self.conn, publication.clone(), &projection).await?;
-            if receipt.disposition == LcmSummaryPublicationDisposition::ExactReplay {
-                let (manifest, _) = load_manifest(self.conn, &publication.summary_id)
-                    .await?
-                    .ok_or(LcmError::SummaryNodeNotFound)?;
-                verify_projection_summary(&projection, &publication, &manifest)?;
-                return Ok(receipt);
-            }
-            append_summary_relation(
-                self.conn,
-                &mut projection,
-                &publication,
-                receipt.generation,
-                receipt.published_at,
-            )
-            .await?;
-            *self.relation_projection.lock().map_err(|_| {
-                LcmError::Db("session relation publication lock poisoned".to_owned())
-            })? = projection;
-            Ok(receipt)
+    ) -> Result<LcmSummaryPublicationReceipt, LcmError> {
+        let mut projection = self
+            .relation_projection
+            .lock()
+            .map_err(|_| LcmError::Db("session relation publication lock poisoned".to_owned()))?
+            .clone();
+        let receipt =
+            publish_immutable_summary(self.conn, publication.clone(), &projection).await?;
+        if receipt.disposition == LcmSummaryPublicationDisposition::ExactReplay {
+            let (manifest, _) = load_manifest(self.conn, &publication.summary_id)
+                .await?
+                .ok_or(LcmError::SummaryNodeNotFound)?;
+            verify_projection_summary(&projection, &publication, &manifest)?;
+            return Ok(receipt);
         }
+        append_summary_relation(
+            self.conn,
+            &mut projection,
+            &publication,
+            receipt.generation,
+            receipt.published_at,
+        )
+        .await?;
+        *self
+            .relation_projection
+            .lock()
+            .map_err(|_| LcmError::Db("session relation publication lock poisoned".to_owned()))? =
+            projection;
+        Ok(receipt)
     }
 }
 

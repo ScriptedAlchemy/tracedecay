@@ -210,8 +210,7 @@ fn capture_child(
             Ok(Some(_)) => {
                 return child
                     .wait_with_output()
-                    .map(ChildCaptureOutcome::Completed)
-                    .unwrap_or(ChildCaptureOutcome::Failed);
+                    .map_or(ChildCaptureOutcome::Failed, ChildCaptureOutcome::Completed);
             }
             Ok(None) => {}
             Err(_) => {

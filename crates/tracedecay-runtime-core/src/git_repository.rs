@@ -69,18 +69,22 @@ pub struct GitRepositoryAuthority {
 impl GitRepositoryAuthority {
     /// Discover the repository containing `path`.
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
-        let repository = gix::discover_opts(path, Default::default(), repository_open_options())
-            .map_err(|error| match error {
-                gix::discover::Error::Discover(
-                    gix::discover::upwards::Error::NoGitRepository { .. },
-                ) => GitRepositoryError::NotARepository {
-                    path: path.display().to_string(),
-                },
-                error => GitRepositoryError::UnreadableRepository {
-                    path: path.display().to_string(),
-                    detail: error.to_string(),
-                },
-            })?;
+        let repository = gix::discover_opts(
+            path,
+            gix::discover::upwards::Options::default(),
+            repository_open_options(),
+        )
+        .map_err(|error| match error {
+            gix::discover::Error::Discover(gix::discover::upwards::Error::NoGitRepository {
+                ..
+            }) => GitRepositoryError::NotARepository {
+                path: path.display().to_string(),
+            },
+            error => GitRepositoryError::UnreadableRepository {
+                path: path.display().to_string(),
+                detail: error.to_string(),
+            },
+        })?;
         let worktree_root = repository
             .workdir()
             .map(|path| canonical(path, "worktree root"))

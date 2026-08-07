@@ -566,6 +566,7 @@ async fn reconstruct_occurrences(
     Ok(occurrences)
 }
 
+#[allow(clippy::type_complexity)]
 fn occurrence_relations(
     occurrences: &[CanonicalOccurrence],
 ) -> SessionStoreResult<(

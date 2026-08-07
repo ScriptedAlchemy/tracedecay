@@ -932,10 +932,10 @@ where
         }
         stats = stats.merge(outcome);
     }
-    if deferred > 0 || attempted_sources < scheduled_source_count {
-        if let Err(error) = advance_source_frontier(admission, &scope, attempted_sources).await {
-            return Err(terminal_error_after_progress(stats, error));
-        }
+    if (deferred > 0 || attempted_sources < scheduled_source_count)
+        && let Err(error) = advance_source_frontier(admission, &scope, attempted_sources).await
+    {
+        return Err(terminal_error_after_progress(stats, error));
     }
     let projection_stats = match drain_projection_queue(admission, &scope, &cancellation).await {
         Ok(stats) => stats,

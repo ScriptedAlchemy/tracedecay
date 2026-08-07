@@ -395,7 +395,6 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
         )
         .await
         .unwrap();
-    drop(store);
     let store = GlobalDbConfigurationControlStore::new_registered(db);
     assert_eq!(
         store

@@ -424,7 +424,7 @@ mod tests {
     }
 
     async fn seed_observation(
-        conn: &(impl Executor + QueryExecutor),
+        conn: &impl Executor,
         observation: &DurableObservationV1,
         cursor: &ObservationSourceCursorV1,
         queue: bool,

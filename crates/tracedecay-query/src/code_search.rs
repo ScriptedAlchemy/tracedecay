@@ -338,6 +338,7 @@ impl CodeIndexBranchDiffPartialReasonV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum CodeIndexBranchChangeV1 {
     Added {
         symbol: CodeIndexBranchSymbolV1,

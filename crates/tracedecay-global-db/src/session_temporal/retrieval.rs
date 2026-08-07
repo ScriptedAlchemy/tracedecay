@@ -241,16 +241,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
-    /// Supplies the provider-qualified session IDs selected by the canonical
-    /// Git correlation graph authority for the request's Git scope.
-    pub const fn with_git_scope_session_ids(
-        mut self,
-        session_ids: &'a BTreeSet<(String, String)>,
-    ) -> Self {
-        self.git_scope_session_ids = Some(session_ids);
-        self
-    }
-
     async fn candidate_matches_filter(
         &self,
         snapshot: &TemporalExecutionSnapshot,

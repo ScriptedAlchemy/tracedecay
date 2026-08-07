@@ -377,9 +377,9 @@ pub async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
     })
 }
 
-/// Opens one foreign SQLite family as a private, immutable read snapshot.
+/// Opens one foreign `SQLite` family as a private, immutable read snapshot.
 ///
-/// Foreign host databases do not participate in TraceDecay's database
+/// Foreign host databases do not participate in `TraceDecay`'s database
 /// authority system. This boundary therefore never opens the source as the
 /// returned snapshot: it first reflinks or copies the database family into
 /// private scratch, verifies the source generation, and materializes any WAL

@@ -372,6 +372,7 @@ pub(in super::super) fn scan_reflog_verification_chunk(
     Ok(ReflogVerificationChunk { cursor, complete })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in super::super) fn scan_graph_chunk(
     project_path: &Path,
     window_start: i64,
@@ -628,7 +629,7 @@ fn verify_reflog_termination(
     let mut last = [0_u8; 1];
     file.read_exact(&mut last)
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    if last != [b'\n'] {
+    if last != *b"\n" {
         return Err(BoundedBackfillInterruption::UnsupportedSourceFraming);
     }
     Ok(())

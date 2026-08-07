@@ -124,7 +124,7 @@ impl StoreRuntimeRegistry {
             if let Some(path) = request
                 .database_authority
                 .as_ref()
-                .map(|authority| authority.canonical_database_path())
+                .map(crate::db::DatabaseAuthority::canonical_database_path)
             {
                 if let Some(reservation) = state
                     .destructive_paths
@@ -278,7 +278,7 @@ impl StoreRuntimeRegistry {
             if let Some(path) = request
                 .database_authority
                 .as_ref()
-                .map(|authority| authority.canonical_database_path())
+                .map(crate::db::DatabaseAuthority::canonical_database_path)
             {
                 while let Some(mut released) = self.destructive_wait(path) {
                     while !*released.borrow_and_update() {
@@ -297,7 +297,7 @@ impl StoreRuntimeRegistry {
             match self.begin_or_join_open(&request) {
                 StoreRuntimeOpenBegin::Rejected(
                     StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress { .. },
-                ) => continue,
+                ) => {}
                 begin => return begin.wait().await,
             }
         }

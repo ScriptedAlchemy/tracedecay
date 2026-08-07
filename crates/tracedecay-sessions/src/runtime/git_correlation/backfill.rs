@@ -501,7 +501,7 @@ where
 }
 
 pub(super) async fn advance_history_frontier(
-    transaction: &(impl QueryExecutor + Executor + ?Sized),
+    transaction: &(impl Executor + ?Sized),
     candidate: GitHistoryIndexFrontier,
 ) -> Result<GitHistoryIndexFrontier, GitCorrelationError> {
     let current = GitHistoryIndexFrontier {

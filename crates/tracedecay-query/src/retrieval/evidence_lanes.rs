@@ -71,10 +71,7 @@ impl EvidenceLaneExecutionControlV1 {
 }
 
 fn elapsed_micros(started_at: Instant, now: Instant) -> u64 {
-    match u64::try_from(now.saturating_duration_since(started_at).as_micros()) {
-        Ok(elapsed) => elapsed,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(now.saturating_duration_since(started_at).as_micros()).unwrap_or(u64::MAX)
 }
 
 /// Task relation that selected source-owned evidence.

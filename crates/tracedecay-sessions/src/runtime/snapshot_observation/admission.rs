@@ -126,6 +126,7 @@ pub fn snapshot_cursor_after(
 /// generation from their content; it neither consults nor advances legacy parse
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
 /// sweep.
+#[allow(clippy::too_many_arguments)]
 pub async fn capture_snapshot_observations<R, D, B, L>(
     facade: &dyn HostAdmission,
     provider: &'static str,

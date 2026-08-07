@@ -294,6 +294,7 @@ pub fn probe_writer_owner(db_path: &Path) -> Result<WriterOwnership> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&identity.database_key)
-        .map(|lease| WriterOwnership::Active(lease.owner.clone()))
-        .unwrap_or(WriterOwnership::Idle))
+        .map_or(WriterOwnership::Idle, |lease| {
+            WriterOwnership::Active(lease.owner.clone())
+        }))
 }

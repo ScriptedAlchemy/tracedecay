@@ -14,7 +14,7 @@ impl DatabaseEngineReadSnapshot {
     ///
     /// The generation advances in the same durable transaction as graph writes.
     /// Reading it through this capability binds every later graph query to the
-    /// same SQLite snapshot without relying on second-resolution timestamps.
+    /// same `SQLite` snapshot without relying on second-resolution timestamps.
     pub async fn graph_generation_identity(&self) -> Result<String> {
         let mut rows = self
             .query(

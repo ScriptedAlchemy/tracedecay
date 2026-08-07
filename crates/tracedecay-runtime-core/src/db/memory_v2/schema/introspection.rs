@@ -1,4 +1,4 @@
-//! Schema-shape introspection probes for the memory_v2 tests.
+//! Schema-shape introspection probes for the `memory_v2` tests.
 
 use crate::db::engine::params;
 use crate::errors::Result;

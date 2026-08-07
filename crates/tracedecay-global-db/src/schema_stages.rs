@@ -12,7 +12,7 @@ use super::{
     observation_projection, project_registry, session_temporal,
 };
 use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, QueryExecutor, TransactionBehavior, params,
+    Connection, Executor, QueryExecutor, TransactionBehavior,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::{
@@ -518,23 +518,6 @@ pub async fn converge_registered_schema(
     // Completed repairs survive interruption, while the trusted checkpoint is
     // still written only after every audit succeeds.
     ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
-}
-
-async fn table_exists(
-    conn: &impl QueryExecutor,
-    table: &str,
-) -> tracedecay_runtime_core::errors::Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
-            params![table],
-        )
-        .await
-        .map_err(|error| global_db_operation_error("inspect registered global schema", error))?;
-    rows.next()
-        .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error("inspect registered global schema", error))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

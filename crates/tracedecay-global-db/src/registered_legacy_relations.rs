@@ -30,13 +30,8 @@ pub(crate) async fn reject_legacy_session_relation_shape(
                 [table],
             )
             .await
-            .map_err(|error| inspection_error(error))?;
-        if rows
-            .next()
-            .await
-            .map_err(|error| inspection_error(error))?
-            .is_some()
-        {
+            .map_err(inspection_error)?;
+        if rows.next().await.map_err(inspection_error)?.is_some() {
             return Err(TraceDecayError::reset_required(
                 "registered session relation store",
                 format!(

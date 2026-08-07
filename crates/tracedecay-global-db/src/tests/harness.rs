@@ -167,6 +167,7 @@ impl RegisteredGlobalDbHarness {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn remount_profile_database_for_test(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
@@ -735,7 +736,7 @@ impl HostAdmissionTestRuntimeV1 {
 /// the payload sanitizer binds at ingest, so a seeded raw row satisfies
 /// `verify_raw_message_receipt`. Returns a SQL-escaped literal ready to embed
 /// directly in a fixture `INSERT`.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(test)]
 fn lcm_render_fixture_sanitization_metadata(
     content: &str,
 ) -> tracedecay_runtime_core::errors::Result<String> {

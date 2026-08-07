@@ -192,7 +192,7 @@ pub fn bounded_git_output(
 /// The caller owns the executable, arguments, working directory, and
 /// environment. This function owns only process I/O, cancellation, deadline,
 /// and termination. [`bounded_git_output`] is the read-only Git wrapper that
-/// applies TraceDecay's ambient-environment sanitization.
+/// applies `TraceDecay`'s ambient-environment sanitization.
 pub fn bounded_command_output(
     command: Command,
     stdin: Option<&[u8]>,
@@ -458,8 +458,7 @@ fn capture_child_with_deadline(mut child: Child, timeout: Duration) -> ChildCapt
             Ok(Some(_)) => {
                 return child
                     .wait_with_output()
-                    .map(ChildCaptureResult::Completed)
-                    .unwrap_or(ChildCaptureResult::Failed);
+                    .map_or(ChildCaptureResult::Failed, ChildCaptureResult::Completed);
             }
             Ok(None) => {}
             Err(_) => {

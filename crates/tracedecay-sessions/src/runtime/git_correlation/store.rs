@@ -224,13 +224,11 @@ impl GitEvidenceProjectionStore {
             for entity in page.entities {
                 if let Some(GraphProperty::String(value)) =
                     entity.properties.get(&projection_property)
+                    && source_watermark.replace(value.clone()).is_some()
                 {
-                    if source_watermark.replace(value.clone()).is_some() {
-                        return Err(GitCorrelationError::Corrupt(
-                            "verified Git evidence contains duplicate projection metadata"
-                                .to_owned(),
-                        ));
-                    }
+                    return Err(GitCorrelationError::Corrupt(
+                        "verified Git evidence contains duplicate projection metadata".to_owned(),
+                    ));
                 }
                 if let Some(GraphProperty::Bytes(bytes)) = entity.properties.get(&span_property) {
                     spans.push(serde_json::from_slice(bytes)?);
