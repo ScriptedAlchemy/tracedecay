@@ -303,6 +303,45 @@ fn v3_record_binds_exact_target_owner_and_ordered_lineage() {
 }
 
 #[test]
+fn v3_record_rejects_cross_privacy_authorization() {
+    let owner = v3_owner("project.fixture", "privacy.other");
+    let source = AnchorLineageRefV3::new(
+        0,
+        AnchorProvenanceRelationV2::DerivedFrom,
+        RetrievalAnchorId::new("retrieval.source.fixture").unwrap(),
+        owner.clone(),
+    )
+    .unwrap();
+    let parts = RetrievalAnchorRecordV3Parts {
+        target: RetrievalAnchorTargetV3::ExactSourceOccurrence(
+            SourceOccurrenceId::new("occurrence.fixture").unwrap(),
+        ),
+        owner,
+        aliases: vec![],
+        occurred_at: None,
+        ingested_at: UtcMicros(1),
+        evidence_class: EvidenceClass::Observed,
+        source_generation: AnchorSourceGenerationV3::Unknown,
+        projection_generation: ProjectionGenerationId::new("projection.fixture").unwrap(),
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![],
+        source_anchors: vec![source],
+        authorization: authorization(),
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: RetentionClass::new("retention.fixture").unwrap(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    };
+
+    assert_eq!(
+        RetrievalAnchorRecordV3::new(parts).unwrap_err(),
+        DomainError::UnknownReference {
+            field: "retrieval anchor V3 authorization owner"
+        }
+    );
+}
+
+#[test]
 fn rejects_alias_digest_collisions_across_alias_kinds() {
     let mut parts = record_parts(entity_target("document.fixture"), owner("project.fixture"));
     parts.aliases = vec![
