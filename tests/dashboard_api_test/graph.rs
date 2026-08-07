@@ -8,6 +8,19 @@ use crate::dashboard_api_support::write_file;
 use crate::runtime::DashboardTestRuntimeV1;
 use serde_json::Value;
 use tempfile::TempDir;
+
+/// Proves a graph envelope was served ready by the verified graph authority:
+/// its version carries the generation the daemon published and verified for
+/// the served topology, never a fabricated or absent one.
+fn assert_ready_verified_generation(body: &Value) {
+    assert_eq!(body["domain_state"], "ready", "{body}");
+    assert!(
+        body["version"]["graph_version"]
+            .as_str()
+            .is_some_and(|generation| generation.starts_with("code-dashboard:")),
+        "graph reads must carry their verified generation: {body}"
+    );
+}
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
 use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
@@ -320,10 +333,11 @@ async fn start_dashboard_fixture_with(
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
     let server_graph = std::sync::Arc::new(cg);
+    let authority = host_runtime
+        .dashboard_test_authority_with_session_reads(server_graph.as_ref())
+        .await
+        .unwrap_or_else(|error| panic!("compose dashboard graph authority: {error}"));
     let server = tokio::spawn(async move {
-        let authority = host_runtime
-            .dashboard_test_authority()
-            .expect("dashboard graph authority");
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
             authority,
@@ -372,13 +386,16 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             &format!("{}/api/plugins/graph/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_ready_verified_generation(&overview);
         assert_eq!(overview["payload"]["totals"]["nodes"], 4);
         assert_eq!(overview["payload"]["totals"]["edges"], 3);
         assert_eq!(overview["payload"]["totals"]["files"], 2);
         assert!(
-            overview["payload"]["nodes_by_kind"].as_array().is_some_and(|rows| rows
-                .iter()
-                .any(|row| row["kind"] == "function" && row["count"] == 3)),
+            overview["payload"]["nodes_by_kind"]
+                .as_array()
+                .is_some_and(|rows| rows
+                    .iter()
+                    .any(|row| row["kind"] == "function" && row["count"] == 3)),
             "overview should include node counts by kind"
         );
         assert!(
@@ -398,6 +415,7 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             ),
         );
         assert_eq!(status, 200);
+        assert_ready_verified_generation(&search);
         assert_eq!(search["payload"]["query"], "dashboard");
         assert!(
             search["payload"]["results"]
@@ -416,7 +434,10 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             "crate::dashboard::route_graph"
         );
         assert_eq!(node["payload"]["node"]["span"]["start_line"], 8);
-        assert_eq!(node["payload"]["node"]["doc"], "Fixture documentation for route_graph");
+        assert_eq!(
+            node["payload"]["node"]["doc"],
+            "Fixture documentation for route_graph"
+        );
 
         let (status, neighbors) = get_json(
             &agent,
@@ -479,7 +500,9 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         assert_eq!(status, 200);
         assert_eq!(capped["payload"]["capped"]["edges"], true);
         assert_eq!(
-            capped["payload"]["edges"].as_array().map_or(0, |rows| rows.len()),
+            capped["payload"]["edges"]
+                .as_array()
+                .map_or(0, |rows| rows.len()),
             1,
             "edge list should be truncated to the cap"
         );
@@ -560,6 +583,7 @@ fn graph_api_finds_shortest_path_and_analytics() {
             ),
         );
         assert_eq!(status, 200);
+        assert_ready_verified_generation(&path);
         assert_eq!(path["payload"]["found"], true);
         assert_eq!(
             path["payload"]["path"],
@@ -570,7 +594,9 @@ fn graph_api_finds_shortest_path_and_analytics() {
             .unwrap_or_else(|| panic!("expected path edges array"));
         assert_eq!(path_edges.len(), 2);
         assert!(
-            path["payload"]["nodes"].as_array().is_some_and(|rows| rows.len() == 3),
+            path["payload"]["nodes"]
+                .as_array()
+                .is_some_and(|rows| rows.len() == 3),
             "path payload should hydrate full node rows"
         );
 
@@ -630,6 +656,7 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
             &format!("{}/api/plugins/graph/subgraph", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_ready_verified_generation(&default_slice);
         assert_eq!(default_slice["payload"]["mode"], "default");
         assert_eq!(default_slice["payload"]["seed_id"], Value::Null);
         let nodes = default_slice["payload"]["nodes"]
@@ -717,8 +744,18 @@ fn graph_api_seedless_subgraph_returns_default_hub_slice() {
         );
         assert_eq!(status, 200);
         assert_eq!(no_hit["payload"]["seed_id"], Value::Null);
-        assert_eq!(no_hit["payload"]["nodes"].as_array().map_or(1, |rows| rows.len()), 0);
-        assert_eq!(no_hit["payload"]["edges"].as_array().map_or(1, |rows| rows.len()), 0);
+        assert_eq!(
+            no_hit["payload"]["nodes"]
+                .as_array()
+                .map_or(1, |rows| rows.len()),
+            0
+        );
+        assert_eq!(
+            no_hit["payload"]["edges"]
+                .as_array()
+                .map_or(1, |rows| rows.len()),
+            0
+        );
     });
 }
 
