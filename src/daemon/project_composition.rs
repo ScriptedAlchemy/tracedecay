@@ -1042,6 +1042,7 @@ pub(super) async fn production_project_server(
                     let state = project_open_owners::register_project_open_production_owners(
                         invocation,
                         store_administration.git_index_transaction_services(),
+                        store_administration.native_integration_services(),
                         canonical_project_path,
                         &project_id,
                         full_candidate.as_ref(),
