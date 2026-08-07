@@ -886,7 +886,7 @@ async fn dispatch_admitted(
     observed_at: UtcMicros,
 ) -> ApplicationResult<Value> {
     let operation = invocation.operation;
-    if !valid_owned_symbol_graph_request(&invocation.request) {
+    if !valid_owned_primitive_request(&invocation.request) {
         return invalid_request(&context, &operation);
     }
     match invocation.request {
@@ -1227,7 +1227,7 @@ async fn dispatch_admitted(
     }
 }
 
-fn valid_owned_symbol_graph_request(request: &PrimitiveRequest) -> bool {
+fn valid_owned_primitive_request(request: &PrimitiveRequest) -> bool {
     match request {
         PrimitiveRequest::SymbolSearch(request) => request.validate().is_ok(),
         PrimitiveRequest::ExactSymbol(request) => request.validate().is_ok(),
@@ -1238,6 +1238,8 @@ fn valid_owned_symbol_graph_request(request: &PrimitiveRequest) -> bool {
             request.validate().is_ok()
         }
         PrimitiveRequest::Impact(request) => request.validate().is_ok(),
+        PrimitiveRequest::TestMap(request) => request.validate(),
+        PrimitiveRequest::AffectedFileTests(request) => request.validate(),
         _ => true,
     }
 }

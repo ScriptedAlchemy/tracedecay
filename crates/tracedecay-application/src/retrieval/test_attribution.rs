@@ -22,6 +22,13 @@ pub struct TestMapPrimitiveRequest {
     pub meta: RetrievalRequestMeta,
 }
 
+impl TestMapPrimitiveRequest {
+    /// Exactly one of `file` / `node_id` selects the map root.
+    pub fn validate(&self) -> bool {
+        self.file.is_some() ^ self.node_id.is_some()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AffectedFileTestsPrimitiveRequest {
@@ -29,6 +36,18 @@ pub struct AffectedFileTestsPrimitiveRequest {
     pub maximum_depth: usize,
     pub filter: Option<String>,
     pub meta: RetrievalRequestMeta,
+}
+
+impl AffectedFileTestsPrimitiveRequest {
+    pub fn validate(&self) -> bool {
+        !self.files.is_empty()
+            && self.files.len() <= MAX_TEST_PRIMITIVE_FILES
+            && self.maximum_depth <= MAX_TEST_PRIMITIVE_DEPTH
+            && self
+                .filter
+                .as_ref()
+                .is_none_or(|filter| filter.len() <= MAX_TEST_FILTER_BYTES)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -134,4 +153,79 @@ pub trait TestPrimitivePort {
         context: TestPrimitivePortContext<'a>,
         request: &'a AffectedFileTestsPrimitiveRequest,
     ) -> TestPrimitivePortFuture<'a, AffectedFileTestsPrimitiveResultV1>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::requests::{PageRequest, ResultProjection, RetrievalOrder};
+    use super::*;
+
+    fn meta() -> RetrievalRequestMeta {
+        RetrievalRequestMeta::current(
+            PageRequest::first(10).expect("bounded first page"),
+            ResultProjection::Summary,
+            RetrievalOrder::Relevance,
+        )
+    }
+
+    #[test]
+    fn test_map_requires_exactly_one_selector() {
+        let both = TestMapPrimitiveRequest {
+            file: Some("src/lib.rs".to_owned()),
+            node_id: Some("node".to_owned()),
+            meta: meta(),
+        };
+        let neither = TestMapPrimitiveRequest {
+            file: None,
+            node_id: None,
+            meta: meta(),
+        };
+        let file_only = TestMapPrimitiveRequest {
+            file: Some("src/lib.rs".to_owned()),
+            node_id: None,
+            meta: meta(),
+        };
+        assert!(!both.validate());
+        assert!(!neither.validate());
+        assert!(file_only.validate());
+    }
+
+    #[test]
+    fn affected_tests_enforces_bounds() {
+        let valid = AffectedFileTestsPrimitiveRequest {
+            files: vec!["src/lib.rs".to_owned()],
+            maximum_depth: MAX_TEST_PRIMITIVE_DEPTH,
+            filter: Some("a".repeat(MAX_TEST_FILTER_BYTES)),
+            meta: meta(),
+        };
+        assert!(valid.validate());
+        let empty = AffectedFileTestsPrimitiveRequest {
+            files: Vec::new(),
+            maximum_depth: 1,
+            filter: None,
+            meta: meta(),
+        };
+        assert!(!empty.validate());
+        let too_many = AffectedFileTestsPrimitiveRequest {
+            files: vec![String::new(); MAX_TEST_PRIMITIVE_FILES + 1],
+            maximum_depth: 1,
+            filter: None,
+            meta: meta(),
+        };
+        assert!(!too_many.validate());
+        let too_deep = AffectedFileTestsPrimitiveRequest {
+            files: vec!["src/lib.rs".to_owned()],
+            maximum_depth: MAX_TEST_PRIMITIVE_DEPTH + 1,
+            filter: None,
+            meta: meta(),
+        };
+        assert!(!too_deep.validate());
+        let filter_too_long = AffectedFileTestsPrimitiveRequest {
+            files: vec!["src/lib.rs".to_owned()],
+            maximum_depth: 1,
+            filter: Some("a".repeat(MAX_TEST_FILTER_BYTES + 1)),
+            meta: meta(),
+        };
+        assert!(!filter_too_long.validate());
+    }
 }
