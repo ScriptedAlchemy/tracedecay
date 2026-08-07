@@ -87,7 +87,7 @@ fn publish(db: &GraphDb, generation: &str) {
 #[test]
 fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
     let temp = TempDir::new().unwrap();
-    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
+    let (registered, db) = RegisteredGraph::open_raw(temp.path()).unwrap();
     publish(&db, "generation.one");
     let snapshot = db.snapshot().unwrap();
 
@@ -137,7 +137,7 @@ fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
 
     drop(db);
     registered.close().unwrap();
-    let reopened = registered.reopen().unwrap();
+    let reopened = registered.reopen_raw().unwrap();
     assert_eq!(
         reopened
             .entity(&namespace(), &entity_id("root"), live())

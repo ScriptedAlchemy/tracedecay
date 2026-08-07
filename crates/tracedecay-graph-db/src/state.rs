@@ -1,17 +1,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use grafeo_common::types::{EdgeId, NodeId};
+use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
 use grafeo_core::graph::Direction;
 use grafeo_engine::GrafeoDB;
 
+use crate::limits::{
+    MAX_GRAPH_IDENTIFIER_BYTES, MAX_VERIFIED_GENERATION_ENTITIES,
+    MAX_VERIFIED_GENERATION_RELATIONS, require_generation_capacity,
+};
 use crate::schema::{
     COMMIT_SEQUENCE_PROPERTY, DIGEST_PROPERTY, ENTITY_ID_PROPERTY, ENTITY_LABEL, FORMAT_LABEL,
-    IDEMPOTENCY_KEY_PROPERTY, NAMESPACE_PROPERTY, PROJECTION_LABEL, PROJECTION_PROPERTY,
-    PUBLICATION_DIGEST_PROPERTY, PUBLICATION_INPUT_DIGEST_PROPERTY, PUBLICATION_LABEL,
-    RELATION_EDGE_PROPERTY, RELATION_LABEL, SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY,
-    WATERMARK_PROPERTY, decode_entity, decode_relation, entity_key_label, entity_projection_label,
-    projection_state_label, publication_key_label, relation_edge_label, relation_key_label,
-    relation_projection_label, required_i64, required_string, stable_key,
+    GENERATION_DEPENDENCY_DIGEST_PROPERTY, IDEMPOTENCY_KEY_PROPERTY, NAMESPACE_PROPERTY,
+    PROJECTION_LABEL, PROJECTION_PROPERTY, PUBLICATION_DIGEST_PROPERTY,
+    PUBLICATION_INPUT_DIGEST_PROPERTY, PUBLICATION_LABEL, RELATION_EDGE_PROPERTY, RELATION_LABEL,
+    SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity,
+    decode_relation, entity_key_label, entity_projection_label, projection_state_label,
+    publication_key_label, relation_edge_label, relation_key_label, relation_projection_label,
+    required_i64, required_string, stable_key,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphMutation,
@@ -285,7 +290,7 @@ fn load_relation_by_key(
     load_relation_by_locator(database, locator).map(Some)
 }
 
-fn load_relation_by_locator(
+pub(crate) fn load_relation_by_locator(
     database: &GrafeoDB,
     locator_id: NodeId,
 ) -> Result<StoredRelation, GraphDbError> {
@@ -321,8 +326,11 @@ fn load_relation_by_locator(
     let relation = decode_relation(&locator, &edge)?;
     let source = load_entity_by_node(database, edge.src)?;
     let target = load_entity_by_node(database, edge.dst)?;
-    if source.namespace != namespace
-        || target.namespace != namespace
+    let same_namespace = source.namespace == namespace && target.namespace == namespace;
+    let generation_scoped = crate::generation::is_physical_generation_namespace(&namespace)
+        && crate::generation::is_physical_generation_namespace(&source.namespace)
+        && crate::generation::is_physical_generation_namespace(&target.namespace);
+    if (!same_namespace && !generation_scoped)
         || source.entity.identity != relation.from
         || target.entity.identity != relation.to
     {
@@ -381,6 +389,69 @@ pub(crate) fn projection_entities(
     .collect()
 }
 
+pub(crate) fn projection_entities_checked(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<StoredEntity>, GraphDbError> {
+    let nodes = labeled_projection_nodes_checked(
+        database,
+        &entity_projection_label(namespace, projection),
+        ENTITY_LABEL,
+        MAX_VERIFIED_GENERATION_ENTITIES,
+        check,
+    )?;
+    let mut entities = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        check()?;
+        entities.push(load_entity_by_node(database, node)?);
+    }
+    check()?;
+    Ok(entities)
+}
+
+pub(crate) fn projection_entity_nodes_sorted_checked(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<(ArcStr, NodeId)>, GraphDbError> {
+    let nodes = labeled_projection_nodes_checked(
+        database,
+        &entity_projection_label(namespace, projection),
+        ENTITY_LABEL,
+        MAX_VERIFIED_GENERATION_ENTITIES,
+        check,
+    )?;
+    let store = database.graph_store();
+    let mut keyed = Vec::new();
+    keyed
+        .try_reserve_exact(nodes.len())
+        .map_err(|_| GraphDbError::unavailable("native graph entity identity sort is too large"))?;
+    for node in nodes {
+        check()?;
+        let record = store.get_node(node).ok_or_else(|| GraphDbError::Corrupt {
+            message: "native graph entity disappeared during verification".to_owned(),
+        })?;
+        keyed.push((
+            required_arc_string(
+                record.get_property(ENTITY_ID_PROPERTY),
+                "native graph entity identity",
+            )?,
+            node,
+        ));
+    }
+    check()?;
+    keyed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    if keyed.windows(2).any(|window| window[0].0 == window[1].0) {
+        return Err(GraphDbError::Corrupt {
+            message: "native graph generation repeats an entity identity".to_owned(),
+        });
+    }
+    Ok(keyed)
+}
+
 pub(crate) fn projection_relations(
     database: &GrafeoDB,
     namespace: &GraphNamespace,
@@ -394,6 +465,82 @@ pub(crate) fn projection_relations(
     .into_iter()
     .map(|locator| load_relation_by_locator(database, locator))
     .collect()
+}
+
+pub(crate) fn projection_relations_checked(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<StoredRelation>, GraphDbError> {
+    let locators = labeled_projection_nodes_checked(
+        database,
+        &relation_projection_label(namespace, projection),
+        RELATION_LABEL,
+        MAX_VERIFIED_GENERATION_RELATIONS,
+        check,
+    )?;
+    let mut relations = Vec::with_capacity(locators.len());
+    for locator in locators {
+        check()?;
+        relations.push(load_relation_by_locator(database, locator)?);
+    }
+    check()?;
+    Ok(relations)
+}
+
+pub(crate) fn projection_relation_nodes_sorted_checked(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<(ArcStr, NodeId)>, GraphDbError> {
+    let nodes = labeled_projection_nodes_checked(
+        database,
+        &relation_projection_label(namespace, projection),
+        RELATION_LABEL,
+        MAX_VERIFIED_GENERATION_RELATIONS,
+        check,
+    )?;
+    let store = database.graph_store();
+    let mut keyed = Vec::new();
+    keyed.try_reserve_exact(nodes.len()).map_err(|_| {
+        GraphDbError::unavailable("native graph relation identity sort is too large")
+    })?;
+    for node in nodes {
+        check()?;
+        let record = store.get_node(node).ok_or_else(|| GraphDbError::Corrupt {
+            message: "native graph relation disappeared during verification".to_owned(),
+        })?;
+        keyed.push((
+            required_arc_string(
+                record.get_property(crate::schema::RELATION_ID_PROPERTY),
+                "native graph relation identity",
+            )?,
+            node,
+        ));
+    }
+    check()?;
+    keyed.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    if keyed.windows(2).any(|window| window[0].0 == window[1].0) {
+        return Err(GraphDbError::Corrupt {
+            message: "native graph generation repeats a relation identity".to_owned(),
+        });
+    }
+    Ok(keyed)
+}
+
+pub(crate) fn projection_node_counts(
+    database: &GrafeoDB,
+    namespace: &GraphNamespace,
+    projection: &GraphProjectionId,
+) -> Result<(usize, usize), GraphDbError> {
+    let store = database.graph_store();
+    let entities = store.nodes_by_label_count(&entity_projection_label(namespace, projection));
+    let relations = store.nodes_by_label_count(&relation_projection_label(namespace, projection));
+    require_generation_capacity("entities", entities, 0, MAX_VERIFIED_GENERATION_ENTITIES)?;
+    require_generation_capacity("relations", relations, 0, MAX_VERIFIED_GENERATION_RELATIONS)?;
+    Ok((entities, relations))
 }
 
 pub(crate) fn latest_projection(
@@ -474,6 +621,67 @@ fn labeled_projection_nodes(
         .collect())
 }
 
+fn labeled_projection_nodes_checked(
+    database: &GrafeoDB,
+    owner_label: &str,
+    label: &str,
+    maximum: usize,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<NodeId>, GraphDbError> {
+    check()?;
+    let store = database.graph_store();
+    require_generation_capacity(
+        if label == ENTITY_LABEL {
+            "entities"
+        } else {
+            "relations"
+        },
+        store.nodes_by_label_count(owner_label),
+        0,
+        maximum,
+    )?;
+    let candidates = store.nodes_by_label(owner_label);
+    check()?;
+    require_generation_capacity(
+        if label == ENTITY_LABEL {
+            "entities"
+        } else {
+            "relations"
+        },
+        candidates.len(),
+        0,
+        maximum,
+    )?;
+    let mut nodes = Vec::new();
+    nodes.try_reserve_exact(candidates.len()).map_err(|_| {
+        GraphDbError::unavailable("native graph generation identity scan is too large")
+    })?;
+    for node in candidates {
+        check()?;
+        if store
+            .get_node(node)
+            .is_some_and(|record| record.has_label(label))
+        {
+            nodes.push(node);
+        }
+    }
+    check()?;
+    Ok(nodes)
+}
+
+fn required_arc_string(value: Option<&Value>, description: &str) -> Result<ArcStr, GraphDbError> {
+    match value {
+        Some(Value::String(value)) if value.len() <= MAX_GRAPH_IDENTIFIER_BYTES => {
+            Ok(value.clone())
+        }
+        _ => Err(GraphDbError::Corrupt {
+            message: format!(
+                "native {description} is missing, not a string, or exceeds its product bound"
+            ),
+        }),
+    }
+}
+
 fn decode_projection(
     database: &GrafeoDB,
     node: NodeId,
@@ -522,11 +730,26 @@ fn decode_commit(node: &grafeo_core::graph::lpg::Node) -> Result<GraphCommit, Gr
     )?)
     .map_err(|error| persisted_validation_error("commit watermark", error))?;
     let digest = required_string(node.get_property(DIGEST_PROPERTY), "commit digest")?;
+    let generation_dependency_digest = node
+        .get_property(GENERATION_DEPENDENCY_DIGEST_PROPERTY)
+        .map(|_| {
+            tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1::new(
+                required_string(
+                    node.get_property(GENERATION_DEPENDENCY_DIGEST_PROPERTY),
+                    "generation dependency digest",
+                )?,
+            )
+            .map_err(|error| GraphDbError::Corrupt {
+                message: format!("invalid persisted generation dependency digest: {error}"),
+            })
+        })
+        .transpose()?;
     Ok(GraphCommit {
         sequence,
         source_generation,
         watermark,
         digest,
+        generation_dependency_digest,
     })
 }
 
@@ -565,5 +788,76 @@ fn unique_labeled_node(
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use grafeo_common::types::Value;
+    use grafeo_engine::GrafeoDB;
+
+    use super::{projection_entities_checked, projection_relations_checked};
+    use crate::schema::{
+        ENTITY_LABEL, RELATION_LABEL, entity_projection_label, relation_projection_label,
+    };
+    use crate::{GraphDbError, GraphNamespace, GraphProjectionId};
+
+    #[test]
+    fn checked_projection_extraction_cancels_before_decoding_rows() {
+        let database = GrafeoDB::new_in_memory();
+        let namespace = GraphNamespace::new("project").unwrap();
+        let projection = GraphProjectionId::new("code").unwrap();
+        database
+            .session()
+            .create_node_with_props(
+                &[
+                    ENTITY_LABEL,
+                    &entity_projection_label(&namespace, &projection),
+                ],
+                [("malformed", Value::from(true))],
+            )
+            .unwrap();
+        database
+            .session()
+            .create_node_with_props(
+                &[
+                    RELATION_LABEL,
+                    &relation_projection_label(&namespace, &projection),
+                ],
+                [("malformed", Value::from(true))],
+            )
+            .unwrap();
+
+        let entity_polls = Cell::new(0);
+        let entity_check = || {
+            let poll = entity_polls.get() + 1;
+            entity_polls.set(poll);
+            if poll == 5 {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            projection_entities_checked(&database, &namespace, &projection, &entity_check),
+            Err(GraphDbError::Cancelled)
+        ));
+
+        let relation_polls = Cell::new(0);
+        let relation_check = || {
+            let poll = relation_polls.get() + 1;
+            relation_polls.set(poll);
+            if poll == 5 {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            projection_relations_checked(&database, &namespace, &projection, &relation_check),
+            Err(GraphDbError::Cancelled)
+        ));
     }
 }

@@ -8,22 +8,40 @@ use tracedecay_store::{
     RetainedGraphStoreLeaseV1, StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1,
 };
 
-use crate::error::rollback_failure;
-use crate::location::PersistentGraphStoreState;
+use crate::generation::InlineOnlyGraphGenerationManifestProvider;
 use crate::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
-    GraphDbRuntimeState, GraphDurability, GraphFormatVersion, NeverCancelled,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphDbRuntimeState,
+    GraphFormatVersion, GraphGenerationManifestProvider,
 };
 
 use self::identity::{
     binding, entry_binding, require_binding, require_closing, validate_registration,
 };
-use self::path::{inspect_graph_database_file, validate_graph_database_file};
+use self::path::validate_graph_database_file;
+use self::support::{
+    check_deadline, check_registration_request, check_request, open_registered_graph,
+    reject_path_alias, retains_fault, status,
+};
 
 #[path = "registry/identity.rs"]
 mod identity;
 #[path = "registry/path.rs"]
 mod path;
+#[path = "registry/publication.rs"]
+mod publication;
+#[path = "registry/publication_support.rs"]
+mod publication_support;
+#[path = "registry/staging.rs"]
+mod staging;
+#[path = "registry/support.rs"]
+mod support;
+#[path = "registry/vector_retirement.rs"]
+mod vector_retirement;
+pub use staging::{VerifiedGenerationBatchApply, VerifiedGenerationBatchCommit};
+pub use vector_retirement::{
+    SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,
+    SemanticVectorRetirementReservation,
+};
 
 const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
 
@@ -102,6 +120,7 @@ pub struct GraphDbRegistry {
 
 struct RegistryInner {
     config: GraphDbRegistryConfig,
+    manifest_provider: Arc<dyn GraphGenerationManifestProvider>,
     state: Mutex<RegistryState>,
     changed: Condvar,
 }
@@ -167,6 +186,16 @@ enum CloseReservation {
 
 impl GraphDbRegistry {
     pub fn new(config: GraphDbRegistryConfig) -> Result<Self, GraphDbError> {
+        Self::new_with_manifest_provider(
+            config,
+            Arc::new(InlineOnlyGraphGenerationManifestProvider),
+        )
+    }
+
+    pub fn new_with_manifest_provider(
+        config: GraphDbRegistryConfig,
+        manifest_provider: Arc<dyn GraphGenerationManifestProvider>,
+    ) -> Result<Self, GraphDbError> {
         if config.max_open == 0 {
             return Err(GraphDbError::invalid(
                 "graph registry max_open must be greater than zero",
@@ -175,13 +204,17 @@ impl GraphDbRegistry {
         Ok(Self {
             inner: Arc::new(RegistryInner {
                 config,
+                manifest_provider,
                 state: Mutex::new(RegistryState::default()),
                 changed: Condvar::new(),
             }),
         })
     }
 
-    pub fn resolve(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
+    pub(crate) fn resolve(
+        &self,
+        registration: GraphDbRegistration,
+    ) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
         let path = registration.canonical_path().to_path_buf();
@@ -193,7 +226,6 @@ impl GraphDbRegistry {
         let shard_id = binding.shard_id.clone();
 
         loop {
-            check_request(registration.cancellation.as_ref(), registration.deadline)?;
             let mut state = self.state_lock()?;
             reject_path_alias(&state, &binding, &verified_locator, &path, expected_format)?;
 
@@ -275,6 +307,7 @@ impl GraphDbRegistry {
                         ),
                         (&binding, &verified_locator, &path, expected_format),
                     )?;
+                    check_request(registration.cancellation.as_ref(), registration.deadline)?;
                     let (next, _) = self
                         .inner
                         .changed
@@ -286,6 +319,7 @@ impl GraphDbRegistry {
                     continue;
                 }
                 None => {
+                    check_request(registration.cancellation.as_ref(), registration.deadline)?;
                     let eviction = reserve_capacity_eviction(
                         &mut state,
                         self.inner.config.max_open,
@@ -366,7 +400,69 @@ impl GraphDbRegistry {
         }
     }
 
-    pub fn reopen(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
+    fn retain_verification_fault(
+        &self,
+        registration: &GraphDbRegistration,
+        error: &GraphDbError,
+    ) -> Result<(), GraphDbError> {
+        let mut state = self.state_lock()?;
+        let entry = state
+            .entries
+            .get(&registration.binding().shard_id)
+            .ok_or_else(|| GraphDbError::unavailable("graph verification entry disappeared"))?;
+        let RegistryEntry::Ready {
+            authority_lease,
+            binding,
+            verified_locator,
+            path,
+            expected_format,
+            owner,
+            ..
+        } = entry
+        else {
+            return Err(GraphDbError::Conflict);
+        };
+        require_binding(
+            (binding, verified_locator, path, *expected_format),
+            (
+                registration.binding(),
+                registration.verified_locator(),
+                registration.canonical_path(),
+                GraphFormatVersion::current(),
+            ),
+        )?;
+        let faulted = RegistryEntry::Faulted {
+            authority_lease: Arc::clone(authority_lease),
+            binding: binding.clone(),
+            verified_locator: verified_locator.clone(),
+            path: path.clone(),
+            expected_format: *expected_format,
+            owner: Some(Arc::clone(owner)),
+            error: error.clone(),
+        };
+        state
+            .entries
+            .insert(registration.binding().shard_id.clone(), faulted);
+        self.inner.changed.notify_all();
+        Ok(())
+    }
+
+    /// Opens a raw runtime only for direct storage tests and developer evals.
+    ///
+    /// Production readers obtain [`crate::VerifiedGraphSnapshot`] from this
+    /// registry instead.
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn resolve_raw_for_harness(
+        &self,
+        registration: GraphDbRegistration,
+    ) -> Result<Arc<GraphDb>, GraphDbError> {
+        self.resolve(registration)
+    }
+
+    pub(crate) fn reopen(
+        &self,
+        registration: GraphDbRegistration,
+    ) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
         let path = registration.canonical_path().to_path_buf();
@@ -399,6 +495,18 @@ impl GraphDbRegistry {
             }
         }
         self.resolve(registration)
+    }
+
+    /// Reopens a raw runtime only for direct storage tests and developer evals.
+    ///
+    /// Production recovery returns a verified snapshot through
+    /// [`GraphDbRegistry::recover_verified_snapshot`].
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn reopen_raw_for_harness(
+        &self,
+        registration: GraphDbRegistration,
+    ) -> Result<Arc<GraphDb>, GraphDbError> {
+        self.reopen(registration)
     }
 
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
@@ -856,134 +964,4 @@ fn reserve_capacity_eviction(
         },
     );
     Ok(Some(eviction))
-}
-
-fn reject_path_alias(
-    state: &RegistryState,
-    requested_binding: &StoreRuntimeBindingV1,
-    requested_locator: &VerifiedStoreLocatorV1,
-    path: &Path,
-    expected_format: GraphFormatVersion,
-) -> Result<(), GraphDbError> {
-    for entry in state.entries.values() {
-        let (registered_binding, registered_locator, registered_path, registered_format) =
-            binding(entry);
-        if registered_binding.shard_id == requested_binding.shard_id {
-            require_binding(
-                (
-                    registered_binding,
-                    registered_locator,
-                    registered_path,
-                    registered_format,
-                ),
-                (requested_binding, requested_locator, path, expected_format),
-            )?;
-        } else if registered_path == path {
-            return Err(GraphDbError::Conflict);
-        }
-    }
-    Ok(())
-}
-
-fn open_registered_graph(
-    path: &Path,
-    expected_format: GraphFormatVersion,
-    registration: &GraphDbRegistration,
-) -> Result<GraphDbOwner, GraphDbError> {
-    check_request(
-        registration.lifecycle_cancellation.as_ref(),
-        registration.deadline,
-    )?;
-    check_request(registration.cancellation.as_ref(), registration.deadline)?;
-    let persistent_store_state = inspect_graph_database_file(path)?;
-    let cancellation: Arc<dyn GraphCancellation> = match persistent_store_state {
-        PersistentGraphStoreState::Prospective => Arc::new(NeverCancelled),
-        PersistentGraphStoreState::Existing => Arc::new(RegisteredGraphOpenCancellation {
-            request: Arc::clone(&registration.cancellation),
-            lifecycle: Arc::clone(&registration.lifecycle_cancellation),
-        }),
-    };
-    let owner = GraphDbOwner::open_registered(
-        GraphDbOpenOptions {
-            location: GraphDbLocation::Persistent(path.to_path_buf()),
-            expected_format,
-            durability: GraphDurability::WalSync,
-            cancellation,
-        },
-        persistent_store_state,
-    )?;
-    if persistent_store_state == PersistentGraphStoreState::Prospective
-        && let Err(error) = check_request(
-            registration.lifecycle_cancellation.as_ref(),
-            registration.deadline,
-        )
-        .and_then(|()| check_request(registration.cancellation.as_ref(), registration.deadline))
-    {
-        return match owner.close() {
-            Ok(()) => Err(error),
-            Err(close_error) => Err(rollback_failure(
-                "cancelled graph format initialization",
-                error,
-                close_error,
-            )),
-        };
-    }
-    Ok(owner)
-}
-
-fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {
-    if cancellation.is_cancelled() {
-        Err(GraphDbError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-fn check_deadline(deadline: Instant) -> Result<(), GraphDbError> {
-    if Instant::now() >= deadline {
-        Err(GraphDbError::DeadlineExceeded)
-    } else {
-        Ok(())
-    }
-}
-
-fn check_request(
-    cancellation: &dyn GraphCancellation,
-    deadline: Instant,
-) -> Result<(), GraphDbError> {
-    check_cancelled(cancellation)?;
-    check_deadline(deadline)
-}
-
-fn retains_fault(error: &GraphDbError) -> bool {
-    matches!(
-        error,
-        GraphDbError::ResetRequired { .. }
-            | GraphDbError::Corrupt { .. }
-            | GraphDbError::DurabilityUncertain { .. }
-    )
-}
-
-fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
-    match entry {
-        RegistryEntry::Opening { .. } => GraphDbRegistryStatus::Opening,
-        RegistryEntry::Closing { .. } => GraphDbRegistryStatus::Closing,
-        RegistryEntry::Ready { owner, .. } => match owner.runtime_state() {
-            GraphDbRuntimeState::Ready => GraphDbRegistryStatus::Ready,
-            GraphDbRuntimeState::Closed => GraphDbRegistryStatus::Closed,
-            GraphDbRuntimeState::DurabilityUncertain => GraphDbRegistryStatus::DurabilityUncertain,
-        },
-        RegistryEntry::Faulted { error, .. } => match error {
-            GraphDbError::ResetRequired { .. } => GraphDbRegistryStatus::ResetRequired,
-            GraphDbError::Corrupt { .. } => GraphDbRegistryStatus::Corrupt,
-            GraphDbError::DurabilityUncertain { .. } => GraphDbRegistryStatus::DurabilityUncertain,
-            GraphDbError::Cancelled
-            | GraphDbError::InvalidRequest { .. }
-            | GraphDbError::Conflict
-            | GraphDbError::BudgetExhausted
-            | GraphDbError::DeadlineExceeded
-            | GraphDbError::Unavailable { .. }
-            | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
-        },
-    }
 }

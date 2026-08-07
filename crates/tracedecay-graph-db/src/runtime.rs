@@ -3,27 +3,29 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use grafeo_common::types::Value;
-use grafeo_common::utils::error::ErrorCode;
 use grafeo_engine::GrafeoDB;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLock, RwLock as ParkingRwLock};
 
-use crate::error::rollback_failure;
+use crate::lease::VerifiedGenerationState;
 use crate::location::{PersistentGraphStoreState, ValidatedOpen};
-use crate::schema::{
-    FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, SCHEMA_PROPERTY,
-    SEQUENCE_PROPERTY,
+use crate::recovery::{
+    checkpoint_recovered_database, is_database_fault, load_quarantined_projections, map_open_error,
+    open_recovered_database, projection_mismatch, quarantine_transition_failure,
+    requarantine_after_failed_checkpoint_verification, set_projection_quarantine,
+    validate_or_initialize_format, verify_recovered_projection,
 };
 use crate::state::{
-    FormatState, latest_projection, projection_entities, projection_relations, publication,
+    FormatState, latest_projection, load_entity, projection_entities, projection_relations,
+    publication, relations_for_entity,
 };
 use crate::{
-    GraphCancellation, GraphCommit, GraphDbError, GraphDbLocation, GraphDbOpenOptions,
-    GraphDurability, GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphMutation,
-    GraphNamespace, GraphProjectionId, GraphProperty, GraphPublication, GraphPublicationDigest,
-    GraphPublicationInputDigest, GraphPublicationReceipt, GraphRelation, GraphRelationId,
-    GraphRelationKind, GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWriteBatch,
-    ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
+    GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
+    GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
+    GraphProperty, GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest,
+    GraphPublicationReceipt, GraphRelation, GraphRelationId, GraphRelationKind,
+    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWriteBatch, ProjectionReplacement,
+    RecoveredProjectionManifest, TraversalRequest, TraversalResult, VectorSearchRequest,
     VectorSearchResult, mutation, traversal, vector,
 };
 
@@ -31,16 +33,15 @@ pub struct GraphDb {
     pub(crate) inner: Arc<Inner>,
 }
 
-pub struct GraphDbOwner {
-    database: Arc<GraphDb>,
-}
-
 pub(crate) struct Inner {
     pub(crate) database: RwLock<Option<GrafeoDB>>,
     state: RwLock<FormatState>,
-    durability: GraphDurability,
-    snapshot_gate: Arc<ParkingRwLock<()>>,
-    closed: AtomicBool,
+    pub(crate) durability: GraphDurability,
+    pub(crate) reopen: Option<ValidatedOpen>,
+    pub(crate) snapshot_gate: Arc<ParkingRwLock<()>>,
+    pub(crate) verified_generations: RwLock<VerifiedGenerationState>,
+    pub(crate) quarantined_projections: RwLock<BTreeSet<(GraphNamespace, GraphProjectionId)>>,
+    pub(crate) closed: AtomicBool,
     pub(crate) poisoned: AtomicBool,
 }
 
@@ -66,15 +67,6 @@ impl std::fmt::Debug for GraphDb {
     }
 }
 
-impl std::fmt::Debug for GraphDbOwner {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("GraphDbOwner")
-            .field("state", &self.runtime_state())
-            .finish_non_exhaustive()
-    }
-}
-
 impl std::fmt::Debug for GraphSnapshot {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -83,57 +75,12 @@ impl std::fmt::Debug for GraphSnapshot {
     }
 }
 
-impl GraphDbOwner {
-    pub fn memory(cancellation: Arc<dyn GraphCancellation>) -> Result<Self, GraphDbError> {
-        Self::open(GraphDbOpenOptions {
-            location: GraphDbLocation::Memory,
-            expected_format: GraphFormatVersion::current(),
-            durability: GraphDurability::Memory,
-            cancellation,
-        })
-    }
-
-    pub(crate) fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError> {
-        GraphDb::open(options).map(|database| Self { database })
-    }
-
-    pub(crate) fn open_registered(
-        options: GraphDbOpenOptions,
-        persistent_store_state: PersistentGraphStoreState,
-    ) -> Result<Self, GraphDbError> {
-        GraphDb::open_with_store_state(options, Some(persistent_store_state))
-            .map(|database| Self { database })
-    }
-
-    #[must_use]
-    pub fn handle(&self) -> Arc<GraphDb> {
-        Arc::clone(&self.database)
-    }
-
-    #[must_use]
-    pub fn runtime_state(&self) -> GraphDbRuntimeState {
-        self.database.runtime_state()
-    }
-
-    pub fn close(&self) -> Result<(), GraphDbError> {
-        self.database.close()
-    }
-
-    pub(crate) fn is_unleased(&self) -> bool {
-        Arc::strong_count(&self.database) == 1
-    }
-
-    pub(crate) fn is_closed(&self) -> bool {
-        self.database.inner.closed.load(Ordering::Acquire)
-    }
-}
-
 impl GraphDb {
-    fn open(options: GraphDbOpenOptions) -> Result<Arc<Self>, GraphDbError> {
+    pub(crate) fn open(options: GraphDbOpenOptions) -> Result<Arc<Self>, GraphDbError> {
         Self::open_with_store_state(options, None)
     }
 
-    fn open_with_store_state(
+    pub(crate) fn open_with_store_state(
         options: GraphDbOpenOptions,
         persistent_store_state: Option<PersistentGraphStoreState>,
     ) -> Result<Arc<Self>, GraphDbError> {
@@ -142,12 +89,20 @@ impl GraphDb {
             .map_err(|error| map_open_error(error, validated.preexisting_store))?;
         validate_or_initialize_format(&database, &validated)?;
         let state = FormatState::load(&database)?;
+        let quarantined_projections = load_quarantined_projections(&database)?;
         Ok(Arc::new(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(Some(database)),
                 state: RwLock::new(state),
                 durability: validated.durability,
+                reopen: validated.config.path.as_ref().map(|_| {
+                    let mut reopen = validated.clone();
+                    reopen.preexisting_store = true;
+                    reopen
+                }),
                 snapshot_gate: Arc::new(ParkingRwLock::new(())),
+                verified_generations: RwLock::new(VerifiedGenerationState::default()),
+                quarantined_projections: RwLock::new(quarantined_projections),
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -192,7 +147,15 @@ impl GraphDb {
             return Err(GraphDbError::Cancelled);
         }
         let mut state = self.state_write_guard()?;
-        self.apply_locked(database, &mut state, batch, digest, None)
+        self.apply_locked(
+            database,
+            &mut state,
+            batch,
+            digest,
+            None,
+            &mutation::RelationEndpointNamespaces::new(),
+            &|| Ok(()),
+        )
     }
 
     /// Rebuilds one disposable derived projection from its complete input.
@@ -254,7 +217,15 @@ impl GraphDb {
         )?;
         let digest = batch.validate_and_digest()?;
         let mut state = self.state_write_guard()?;
-        self.apply_locked(database, &mut state, batch, digest, None)
+        self.apply_locked(
+            database,
+            &mut state,
+            batch,
+            digest,
+            None,
+            &mutation::RelationEndpointNamespaces::new(),
+            &|| Ok(()),
+        )
     }
 
     /// Records an idempotent derived-index publication.
@@ -307,6 +278,8 @@ impl GraphDb {
             publication_request.batch,
             batch_digest,
             Some(publication_record),
+            &mutation::RelationEndpointNamespaces::new(),
+            &|| Ok(()),
         )
     }
 
@@ -338,7 +311,14 @@ impl GraphDb {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        traversal::traverse(database, request)
+        self.ensure_start_projections_readable(
+            database,
+            &request.namespace,
+            std::slice::from_ref(&request.start),
+        )?;
+        traversal::traverse(database, request, &|namespace, projection| {
+            self.ensure_projection_readable(namespace, projection)
+        })
     }
 
     pub fn outgoing_relation_ids(
@@ -351,6 +331,7 @@ impl GraphDb {
     ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
         traversal::outgoing_relation_ids(
             database,
             namespace,
@@ -358,6 +339,7 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
         )
     }
 
@@ -371,6 +353,7 @@ impl GraphDb {
     ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_start_projections_readable(database, namespace, starts)?;
         traversal::outgoing_relations(
             database,
             namespace,
@@ -378,6 +361,7 @@ impl GraphDb {
             relation_kinds,
             max_relations,
             cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
         )
     }
 
@@ -394,6 +378,8 @@ impl GraphDb {
     ) -> Result<Vec<BTreeSet<GraphEntityId>>, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_projection_readable(namespace, projection)?;
+        self.ensure_outgoing_start_relations_readable(database, namespace, starts)?;
         traversal::reachable_entities(
             database,
             namespace,
@@ -403,6 +389,7 @@ impl GraphDb {
             outgoing_overrides,
             max_visits,
             cancellation.as_ref(),
+            &|namespace, projection| self.ensure_projection_readable(namespace, projection),
         )
     }
 
@@ -412,7 +399,197 @@ impl GraphDb {
     ) -> Result<VectorSearchResult, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_projection_readable(&request.namespace, &request.projection)?;
         vector::vector_search(database, request)
+    }
+
+    pub(crate) fn reopen_and_verify_projection(
+        &self,
+        manifest: &RecoveredProjectionManifest,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<(GraphCommit, crate::RecoveredProjectionDigest), GraphDbError> {
+        check()?;
+        let _snapshot_gate = self.inner.snapshot_gate.write();
+        let mut database_guard = self
+            .inner
+            .database
+            .write()
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        self.ensure_available()?;
+        check()?;
+        let mut state_guard = self.state_write_guard()?;
+        let mut quarantined_guard = self
+            .inner
+            .quarantined_projections
+            .write()
+            .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
+        let reopen = self.inner.reopen.clone().ok_or_else(|| {
+            GraphDbError::invalid(
+                "recovered projection verification requires a persistent graph database",
+            )
+        })?;
+        let Some(database) = database_guard.take() else {
+            return Err(GraphDbError::Closed);
+        };
+        if let Err(error) = database.close() {
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(GraphDbError::DurabilityUncertain {
+                message: format!(
+                    "Grafeo close failed before recovered projection verification: {error}"
+                ),
+            });
+        }
+        let (mut recovered, mut recovered_state, mut quarantined) =
+            match open_recovered_database(&reopen) {
+                Ok(recovered) => recovered,
+                Err(error) => {
+                    self.inner.poisoned.store(true, Ordering::Release);
+                    return Err(error);
+                }
+            };
+        if let Err(error) = check() {
+            *state_guard = recovered_state;
+            *quarantined_guard = quarantined;
+            *database_guard = Some(recovered);
+            return Err(error);
+        }
+
+        let key = (manifest.namespace.clone(), manifest.projection.clone());
+        match verify_recovered_projection(&recovered, manifest, check) {
+            Ok(mut verified) => {
+                if quarantined.contains(&key) {
+                    if let Err(error) = set_projection_quarantine(
+                        &recovered,
+                        &manifest.namespace,
+                        &manifest.projection,
+                        false,
+                    )
+                    .and_then(|()| sync_wal(&recovered))
+                    {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                        *state_guard = recovered_state;
+                        *quarantined_guard = quarantined;
+                        *database_guard = Some(recovered);
+                        return Err(quarantine_transition_failure(
+                            "clear recovered projection quarantine",
+                            error,
+                        ));
+                    }
+                    (recovered, recovered_state, quarantined) =
+                        match checkpoint_recovered_database(recovered, &reopen) {
+                            Ok(reopened) => reopened,
+                            Err(error) => {
+                                self.inner.poisoned.store(true, Ordering::Release);
+                                return Err(error);
+                            }
+                        };
+                    if quarantined.contains(&key) {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                        let error = GraphDbError::DurabilityUncertain {
+                            message: "recovered projection quarantine remained after checkpoint"
+                                .to_owned(),
+                        };
+                        *state_guard = recovered_state;
+                        *quarantined_guard = quarantined;
+                        *database_guard = Some(recovered);
+                        return Err(error);
+                    }
+                    verified = match verify_recovered_projection(&recovered, manifest, check) {
+                        Ok(verified) => verified,
+                        Err(error) => {
+                            let error = if matches!(&error, GraphDbError::ProjectionMismatch { .. })
+                            {
+                                GraphDbError::Corrupt {
+                                    message: format!(
+                                        "projection changed while checkpointing quarantine removal: {error}"
+                                    ),
+                                }
+                            } else {
+                                error
+                            };
+                            (recovered, recovered_state, quarantined) =
+                                match requarantine_after_failed_checkpoint_verification(
+                                    recovered,
+                                    &reopen,
+                                    &manifest.namespace,
+                                    &manifest.projection,
+                                    &error,
+                                ) {
+                                    Ok(reopened) => reopened,
+                                    Err(restore_error) => {
+                                        self.inner.poisoned.store(true, Ordering::Release);
+                                        return Err(restore_error);
+                                    }
+                                };
+                            if is_database_fault(&error) {
+                                self.inner.poisoned.store(true, Ordering::Release);
+                            }
+                            *state_guard = recovered_state;
+                            *quarantined_guard = quarantined;
+                            *database_guard = Some(recovered);
+                            return Err(error);
+                        }
+                    };
+                }
+                *state_guard = recovered_state;
+                *quarantined_guard = quarantined;
+                *database_guard = Some(recovered);
+                Ok(verified)
+            }
+            Err(error @ GraphDbError::ProjectionMismatch { .. }) => {
+                if !quarantined.contains(&key) {
+                    if let Err(marker_error) = set_projection_quarantine(
+                        &recovered,
+                        &manifest.namespace,
+                        &manifest.projection,
+                        true,
+                    )
+                    .and_then(|()| sync_wal(&recovered))
+                    {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                        *state_guard = recovered_state;
+                        *quarantined_guard = quarantined;
+                        *database_guard = Some(recovered);
+                        return Err(quarantine_transition_failure(
+                            "persist recovered projection quarantine",
+                            marker_error,
+                        ));
+                    }
+                    (recovered, recovered_state, quarantined) =
+                        match checkpoint_recovered_database(recovered, &reopen) {
+                            Ok(reopened) => reopened,
+                            Err(reopen_error) => {
+                                self.inner.poisoned.store(true, Ordering::Release);
+                                return Err(reopen_error);
+                            }
+                        };
+                    if !quarantined.contains(&key) {
+                        self.inner.poisoned.store(true, Ordering::Release);
+                        let marker_error = GraphDbError::DurabilityUncertain {
+                            message: "recovered projection quarantine disappeared after checkpoint"
+                                .to_owned(),
+                        };
+                        *state_guard = recovered_state;
+                        *quarantined_guard = quarantined;
+                        *database_guard = Some(recovered);
+                        return Err(marker_error);
+                    }
+                }
+                *state_guard = recovered_state;
+                *quarantined_guard = quarantined;
+                *database_guard = Some(recovered);
+                Err(error)
+            }
+            Err(error) => {
+                if is_database_fault(&error) {
+                    self.inner.poisoned.store(true, Ordering::Release);
+                }
+                *state_guard = recovered_state;
+                *quarantined_guard = quarantined;
+                *database_guard = Some(recovered);
+                Err(error)
+            }
+        }
     }
 
     pub fn vector_index_status(
@@ -422,6 +599,7 @@ impl GraphDb {
         request.validate()?;
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_projection_readable(&request.namespace, &request.projection)?;
         let label = vector::native_vector_label(&request.namespace, &request.projection);
         let property = vector_property_key(&request.property, request.dimension, request.metric);
         Ok(
@@ -442,6 +620,7 @@ impl GraphDb {
         let _snapshot_gate = self.inner.snapshot_gate.write();
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_projection_readable(&request.namespace, &request.projection)?;
         if request.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -466,7 +645,7 @@ impl GraphDb {
         Ok(GraphVectorIndexStatus::Available)
     }
 
-    fn close(&self) -> Result<(), GraphDbError> {
+    pub(crate) fn close(&self) -> Result<(), GraphDbError> {
         let _snapshot_gate = self.inner.snapshot_gate.write();
         let was_uncertain = self.inner.poisoned.load(Ordering::Acquire);
         if self.inner.closed.swap(true, Ordering::AcqRel) {
@@ -501,48 +680,76 @@ impl GraphDb {
         }
     }
 
-    fn apply_locked(
+    pub(crate) fn apply_locked(
         &self,
         database: &GrafeoDB,
         state: &mut FormatState,
         batch: GraphWriteBatch,
         digest: String,
         publication_record: Option<(GraphIdempotencyKey, String, String)>,
+        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphCommit, GraphDbError> {
+        self.apply_locked_with_generation_metadata(
+            database,
+            state,
+            batch,
+            digest,
+            None,
+            publication_record,
+            endpoint_namespaces,
+            check,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_locked_with_generation_metadata(
+        &self,
+        database: &GrafeoDB,
+        state: &mut FormatState,
+        batch: GraphWriteBatch,
+        digest: String,
+        generation_dependency_digest: Option<
+            tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
+        >,
+        publication_record: Option<(GraphIdempotencyKey, String, String)>,
+        endpoint_namespaces: &mutation::RelationEndpointNamespaces,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<GraphCommit, GraphDbError> {
+        check()?;
         ensure_initial_vector_indexes(database, &batch)?;
-        let vector_updates = batch
-            .mutations
-            .iter()
-            .filter_map(|mutation| match mutation {
-                GraphMutation::UpsertEntity(entity) => Some(entity),
-                _ => None,
-            })
-            .flat_map(|entity| {
-                entity
-                    .properties
-                    .iter()
-                    .filter_map(move |(name, property)| {
-                        let GraphProperty::Vector(vector) = property else {
-                            return None;
-                        };
-                        Some((
-                            entity.identity.clone(),
-                            vector_property_key(name, vector.dimension, vector.metric),
-                            Value::Vector(vector.values.clone().into()),
-                        ))
-                    })
-            })
-            .collect::<Vec<_>>();
+        let mut vector_updates = Vec::new();
+        for mutation in &batch.mutations {
+            check()?;
+            let GraphMutation::UpsertEntity(entity) = mutation else {
+                continue;
+            };
+            for (name, property) in &entity.properties {
+                check()?;
+                let GraphProperty::Vector(vector) = property else {
+                    continue;
+                };
+                vector_updates.push((
+                    entity.identity.clone(),
+                    vector_property_key(name, vector.dimension, vector.metric),
+                    Value::Vector(vector.values.clone().into()),
+                ));
+            }
+        }
         let namespace = batch.namespace.clone();
         let commit = mutation::apply(
             database,
             state,
             batch,
             digest,
+            generation_dependency_digest,
             publication_record,
+            endpoint_namespaces,
             &self.inner.poisoned,
+            check,
         )?;
         for (identity, property, value) in vector_updates {
+            check()?;
             let stored = crate::state::load_entity(database, &namespace, &identity)?.ok_or_else(
                 || GraphDbError::Corrupt {
                     message: format!(
@@ -590,7 +797,61 @@ impl GraphDb {
         Ok(guard)
     }
 
-    fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
+    pub(crate) fn ensure_projection_readable(
+        &self,
+        namespace: &GraphNamespace,
+        projection: &GraphProjectionId,
+    ) -> Result<(), GraphDbError> {
+        let quarantined = self
+            .inner
+            .quarantined_projections
+            .read()
+            .map_err(|_| GraphDbError::unavailable("graph quarantine lock is poisoned"))?;
+        if quarantined.contains(&(namespace.clone(), projection.clone())) {
+            Err(projection_mismatch(
+                namespace,
+                projection,
+                "recovered projection remains quarantined until replay verification succeeds",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_start_projections_readable(
+        &self,
+        database: &GrafeoDB,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+    ) -> Result<(), GraphDbError> {
+        for start in starts {
+            if let Some(stored) = load_entity(database, namespace, start)? {
+                self.ensure_projection_readable(&stored.namespace, &stored.projection)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_outgoing_start_relations_readable(
+        &self,
+        database: &GrafeoDB,
+        namespace: &GraphNamespace,
+        starts: &[GraphEntityId],
+    ) -> Result<(), GraphDbError> {
+        for start in starts {
+            let Some(stored) = load_entity(database, namespace, start)? else {
+                continue;
+            };
+            for relation in relations_for_entity(database, stored.node)? {
+                if relation.relation.from == *start {
+                    self.ensure_projection_readable(namespace, &relation.projection)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
         let guard = self
             .inner
@@ -601,7 +862,9 @@ impl GraphDb {
         Ok(guard)
     }
 
-    fn write_guard(&self) -> Result<RwLockWriteGuard<'_, Option<GrafeoDB>>, GraphDbError> {
+    pub(crate) fn write_guard(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
         let guard = self
             .inner
@@ -612,14 +875,16 @@ impl GraphDb {
         Ok(guard)
     }
 
-    fn state_write_guard(&self) -> Result<RwLockWriteGuard<'_, FormatState>, GraphDbError> {
+    pub(crate) fn state_write_guard(
+        &self,
+    ) -> Result<RwLockWriteGuard<'_, FormatState>, GraphDbError> {
         self.inner
             .state
             .write()
             .map_err(|_| GraphDbError::unavailable("graph state lock is poisoned"))
     }
 
-    fn ensure_available(&self) -> Result<(), GraphDbError> {
+    pub(crate) fn ensure_available(&self) -> Result<(), GraphDbError> {
         if self.inner.poisoned.load(Ordering::Acquire) {
             return Err(durability_uncertain());
         }
@@ -670,95 +935,6 @@ fn ensure_initial_vector_indexes(
     Ok(())
 }
 
-impl GraphSnapshot {
-    pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
-        self.database.traverse(request)
-    }
-
-    pub fn vector_search(
-        &self,
-        request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError> {
-        self.database.vector_search(request)
-    }
-}
-
-fn validate_or_initialize_format(
-    database: &GrafeoDB,
-    validated: &ValidatedOpen,
-) -> Result<(), GraphDbError> {
-    let store = database.graph_store();
-    let markers = store.nodes_by_label(FORMAT_LABEL);
-    if markers.is_empty() {
-        if store.node_count() != 0 || validated.preexisting_store {
-            return Err(GraphDbError::ResetRequired {
-                message: "existing Grafeo store has no TraceDecay format marker".to_owned(),
-            });
-        }
-        let mut session = database.session();
-        session
-            .begin_transaction()
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        let version = i64::from(validated.expected_format.get());
-        if let Err(error) = session.create_node_with_props(
-            &[FORMAT_LABEL],
-            [
-                (FORMAT_VERSION_PROPERTY, Value::from(version)),
-                (SCHEMA_PROPERTY, Value::from(FINAL_SCHEMA)),
-                (SEQUENCE_PROPERTY, Value::from(0_i64)),
-            ],
-        ) {
-            return match session.rollback() {
-                Ok(()) => Err(GraphDbError::unavailable(error.to_string())),
-                Err(rollback_error) => Err(rollback_failure(
-                    "format initialization",
-                    error,
-                    rollback_error,
-                )),
-            };
-        }
-        session
-            .commit()
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        for property in INDEXED_PROPERTIES {
-            database.create_property_index(property);
-        }
-        if validated.durability == GraphDurability::WalSync
-            && let Err(error) = sync_wal(database)
-        {
-            return Err(error);
-        }
-        return Ok(());
-    }
-    if markers.len() != 1 {
-        return Err(GraphDbError::ResetRequired {
-            message: "TraceDecay format marker count is not exactly one".to_owned(),
-        });
-    }
-    let marker = store
-        .get_node(markers[0])
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "TraceDecay format marker is unreadable".to_owned(),
-        })?;
-    let actual = marker
-        .get_property(FORMAT_VERSION_PROPERTY)
-        .and_then(Value::as_int64);
-    if actual != Some(i64::from(validated.expected_format.get())) {
-        return Err(GraphDbError::ResetRequired {
-            message: format!(
-                "TraceDecay graph format mismatch: expected {}, found {actual:?}",
-                validated.expected_format.get()
-            ),
-        });
-    }
-    if marker.get_property(SCHEMA_PROPERTY).and_then(Value::as_str) != Some(FINAL_SCHEMA) {
-        return Err(GraphDbError::ResetRequired {
-            message: "TraceDecay graph schema is not the final native scalar schema".to_owned(),
-        });
-    }
-    Ok(())
-}
-
 fn require_committed_vector_scalar(
     database: &GrafeoDB,
     node: grafeo_common::types::NodeId,
@@ -791,7 +967,7 @@ fn durability_uncertain() -> GraphDbError {
 /// metadata. A successful sync observes only the current WAL state: Grafeo's
 /// session commit API can suppress an earlier WAL append error, so it cannot
 /// establish a stronger durable-commit guarantee.
-fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
+pub(crate) fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
     database
         .wal()
         .ok_or_else(|| GraphDbError::DurabilityUncertain {
@@ -804,35 +980,6 @@ fn sync_wal(database: &GrafeoDB) -> Result<(), GraphDbError> {
                 "Grafeo WAL synchronization failed after commit; durable outcome cannot be established: {error}"
             ),
         })
-}
-
-fn map_open_error(
-    error: grafeo_common::utils::error::Error,
-    preexisting_store: bool,
-) -> GraphDbError {
-    let malformed_io = matches!(
-        &error,
-        grafeo_common::utils::error::Error::Io(io)
-            if preexisting_store
-                && matches!(
-                    io.kind(),
-                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
-                )
-    );
-    let message = error.to_string();
-    if malformed_io {
-        return GraphDbError::Corrupt { message };
-    }
-    match error.error_code() {
-        ErrorCode::StorageCorrupted
-        | ErrorCode::StorageRecoveryFailed
-        | ErrorCode::SerializationError
-            if preexisting_store =>
-        {
-            GraphDbError::Corrupt { message }
-        }
-        _ => GraphDbError::unavailable(message),
-    }
 }
 
 pub(crate) use crate::schema::vector_property_key;

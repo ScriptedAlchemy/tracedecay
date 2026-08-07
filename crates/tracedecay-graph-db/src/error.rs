@@ -12,6 +12,23 @@ pub enum GraphDbError {
     BudgetExhausted,
     #[error("graph operation deadline exceeded")]
     DeadlineExceeded,
+    #[error(
+        "graph projection `{namespace}/{projection}` is quarantined after recovery mismatch: {message}"
+    )]
+    ProjectionMismatch {
+        namespace: String,
+        projection: String,
+        message: String,
+    },
+    #[error(
+        "graph generation `{namespace}/{projection}/{generation}` is quarantined after recovery mismatch: {message}"
+    )]
+    GenerationMismatch {
+        namespace: String,
+        projection: String,
+        generation: String,
+        message: String,
+    },
     #[error("graph database reset required: {message}")]
     ResetRequired { message: String },
     #[error("graph database is corrupt: {message}")]
@@ -25,13 +42,15 @@ pub enum GraphDbError {
 }
 
 impl GraphDbError {
-    pub(crate) fn invalid(message: impl Into<String>) -> Self {
+    /// Constructs a typed contract-validation failure.
+    pub fn invalid(message: impl Into<String>) -> Self {
         Self::InvalidRequest {
             message: message.into(),
         }
     }
 
-    pub(crate) fn unavailable(message: impl Into<String>) -> Self {
+    /// Constructs a typed authority or infrastructure availability failure.
+    pub fn unavailable(message: impl Into<String>) -> Self {
         Self::Unavailable {
             message: message.into(),
         }

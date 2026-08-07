@@ -1,23 +1,39 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::limits::{
+    MAX_GRAPH_BATCH_CANONICAL_BYTES, MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS,
+    MAX_GRAPH_IDENTIFIER_BYTES, MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
+    MAX_GRAPH_PROPERTY_VALUE_BYTES, MAX_GRAPH_VECTOR_DIMENSION,
+};
 use crate::{GraphDbError, VectorMetric};
 
-const MAX_OPAQUE_ID_BYTES: usize = 1024;
 const RESERVED_PREFIX: &str = "__tracedecay_graph_db_";
+const CHECKED_DIGEST_INTERVAL_BYTES: u64 = 64 * 1024;
 
 pub trait GraphCancellation: Send + Sync {
     fn is_cancelled(&self) -> bool;
 }
 
+#[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
 #[derive(Debug)]
 pub struct NeverCancelled;
 
+#[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
 impl GraphCancellation for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+struct CanonicalCheckedBatchCancellation;
+
+impl GraphCancellation for CanonicalCheckedBatchCancellation {
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -69,14 +85,15 @@ opaque_id!(GraphRelationKind);
 opaque_id!(GraphIdempotencyKey);
 opaque_id!(SourceGeneration);
 opaque_id!(GraphWatermark);
+opaque_id!(GraphGenerationId);
 
 fn validate_opaque(kind: &str, value: &str) -> Result<(), GraphDbError> {
     if value.is_empty() {
         return Err(GraphDbError::invalid(format!("{kind} must not be empty")));
     }
-    if value.len() > MAX_OPAQUE_ID_BYTES {
+    if value.len() > MAX_GRAPH_IDENTIFIER_BYTES {
         return Err(GraphDbError::invalid(format!(
-            "{kind} exceeds {MAX_OPAQUE_ID_BYTES} bytes"
+            "{kind} exceeds {MAX_GRAPH_IDENTIFIER_BYTES} bytes"
         )));
     }
     if value.starts_with(RESERVED_PREFIX) {
@@ -115,6 +132,9 @@ impl GraphVector {
                 "vector dimension must be greater than zero",
             ));
         }
+        if self.dimension > MAX_GRAPH_VECTOR_DIMENSION {
+            return Err(GraphDbError::BudgetExhausted);
+        }
         if self.values.len() != self.dimension {
             return Err(GraphDbError::invalid(format!(
                 "vector has {} values but declares dimension {}",
@@ -147,11 +167,11 @@ impl GraphProperty {
                 Err(GraphDbError::invalid("floating properties must be finite"))
             }
             Self::Vector(vector) => vector.validate(),
-            Self::String(value) if value.len() > MAX_OPAQUE_ID_BYTES * 1024 => {
-                Err(GraphDbError::invalid("string property is too large"))
+            Self::String(value) if value.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES => {
+                Err(GraphDbError::BudgetExhausted)
             }
-            Self::Bytes(value) if value.len() > MAX_OPAQUE_ID_BYTES * 1024 => {
-                Err(GraphDbError::invalid("byte property is too large"))
+            Self::Bytes(value) if value.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES => {
+                Err(GraphDbError::BudgetExhausted)
             }
             _ => Ok(()),
         }
@@ -181,10 +201,8 @@ impl GraphEntity {
     }
 
     pub(crate) fn validate(&self) -> Result<(), GraphDbError> {
-        for property in self.properties.values() {
-            property.validate()?;
-        }
-        Ok(())
+        validate_labels(&self.labels)?;
+        validate_properties(&self.properties)
     }
 }
 
@@ -217,10 +235,7 @@ impl GraphRelation {
     }
 
     pub(crate) fn validate(&self) -> Result<(), GraphDbError> {
-        for property in self.properties.values() {
-            property.validate()?;
-        }
-        Ok(())
+        validate_properties(&self.properties)
     }
 }
 
@@ -294,22 +309,150 @@ impl GraphWriteBatch {
         })
     }
 
+    pub(crate) fn new_canonical_checked(
+        namespace: GraphNamespace,
+        projection: GraphProjectionId,
+        source_generation: SourceGeneration,
+        next_watermark: GraphWatermark,
+        mutations: Vec<GraphMutation>,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<Self, GraphDbError> {
+        let mut previous = None;
+        for mutation in &mutations {
+            check()?;
+            mutation.validate()?;
+            let key = mutation.sort_key();
+            if previous.as_ref().is_some_and(|prior| prior > &key) {
+                return Err(GraphDbError::invalid(
+                    "canonical graph mutations are not ordered",
+                ));
+            }
+            previous = Some(key);
+        }
+        check()?;
+        Ok(Self {
+            namespace,
+            projection,
+            source_generation,
+            next_watermark,
+            mutations,
+            cancellation: Arc::new(CanonicalCheckedBatchCancellation),
+        })
+    }
+
     pub(crate) fn validate_and_digest(&mut self) -> Result<String, GraphDbError> {
+        self.validate_and_digest_with_limit(MAX_GRAPH_BATCH_CANONICAL_BYTES)
+    }
+
+    pub(crate) fn validate_and_digest_with_limit(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<String, GraphDbError> {
         if self.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
         normalize_mutations(&mut self.mutations)?;
-        let canonical = serde_json::to_vec(&(
-            &self.namespace,
-            &self.projection,
-            &self.source_generation,
-            &self.next_watermark,
-            &self.mutations,
-        ))
-        .map_err(|error| {
+        self.canonical_digest_checked_with_limit(max_bytes, &|| {
+            if self.cancellation.is_cancelled() {
+                Err(GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    pub(crate) fn canonical_digest_checked(
+        &self,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<String, GraphDbError> {
+        self.canonical_digest_checked_with_limit(MAX_GRAPH_BATCH_CANONICAL_BYTES, check)
+    }
+
+    pub(crate) fn canonical_digest_checked_with_limit(
+        &self,
+        max_bytes: usize,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+    ) -> Result<String, GraphDbError> {
+        let mut digest = Sha256::new();
+        let mut writer = CheckedProjectionDigestWriter {
+            digest: &mut digest,
+            total_bytes: 0,
+            max_bytes,
+            bytes_since_check: 0,
+            check,
+            failure: None,
+        };
+        let encoded = serde_json::to_writer(
+            &mut writer,
+            &(
+                &self.namespace,
+                &self.projection,
+                &self.source_generation,
+                &self.next_watermark,
+                &self.mutations,
+            ),
+        );
+        writer.finish()?;
+        encoded.map_err(|error| {
             GraphDbError::invalid(format!("failed to canonicalize graph batch: {error}"))
         })?;
-        Ok(hex::encode(Sha256::digest(canonical)))
+        Ok(hex::encode(digest.finalize()))
+    }
+}
+
+struct CheckedProjectionDigestWriter<'a> {
+    digest: &'a mut Sha256,
+    total_bytes: usize,
+    max_bytes: usize,
+    bytes_since_check: u64,
+    check: &'a dyn Fn() -> Result<(), GraphDbError>,
+    failure: Option<GraphDbError>,
+}
+
+impl CheckedProjectionDigestWriter<'_> {
+    fn finish(mut self) -> Result<(), GraphDbError> {
+        if let Some(error) = self.failure.take() {
+            return Err(error);
+        }
+        (self.check)()
+    }
+}
+
+impl Write for CheckedProjectionDigestWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let Some(total_bytes) = self.total_bytes.checked_add(bytes.len()) else {
+            self.failure = Some(GraphDbError::BudgetExhausted);
+            return Err(io::Error::other("graph batch digest input is too large"));
+        };
+        self.total_bytes = total_bytes;
+        if self.total_bytes > self.max_bytes {
+            self.failure = Some(GraphDbError::BudgetExhausted);
+            return Err(io::Error::other(
+                "graph batch canonical payload exceeds its product bound",
+            ));
+        }
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| io::Error::other("graph batch digest input is too large"))?;
+        self.bytes_since_check = self
+            .bytes_since_check
+            .checked_add(length)
+            .ok_or_else(|| io::Error::other("graph batch digest check interval overflow"))?;
+        if self.bytes_since_check >= CHECKED_DIGEST_INTERVAL_BYTES {
+            self.bytes_since_check = 0;
+            if let Err(error) = (self.check)() {
+                self.failure = Some(error);
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "graph batch digest interrupted",
+                ));
+            }
+        }
+        self.digest.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -332,6 +475,55 @@ fn normalize_mutations(mutations: &mut Vec<GraphMutation>) -> Result<(), GraphDb
     });
     mutations.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
     Ok(())
+}
+
+fn validate_labels(labels: &BTreeSet<GraphLabel>) -> Result<(), GraphDbError> {
+    if labels.len() > MAX_GRAPH_ENTITY_LABELS {
+        return Err(GraphDbError::BudgetExhausted);
+    }
+    let mut bytes = 0usize;
+    for label in labels {
+        bytes = bytes
+            .checked_add(label.as_str().len())
+            .ok_or(GraphDbError::BudgetExhausted)?;
+        if bytes > MAX_GRAPH_ENTITY_LABEL_BYTES {
+            return Err(GraphDbError::BudgetExhausted);
+        }
+    }
+    Ok(())
+}
+
+fn validate_properties(
+    properties: &BTreeMap<GraphPropertyName, GraphProperty>,
+) -> Result<(), GraphDbError> {
+    if properties.len() > MAX_GRAPH_PROPERTIES {
+        return Err(GraphDbError::BudgetExhausted);
+    }
+    let mut bytes = 0usize;
+    for (name, property) in properties {
+        property.validate()?;
+        bytes = bytes
+            .checked_add(name.as_str().len())
+            .and_then(|total| total.checked_add(property_payload_bytes(property)?))
+            .ok_or(GraphDbError::BudgetExhausted)?;
+        if bytes > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES {
+            return Err(GraphDbError::BudgetExhausted);
+        }
+    }
+    Ok(())
+}
+
+fn property_payload_bytes(property: &GraphProperty) -> Option<usize> {
+    match property {
+        GraphProperty::Bool(_) => Some(std::mem::size_of::<bool>()),
+        GraphProperty::I64(_) => Some(std::mem::size_of::<i64>()),
+        GraphProperty::F64(_) => Some(std::mem::size_of::<f64>()),
+        GraphProperty::String(value) => Some(value.len()),
+        GraphProperty::Bytes(value) => Some(value.len()),
+        GraphProperty::Vector(vector) => {
+            vector.values.len().checked_mul(std::mem::size_of::<f32>())
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -374,4 +566,71 @@ pub struct GraphCommit {
     pub source_generation: SourceGeneration,
     pub watermark: GraphWatermark,
     pub digest: String,
+    #[serde(skip)]
+    pub(crate) generation_dependency_digest:
+        Option<tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{
+        GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphVector,
+        GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    };
+    use crate::{
+        GraphDbError, MAX_GRAPH_VECTOR_DIMENSION, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+        VectorMetric,
+    };
+
+    #[test]
+    fn full_generation_batch_accepts_more_than_incremental_stage_limit() {
+        let mutations = (0..=MAX_VERIFIED_GENERATION_BATCH_MUTATIONS)
+            .map(|index| {
+                GraphMutation::DeleteEntity(
+                    GraphEntityId::new(format!("entity-{index:05}")).unwrap(),
+                )
+            })
+            .collect();
+        let batch = GraphWriteBatch::new(
+            GraphNamespace::new("namespace.full-generation").unwrap(),
+            GraphProjectionId::new("projection.full-generation").unwrap(),
+            SourceGeneration::new("source.full-generation").unwrap(),
+            GraphWatermark::new("watermark.full-generation").unwrap(),
+            mutations,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+
+        assert_eq!(
+            batch.mutations.len(),
+            MAX_VERIFIED_GENERATION_BATCH_MUTATIONS + 1
+        );
+    }
+
+    #[test]
+    fn vector_dimension_and_streamed_canonical_bytes_are_bounded() {
+        assert_eq!(
+            GraphVector::new(
+                vec![0.0; MAX_GRAPH_VECTOR_DIMENSION + 1],
+                MAX_GRAPH_VECTOR_DIMENSION + 1,
+                VectorMetric::Cosine,
+            ),
+            Err(GraphDbError::BudgetExhausted)
+        );
+        let batch = GraphWriteBatch::new(
+            GraphNamespace::new("namespace.bounded").unwrap(),
+            GraphProjectionId::new("projection.bounded").unwrap(),
+            SourceGeneration::new("source.bounded").unwrap(),
+            GraphWatermark::new("watermark.bounded").unwrap(),
+            vec![],
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+        assert_eq!(
+            batch.canonical_digest_checked_with_limit(8, &|| Ok(())),
+            Err(GraphDbError::BudgetExhausted)
+        );
+    }
 }

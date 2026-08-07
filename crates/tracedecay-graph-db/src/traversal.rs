@@ -17,7 +17,8 @@ use crate::schema::{
 };
 use crate::{
     GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProjectionId,
-    GraphRelation, GraphRelationId, GraphRelationKind,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphSnapshot, VectorSearchRequest,
+    VectorSearchResult,
 };
 
 const MAX_BATCH_TRAVERSAL_STARTS: usize = 100_000;
@@ -68,9 +69,26 @@ pub struct TraversalResult {
     pub visits: Vec<TraversalVisit>,
 }
 
+impl GraphSnapshot {
+    pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
+        self.database.traverse(request)
+    }
+
+    pub fn vector_search(
+        &self,
+        request: VectorSearchRequest,
+    ) -> Result<VectorSearchResult, GraphDbError> {
+        self.database.vector_search(request)
+    }
+}
+
 pub(crate) fn traverse(
     database: &GrafeoDB,
     request: TraversalRequest,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<TraversalResult, GraphDbError> {
     validate_request(&request)?;
     if request.max_results == 0 {
@@ -81,9 +99,11 @@ pub(crate) fn traverse(
     let start = node_for_entity(store.as_ref(), &request.namespace, &request.start)?;
     let projected = relation_projection(store, &request.relation_kinds);
     match request.direction {
-        GraphTraversalDirection::Outgoing => native_outgoing_traversal(&projected, start, &request),
+        GraphTraversalDirection::Outgoing => {
+            native_outgoing_traversal(&projected, start, &request, ensure_projection_readable)
+        }
         GraphTraversalDirection::Incoming | GraphTraversalDirection::Both => {
-            directional_traversal(&projected, start, &request)
+            directional_traversal(&projected, start, &request, ensure_projection_readable)
         }
     }
 }
@@ -95,6 +115,10 @@ pub(crate) fn outgoing_relation_ids(
     relation_kinds: &BTreeSet<GraphRelationKind>,
     max_relations: usize,
     cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<Vec<Vec<GraphRelationId>>, GraphDbError> {
     Ok(outgoing_relations(
         database,
@@ -103,6 +127,7 @@ pub(crate) fn outgoing_relation_ids(
         relation_kinds,
         max_relations,
         cancellation,
+        ensure_projection_readable,
     )?
     .into_iter()
     .map(|relations| {
@@ -121,6 +146,10 @@ pub(crate) fn outgoing_relations(
     relation_kinds: &BTreeSet<GraphRelationKind>,
     max_relations: usize,
     cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<Vec<Vec<GraphRelation>>, GraphDbError> {
     check_batch_request(starts, cancellation)?;
     let store = database.graph_store();
@@ -140,7 +169,12 @@ pub(crate) fn outgoing_relations(
             if cancellation.is_cancelled() {
                 return Err(GraphDbError::Cancelled);
             }
-            relations.push(relation_for_edge(&projected, edge, namespace)?);
+            relations.push(relation_for_edge(
+                &projected,
+                edge,
+                namespace,
+                ensure_projection_readable,
+            )?);
         }
         relations.sort_by(|left, right| left.identity.cmp(&right.identity));
         relations.dedup_by(|left, right| left.identity == right.identity);
@@ -165,6 +199,10 @@ pub(crate) fn reachable_entities(
     outgoing_overrides: &BTreeMap<GraphEntityId, BTreeSet<GraphEntityId>>,
     max_visits: usize,
     cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<Vec<BTreeSet<GraphEntityId>>, GraphDbError> {
     check_batch_request(starts, cancellation)?;
     let store = database.graph_store();
@@ -183,6 +221,7 @@ pub(crate) fn reachable_entities(
             max_visits,
             &mut admitted,
             cancellation,
+            ensure_projection_readable,
         )?;
         results.push(visited);
     }
@@ -241,6 +280,10 @@ fn native_outgoing_traversal(
     store: &dyn GraphStore,
     start: NodeId,
     request: &TraversalRequest,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<TraversalResult, GraphDbError> {
     let mut depths = HashMap::from([(start, 0_usize)]);
     let mut entities = HashMap::new();
@@ -310,7 +353,12 @@ fn native_outgoing_traversal(
                         GraphDbError::BudgetExhausted,
                     ));
                 };
-                let relation = match relation_identity(store, edge, &request.namespace) {
+                let relation = match relation_identity(
+                    store,
+                    edge,
+                    &request.namespace,
+                    ensure_projection_readable,
+                ) {
                     Ok(relation) => relation,
                     Err(error) => {
                         return Control::Break(NativeTraversalStop::Error(error));
@@ -340,7 +388,12 @@ fn native_outgoing_traversal(
                     }));
                 };
                 if source_depth.checked_add(1) == Some(target_depth) {
-                    let relation = match relation_identity(store, edge, &request.namespace) {
+                    let relation = match relation_identity(
+                        store,
+                        edge,
+                        &request.namespace,
+                        ensure_projection_readable,
+                    ) {
                         Ok(relation) => relation,
                         Err(error) => {
                             return Control::Break(NativeTraversalStop::Error(error));
@@ -426,6 +479,10 @@ fn directional_traversal(
     store: &dyn GraphStore,
     start: NodeId,
     request: &TraversalRequest,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<TraversalResult, GraphDbError> {
     let mut queue = VecDeque::from([(start, 0_usize, None)]);
     let mut discovered = HashSet::from([start]);
@@ -465,7 +522,8 @@ fn directional_traversal(
                 if request.cancellation.is_cancelled() {
                     return Err(GraphDbError::Cancelled);
                 }
-                let relation = relation_identity(store, edge, &request.namespace)?;
+                let relation =
+                    relation_identity(store, edge, &request.namespace, ensure_projection_readable)?;
                 let entity = entity_identity(store, neighbor, &request.namespace)?;
                 adjacent.push((relation, entity, neighbor));
             }
@@ -496,6 +554,10 @@ fn projected_reachable(
     max_visits: usize,
     admitted: &mut usize,
     cancellation: &dyn GraphCancellation,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<BTreeSet<GraphEntityId>, GraphDbError> {
     let mut queue = VecDeque::from([start.clone()]);
     let mut visited = BTreeSet::new();
@@ -522,7 +584,13 @@ fn projected_reachable(
             if cancellation.is_cancelled() {
                 return Err(GraphDbError::Cancelled);
             }
-            if !edge_belongs_to_projection(projected, edge, namespace, projection)? {
+            if !edge_belongs_to_projection(
+                projected,
+                edge,
+                namespace,
+                projection,
+                ensure_projection_readable,
+            )? {
                 continue;
             }
             neighbors.push(entity_identity(projected, neighbor, namespace)?);
@@ -539,6 +607,10 @@ fn edge_belongs_to_projection(
     edge: EdgeId,
     namespace: &GraphNamespace,
     projection: &GraphProjectionId,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<bool, GraphDbError> {
     let stored = store.get_edge(edge).ok_or_else(|| GraphDbError::Corrupt {
         message: "reachable traversal references a missing native relation".to_owned(),
@@ -551,7 +623,16 @@ fn edge_belongs_to_projection(
         stored.get_property(PROJECTION_PROPERTY),
         "reachable relation projection",
     )?;
-    Ok(stored_namespace == namespace.as_str() && stored_projection == projection.as_str())
+    let stored_namespace =
+        GraphNamespace::new(stored_namespace).map_err(|error| GraphDbError::Corrupt {
+            message: format!("reachable relation has an invalid namespace: {error}"),
+        })?;
+    let stored_projection =
+        GraphProjectionId::new(stored_projection).map_err(|error| GraphDbError::Corrupt {
+            message: format!("reachable relation has an invalid projection: {error}"),
+        })?;
+    ensure_projection_readable(&stored_namespace, &stored_projection)?;
+    Ok(stored_namespace == *namespace && stored_projection == *projection)
 }
 
 fn admit_visit(admitted: &mut usize, max_visits: usize) -> Result<(), GraphDbError> {
@@ -628,6 +709,10 @@ fn relation_identity(
     store: &dyn GraphStore,
     edge: EdgeId,
     namespace: &GraphNamespace,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<GraphRelationId, GraphDbError> {
     let stored = store.get_edge(edge).ok_or_else(|| GraphDbError::Corrupt {
         message: "traversal references a missing native relation".to_owned(),
@@ -637,6 +722,14 @@ fn relation_identity(
         namespace,
         "traversal relation",
     )?;
+    let projection = GraphProjectionId::new(required_string_property(
+        stored.get_property(PROJECTION_PROPERTY),
+        "traversal relation projection",
+    )?)
+    .map_err(|error| GraphDbError::Corrupt {
+        message: format!("traversal relation has an invalid projection: {error}"),
+    })?;
+    ensure_projection_readable(namespace, &projection)?;
     let native_kind = relation_kind_from_type(stored.edge_type.as_str())?;
     let scalar_kind = stored
         .get_property(RELATION_KIND_PROPERTY)
@@ -664,6 +757,10 @@ fn relation_for_edge(
     store: &dyn GraphStore,
     edge: EdgeId,
     namespace: &GraphNamespace,
+    ensure_projection_readable: &dyn Fn(
+        &GraphNamespace,
+        &GraphProjectionId,
+    ) -> Result<(), GraphDbError>,
 ) -> Result<GraphRelation, GraphDbError> {
     let stored = store.get_edge(edge).ok_or_else(|| GraphDbError::Corrupt {
         message: "outgoing relation references a missing native edge".to_owned(),
@@ -677,10 +774,11 @@ fn relation_for_edge(
         stored.get_property(PROJECTION_PROPERTY),
         "outgoing relation projection",
     )?;
-    GraphProjectionId::new(projection).map_err(|error| GraphDbError::Corrupt {
+    let projection = GraphProjectionId::new(projection).map_err(|error| GraphDbError::Corrupt {
         message: format!("outgoing relation has an invalid projection: {error}"),
     })?;
-    let identity = relation_identity(store, edge, namespace)?;
+    ensure_projection_readable(namespace, &projection)?;
+    let identity = relation_identity(store, edge, namespace, ensure_projection_readable)?;
     let from = required_entity_property(
         stored.get_property(RELATION_FROM_PROPERTY),
         "outgoing relation source",

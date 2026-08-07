@@ -3,6 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use grafeo_common::types::{EdgeId, Value};
 use grafeo_core::graph::lpg::{Edge, Node};
 
+use crate::limits::{
+    MAX_GRAPH_ENTITY_LABEL_BYTES, MAX_GRAPH_ENTITY_LABELS, MAX_GRAPH_IDENTIFIER_BYTES,
+    MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES, MAX_GRAPH_PROPERTY_VALUE_BYTES,
+    MAX_GRAPH_VECTOR_DIMENSION,
+};
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
@@ -35,6 +40,8 @@ pub(crate) const PUBLICATION_KEY_PROPERTY: &str = "__tracedecay_graph_db_publica
 pub(crate) const SOURCE_GENERATION_PROPERTY: &str = "__tracedecay_graph_db_source_generation";
 pub(crate) const WATERMARK_PROPERTY: &str = "__tracedecay_graph_db_watermark";
 pub(crate) const DIGEST_PROPERTY: &str = "__tracedecay_graph_db_digest";
+pub(crate) const GENERATION_DEPENDENCY_DIGEST_PROPERTY: &str =
+    "__tracedecay_graph_db_generation_dependency_digest";
 pub(crate) const PUBLICATION_DIGEST_PROPERTY: &str = "__tracedecay_graph_db_publication_digest";
 pub(crate) const PUBLICATION_INPUT_DIGEST_PROPERTY: &str =
     "__tracedecay_graph_db_publication_input_digest";
@@ -204,19 +211,37 @@ pub(crate) fn relation_locator_labels(
 pub(crate) fn decode_entity_labels(
     labels: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Result<BTreeSet<GraphLabel>, GraphDbError> {
-    labels
-        .into_iter()
-        .filter_map(|label| {
-            label
-                .as_ref()
-                .strip_prefix(DOMAIN_LABEL_PREFIX)
-                .map(ToOwned::to_owned)
-        })
-        .map(|encoded| {
-            GraphLabel::new(decode_utf8(&encoded, "entity label")?)
-                .map_err(|error| persisted_validation_error("entity label", error))
-        })
-        .collect()
+    let mut decoded = BTreeSet::new();
+    let mut decoded_bytes = 0usize;
+    for label in labels {
+        let Some(encoded) = label.as_ref().strip_prefix(DOMAIN_LABEL_PREFIX) else {
+            continue;
+        };
+        if decoded.len() >= MAX_GRAPH_ENTITY_LABELS
+            || encoded.len() > MAX_GRAPH_IDENTIFIER_BYTES.saturating_mul(2)
+        {
+            return Err(GraphDbError::Corrupt {
+                message: "native entity labels exceed their product bound".to_owned(),
+            });
+        }
+        let value = decode_utf8(encoded, "entity label")?;
+        decoded_bytes =
+            decoded_bytes
+                .checked_add(value.len())
+                .ok_or_else(|| GraphDbError::Corrupt {
+                    message: "native entity label bytes overflow their product bound".to_owned(),
+                })?;
+        if decoded_bytes > MAX_GRAPH_ENTITY_LABEL_BYTES {
+            return Err(GraphDbError::Corrupt {
+                message: "native entity label bytes exceed their product bound".to_owned(),
+            });
+        }
+        decoded.insert(
+            GraphLabel::new(value)
+                .map_err(|error| persisted_validation_error("entity label", error))?,
+        );
+    }
+    Ok(decoded)
 }
 
 pub(crate) fn entity_properties(
@@ -415,7 +440,7 @@ pub(crate) fn publication_properties(
 fn commit_properties(commit: &GraphCommit) -> Result<Vec<(String, Value)>, GraphDbError> {
     let sequence = i64::try_from(commit.sequence)
         .map_err(|_| GraphDbError::unavailable("graph commit sequence exceeds i64"))?;
-    Ok(vec![
+    let mut properties = vec![
         (COMMIT_SEQUENCE_PROPERTY.to_owned(), Value::from(sequence)),
         (
             SOURCE_GENERATION_PROPERTY.to_owned(),
@@ -429,7 +454,14 @@ fn commit_properties(commit: &GraphCommit) -> Result<Vec<(String, Value)>, Graph
             DIGEST_PROPERTY.to_owned(),
             Value::from(commit.digest.as_str()),
         ),
-    ])
+    ];
+    if let Some(dependency_digest) = &commit.generation_dependency_digest {
+        properties.push((
+            GENERATION_DEPENDENCY_DIGEST_PROPERTY.to_owned(),
+            Value::from(dependency_digest.as_str()),
+        ));
+    }
+    Ok(properties)
 }
 
 pub(crate) fn decode_entity(node: &Node) -> Result<GraphEntity, GraphDbError> {
@@ -443,9 +475,9 @@ pub(crate) fn decode_entity(node: &Node) -> Result<GraphEntity, GraphDbError> {
         identity,
         decode_entity_labels(node.labels.iter())?,
         decode_graph_properties(
-            node.properties_as_btree()
-                .into_iter()
-                .map(|(key, value)| (key.as_str().to_owned(), value)),
+            node.properties
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone())),
         )?,
     )
     .map_err(|error| persisted_validation_error("entity", error))?;
@@ -495,9 +527,9 @@ pub(crate) fn decode_relation(locator: &Node, edge: &Edge) -> Result<GraphRelati
         kind,
         decode_graph_properties(
             locator
-                .properties_as_btree()
-                .into_iter()
-                .map(|(key, value)| (key.as_str().to_owned(), value)),
+                .properties
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone())),
         )?,
     )
     .map_err(|error| persisted_validation_error("relation", error))
@@ -507,18 +539,20 @@ pub(crate) fn decode_graph_properties(
     properties: impl IntoIterator<Item = (impl AsRef<str>, Value)>,
 ) -> Result<BTreeMap<GraphPropertyName, GraphProperty>, GraphDbError> {
     let mut decoded = BTreeMap::new();
+    let mut decoded_bytes = 0usize;
     for (key, value) in properties {
         let key = key.as_ref();
         if matches!(value, Value::Null) {
             continue;
         }
         let Some(encoded) = key.strip_prefix(PROPERTY_PREFIX) else {
-            if let Some(vector) = decode_vector_property(key, value.clone())?
-                && decoded.insert(vector.0, vector.1).is_some()
-            {
-                return Err(GraphDbError::Corrupt {
-                    message: "entity repeats a native graph property".to_owned(),
-                });
+            if let Some((name, property)) = decode_vector_property(key, value.clone())? {
+                require_decoded_property_budget(&decoded, &mut decoded_bytes, &name, &property)?;
+                if decoded.insert(name, property).is_some() {
+                    return Err(GraphDbError::Corrupt {
+                        message: "entity repeats a native graph property".to_owned(),
+                    });
+                }
             }
             continue;
         };
@@ -527,20 +561,30 @@ pub(crate) fn decode_graph_properties(
             .ok_or_else(|| GraphDbError::Corrupt {
                 message: "native graph property key is malformed".to_owned(),
             })?;
+        if name.len() > MAX_GRAPH_IDENTIFIER_BYTES.saturating_mul(2) {
+            return Err(GraphDbError::Corrupt {
+                message: "native graph property name exceeds its product bound".to_owned(),
+            });
+        }
         let name = GraphPropertyName::new(decode_utf8(name, "property name")?)
             .map_err(|error| persisted_validation_error("property name", error))?;
         let property = match (tag, value) {
             ("bool", Value::Bool(value)) => GraphProperty::Bool(value),
             ("i64", Value::Int64(value)) => GraphProperty::I64(value),
             ("f64", Value::Float64(value)) if value.is_finite() => GraphProperty::F64(value),
-            ("str", Value::String(value)) => GraphProperty::String(value.to_string()),
-            ("bytes", Value::Bytes(value)) => GraphProperty::Bytes(value.to_vec()),
+            ("str", Value::String(value)) if value.len() <= MAX_GRAPH_PROPERTY_VALUE_BYTES => {
+                GraphProperty::String(value.to_string())
+            }
+            ("bytes", Value::Bytes(value)) if value.len() <= MAX_GRAPH_PROPERTY_VALUE_BYTES => {
+                GraphProperty::Bytes(value.to_vec())
+            }
             _ => {
                 return Err(GraphDbError::Corrupt {
                     message: format!("native graph property `{key}` has the wrong scalar type"),
                 });
             }
         };
+        require_decoded_property_budget(&decoded, &mut decoded_bytes, &name, &property)?;
         if decoded.insert(name, property).is_some() {
             return Err(GraphDbError::Corrupt {
                 message: "entity repeats a native graph property".to_owned(),
@@ -616,11 +660,59 @@ fn decode_vector_property(
             message: format!("native vector property `{key}` is malformed"),
         });
     };
+    if dimension == 0
+        || dimension > MAX_GRAPH_VECTOR_DIMENSION
+        || values.len() != dimension
+        || name.len() > MAX_GRAPH_IDENTIFIER_BYTES.saturating_mul(2)
+    {
+        return Err(GraphDbError::Corrupt {
+            message: format!("native vector property `{key}` exceeds its product bound"),
+        });
+    }
     let name = GraphPropertyName::new(decode_utf8(name, "vector property name")?)
         .map_err(|error| persisted_validation_error("vector property name", error))?;
     let vector = GraphVector::new(values.to_vec(), dimension, metric)
         .map_err(|error| persisted_validation_error("vector", error))?;
     Ok(Some((name, GraphProperty::Vector(vector))))
+}
+
+fn require_decoded_property_budget(
+    decoded: &BTreeMap<GraphPropertyName, GraphProperty>,
+    decoded_bytes: &mut usize,
+    name: &GraphPropertyName,
+    property: &GraphProperty,
+) -> Result<(), GraphDbError> {
+    if decoded.len() >= MAX_GRAPH_PROPERTIES {
+        return Err(GraphDbError::Corrupt {
+            message: "native graph properties exceed their product bound".to_owned(),
+        });
+    }
+    let payload_bytes = match property {
+        GraphProperty::Bool(_) => std::mem::size_of::<bool>(),
+        GraphProperty::I64(_) => std::mem::size_of::<i64>(),
+        GraphProperty::F64(_) => std::mem::size_of::<f64>(),
+        GraphProperty::String(value) => value.len(),
+        GraphProperty::Bytes(value) => value.len(),
+        GraphProperty::Vector(vector) => vector
+            .values
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| GraphDbError::Corrupt {
+                message: "native graph vector byte length overflowed".to_owned(),
+            })?,
+    };
+    *decoded_bytes = decoded_bytes
+        .checked_add(name.as_str().len())
+        .and_then(|bytes| bytes.checked_add(payload_bytes))
+        .ok_or_else(|| GraphDbError::Corrupt {
+            message: "native graph property bytes overflow their product bound".to_owned(),
+        })?;
+    if *decoded_bytes > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES {
+        return Err(GraphDbError::Corrupt {
+            message: "native graph property bytes exceed their product bound".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn require_label(node: &Node, label: &str, description: &str) -> Result<(), GraphDbError> {
@@ -636,12 +728,14 @@ pub(crate) fn required_string(
     value: Option<&Value>,
     description: &str,
 ) -> Result<String, GraphDbError> {
-    value
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: format!("native {description} is missing or not a string"),
-        })
+    match value.and_then(Value::as_str) {
+        Some(value) if value.len() <= MAX_GRAPH_IDENTIFIER_BYTES => Ok(value.to_owned()),
+        _ => Err(GraphDbError::Corrupt {
+            message: format!(
+                "native {description} is missing, not a string, or exceeds its product bound"
+            ),
+        }),
+    }
 }
 
 pub(crate) fn required_i64(value: Option<&Value>, description: &str) -> Result<i64, GraphDbError> {
@@ -664,5 +758,29 @@ fn decode_utf8(value: &str, description: &str) -> Result<String, GraphDbError> {
 fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
     GraphDbError::Corrupt {
         message: format!("invalid persisted {description}: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use grafeo_common::types::Value;
+
+    use super::decode_vector_property;
+    use crate::{GraphDbError, MAX_GRAPH_VECTOR_DIMENSION};
+
+    #[test]
+    fn persisted_vector_dimension_over_product_limit_is_corrupt() {
+        let key = format!(
+            "__tracedecay_graph_db_vector_{}_{dimension}_cos",
+            hex::encode("embedding"),
+            dimension = MAX_GRAPH_VECTOR_DIMENSION + 1,
+        );
+        let error = decode_vector_property(
+            &key,
+            Value::Vector(vec![0.0; MAX_GRAPH_VECTOR_DIMENSION + 1].into()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, GraphDbError::Corrupt { .. }));
     }
 }

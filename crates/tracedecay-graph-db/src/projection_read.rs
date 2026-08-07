@@ -90,6 +90,7 @@ impl GraphDb {
     ) -> Result<GraphProjectionPage, GraphDbError> {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_projection_readable(&request.namespace, &request.projection)?;
         read_projection(database, request)
     }
 
@@ -99,6 +100,7 @@ impl GraphDb {
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         let guard = self.read_database(request.cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_projection_readable(&request.namespace, &request.projection)?;
         projection_telemetry(database, request)
     }
 
@@ -116,6 +118,7 @@ impl GraphDb {
         validate_page_limit(limit)?;
         let guard = self.read_database(cancellation.as_ref())?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        self.ensure_projection_readable(namespace, projection)?;
         let owner_label = entity_projection_domain_label(namespace, projection, label);
         let total_entities =
             count_labeled_nodes(database, &owner_label, ENTITY_LABEL, cancellation.as_ref())?;

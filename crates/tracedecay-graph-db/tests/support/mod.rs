@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+use tracedecay_graph_db::GraphDb;
 use tracedecay_graph_db::{
-    GraphDb, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
-    NeverCancelled,
+    GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
 };
 use tracedecay_store::{
     BrainId, ProjectId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
@@ -39,19 +40,33 @@ pub struct RegisteredGraph {
     root: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct TestCancellation;
+
+impl GraphCancellation for TestCancellation {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
 impl RegisteredGraph {
-    pub fn open(root: &Path) -> Result<(Self, Arc<GraphDb>), GraphDbError> {
+    pub fn new(root: &Path) -> Result<Self, GraphDbError> {
         let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 })?;
         let binding = binding();
-        let database = registry.resolve(registration(binding.clone(), root))?;
-        Ok((
-            Self {
-                registry,
-                binding,
-                root: root.to_path_buf(),
-            },
-            database,
-        ))
+        Ok(Self {
+            registry,
+            binding,
+            root: root.to_path_buf(),
+        })
+    }
+
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn open_raw(root: &Path) -> Result<(Self, Arc<GraphDb>), GraphDbError> {
+        let registered = Self::new(root)?;
+        let database = registered
+            .registry
+            .resolve_raw_for_harness(registration(registered.binding.clone(), root))?;
+        Ok((registered, database))
     }
 
     pub fn close(&self) -> Result<bool, GraphDbError> {
@@ -59,9 +74,10 @@ impl RegisteredGraph {
             .close(&registration(self.binding.clone(), &self.root))
     }
 
-    pub fn reopen(&self) -> Result<Arc<GraphDb>, GraphDbError> {
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
+    pub fn reopen_raw(&self) -> Result<Arc<GraphDb>, GraphDbError> {
         self.registry
-            .reopen(registration(self.binding.clone(), &self.root))
+            .reopen_raw_for_harness(registration(self.binding.clone(), &self.root))
     }
 }
 
@@ -82,8 +98,8 @@ pub fn registration(binding: StoreRuntimeBindingV1, root: &Path) -> GraphDbRegis
             verified_locator,
             canonical_path,
         }),
-        cancellation: Arc::new(NeverCancelled),
-        lifecycle_cancellation: Arc::new(NeverCancelled),
+        cancellation: Arc::new(TestCancellation),
+        lifecycle_cancellation: Arc::new(TestCancellation),
         deadline: Instant::now() + Duration::from_secs(30),
     }
 }

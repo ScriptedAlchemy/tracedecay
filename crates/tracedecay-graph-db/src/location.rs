@@ -65,6 +65,7 @@ impl fmt::Debug for GraphDbOpenOptions {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ValidatedOpen {
     pub(crate) config: Config,
     pub(crate) durability: GraphDurability,
