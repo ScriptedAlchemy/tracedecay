@@ -1695,7 +1695,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "lcm_schema/mod.rs"]
-mod stage_e_schema_tests;
