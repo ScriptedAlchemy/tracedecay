@@ -1,5 +1,7 @@
 //! Transport-neutral observability record/query boundary and dashboard read models.
 
+mod share;
+
 use std::future::Future;
 use std::pin::Pin;
 
@@ -8,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{CoverageStateV1, ObservabilityEnvelopeV1};
 
 use crate::ApplicationContractError;
+
+pub use share::*;
 
 pub type ObservabilityFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ApplicationContractError>> + Send + 'a>>;

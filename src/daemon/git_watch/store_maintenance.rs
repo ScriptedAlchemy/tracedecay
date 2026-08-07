@@ -1551,6 +1551,8 @@ pub(super) async fn run_session_retention(
         }
     }
 
+    succeeded &= run_observability_analytics_retention(database, "mounted_sessions").await;
+
     if let Some(compaction) = &config.compaction {
         succeeded &= run_compaction(
             RetainedCompactionStore::Registered(database),
@@ -1560,6 +1562,37 @@ pub(super) async fn run_session_retention(
         .await;
     }
     succeeded
+}
+
+pub(super) async fn run_observability_analytics_retention(
+    database: &crate::global_db::RegisteredGlobalDb,
+    store: &'static str,
+) -> bool {
+    match database.prune_observability_events(now_secs_i64()).await {
+        Ok(receipt) => {
+            if receipt.expired_detail > 0 || receipt.expired_rollup > 0 {
+                log_daemon_event(
+                    "retention_observability_analytics",
+                    &[
+                        ("store", store.to_owned()),
+                        ("expired_detail", receipt.expired_detail.to_string()),
+                        ("expired_rollup", receipt.expired_rollup.to_string()),
+                    ],
+                );
+            }
+            true
+        }
+        Err(_) => {
+            log_daemon_event(
+                "retention_degraded",
+                &[
+                    ("pass", "observability_analytics".to_owned()),
+                    ("failure", "retention_pass_failed".to_owned()),
+                ],
+            );
+            false
+        }
+    }
 }
 
 pub(super) async fn run_global_compaction(
@@ -1572,6 +1605,66 @@ pub(super) async fn run_global_compaction(
         config,
     )
     .await
+}
+
+#[cfg(test)]
+mod observability_retention_tests {
+    use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn session_maintenance_calls_observability_analytics_retention() {
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let harness = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "daemon-observability-retention",
+        )
+        .await;
+        harness
+            .registered
+            .append_observability_event(&AnalyticsEventInsert {
+                provider: "tracedecay-observability".to_owned(),
+                project_id: "scope:retention".to_owned(),
+                session_id: None,
+                timestamp: 0,
+                event_kind: "retrieval.query.completed.v1".to_owned(),
+                hook_name: None,
+                tool_name: None,
+                tool_category: None,
+                skill_name: None,
+                hint_category: None,
+                hint_id: Some("retention:event:1".to_owned()),
+                outcome: Some("succeeded".to_owned()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "retention_class": "optional_local_detail30d"
+                    })
+                    .to_string(),
+                ),
+            })
+            .await
+            .expect("append old observability detail");
+        let mut config = RetentionConfig::default();
+        config.session_lcm.enabled = false;
+        config.observation.enabled = false;
+        config.compaction = None;
+
+        assert!(run_session_retention(&harness.registered, &config).await);
+        let rows = harness
+            .registered
+            .query_analytics_events(&AnalyticsEventQuery {
+                provider: Some("tracedecay-observability".to_owned()),
+                project_id: Some("scope:retention".to_owned()),
+                limit: 10,
+                ..AnalyticsEventQuery::default()
+            })
+            .await
+            .expect("query retained observability detail");
+        assert!(
+            rows.is_empty(),
+            "maintenance must invoke analytics retention"
+        );
+    }
 }
 
 pub(super) async fn run_project_compaction(

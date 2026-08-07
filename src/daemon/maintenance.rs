@@ -725,6 +725,27 @@ impl MaintenanceCoordinator {
         *self.store_cursor.lock().await =
             cursor_after_attempted_units(&keys, &window, attempted, after.as_deref());
 
+        // Profile-wide observability retention is a single bounded op, not a
+        // per-store loop, so it runs every tick outside the round-robin.
+        if !self.cancellation.is_cancelled() {
+            match administration
+                .try_with_writer(|| async {
+                    super::store_maintenance::run_observability_analytics_retention(
+                        profile_database,
+                        "global.db",
+                    )
+                    .await
+                })
+                .await
+            {
+                Some(unit_succeeded) => succeeded &= unit_succeeded,
+                None => {
+                    deferred = deferred.saturating_add(1);
+                    succeeded = false;
+                }
+            }
+        }
+
         if !self.cancellation.is_cancelled()
             && let Some(compaction) = &retention.compaction
         {

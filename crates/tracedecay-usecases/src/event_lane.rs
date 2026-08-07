@@ -264,6 +264,16 @@ fn mcp_dispatch_envelope(
 /// observability authority. The caller receives a typed storage failure and
 /// must not change the already-determined MCP terminal response because
 /// telemetry persistence failed.
+pub async fn record_observability(
+    db: &RegisteredGlobalDb,
+    envelope: tracedecay_domain::ObservabilityEnvelopeV1,
+) -> Result<String, ApplicationContractError> {
+    let port = RegisteredObservabilityPortV1::new(db);
+    ObservabilityApplicationV1::new(port, port)
+        .record(envelope)
+        .await
+}
+
 pub async fn record_mcp_dispatch(
     db: &RegisteredGlobalDb,
     observation: McpDispatchObservedV1,
@@ -273,10 +283,7 @@ pub async fn record_mcp_dispatch(
             field: "mcp_dispatch_observability.project_scope",
         })?;
     let envelope = mcp_dispatch_envelope(&project_id, observation)?;
-    let port = RegisteredObservabilityPortV1::new(db);
-    ObservabilityApplicationV1::new(port, port)
-        .record(envelope)
-        .await
+    record_observability(db, envelope).await
 }
 
 pub fn enabled(db: Option<&RegisteredGlobalDb>) -> bool {

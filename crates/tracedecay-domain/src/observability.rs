@@ -3,12 +3,18 @@
 mod activity;
 #[cfg(test)]
 mod activity_tests;
+mod execution;
 mod mcp_dispatch;
+mod retrieval;
+mod runtime;
 
 pub use activity::ActivityObservedV1;
+pub use execution::*;
 pub use mcp_dispatch::{
     McpDispatchCancellationV1, McpDispatchDeadlineV1, McpDispatchObservedV1, McpDispatchTerminalV1,
 };
+pub use retrieval::*;
+pub use runtime::*;
 
 use std::collections::BTreeMap;
 
@@ -94,6 +100,22 @@ pub enum ObservabilityPayloadV1 {
     AdoptionOutcome(AdoptionOutcomeLinkedV1),
     AnalyticsConsent(AnalyticsConsentChangedV1),
     OperationResource(Box<OperationResourceObservedV1>),
+    NoProgress(NoProgressObservedV1),
+    Latency(LatencyObservedV1),
+    Deadline(DeadlineObservedV1),
+    Storage(StorageObservedV1),
+    Index(IndexObservedV1),
+    ExecutionTopology(ExecutionTopologySampledV1),
+    WorkConflictPrediction(WorkConflictPredictionObservedV1),
+    WorkConflictOutcome(WorkConflictOutcomeLinkedV1),
+    WorkIntegrationTransition(WorkIntegrationTransitionObservedV1),
+    WorkStackDrift(WorkStackDriftObservedV1),
+    GitHubStackCapability(GitHubStackCapabilityObservedV1),
+    WorkDuplicateEffort(WorkDuplicateEffortObservedV1),
+    WorkBlockedInterval(WorkBlockedIntervalObservedV1),
+    WorkRerun(WorkRerunObservedV1),
+    WorkExecutionLeak(WorkExecutionLeakObservedV1),
+    WorkDeliveryFanout(WorkDeliveryFanoutObservedV1),
     TelemetryDrop(TelemetryDropObservedV1),
     HealthSnapshot(HealthSnapshotObservedV1),
     Activity(ActivityObservedV1),
@@ -103,21 +125,73 @@ pub enum ObservabilityPayloadV1 {
 impl ObservabilityPayloadV1 {
     pub const fn event_kind(&self) -> &'static str {
         match self {
-            Self::RetrievalQuery(_) => "retrieval.query.observed.v1",
-            Self::RetrievalPlanner(_) => "retrieval.planner.observed.v1",
-            Self::Retriever(_) => "retriever.observed.v1",
-            Self::RetrievalSynthesis(_) => "retrieval.synthesis.observed.v1",
+            Self::RetrievalQuery(_) => "retrieval.query.completed.v1",
+            Self::RetrievalPlanner(_) => "retrieval.planner.decided.v1",
+            Self::Retriever(_) => "retrieval.retriever.completed.v1",
+            Self::RetrievalSynthesis(_) => "retrieval.synthesis.completed.v1",
             Self::RetrievalSource(_) => "retrieval.source.observed.v1",
-            Self::ContextOutcome(_) => "context.outcome.observed.v1",
-            Self::RetrievalAblation(_) => "retrieval.ablation.observed.v1",
-            Self::AdoptionEligibility(_) => "adoption.eligibility.observed.v1",
+            Self::ContextOutcome(_) => "retrieval.context.outcome_linked.v1",
+            Self::RetrievalAblation(_) => "retrieval.ablation.measured.v1",
+            Self::AdoptionEligibility(_) => "adoption.eligibility_observed.v1",
             Self::AdoptionOutcome(_) => "adoption.outcome.linked.v1",
             Self::AnalyticsConsent(_) => "analytics.consent.changed.v1",
-            Self::OperationResource(_) => "operation.resource.observed.v1",
+            Self::OperationResource(_) => "operation.resource.completed.v1",
+            Self::NoProgress(_) => "operation.no_progress.terminal.v1",
+            Self::Latency(_) => "operation.latency.observed.v1",
+            Self::Deadline(_) => "operation.deadline.observed.v1",
+            Self::Storage(_) => "storage.measurement.observed.v1",
+            Self::Index(_) => "index.measurement.observed.v1",
+            Self::ExecutionTopology(_) => "work.execution_topology.sampled.v1",
+            Self::WorkConflictPrediction(_) => "work.conflict_prediction.observed.v1",
+            Self::WorkConflictOutcome(_) => "work.conflict_outcome.linked.v1",
+            Self::WorkIntegrationTransition(_) => "work.integration.transition.observed.v1",
+            Self::WorkStackDrift(_) => "work.stack_drift.observed.v1",
+            Self::GitHubStackCapability(_) => "work.github_stack_capability.observed.v1",
+            Self::WorkDuplicateEffort(_) => "work.duplicate_effort.observed.v1",
+            Self::WorkBlockedInterval(_) => "work.blocked_interval.observed.v1",
+            Self::WorkRerun(_) => "work.rerun.observed.v1",
+            Self::WorkExecutionLeak(_) => "work.execution_leak.observed.v1",
+            Self::WorkDeliveryFanout(_) => "work.delivery_fanout.observed.v1",
             Self::TelemetryDrop(_) => "telemetry.drop.observed.v1",
             Self::HealthSnapshot(_) => "health.snapshot.observed.v1",
             Self::Activity(_) => "activity.observed.v1",
             Self::McpDispatch(_) => "mcp.dispatch.observed.v1",
+        }
+    }
+
+    /// Validates payload-specific bounds and semantic relationships before a
+    /// record reaches the registered observation authority.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::RetrievalQuery(value) => value.validate(),
+            Self::RetrievalPlanner(value) => value.validate(),
+            Self::Retriever(value) => value.validate(),
+            Self::RetrievalSynthesis(value) => value.validate(),
+            Self::RetrievalSource(value) => value.validate(),
+            Self::ContextOutcome(value) => value.validate(),
+            Self::RetrievalAblation(value) => value.validate(),
+            Self::AdoptionEligibility(value) => value.validate(),
+            Self::AdoptionOutcome(value) => value.validate(),
+            Self::AnalyticsConsent(_) => Ok(()),
+            Self::OperationResource(_) => Ok(()),
+            Self::NoProgress(value) => value.validate(),
+            Self::Latency(value) => value.validate(),
+            Self::Deadline(value) => value.validate(),
+            Self::Storage(value) => value.validate(),
+            Self::Index(value) => value.validate(),
+            Self::ExecutionTopology(value) => value.validate(),
+            Self::WorkConflictPrediction(value) => value.validate(),
+            Self::WorkConflictOutcome(value) => value.validate(),
+            Self::WorkIntegrationTransition(value) => value.validate(),
+            Self::WorkStackDrift(value) => value.validate(),
+            Self::GitHubStackCapability(value) => value.validate(),
+            Self::WorkDuplicateEffort(value) => value.validate(),
+            Self::WorkBlockedInterval(value) => value.validate(),
+            Self::WorkRerun(value) => value.validate(),
+            Self::WorkExecutionLeak(value) => value.validate(),
+            Self::WorkDeliveryFanout(value) => value.validate(),
+            Self::TelemetryDrop(value) => value.validate(),
+            Self::HealthSnapshot(_) | Self::Activity(_) | Self::McpDispatch(_) => Ok(()),
         }
     }
 }
@@ -167,6 +241,13 @@ impl ObservabilityEnvelopeV1 {
         if self.quantity.is_some_and(|value| !value.is_finite()) {
             return Err("quantity");
         }
+        if self.emitted_count == 0
+            || self.delayed_count > self.emitted_count
+            || self.dropped_count > u64::MAX.saturating_sub(self.emitted_count)
+        {
+            return Err("emission_counts");
+        }
+        self.payload.validate()?;
         match &self.payload {
             ObservabilityPayloadV1::OperationResource(resource) => {
                 resource.validate(self.terminal_result)?;
@@ -207,103 +288,6 @@ impl ObservabilityEnvelopeV1 {
         }
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RetrievalQueryObservedV1 {
-    pub query_family: String,
-    pub enabled_lanes: Vec<String>,
-    pub candidate_budget: u64,
-    pub context_budget: u64,
-    pub token_budget: u64,
-    pub answered: bool,
-    pub source_coverage: CoverageStateV1,
-    pub lane_coverage: CoverageStateV1,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RetrievalPlannerObservedV1 {
-    pub planner_revision: String,
-    pub requested_lanes: Vec<String>,
-    pub admitted_lanes: Vec<String>,
-    pub abstained: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RetrieverObservedV1 {
-    pub retriever_kind: String,
-    pub profile_revision: String,
-    pub requested_candidates: u64,
-    pub consumed_candidates: u64,
-    pub eligible_candidates: u64,
-    pub returned_candidates: u64,
-    pub unique_contributions: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RetrievalSynthesisObservedV1 {
-    pub candidate_count: u64,
-    pub context_count: u64,
-    pub context_tokens: u64,
-    pub abstained: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RetrievalSourceObservedV1 {
-    pub source_kind: String,
-    pub eligible: u64,
-    pub observed: u64,
-    pub denied: u64,
-    pub unknown: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ContextOutcomeObservedV1 {
-    pub outcome: String,
-    pub independently_observed: bool,
-    pub censored: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct RetrievalAblationObservedV1 {
-    pub descriptor_revision: String,
-    pub baseline_value: f64,
-    pub candidate_value: f64,
-    pub unit: String,
-    pub coverage: CoverageStateV1,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AdoptionEligibilityObservedV1 {
-    pub capability: String,
-    pub eligible: u64,
-    pub enabled: u64,
-    pub available: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AdoptionOutcomeLinkedV1 {
-    pub invoked: u64,
-    pub terminal: u64,
-    pub independently_useful: u64,
-    pub repeat_useful: u64,
-    pub censored: u64,
-    pub unknown: u64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AnalyticsModeV1 {
-    Off,
-    LocalOnly,
-    AggregateShare,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AnalyticsConsentChangedV1 {
-    pub previous: AnalyticsModeV1,
-    pub current: AnalyticsModeV1,
-    pub share_staging_age_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -531,6 +515,22 @@ pub struct TelemetryDropObservedV1 {
     pub clean_shutdown_observed: bool,
 }
 
+impl TelemetryDropObservedV1 {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.first_missing_sequence == 0
+            || self.last_missing_sequence < self.first_missing_sequence
+            || self.proved_drop_lower_bound
+                > self
+                    .last_missing_sequence
+                    .saturating_sub(self.first_missing_sequence)
+                    .saturating_add(1)
+        {
+            return Err("telemetry_drop_range");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HealthDimensionObservedV1 {
     pub score_ppm: u64,
@@ -661,7 +661,7 @@ mod tests {
     ) -> ObservabilityEnvelopeV1 {
         ObservabilityEnvelopeV1 {
             event_id: "event:operation:1".into(),
-            event_kind: "operation.resource.observed.v1".into(),
+            event_kind: "operation.resource.completed.v1".into(),
             schema_revision: 1,
             idempotency_key: "idempotency:operation:1".into(),
             trace_id: "trace:operation:1".into(),

@@ -1,5 +1,15 @@
 //! Production Plan 26 read-model composition over the canonical accounting store.
 
+mod export;
+mod producer;
+
+pub use export::RegisteredAggregateShareExporterV1;
+pub use producer::{
+    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
+    ObservabilityProducerDeadlinesV1, ObservabilityProducerIdentityV1,
+    ObservabilityProducerSummaryV1,
+};
+
 use tracedecay_application::{
     ApplicationContractError, ObservabilityFuture, ObservabilityPageV1, ObservabilityQueryPort,
     ObservabilityQueryV1, ObservabilityRecordPort,
@@ -560,10 +570,28 @@ pub async fn observatory_read_model(
         })
         .collect::<Vec<_>>();
     let observed = events.len() as u64;
+    let explicit_drop_carriers = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            ObservabilityPayloadV1::TelemetryDrop(drop) => Some((
+                (
+                    event.process_boot_id.clone(),
+                    drop.last_missing_sequence.saturating_add(1),
+                ),
+                drop.proved_drop_lower_bound,
+            )),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let dropped = events.iter().fold(0u64, |total, event| {
         let payload_drops = match &event.payload {
             ObservabilityPayloadV1::TelemetryDrop(drop) => drop.proved_drop_lower_bound,
-            _ => event.dropped_count,
+            _ => event.dropped_count.saturating_sub(
+                explicit_drop_carriers
+                    .get(&(event.process_boot_id.clone(), event.producer_sequence))
+                    .copied()
+                    .unwrap_or(0),
+            ),
         };
         total.saturating_add(payload_drops)
     });
@@ -1127,7 +1155,7 @@ mod tests {
     fn envelope(event_id: &str, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
         ObservabilityEnvelopeV1 {
             event_id: event_id.to_string(),
-            event_kind: "retrieval.query.observed.v1".to_string(),
+            event_kind: "retrieval.query.completed.v1".to_string(),
             schema_revision: 1,
             idempotency_key: format!("idempotency:{event_id}"),
             trace_id: format!("trace:{event_id}"),
@@ -1324,7 +1352,7 @@ mod tests {
         let first = port
             .query(ObservabilityQueryV1 {
                 authorized_scope_ref: "scope:boundary".to_string(),
-                event_kinds: vec!["retrieval.query.observed.v1".to_string()],
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
                 horizon: ObservabilityHorizonV1 {
                     since_micros: 1_500_000,
                     until_micros: 1_600_000,
@@ -1346,7 +1374,7 @@ mod tests {
         let second = port
             .query(ObservabilityQueryV1 {
                 authorized_scope_ref: "scope:boundary".to_string(),
-                event_kinds: vec!["retrieval.query.observed.v1".to_string()],
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
                 horizon: ObservabilityHorizonV1 {
                     since_micros: 1_500_000,
                     until_micros: 1_600_000,
