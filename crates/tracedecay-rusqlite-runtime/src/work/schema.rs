@@ -32,6 +32,36 @@ CREATE TABLE IF NOT EXISTS work_events_v1 (
         project_id, repository_id, worktree_id, actor_id, policy_digest, task_id, command_id
     )
 ) STRICT;
+CREATE TABLE IF NOT EXISTS work_attempt_fences_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch > 0),
+    PRIMARY KEY (project_id, repository_id, worktree_id, actor_id, policy_digest)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS work_attempts_v1 (
+    project_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    policy_digest TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    lease_id TEXT NOT NULL,
+    fence_epoch INTEGER NOT NULL CHECK (fence_epoch > 0),
+    terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+    attempt_payload TEXT NOT NULL,
+    evidence_payload TEXT,
+    PRIMARY KEY (
+        project_id, repository_id, worktree_id, actor_id, policy_digest,
+        task_id, run_id, attempt_id
+    )
+) STRICT;
 ";
 
 pub fn install_work_schema(connection: &Connection) -> rusqlite::Result<()> {

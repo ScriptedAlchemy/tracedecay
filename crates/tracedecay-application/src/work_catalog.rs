@@ -15,14 +15,18 @@ use tracedecay_tool_catalog::{
     UseCaseId,
 };
 
+use tracedecay_domain::WorkAttemptV1;
+
 use crate::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand,
-    CreateWorkCommand, GenerateProposalRequest, GeneratedWorkProposal, ReplanDependenciesCommand,
-    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    CancelWorkAttemptCommand, CreateWorkCommand, GenerateProposalRequest, GeneratedWorkProposal,
+    ReplanDependenciesCommand, ResumeWorkAttemptsCommand, ReviewProposalRequestV1,
+    StartWorkAttemptCommand, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 10] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 14] = [
     (
         "snapshot",
         "capability.work.snapshot",
@@ -64,6 +68,26 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 10] = [
         "accept_task",
         "capability.work.accept_task",
         "use-case.work.accept_task",
+    ),
+    (
+        "start_attempt",
+        "capability.work.start_attempt",
+        "use-case.work.start_attempt",
+    ),
+    (
+        "attempt_status",
+        "capability.work.attempt_status",
+        "use-case.work.attempt_status",
+    ),
+    (
+        "cancel_attempt",
+        "capability.work.cancel_attempt",
+        "use-case.work.cancel_attempt",
+    ),
+    (
+        "resume_attempts",
+        "capability.work.resume_attempts",
+        "use-case.work.resume_attempts",
     ),
 ];
 
@@ -118,6 +142,26 @@ pub fn work_executable_binding_registry()
         available::<AcceptTaskCommand, WorkProjection>(
             "accept_task",
             "/application/work/accept-task",
+            EffectClass::Administrative,
+        )?,
+        available::<StartWorkAttemptCommand, WorkAttemptV1>(
+            "start_attempt",
+            "/application/work/start-attempt",
+            EffectClass::Administrative,
+        )?,
+        available::<WorkAttemptStatusRequestV1, WorkAttemptV1>(
+            "attempt_status",
+            "/application/work/attempt-status",
+            EffectClass::Read,
+        )?,
+        available::<CancelWorkAttemptCommand, WorkAttemptV1>(
+            "cancel_attempt",
+            "/application/work/cancel-attempt",
+            EffectClass::Administrative,
+        )?,
+        available::<ResumeWorkAttemptsCommand, WorkAttemptRecoveryReportV1>(
+            "resume_attempts",
+            "/application/work/resume-attempts",
             EffectClass::Administrative,
         )?,
     ];

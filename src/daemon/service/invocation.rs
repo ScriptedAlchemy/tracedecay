@@ -196,6 +196,7 @@ pub(in crate::daemon) mod semantic_evaluation;
 mod tests;
 mod types;
 mod work;
+mod work_attempt_exec;
 
 use clock::{current_micros, now_micros, now_millis};
 use configuration::*;
@@ -264,6 +265,7 @@ pub(crate) struct DaemonInvocationService {
     /// [`ProjectRuntimeRegistryV1`] for why these are not twelve maps.
     project_runtimes: ProjectRuntimeRegistryV1,
     operation_events: OperationEventAuthority,
+    work_attempt_processes: Arc<work_attempt_exec::WorkAttemptProcessRegistryV1>,
 }
 
 #[cfg(test)]
@@ -288,6 +290,9 @@ impl DaemonInvocationService {
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             project_runtimes: ProjectRuntimeRegistryV1::default(),
             operation_events: daemon_operation_event_authority(),
+            work_attempt_processes: Arc::new(
+                work_attempt_exec::WorkAttemptProcessRegistryV1::default(),
+            ),
         }
     }
 }

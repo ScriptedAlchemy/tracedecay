@@ -45,6 +45,7 @@ pub mod source_edit;
 pub mod storage;
 pub mod wire;
 pub mod work;
+pub mod work_attempt;
 pub mod work_catalog;
 pub mod work_product;
 pub mod work_read;
@@ -272,6 +273,7 @@ pub use wire::{
     ApplicationWireSchemaV1,
 };
 pub use work::*;
+pub use work_attempt::*;
 pub use work_catalog::*;
 pub use work_product::*;
 pub use work_read::*;

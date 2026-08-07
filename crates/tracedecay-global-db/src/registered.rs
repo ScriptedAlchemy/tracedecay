@@ -140,6 +140,11 @@ pub struct RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
     topology: RegisteredWorkTopologyV1,
+    attempts: tracedecay_application::WorkAttemptService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
 }
 
 impl RegisteredWorkApplicationServicesV1 {
@@ -160,6 +165,16 @@ impl RegisteredWorkApplicationServicesV1 {
 
     pub fn topology(&self) -> &RegisteredWorkTopologyV1 {
         &self.topology
+    }
+
+    pub fn attempts(
+        &self,
+    ) -> &tracedecay_application::WorkAttemptService<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.attempts
     }
 }
 
@@ -576,6 +591,11 @@ impl RegisteredGlobalDb {
         Ok(RegisteredWorkApplicationServicesV1 {
             commands: tracedecay_application::WorkService::new(storage.clone()),
             projections: tracedecay_application::WorkProjectionReadService::new(storage.clone()),
+            attempts: tracedecay_application::WorkAttemptService::new(
+                storage.clone(),
+                storage.clone(),
+                tracedecay_application::WorkService::new(storage.clone()),
+            ),
             topology: RegisteredWorkTopologyV1 {
                 source: storage,
                 runtime,

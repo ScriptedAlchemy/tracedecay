@@ -26,11 +26,15 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
     AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, ApplicationProblem,
-    AttachRuntimeEvidenceCommand, CreateWorkCommand, GenerateProposalRequest,
-    GeneratedWorkProposal, ReplanDependenciesCommand, RequestId, RetryDirective,
-    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CreateWorkCommand,
+    GenerateProposalRequest, GeneratedWorkProposal, ReplanDependenciesCommand, RequestId,
+    ResumeWorkAttemptsCommand, RetryDirective, ReviewProposalRequestV1, StartWorkAttemptCommand,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1,
+    WorkProjectionSnapshotRequestV1,
 };
-use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
+use tracedecay_domain::{
+    WorkAttemptV1, WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1,
+};
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
@@ -54,6 +58,10 @@ pub enum WorkOperation {
     AdmitExecution,
     AttachRuntimeEvidence,
     AcceptTask,
+    StartAttempt,
+    AttemptStatus,
+    CancelAttempt,
+    ResumeAttempts,
 }
 
 /// Derive every Work operation projection from one `(variant, key, segment)`
@@ -113,11 +121,15 @@ work_operations! {
     AdmitExecution: "admit_execution", "admit-execution";
     AttachRuntimeEvidence: "attach_runtime_evidence", "attach-runtime-evidence";
     AcceptTask: "accept_task", "accept-task";
+    StartAttempt: "start_attempt", "start-attempt";
+    AttemptStatus: "attempt_status", "attempt-status";
+    CancelAttempt: "cancel_attempt", "cancel-attempt";
+    ResumeAttempts: "resume_attempts", "resume-attempts";
 }
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 14] = [
         Self::Snapshot,
         Self::Delta,
         Self::GenerateProposal,
@@ -128,6 +140,10 @@ impl WorkOperation {
         Self::AdmitExecution,
         Self::AttachRuntimeEvidence,
         Self::AcceptTask,
+        Self::StartAttempt,
+        Self::AttemptStatus,
+        Self::CancelAttempt,
+        Self::ResumeAttempts,
     ];
 
     /// The catalog operation id.
@@ -137,7 +153,10 @@ impl WorkOperation {
 
     /// Whether the operation reads without producing a durable effect.
     pub const fn is_read_only(self) -> bool {
-        matches!(self, Self::Snapshot | Self::Delta | Self::GenerateProposal)
+        matches!(
+            self,
+            Self::Snapshot | Self::Delta | Self::GenerateProposal | Self::AttemptStatus
+        )
     }
 
     /// The generated name of the schema this operation's request satisfies.
@@ -153,6 +172,10 @@ impl WorkOperation {
             Self::AdmitExecution => schema_name::<AdmitExecutionCommand>(),
             Self::AttachRuntimeEvidence => schema_name::<AttachRuntimeEvidenceCommand>(),
             Self::AcceptTask => schema_name::<AcceptTaskCommand>(),
+            Self::StartAttempt => schema_name::<StartWorkAttemptCommand>(),
+            Self::AttemptStatus => schema_name::<WorkAttemptStatusRequestV1>(),
+            Self::CancelAttempt => schema_name::<CancelWorkAttemptCommand>(),
+            Self::ResumeAttempts => schema_name::<ResumeWorkAttemptsCommand>(),
         }
     }
 
@@ -169,6 +192,10 @@ impl WorkOperation {
             | Self::AdmitExecution
             | Self::AttachRuntimeEvidence
             | Self::AcceptTask => schema_name::<WorkProjection>(),
+            Self::StartAttempt | Self::AttemptStatus | Self::CancelAttempt => {
+                schema_name::<WorkAttemptV1>()
+            }
+            Self::ResumeAttempts => schema_name::<WorkAttemptRecoveryReportV1>(),
         }
     }
 
@@ -364,7 +391,8 @@ mod tests {
             vec![
                 WorkOperation::Snapshot,
                 WorkOperation::Delta,
-                WorkOperation::GenerateProposal
+                WorkOperation::GenerateProposal,
+                WorkOperation::AttemptStatus
             ]
         );
     }

@@ -35,13 +35,15 @@ use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, AcceptProposalCommand, AcceptTaskCommand,
     AdmitExecutionCommand, ApplicationContractError, ApplicationEnvelope, ApplicationOperation,
     ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationResult,
-    AttachRuntimeEvidenceCommand, CancellationContext, CancellationSignal, CreateWorkCommand,
-    Deadline, GenerateProposalRequest, GeneratedWorkProposal, HealthReadRequest, IdempotencyKey,
-    LegalAction, OpaqueCursor, OperationTermination, PageRequest, ProblemOwningLayer,
-    ReplanDependenciesCommand, RequestContext, RequestId, ResultContractRef, ResultProjection,
-    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, ReviewProposalRequestV1,
-    SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
-    WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationContext,
+    CancellationSignal, CreateWorkCommand, Deadline, GenerateProposalRequest,
+    GeneratedWorkProposal, HealthReadRequest, IdempotencyKey, LegalAction, OpaqueCursor,
+    OperationTermination, PageRequest, ProblemOwningLayer, ReplanDependenciesCommand,
+    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken,
+    ResumeWorkAttemptsCommand, RetrievalOrder, RetrievalRequestMeta, RetryDirective,
+    ReviewProposalRequestV1, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
+    StartWorkAttemptCommand, StreamEvent, StreamEventKind, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
 };
 pub use tracedecay_application::{
     ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
@@ -998,6 +1000,26 @@ async fn invoke_work_operation(
             WorkProjection
         ),
         WorkOperation::AcceptTask => core!(AcceptTaskCommand, AcceptTask, WorkProjection),
+        WorkOperation::StartAttempt => core!(
+            StartWorkAttemptCommand,
+            StartAttempt,
+            tracedecay_domain::WorkAttemptV1
+        ),
+        WorkOperation::AttemptStatus => core!(
+            WorkAttemptStatusRequestV1,
+            AttemptStatus,
+            tracedecay_domain::WorkAttemptV1
+        ),
+        WorkOperation::CancelAttempt => core!(
+            CancelWorkAttemptCommand,
+            CancelAttempt,
+            tracedecay_domain::WorkAttemptV1
+        ),
+        WorkOperation::ResumeAttempts => core!(
+            ResumeWorkAttemptsCommand,
+            ResumeAttempts,
+            WorkAttemptRecoveryReportV1
+        ),
     }
 }
 
