@@ -279,6 +279,16 @@ impl WorkCausalProjectionV1 {
     pub const fn graph_version(&self) -> WorkGraphVersionV1 {
         self.graph_version
     }
+
+    /// The DECLARED causal candidates, as edges.
+    ///
+    /// These come from `WorkItemV1::causal_candidates` — relations a caller
+    /// stated, never an order inferred from when attempts happened to finish.
+    /// An empty slice therefore means "no candidate was declared", which is a
+    /// true reading and not a missing one.
+    pub fn candidate_edges(&self) -> &[WorkDagEdgeV1] {
+        &self.candidate_edges
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

@@ -15,7 +15,10 @@ use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior, params,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
-use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1 as WORK_EVENT_JOURNAL_SCHEMA_V1;
+use tracedecay_rusqlite_runtime::work::{
+    WORK_PRODUCT_SCHEMA_V1 as WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1,
+    WORK_SCHEMA_V1 as WORK_EVENT_JOURNAL_SCHEMA_V1,
+};
 use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
     WORKFLOW_TABLE_CONTRACTS_V1,
@@ -400,6 +403,16 @@ pub async fn ensure_registered_schema_for_admission(
             .execute_batch(WORK_EVENT_JOURNAL_SCHEMA_V1)
             .await
             .map_err(|error| global_db_operation_error("initialize Work event journal", error))?;
+        // The Work product graph authority is its own admission stage, not a
+        // continuation of the task journal above: it is owner-scoped rather
+        // than WorkAuthority-scoped, so a store that carries one and not the
+        // other is a legible state, and its failure names itself.
+        transaction
+            .execute_batch(WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize Work product graph journal", error)
+            })?;
         transaction
             .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
             .await

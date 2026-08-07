@@ -20,7 +20,7 @@ mod projection;
 mod schema;
 mod sql;
 
-pub use schema::{WORK_SCHEMA_V1, install_work_schema};
+pub use schema::{WORK_PRODUCT_SCHEMA_V1, WORK_SCHEMA_V1, install_work_schema};
 
 pub(crate) use sql::*;
 
