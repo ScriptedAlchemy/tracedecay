@@ -950,7 +950,8 @@ mod doctor_runtime_route_tests {
             .lock()
             .await
             .insert(key, server);
-        let value = super::doctor_runtime_value(&handshake, &store_administration, false).await;
+        let value =
+            super::doctor_runtime_value(&handshake, &store_administration, false, None).await;
 
         assert_eq!(
             value.pointer("/doctor_runtime/status"),
