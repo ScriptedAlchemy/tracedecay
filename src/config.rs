@@ -1091,32 +1091,79 @@ async fn open_runtime_configuration_from_store(
             "daemon project source binding could not be derived: {error}"
         ))
     })?;
-    let current = store.current().await.map_err(map_configuration_error)?;
+    let mut current = store.current().await.map_err(map_configuration_error)?;
     let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
         .map_err(|error| config_error(format!("invalid source bindings setting key: {error}")))?;
-    let Some(ConfigurationValueV1::SourceBindings(configured_bindings)) =
-        current.snapshot.effective_values.get(&source_bindings_key)
-    else {
-        return Err(TraceDecayError::reset_required(
-            "configuration",
-            "canonical configuration source bindings are missing",
-        ));
-    };
-    let authority_bindings = configured_bindings
-        .iter()
-        .filter(|candidate| {
-            candidate.source_kind == daemon_binding.source_kind
-                && candidate.authority == daemon_binding.authority
-        })
-        .collect::<Vec<_>>();
-    if !matches!(
-        authority_bindings.as_slice(),
-        [candidate] if *candidate == &daemon_binding
-    ) {
-        return Err(TraceDecayError::reset_required(
-            "configuration",
-            "canonical configuration source binding does not match the registered project",
-        ));
+    enum SourceBindingCheck {
+        Verified,
+        LocatorDigestDrift,
+        Mismatch,
+    }
+    let mut rebind_attempted = false;
+    loop {
+        let check = {
+            let Some(ConfigurationValueV1::SourceBindings(configured_bindings)) =
+                current.snapshot.effective_values.get(&source_bindings_key)
+            else {
+                return Err(TraceDecayError::reset_required(
+                    "configuration",
+                    "canonical configuration source bindings are missing",
+                ));
+            };
+            let authority_bindings = configured_bindings
+                .iter()
+                .filter(|candidate| {
+                    candidate.source_kind == daemon_binding.source_kind
+                        && candidate.authority == daemon_binding.authority
+                })
+                .collect::<Vec<_>>();
+            match authority_bindings.as_slice() {
+                [candidate] if **candidate == daemon_binding => SourceBindingCheck::Verified,
+                [candidate]
+                    if candidate.binding_id == daemon_binding.binding_id
+                        && candidate.source_locator_digest
+                            != daemon_binding.source_locator_digest =>
+                {
+                    SourceBindingCheck::LocatorDigestDrift
+                }
+                _ => SourceBindingCheck::Mismatch,
+            }
+        };
+        match check {
+            SourceBindingCheck::Verified => break,
+            // Exactly one daemon-owned binding for this registry-verified
+            // project whose only drift is the path-derived locator digest:
+            // the checkout moved or was renamed. The registry — not the
+            // path — owns identity and has already resolved this exact
+            // registered project for the current root, so republish the
+            // binding with the new derived digest under compare-and-swap
+            // instead of demanding a reset.
+            SourceBindingCheck::LocatorDigestDrift if !rebind_attempted => {
+                rebind_attempted = true;
+                current = match store
+                    .rebind_daemon_project_source_binding(
+                        &current.revision_id,
+                        &daemon_binding,
+                        current_utc_micros(),
+                    )
+                    .await
+                {
+                    Ok(state) => state,
+                    // A concurrent open won the swap; adopt what it
+                    // published and re-verify it exactly.
+                    Err(
+                        crate::application::configuration::ConfigurationError::RevisionConflict,
+                    ) => store.current().await.map_err(map_configuration_error)?,
+                    Err(error) => return Err(map_configuration_error(error)),
+                };
+            }
+            SourceBindingCheck::LocatorDigestDrift | SourceBindingCheck::Mismatch => {
+                return Err(TraceDecayError::reset_required(
+                    "configuration",
+                    "canonical configuration source binding does not match the registered project",
+                ));
+            }
+        }
     }
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;

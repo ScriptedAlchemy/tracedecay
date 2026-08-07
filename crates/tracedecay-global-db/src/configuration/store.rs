@@ -24,8 +24,8 @@ use tracedecay_domain::configuration::{
     ConfigurationReceiptId, ConfigurationRevisionId, ConfigurationSnapshotV1, ConfigurationValueV1,
     CredentialKindV1, CredentialReferenceId, CredentialReferenceMetadataV1, ProtectedChange,
     ProtectedChangePlan, ProtectedChangeSnapshotError, RedactedConfigurationChangeV1,
-    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1, SettingKey,
-    SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1,
+    ScopeSourceBinding, SettingKey, SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
@@ -48,8 +48,9 @@ mod revision;
 mod write;
 
 use activation::{
-    StoredComponentActivationState, insert_component_activation_event,
-    latest_component_activation_state, validate_activation_error_code, validate_component_name,
+    StoredComponentActivationState, advance_component_desired_state,
+    insert_component_activation_event, latest_component_activation_state,
+    validate_activation_error_code, validate_component_name,
 };
 #[cfg(test)]
 use audit::decode_audit_row;
@@ -59,7 +60,8 @@ use mutation::commit_configuration_transaction;
 #[cfg(test)]
 use mutation::validate_commit_bindings;
 use mutation::{
-    ConfigurationCommitDraft, current_state_from_transaction, derived_identifier, map_store_error,
+    ConfigurationCommitDraft, current_state_from_transaction, derived_identifier,
+    map_protected_change_snapshot_error, map_store_error,
 };
 use read::read_revision_from_executor;
 use read::validate_snapshot_registry_completeness;
@@ -443,6 +445,95 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .commit()
                 .await
                 .map_err(|_| ConfigurationError::Unavailable),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Republishes the daemon-owned project source binding with the locator
+    /// digest of a moved or renamed checkout whose identity the registry has
+    /// already re-verified.
+    ///
+    /// This is a daemon-owned identity-preserving heal, not an operator scope
+    /// change: the caller must have already resolved `binding.authority` to
+    /// the exact registered project for the current root, and the stored
+    /// binding must match on binding id, source kind, and authority so only
+    /// the derived locator digest changes. The write is a compare-and-swap
+    /// against the revision the caller read; concurrent mutation surfaces as
+    /// a typed `RevisionConflict` and the caller re-reads.
+    pub async fn rebind_daemon_project_source_binding(
+        &self,
+        expected_revision_id: &ConfigurationRevisionId,
+        binding: &ScopeSourceBinding,
+        occurred_at: UtcMicros,
+    ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
+        expected_revision_id
+            .validate()
+            .map_err(ConfigurationError::validation)?;
+        binding.validate().map_err(ConfigurationError::validation)?;
+        let transaction = self
+            .db
+            .begin_write_transaction()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        let outcome = async {
+            let current = current_state_from_transaction(&transaction).await?;
+            if &current.revision_id != expected_revision_id {
+                return Err(ConfigurationError::RevisionConflict);
+            }
+            let operation_digest = canonical_sha256(&(
+                "tracedecay.configuration.daemon-source-binding-rebind.v1",
+                binding,
+            ))
+            .map_err(ConfigurationError::validation)?;
+            let next_revision_id: ConfigurationRevisionId = derived_identifier(
+                "configuration.revision.v1",
+                &canonical_sha256(&(
+                    "tracedecay.configuration.result-revision.v1",
+                    expected_revision_id,
+                    &operation_digest,
+                ))
+                .map_err(ConfigurationError::validation)?,
+                "configuration rebind revision id",
+            )?;
+            let snapshot = current
+                .snapshot
+                .apply_protected_change(
+                    &ProtectedChange::RebindSource(binding.clone()),
+                    &next_revision_id,
+                )
+                .map_err(map_protected_change_snapshot_error)?;
+            validate_snapshot_registry_completeness(&snapshot).map_err(map_store_error)?;
+            let actor_id =
+                ActorId::new("actor.tracedecay-daemon.source-binding-rebind".to_owned())
+                    .map_err(ConfigurationError::validation)?;
+            let revision = ConfigurationRevisionRecordV1 {
+                revision_id: next_revision_id.clone(),
+                parent_revision_id: Some(expected_revision_id.clone()),
+                snapshot,
+                actor_id,
+                operation_kind: "daemon_source_binding_rebind".to_owned(),
+                created_at: occurred_at,
+            };
+            insert_revision(&transaction, &revision)
+                .await
+                .map_err(map_store_error)?;
+            advance_component_desired_state(&transaction, &next_revision_id, occurred_at)
+                .await
+                .map_err(map_store_error)?;
+            Ok(ConfigurationCurrentStateV1 {
+                revision_id: revision.revision_id,
+                snapshot: revision.snapshot,
+            })
+        }
+        .await;
+        match outcome {
+            Ok(state) => {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| ConfigurationError::Unavailable)?;
+                Ok(state)
+            }
             Err(error) => Err(error),
         }
     }

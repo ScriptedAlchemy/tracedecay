@@ -1069,13 +1069,18 @@ mod runtime_configuration_cutover {
     #[cfg(unix)]
     use std::process::Command;
 
+    use std::collections::BTreeMap;
+
     use tempfile::TempDir;
-    use tracedecay_domain::configuration::ConfigurationRevisionId;
+    use tracedecay_domain::configuration::{
+        AuthorityRef, ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
+        SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId,
+    };
     use tracedecay_domain::{ProjectId, UtcMicros};
 
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
-    use crate::config::resolver::resolve_configuration;
+    use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
     use crate::config::{
         PinnedRuntimeConfiguration, RuntimeConfigurationCache, RuntimeConfigurationTarget,
         TraceDecayConfig, cached_runtime_configuration, cached_sync_config,
@@ -1413,6 +1418,159 @@ mod runtime_configuration_cutover {
             )
             .expect("linked binding"),
         );
+    }
+
+    /// Moving or renaming a checkout changes only the path-derived locator
+    /// digest; the registry still resolves the same registered project. The
+    /// open path must republish the daemon binding with the new digest as a
+    /// durable revision instead of demanding a reset.
+    #[tokio::test]
+    async fn ensure_runtime_configuration_rebinds_locator_digest_for_a_renamed_checkout() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary root");
+        let original = root.path().join("checkout");
+        let renamed = root.path().join("checkout-renamed");
+        std::fs::create_dir_all(&original).expect("create original checkout");
+        let project_id = project_id("proj_runtime_rebind_rename");
+        crate::storage::write_enrollment_marker(
+            &original,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(&original)
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            &original,
+            project_id.clone(),
+        )
+        .await
+        .expect("open retained project runtime");
+        let initial = runtime
+            .ensure_runtime_configuration_for_test(&original, &layout)
+            .await
+            .expect("cold open publishes the canonical initial revision");
+
+        // The whole checkout moves on disk: same registered project and
+        // store, new canonical root, therefore a new derived locator digest.
+        std::fs::rename(&original, &renamed).expect("rename checkout");
+
+        let healed = runtime
+            .ensure_runtime_configuration_for_test(&renamed, &layout)
+            .await
+            .expect("registry-verified rename must rebind the locator digest, not reset");
+        assert_ne!(
+            healed.revision_id, initial.revision_id,
+            "the rebind must republish a new durable revision"
+        );
+        let reopened = runtime
+            .ensure_runtime_configuration_for_test(&renamed, &layout)
+            .await
+            .expect("reopen after the rebind");
+        assert_eq!(
+            reopened.revision_id, healed.revision_id,
+            "a rebound binding must be stable across reopens"
+        );
+    }
+
+    /// Locator drift may heal only through the exact daemon-owned binding.
+    /// A store whose single authority-matching binding carries a foreign
+    /// binding id (and a store whose bindings belong to another project)
+    /// must stay a typed reset, never a silent rebind.
+    #[tokio::test]
+    async fn ensure_runtime_configuration_rejects_locator_drift_without_the_daemon_binding() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary root");
+        let checkout = root.path().join("checkout");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&checkout).expect("create checkout");
+        std::fs::create_dir_all(&elsewhere).expect("create foreign locator root");
+        let other_project = project_id("proj_runtime_rebind_other");
+        let project_id = project_id("proj_runtime_rebind_denied");
+        crate::storage::write_enrollment_marker(
+            &checkout,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(&checkout)
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            &checkout,
+            project_id.clone(),
+        )
+        .await
+        .expect("open retained project runtime");
+        let database = runtime
+            .registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            )
+            .expect("bind registered project database");
+        let store =
+            crate::global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
+                database.as_ref(),
+            );
+
+        // One binding belongs to a different registered project; the other
+        // matches this project's authority but carries a foreign binding id
+        // and a drifted locator digest.
+        let other_binding = crate::config::scope_control::daemon_owned_project_source_binding(
+            &other_project,
+            &checkout,
+        )
+        .expect("build other-project binding");
+        let drifted = crate::config::scope_control::daemon_owned_project_source_binding(
+            &project_id,
+            &elsewhere,
+        )
+        .expect("build drifted daemon binding");
+        let foreign = ScopeSourceBinding::new(
+            SourceBindingId::new("binding.operator.project-open".to_owned())
+                .expect("foreign binding id"),
+            drifted.source_kind,
+            drifted.source_locator_digest,
+            AuthorityRef::Project(project_id.clone()),
+        )
+        .expect("build foreign-id binding");
+        let source_bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
+            .expect("source bindings setting key");
+        let seeded_revision = revision_id("configuration.seeded.foreign-binding");
+        let resolution = resolve_configuration(
+            &ConfigurationRegistry::core().expect("configuration registry"),
+            &[ConfigurationLayerV1 {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: project_id.clone(),
+                },
+                revision_id: seeded_revision.clone(),
+                entries: BTreeMap::from([(
+                    source_bindings_key,
+                    ConfigurationValueV1::SourceBindings(vec![foreign, other_binding]),
+                )]),
+            }],
+        )
+        .expect("resolve seeded bindings");
+        store
+            .initialize_canonical(&seeded_revision, &resolution, UtcMicros(1))
+            .await
+            .expect("seed store with foreign bindings");
+
+        let error = runtime
+            .ensure_runtime_configuration_for_test(&checkout, &layout)
+            .await
+            .expect_err("locator drift without the daemon binding id must stay a reset");
+        assert!(matches!(
+            error,
+            crate::errors::TraceDecayError::ResetRequired { ref authority, .. }
+                if authority == "configuration"
+        ));
     }
 
     #[tokio::test]
