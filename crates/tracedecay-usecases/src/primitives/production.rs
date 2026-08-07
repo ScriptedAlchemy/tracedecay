@@ -1618,10 +1618,14 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                     )
                 })?
                 .admit_for_scope(&self.scope)
-                .map_err(|_| {
+                .map_err(|failure| {
                     symbol_graph_snapshot_failure(
                         "application.symbol-graph.scope",
-                        "the current symbol-graph identity did not match the admitted scope",
+                        &format!(
+                            "the current symbol-graph identity was not admitted \
+                             for the scope: {}",
+                            failure.class()
+                        ),
                     )
                 })?;
             // Every component of the published generation's address folds into

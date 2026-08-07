@@ -180,6 +180,27 @@ impl ProductionDaemon {
                 .current_dir(&project),
             "git init",
         );
+        // Symbol-graph admission requires an exact source revision; an unborn
+        // HEAD can never satisfy it, so the fixture needs one real commit.
+        run_ok(
+            Command::new("git").args(["add", "."]).current_dir(&project),
+            "git add",
+        );
+        run_ok(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=journey@tracedecay.invalid",
+                    "-c",
+                    "user.name=Journey",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ])
+                .current_dir(&project),
+            "git commit",
+        );
         run_ok(
             isolated(&root, &profile).arg("init").current_dir(&project),
             "tracedecay init",
