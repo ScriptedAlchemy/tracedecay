@@ -103,9 +103,9 @@ Official implementation references:
 | `tracedecay-semantic` | Produce verified embeddings; persist/search admitted vectors through graph-db. |
 | `tracedecay-sessions` | Move LCM/source/successor/logical-copy/thread/agent DAG relations to graph-db; retain raw content and replay/retention journals in SQLite. |
 | `tracedecay-temporal-query` | Consume typed session graph ports. |
-| `tracedecay-rusqlite-parity` | Delete graph/vector fixtures and probes after cutover; retain SQLite parity for retained relational stores. |
+| `tracedecay-rusqlite-parity` | Delete graph/vector fixtures and probes after cutover; retain SQLite parity for retained relational stores. (Update 2026-08-07: crate deleted outright, not retained — "refactor(storage): remove the superseded sqlite parity crates"; `git grep rusqlite-parity` outside plan history returns zero hits.) |
 | `tracedecay-rusqlite-runtime` | Delete the `graph` module and graph-shaped Work/workflow SQL after callers move; retain connection, ledger, repository, receipt, idempotency, and relational transaction support. |
-| `tracedecay-sqlite-parity-protocol` | Remove graph/vector parity variants; retain relational protocol variants. |
+| `tracedecay-sqlite-parity-protocol` | Remove graph/vector parity variants; retain relational protocol variants. (Update 2026-08-07: crate deleted outright — same commit as `tracedecay-rusqlite-parity`; no relational variants were retained because no production caller remained.) |
 | `tracedecay-store` | Own graph-db-neutral attachment, snapshot, generation, and operation ports. |
 | `tracedecay-tool-catalog` | No storage dependency. |
 | `tracedecay-usecases` | Replace Git/vector SQL access with typed graph-db application calls. |
@@ -813,10 +813,15 @@ git commit -am "feat(graph-db): wire embedded graph journeys"
 **Files:**
 - Delete/modify: `crates/tracedecay-runtime-core/src/db/migrations.rs`
 - Delete/modify: `crates/tracedecay-rusqlite-parity/src/fixture_ddl.rs`
+  (Update 2026-08-07: moot — the whole `tracedecay-rusqlite-parity` crate,
+  21 files, was deleted outright rather than modified.)
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/request.rs`
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/response.rs`
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/results.rs`
 - Modify: `crates/tracedecay-sqlite-parity-protocol/src/tests.rs`
+  (Update 2026-08-07: moot — the whole `tracedecay-sqlite-parity-protocol`
+  crate, 10 files, was deleted outright rather than modified; see
+  "refactor(storage): remove the superseded sqlite parity crates".)
 - Delete: `crates/tracedecay-migrate/src/memory_cutover.rs`
 - Delete: `crates/tracedecay-migrate/src/consolidate/mod.rs`
 - Delete: `crates/tracedecay-migrate/src/consolidate/sqlite.rs`

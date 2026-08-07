@@ -115,6 +115,14 @@ measurements, not inferred table sizes.
    re-registered repositories under new project IDs; the old-identity stores
    remained silently, invisible to any surface. Registry GC exists but was
    not automatic and was blocked by a daemon configuration-authority bug.
+   (Update 2026-08-07: the configuration-authority defect forcing a moved or
+   renamed checkout to `reset_required` instead of republishing its source
+   binding now has code repairs at tip — `fix(config): rebind daemon source
+   binding for moved checkouts` and `fix(global-db): keep moved project roots
+   resolvable by former path`. Whether this closes the measured ~41 GB
+   orphan-store backlog, or whether Registry GC still needs an operator-run
+   pass to reclaim already-orphaned stores, is not verified by this docs
+   lane.)
 4. **Unbounded session retention with structural duplication.** The measured
    `sessions.db` population totals 35.7 GiB and includes a 15.7 GiB single
    file. Structurally, `lcm_raw_messages` and `session_messages` can retain the
