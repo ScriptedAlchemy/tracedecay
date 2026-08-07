@@ -46,9 +46,8 @@ async fn compatibility_bank_rows(
     let mut statement = conn
         .prepare(
             "SELECT bank_name, vector, fact_count, updated_at
-             FROM memory_v2_compatibility_banks
+             FROM memory_v2_banks
              WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
-               AND source_store_id = 'legacy-memory-v1'
              ORDER BY bank_name",
         )
         .unwrap();
@@ -76,9 +75,8 @@ async fn compatibility_dirty_bank_rows(db: &Database, owner: &FactOwnerV1) -> Ve
     let mut statement = conn
         .prepare(
             "SELECT bank_name, updated_at
-             FROM memory_v2_compatibility_bank_dirty
+             FROM memory_v2_bank_dirty
              WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
-               AND source_store_id = 'legacy-memory-v1'
              ORDER BY bank_name",
         )
         .unwrap();
@@ -322,8 +320,23 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
         .await
         .unwrap();
 
+    // Resolve the canonical fact id up front: removal deletes the legacy
+    // projection row (the mapping no longer outlives the fact), while the
+    // canonical feedback history keyed by this id must survive for lineage.
+    let canonical_fact_id: String = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1",
+        rusqlite::params![fact.fact_id],
+        |row| row.get(0),
+    )
+    .unwrap();
     let history_state = |label: &'static str| {
         let db = &db;
+        let canonical_fact_id = canonical_fact_id.clone();
         async move {
             rusqlite::Connection::open_with_flags(
                 db.database_path(),
@@ -335,10 +348,8 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
                             COUNT(source), COUNT(note),
                             SUM(CASE WHEN details_availability = 'available' THEN 1 ELSE 0 END)
                      FROM memory_v2_feedback_history
-                     WHERE fact_id = (
-                         SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
-                     )",
-                rusqlite::params![fact.fact_id],
+                     WHERE fact_id = ?1",
+                rusqlite::params![canonical_fact_id],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
@@ -402,7 +413,7 @@ async fn compatibility_repair_skips_malformed_unavailable_vectors() {
         "UPDATE memory_v2_current_facts
          SET payload_access = 'quarantined'
          WHERE fact_id = (
-             SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
+             SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1
          )",
         rusqlite::params![fact.fact_id],
     );
@@ -462,7 +473,7 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
         "UPDATE memory_v2_current_facts
          SET payload_access = 'unavailable'
          WHERE fact_id <> (
-             SELECT fact_id FROM memory_v2_legacy_map WHERE legacy_fact_id = ?1
+             SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1
          )",
         rusqlite::params![eligible.fact_id],
     );
@@ -500,12 +511,8 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
             &db,
             "SELECT COUNT(*)
              FROM memory_facts AS legacy_facts
-             JOIN memory_v2_legacy_map AS mappings
-               ON mappings.legacy_fact_id = legacy_facts.fact_id
              JOIN memory_v2_current_facts AS current_facts
-               ON current_facts.fact_id = mappings.fact_id
-              AND current_facts.owner_kind = mappings.owner_kind
-              AND current_facts.project_id = mappings.project_id
+               ON current_facts.fact_id = legacy_facts.canonical_fact_id
              WHERE current_facts.payload_access = 'unavailable'
                AND legacy_facts.hrr_vector IS NULL",
         )
