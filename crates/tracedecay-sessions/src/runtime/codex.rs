@@ -66,7 +66,10 @@ use records::{
 use crate::runtime::jsonl_observation_admission::{
     namespace_replacement_message_ids, preflight_and_parse_new,
 };
-use crate::runtime::shared::{StoredCursor, TranscriptScopeMatcher, title_from_messages};
+use crate::runtime::shared::{
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptScopeMatcher,
+    title_from_messages,
+};
 use crate::runtime::source::{
     FileDiscoveryReport, ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds,
     TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, stream_new_jsonl,
@@ -90,6 +93,10 @@ pub struct CodexSource {
     sessions_dir: PathBuf,
     archived_sessions_dir: PathBuf,
     user_scope: Option<UserCodexScope>,
+    /// Source-lifetime cache of project-root matchers and cwd worktree
+    /// resolutions, so one scan pass runs git identity discovery once per
+    /// root/cwd instead of once per transcript record.
+    project_matchers: ProjectRootMatcherCache,
 }
 
 struct UserCodexScope {
@@ -112,6 +119,7 @@ impl CodexSource {
             sessions_dir: codex_home.join("sessions"),
             archived_sessions_dir: codex_home.join("archived_sessions"),
             user_scope: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -215,17 +223,25 @@ impl TranscriptSource for CodexSource {
         } else {
             CodexContextState::from_meta(&meta)
         };
-        let scope_matcher = TranscriptScopeMatcher::for_scope(
+        let scope_matcher = TranscriptScopeMatcher::for_scope_cached(
             project_root,
             self.user_scope
                 .as_ref()
                 .map(|scope| scope.registered_roots.as_slice()),
+            &self.project_matchers,
         );
         let mut last_in_scope_cwd = None;
         let mut last_in_scope_git = None;
         for line in &new.lines {
             let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            let in_scope = scope_matcher.accepts(context_state.cwd.as_deref());
+            // `Unknown` means a bounded git timeout left this record's scope
+            // undecided: abort before any cursor can be persisted so the same
+            // bytes are re-parsed (and re-resolved) on the next scan pass.
+            let in_scope = match scope_matcher.membership(context_state.cwd.as_deref()) {
+                ProjectMembership::Match => true,
+                ProjectMembership::NoMatch => false,
+                ProjectMembership::Unknown => return None,
+            };
             if !in_scope {
                 if compacted_summary_from_line(
                     &line.value,
@@ -261,6 +277,7 @@ impl TranscriptSource for CodexSource {
                         &mut message,
                         context_state.cwd.as_deref(),
                         context_state.git.as_ref(),
+                        &self.project_matchers,
                     );
                     messages.push(message);
                 }
@@ -284,6 +301,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -299,6 +317,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -314,6 +333,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -331,6 +351,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -346,6 +367,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -361,6 +383,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
             }
@@ -372,6 +395,7 @@ impl TranscriptSource for CodexSource {
                 &mut message,
                 last_in_scope_cwd.as_deref(),
                 last_in_scope_git.as_ref(),
+                &self.project_matchers,
             );
             messages.push(message);
         }
@@ -398,6 +422,7 @@ impl TranscriptSource for CodexSource {
             metadata_json: context::session_metadata_json(
                 &meta,
                 self.user_scope.is_none().then_some(&structured.summary),
+                &self.project_matchers,
             ),
             parent_session_id: meta.parent_session_id.clone(),
             is_subagent: meta.is_subagent,

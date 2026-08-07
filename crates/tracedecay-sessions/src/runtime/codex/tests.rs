@@ -826,3 +826,136 @@ mod goal_event_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod source_matcher_cache_tests {
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::CodexSource;
+    use crate::runtime::shared::{ProjectRootMatcherCache, StoredCursor};
+    use crate::runtime::source::TranscriptSource;
+
+    static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn retrying_identity(
+        path: &Path,
+    ) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
+        let root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+            .unwrap_or(path);
+        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
+            return tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Unknown;
+        }
+        tracedecay_runtime_core::worktree::GitRepoIdentityOutcome::Resolved(
+            tracedecay_runtime_core::worktree::GitRepoIdentity {
+                worktree_root: root.to_path_buf(),
+                common_dir: root.join(".git"),
+            },
+        )
+    }
+
+    fn write_rollout(path: &Path, session_id: &str, cwd: &Path) {
+        let lines = [
+            json!({
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": session_id,
+                    "cwd": cwd,
+                    "model": "gpt-5.5"
+                }
+            }),
+            json!({
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": format!("message from {session_id}")
+                }
+            }),
+        ];
+        std::fs::write(
+            path,
+            lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn codex_source_reuses_project_matcher_across_parse_calls() {
+        let temp = TempDir::new().unwrap();
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let first_path = temp.path().join("first.jsonl");
+        let second_path = temp.path().join("second.jsonl");
+        write_rollout(&first_path, "first-session", &nested_cwd);
+        write_rollout(&second_path, "second-session", &nested_cwd);
+        let source = CodexSource::with_home(temp.path());
+
+        let first = source
+            .parse_new(&first_path, StoredCursor::default(), &project_root, None)
+            .unwrap();
+        assert_eq!(first.messages.len(), 1);
+        let first_metadata: serde_json::Value =
+            serde_json::from_str(first.messages[0].metadata_json.as_deref().unwrap()).unwrap();
+        let first_worktree = first_metadata["codex_turn_worktree"].clone();
+        assert!(first_worktree.is_string());
+
+        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden")).unwrap();
+        let second = source
+            .parse_new(&second_path, StoredCursor::default(), &project_root, None)
+            .unwrap();
+        assert_eq!(second.messages.len(), 1);
+        let second_metadata: serde_json::Value =
+            serde_json::from_str(second.messages[0].metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(second_metadata["codex_turn_worktree"], first_worktree);
+    }
+
+    #[test]
+    fn codex_unknown_membership_retries_without_advancing_cursor() {
+        UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
+        let temp = TempDir::new().unwrap();
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).unwrap();
+        let transcript = temp.path().join("retry.jsonl");
+        write_rollout(&transcript, "retry-session", &nested_cwd);
+        let mut source = CodexSource::with_home(temp.path());
+        source.project_matchers =
+            ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
+
+        let previous = StoredCursor::default();
+        assert!(
+            source
+                .parse_new(&transcript, previous, &project_root, None)
+                .is_none(),
+            "unknown membership must abort before a new cursor can be persisted"
+        );
+
+        let retried = source
+            .parse_new(&transcript, previous, &project_root, None)
+            .expect("unknown membership must be resolved again on retry");
+        assert_eq!(retried.messages.len(), 1);
+        assert!(retried.new_cursor.position > previous.position);
+        assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
+    }
+}

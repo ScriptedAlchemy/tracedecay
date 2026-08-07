@@ -8,7 +8,8 @@ use serde_json::Value;
 use super::{CodexMeta, session_meta_from_record, turn_context_from_record};
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
+    ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
+    append_location_metadata_cached,
 };
 use crate::runtime::source::{MAX_JSONL_RECORD_BYTES, RawJsonlFrame, RawJsonlFrameReader};
 
@@ -223,6 +224,7 @@ fn store_prior_context(path: &Path, generation: u64, offset: u64, state: CodexCo
 pub(super) fn session_metadata_json(
     meta: &CodexMeta,
     summary: Option<&super::events::CodexSessionSummary>,
+    location_cache: &ProjectRootMatcherCache,
 ) -> Option<String> {
     let mut metadata = serde_json::Map::new();
     metadata.insert(
@@ -244,10 +246,11 @@ pub(super) fn session_metadata_json(
             Value::String(agent_nickname.clone()),
         );
     }
-    append_location_metadata(
+    append_location_metadata_cached(
         &mut metadata,
         CODEX_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(Some(&meta.cwd), "session_meta"),
+        location_cache,
     );
     insert_git_metadata(&mut metadata, meta.git.as_ref());
     if let Some(summary) = summary {
@@ -260,6 +263,7 @@ pub(super) fn annotate_message(
     message: &mut SessionMessageRecord,
     cwd: Option<&Path>,
     git: Option<&Value>,
+    location_cache: &ProjectRootMatcherCache,
 ) {
     let mut metadata = message
         .metadata_json
@@ -271,10 +275,11 @@ pub(super) fn annotate_message(
         })
         .unwrap_or_default();
 
-    append_location_metadata(
+    append_location_metadata_cached(
         &mut metadata,
         CODEX_TURN_LOCATION_KEYS,
         TranscriptLocation::new(cwd, "codex_context"),
+        location_cache,
     );
     insert_git_metadata(&mut metadata, git);
     message.metadata_json = serde_json::to_string(&Value::Object(metadata)).ok();
