@@ -56,6 +56,22 @@ What is NOT closed: the 237-minute observation was an operational measurement
 on a live profile, and no equivalent re-observation has been taken since these
 landed. The mechanism to prove cadence now exists; the proof does not.)
 
+(Observation 2026-08-07 ~21:00 UTC, live operator profile, this repository:
+the staleness defect does not reproduce. Method: the live daemon (installed
+release 0.0.73, running since 08:56 UTC) journals `git_watch_synced` per
+metadata-watcher sync; joining today's 164 commits made inside that daemon's
+window against the journal's sync timestamps gives commit-to-next-sync delays
+of p50 = 8 s, p95 = 252 s, p99 = 1,043 s, max = 1,176 s (19.6 min) — minutes,
+not the 237–285 min measured before the watcher/backstop repairs. The worst
+inter-sync gap today (67 min) contained zero commits, i.e. idle time, not
+staleness. Caveat kept honest: the installed 0.0.73 binary predates the
+event-to-ready receipts (325ea665e4) and the query-admission ladder close
+(cbac4ae64e), so its journal contains no `code_index_event_to_ready` records —
+this closes the *operational* defect with data, while the receipts-based
+percentile proof still requires the next operator install and rides the
+existing operator-journey item (H1). Reopen only if that re-observation
+regresses.)
+
 Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
 semantics. Plan 15 owns quality evaluation. Plan 31 consumes the tested
 consumer of tested chunks and lexical/graph fallback behavior; application,
