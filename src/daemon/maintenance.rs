@@ -440,7 +440,6 @@ pub(super) struct MaintenanceMetricsV1 {
     pub(super) last_outcome: Option<MaintenanceStoreOutcomeV1>,
 }
 
-#[derive(Clone)]
 /// Grace windows for the daily branch-store GC pass, taken from the pinned
 /// sync configuration at daemon startup.
 #[derive(Clone, Copy, Debug)]
@@ -452,6 +451,7 @@ pub(super) struct BranchStoreGcCadenceV1 {
 /// Interval between branch-store GC passes across mounted projects.
 const BRANCH_STORE_GC_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
 
+#[derive(Clone)]
 pub(super) struct MaintenanceCoordinator {
     cancellation: crate::application::context::CancellationToken,
     wake: Arc<Notify>,
