@@ -207,11 +207,8 @@ fn command_replay_is_idempotent_and_divergent_reuse_is_a_typed_conflict() {
     assert_eq!(store.count("workflow_run_journal"), 1);
 
     assert_eq!(
-        WorkflowRunStoragePort::projection(
-            &authority,
-            &id::<RunId>("run.workflow.journal.absent")
-        )
-        .unwrap_err(),
+        WorkflowRunStoragePort::projection(&authority, &id::<RunId>("run.workflow.journal.absent"))
+            .unwrap_err(),
         WorkflowRunStorageError::NotFound
     );
 }
@@ -220,7 +217,10 @@ fn command_replay_is_idempotent_and_divergent_reuse_is_a_typed_conflict() {
 fn artifact_payloads_survive_restart_and_hydration_verifies_content() {
     let store = RegisteredWorkflowStore::start("artifact-payload-durability");
     let authority = attach(&store);
-    let payload = content_artifact("artifact.workflow.journal.context", b"durable context bytes");
+    let payload = content_artifact(
+        "artifact.workflow.journal.context",
+        b"durable context bytes",
+    );
 
     assert_eq!(
         authority.persist(&payload).unwrap(),
@@ -247,7 +247,10 @@ fn artifact_payloads_survive_restart_and_hydration_verifies_content() {
 fn corrupted_artifact_rows_are_refused_on_hydration() {
     let store = RegisteredWorkflowStore::start("artifact-payload-corruption");
     let authority = attach(&store);
-    let payload = content_artifact("artifact.workflow.journal.context", b"durable context bytes");
+    let payload = content_artifact(
+        "artifact.workflow.journal.context",
+        b"durable context bytes",
+    );
     assert_eq!(
         authority.persist(&payload).unwrap(),
         WorkflowArtifactPersistOutcome::Persisted

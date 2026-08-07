@@ -6,12 +6,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, RunId, WorkArtifactRefV1, WorkflowDefinition, WorkflowDefinitionId,
-    WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEvent,
-    WorkflowRunEventContext, WorkflowRunProjection, WorkflowRunStateError,
+    ManifestDigest, RunId, WorkArtifactRefV1, WorkCommandId, WorkflowDefinition,
+    WorkflowDefinitionId, WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowRunCommand,
+    WorkflowRunEvent, WorkflowRunEventContext, WorkflowRunProjection, WorkflowRunStateError,
     WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepInput, WorkflowStepOutput,
     canonical_sha256, canonical_text::canonical_framed_sha256,
 };
+
+use crate::workflow_provider::WorkflowProviderRegistration;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowRunStorageError {
@@ -400,13 +402,25 @@ where
             .iter()
             .flat_map(WorkflowStepOutput::artifacts)
             .map(|artifact| artifact.artifact())
-            .map(|artifact| (artifact.digest(), artifact.artifact_id(), artifact.byte_length()))
+            .map(|artifact| {
+                (
+                    artifact.digest(),
+                    artifact.artifact_id(),
+                    artifact.byte_length(),
+                )
+            })
             .collect::<BTreeSet<_>>();
         let supplied = result
             .artifact_payloads
             .iter()
             .map(WorkflowArtifactPayload::artifact)
-            .map(|artifact| (artifact.digest(), artifact.artifact_id(), artifact.byte_length()))
+            .map(|artifact| {
+                (
+                    artifact.digest(),
+                    artifact.artifact_id(),
+                    artifact.byte_length(),
+                )
+            })
             .collect::<BTreeSet<_>>();
         if declared != supplied || result.artifact_payloads.len() != supplied.len() {
             return None;
@@ -599,4 +613,54 @@ fn protocol_failure_receipt(
         &[],
     )
     .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt.into())
+}
+
+/// Starts (admits) a journaled workflow run from an active definition.
+///
+/// The daemon derives every admission digest itself: the definition's own
+/// pinned policy/configuration/catalog digests are checked against the live
+/// environment, the topology digest comes from the evaluated topology policy,
+/// and the provider registry digest is computed from this registration — the
+/// caller never supplies a digest the runtime must trust.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRunStartRequest {
+    pub run_id: RunId,
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+    pub provider: WorkflowProviderRegistration,
+    pub command_id: WorkCommandId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRunPauseRequest {
+    pub run_id: RunId,
+    pub expected_sequence: u64,
+    pub command_id: WorkCommandId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRunResumeRequest {
+    pub run_id: RunId,
+    pub expected_sequence: u64,
+    pub command_id: WorkCommandId,
+}
+
+/// Requests cooperative cancellation as a durable typed transition; the run
+/// settles to `Cancelled` when the runtime reconciles in-flight steps.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRunCancelRequest {
+    pub run_id: RunId,
+    pub expected_sequence: u64,
+    pub command_id: WorkCommandId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRunGetRequest {
+    pub run_id: RunId,
 }

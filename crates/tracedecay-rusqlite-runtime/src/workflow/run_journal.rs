@@ -23,7 +23,10 @@ fn run_journal_unavailable<E>(_: E) -> WorkflowRunStorageError {
     WorkflowRunStorageError::Unavailable
 }
 
-fn decode_event(payload: &str, stored_digest: &str) -> Result<WorkflowRunEvent, WorkflowRunStorageError> {
+fn decode_event(
+    payload: &str,
+    stored_digest: &str,
+) -> Result<WorkflowRunEvent, WorkflowRunStorageError> {
     let event: WorkflowRunEvent =
         decode_json(payload).map_err(|_| WorkflowRunStorageError::InvalidHistory)?;
     let digest = canonical_sha256(&event).map_err(|_| WorkflowRunStorageError::InvalidHistory)?;
