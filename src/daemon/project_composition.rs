@@ -744,6 +744,21 @@ pub(super) async fn production_project_server(
             let registered_project_session_db = store_administration
                 .registered_project_session_database(cg.project_root(), cg.store_layout())
                 .await?;
+            let project_graph_runtime = graph_runtime
+                .retain_project_graph_runtime(
+                    code_search_project_id.clone(),
+                    Arc::new(cg.db().clone()),
+                )
+                .await?;
+            let project_graph_runtime: Arc<
+                dyn crate::global_db::ProjectGraphRuntimePortV1,
+            > = Arc::new(project_graph_runtime);
+            registered_project_session_db
+                .bind_project_graph_runtime(project_graph_runtime)
+                .map_err(|_| TraceDecayError::Config {
+                    message: "project graph runtime was already mounted for project sessions"
+                        .to_owned(),
+                })?;
             log_daemon_event(
                 "project_open_phase",
                 &[

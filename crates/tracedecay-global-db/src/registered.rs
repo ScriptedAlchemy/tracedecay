@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
@@ -22,6 +23,22 @@ pub struct RegisteredGlobalDb {
     write_connection: Connection,
     runtime: StoreRuntimeHandle,
     authority: DatabaseAuthority,
+    project_graph: OnceLock<Arc<dyn ProjectGraphRuntimePortV1>>,
+}
+
+pub trait ProjectGraphRuntimePortV1: Send + Sync {
+    fn publish_verified_manifest(
+        &self,
+        manifest: &tracedecay_graph_db::GraphGenerationManifest,
+        idempotency_key: tracedecay_graph_db::GraphIdempotencyKey,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError>;
+
+    fn verified_snapshot(
+        &self,
+        projection: &tracedecay_graph_db::GraphProjectionIdentity,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError>;
 }
 
 /// Core Work command and projection services over the registered exact-SQL
@@ -146,6 +163,7 @@ impl RegisteredGlobalDb {
             write_connection,
             runtime,
             authority,
+            project_graph: OnceLock::new(),
         };
         database.validate_authority_schema_contract().await?;
         Ok(database)
@@ -153,6 +171,17 @@ impl RegisteredGlobalDb {
 
     pub fn read_connection(&self) -> &ReadConnection {
         &self.read_connection
+    }
+
+    pub fn bind_project_graph_runtime(
+        &self,
+        runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+    ) -> Result<(), Arc<dyn ProjectGraphRuntimePortV1>> {
+        self.project_graph.set(runtime)
+    }
+
+    pub fn project_graph_runtime(&self) -> Option<&Arc<dyn ProjectGraphRuntimePortV1>> {
+        self.project_graph.get()
     }
 
     pub async fn read_snapshot(&self) -> tracedecay_runtime_core::db::engine::Result<ReadSnapshot> {

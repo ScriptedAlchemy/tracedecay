@@ -9,12 +9,12 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbRegistration, GraphGenerationDependency,
-    GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
+    GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
     GraphProjectorRevision, GraphReplayCollectionOutcome, GraphWriteBatch,
     SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
-    CanonicalCodeGraphStoreLeaseV1, StoreRuntimeKey,
+    CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
     CodeShardScopeV1, GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
@@ -123,6 +123,253 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     replay_root: std::path::PathBuf,
     sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
     lifecycle_cancelled: Arc<AtomicBool>,
+}
+
+/// Project-scoped publication runtime for immutable non-code graph journeys.
+///
+/// Code and journey projections share the daemon's sole `GraphDbRegistry` and
+/// physical Grafeo store. Journey manifests use canonical inline replay; code
+/// generations keep their sealed replay source through
+/// [`RetainedCodeGraphRuntimeV1`].
+pub(crate) struct RetainedProjectGraphRuntimeV1 {
+    graph_registry: tracedecay_graph_db::GraphDbRegistry,
+    authority: Arc<CanonicalGraphStoreLeaseV1>,
+    project_database: Arc<crate::db::Database>,
+    lifecycle_cancelled: Arc<AtomicBool>,
+}
+
+impl RetainedProjectGraphRuntimeV1 {
+    pub(crate) fn publish_verified_manifest(
+        &self,
+        manifest: &GraphGenerationManifest,
+        idempotency_key: GraphIdempotencyKey,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+        let identity = manifest.generation.as_str();
+        let cancellation_identity = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!(
+                "graph-publish:{identity}"
+            ))
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            generation: 1,
+        };
+        let deadline_identity = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!(
+                "graph-publish-deadline:{identity}"
+            ))
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let request_cancellation: Arc<dyn GraphCancellation> = Arc::new(
+            AtomicGraphCancellationV1::new(Arc::clone(&request_cancelled)),
+        );
+        let probe = GraphPublicationProbeV1 {
+            request_cancellation: Arc::clone(&request_cancellation),
+            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+            deadline_at,
+            cancellation: cancellation_identity.clone(),
+            deadline: deadline_identity.clone(),
+            commit_started: AtomicBool::new(false),
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            deadline: deadline_identity,
+            cancellation: cancellation_identity,
+        };
+        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
+        let registration = || GraphDbRegistration {
+            authority_lease: Arc::clone(&authority_lease),
+            cancellation: Arc::clone(&request_cancellation),
+            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                &self.lifecycle_cancelled,
+            ))),
+            deadline: deadline_at,
+        };
+        let relational_projection = GraphProjectionIdentityV1 {
+            shard_id: self.authority.binding().shard_id.clone(),
+            namespace: tracedecay_store::GraphNamespaceV1::new(
+                manifest.projection.namespace.as_str(),
+            )
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            projection: GraphProjectionIdV1::new(manifest.projection.projection.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let publication_key = GraphPublicationKeyV1::new(
+            relational_projection.clone(),
+            GraphGenerationIdV1::new(manifest.generation.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            GraphPublicationIdempotencyKeyV1::new(idempotency_key.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        );
+        let mut storage = self
+            .project_database
+            .graph_publication_storage()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        match storage
+            .replay(&publication_key, &context)
+            .map_err(map_publication_error)?
+        {
+            GraphPublicationReplayLookupV1::Active(_) => {
+                let head = storage
+                    .verified_head(&relational_projection, &context)
+                    .map_err(map_publication_error)?;
+                if head
+                    .as_ref()
+                    .is_some_and(|head| head.key == publication_key)
+                {
+                    return self.graph_registry.recover_verified_snapshot(
+                        registration(),
+                        &mut storage,
+                        &context,
+                        &relational_projection,
+                    );
+                }
+                return Err(GraphDbError::Conflict);
+            }
+            GraphPublicationReplayLookupV1::Retired(_) => {
+                return Err(GraphDbError::Conflict);
+            }
+            GraphPublicationReplayLookupV1::Missing => {}
+        }
+        let prior = storage
+            .verified_head(&relational_projection, &context)
+            .map_err(map_publication_error)?;
+        let input = canonical_sha256(&(
+            "tracedecay.inline-graph-publication-input.v1",
+            &publication_key,
+            manifest,
+        ))
+        .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        let replay = manifest.relational_replay(
+            self.authority.binding().shard_id.clone(),
+            idempotency_key,
+            GraphPublicationInputDigestV1::new(input.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            prior,
+            &|| match probe.interruption() {
+                Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                    Err(GraphDbError::DeadlineExceeded)
+                }
+                None => Ok(()),
+            },
+        )?;
+        match storage
+            .append_replay(&replay, &context)
+            .map_err(map_publication_error)?
+        {
+            GraphReplayAppendOutcomeV1::Appended(_)
+            | GraphReplayAppendOutcomeV1::ExactReplay(_)
+            | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => {}
+            GraphReplayAppendOutcomeV1::Conflict { .. }
+            | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. }
+            | GraphReplayAppendOutcomeV1::VerifiedHeadConflict { .. }
+            | GraphReplayAppendOutcomeV1::PendingReplayConflict { .. } => {
+                return Err(GraphDbError::Conflict);
+            }
+        }
+        let publication = self.graph_registry.publish_verified(
+            registration(),
+            &mut storage,
+            &context,
+            &replay.key,
+        )?;
+        Ok(publication.snapshot)
+    }
+
+    pub(crate) fn verified_snapshot(
+        &self,
+        projection: &GraphProjectionIdentity,
+        request_cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
+        let cancellation_identity = RuntimeCancellationIdentityV1 {
+            cancellation_id: RuntimeCancellationIdV1::new(format!(
+                "graph-read:{}",
+                projection.projection.as_str()
+            ))
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            generation: 1,
+        };
+        let deadline_identity = RuntimeDeadlineV1 {
+            deadline_id: RuntimeDeadlineIdV1::new(format!(
+                "graph-read-deadline:{}",
+                projection.projection.as_str()
+            ))
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let probe = GraphPublicationProbeV1 {
+            request_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                &request_cancelled,
+            ))),
+            lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
+            deadline_at,
+            cancellation: cancellation_identity.clone(),
+            deadline: deadline_identity.clone(),
+            commit_started: AtomicBool::new(false),
+        };
+        let control = RuntimeRequestControlV1 {
+            requested_at: UtcMicros(crate::tracedecay::current_timestamp()),
+            deadline: deadline_identity,
+            cancellation: cancellation_identity,
+        };
+        let context = GraphPublicationOperationContextV1::new(&control, &probe)
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        let relational_projection = GraphProjectionIdentityV1 {
+            shard_id: self.authority.binding().shard_id.clone(),
+            namespace: tracedecay_store::GraphNamespaceV1::new(
+                projection.namespace.as_str(),
+            )
+            .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+            projection: GraphProjectionIdV1::new(projection.projection.as_str())
+                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
+        };
+        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
+        let registration = GraphDbRegistration {
+            authority_lease,
+            cancellation: Arc::new(AtomicGraphCancellationV1::new(request_cancelled)),
+            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
+                &self.lifecycle_cancelled,
+            ))),
+            deadline: deadline_at,
+        };
+        let mut storage = self
+            .project_database
+            .graph_publication_storage()
+            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        self.graph_registry.recover_verified_snapshot(
+            registration,
+            &mut storage,
+            &context,
+            &relational_projection,
+        )
+    }
+}
+
+impl crate::global_db::ProjectGraphRuntimePortV1 for RetainedProjectGraphRuntimeV1 {
+    fn publish_verified_manifest(
+        &self,
+        manifest: &GraphGenerationManifest,
+        idempotency_key: GraphIdempotencyKey,
+        cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        RetainedProjectGraphRuntimeV1::publish_verified_manifest(
+            self,
+            manifest,
+            idempotency_key,
+            cancelled,
+        )
+    }
+
+    fn verified_snapshot(
+        &self,
+        projection: &GraphProjectionIdentity,
+        cancelled: Arc<AtomicBool>,
+    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        RetainedProjectGraphRuntimeV1::verified_snapshot(self, projection, cancelled)
+    }
 }
 
 impl RetainedCodeGraphRuntimeV1 {
@@ -623,6 +870,31 @@ impl RetainedCodeGraphRuntimeV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) async fn retain_project_graph_runtime(
+        &self,
+        project_id: ProjectId,
+        project_database: Arc<crate::db::Database>,
+    ) -> Result<RetainedProjectGraphRuntimeV1> {
+        let project_shard = StoreShardIdV1::project(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id,
+        );
+        let authority = self
+            .registry
+            .retain_graph_store(StoreRuntimeKey::new(project_shard, self.incarnation))
+            .await
+            .map_err(|failure| {
+                session_registry_error("retain project graph authority", format!("{failure:?}"))
+            })?;
+        Ok(RetainedProjectGraphRuntimeV1 {
+            graph_registry: self.graph_registry.clone(),
+            authority,
+            project_database,
+            lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn retain_code_graph_runtime(
         &self,

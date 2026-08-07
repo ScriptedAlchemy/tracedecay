@@ -12,6 +12,10 @@ use super::{
     LocalProfileIdentityAuthorityV1, ProjectId, StoreShardIdV1, process_runtime_generation,
 };
 use crate::db::engine::{Executor, TestConnection};
+use tracedecay_graph_db::{
+    GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
+    GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
+};
 use tracedecay_store::RetainedGraphStoreLeaseV1;
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
@@ -663,6 +667,115 @@ async fn worktree_graph_mount_does_not_require_git() {
         .expect("non-git graph runtime");
 
     assert_eq!(database.database_path(), database_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
+    let temporary = tempfile::tempdir().expect("temporary project parent");
+    let root = temporary.path().canonicalize().expect("canonical root");
+    let profile_root = root.join("profile");
+    let project_root = root.join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("durable profile identity");
+    let project_id = ProjectId::new("project.generic-graph").expect("project id");
+    crate::storage::write_enrollment_marker(
+        &project_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("project enrollment");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 19, "generic graph runtime")
+            .expect("daemon database scope");
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+        .await
+        .expect("session runtime registry");
+    let project_database = registry
+        .project_memory(project_id.clone(), [project_root])
+        .await
+        .expect("project database");
+    let runtime = registry
+        .retain_project_graph_runtime(project_id, Arc::clone(&project_database))
+        .await
+        .expect("project graph runtime");
+    let projection = GraphProjectionIdentity::new(
+        GraphNamespace::new("journey:generic-test").expect("namespace"),
+        GraphProjectionId::new("projection.generic-test").expect("projection"),
+    );
+    let manifest = GraphGenerationManifest::new(
+        projection.clone(),
+        GraphGenerationId::new("generation.generic-test.1").expect("generation"),
+        SourceGeneration::new("source.generic-test.1").expect("source"),
+        GraphWatermark::new("watermark.generic-test.1").expect("watermark"),
+        vec![],
+        vec![],
+        vec![],
+    )
+    .expect("manifest");
+    let idempotency =
+        GraphIdempotencyKey::new("idempotency.generic-test.1").expect("idempotency");
+
+    let published = runtime
+        .publish_verified_manifest(
+            &manifest,
+            idempotency.clone(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("publish inline manifest");
+    assert_eq!(published.generation(), &manifest.generation);
+    let replayed = runtime
+        .publish_verified_manifest(&manifest, idempotency, Arc::new(AtomicBool::new(false)))
+        .expect("recover exact publication");
+    assert_eq!(replayed.generation(), &manifest.generation);
+    let recovered = runtime
+        .verified_snapshot(&projection, Arc::new(AtomicBool::new(false)))
+        .expect("recover verified head");
+    assert_eq!(recovered.generation(), &manifest.generation);
+
+    let successor = GraphGenerationManifest::new(
+        projection.clone(),
+        GraphGenerationId::new("generation.generic-test.2").expect("successor generation"),
+        SourceGeneration::new("source.generic-test.2").expect("successor source"),
+        GraphWatermark::new("watermark.generic-test.2").expect("successor watermark"),
+        vec![],
+        vec![],
+        vec![],
+    )
+    .expect("successor manifest");
+    runtime
+        .publish_verified_manifest(
+            &successor,
+            GraphIdempotencyKey::new("idempotency.generic-test.2")
+                .expect("successor idempotency"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("publish successor");
+    assert!(matches!(
+        runtime.publish_verified_manifest(
+            &manifest,
+            GraphIdempotencyKey::new("idempotency.generic-test.1")
+                .expect("stale idempotency"),
+            Arc::new(AtomicBool::new(false)),
+        ),
+        Err(GraphDbError::Conflict)
+    ));
+
+    let cancelled = Arc::new(AtomicBool::new(true));
+    assert!(matches!(
+        runtime.verified_snapshot(&projection, cancelled),
+        Err(GraphDbError::Cancelled)
+    ));
+    let missing = GraphProjectionIdentity::new(
+        projection.namespace.clone(),
+        GraphProjectionId::new("projection.generic-test.missing").expect("missing projection"),
+    );
+    assert!(matches!(
+        runtime.verified_snapshot(&missing, Arc::new(AtomicBool::new(false))),
+        Err(GraphDbError::Unavailable { .. })
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

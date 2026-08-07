@@ -69,7 +69,9 @@ pub use project_registry::{
     GIT_COMMON_DIR_ALIAS_PREFIX, ReapEntryKind, RegistryReapEntry, RegistryReapPlan,
     RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
 };
-pub use registered::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+pub use registered::{
+    ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
+};
 pub use session_temporal::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
