@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+use tracedecay_domain::{CoverageStateV1, StorageObservationKindV1, StorageObservedV1};
 use tracedecay_global_db::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
 /// Maximum events committed with one matching durable cursor frontier.
@@ -166,6 +167,10 @@ pub async fn import_source(
     }
     let mut acknowledged = 0u64;
     let mut claimed_cursor = expected_cursor;
+    // Durable-append span only. Parsing and file I/O above are deliberately
+    // outside it so the storage measurement denominates store write latency
+    // rather than total import cost.
+    let durable_started = std::time::Instant::now();
     for chunk in batch.chunks(IMPORT_BATCH_SIZE) {
         let events = chunk
             .iter()
@@ -186,6 +191,7 @@ pub async fn import_source(
             .await
         {
             result.error = Some(err);
+            observe_import_write_latency(gdb, durable_started, false).await;
             return result;
         }
         acknowledged = frontier;
@@ -212,7 +218,44 @@ pub async fn import_source(
     {
         result.error = Some(err);
     }
+    observe_import_write_latency(gdb, durable_started, result.error.is_none()).await;
     result
+}
+
+/// Retains one `storage.measurement.observed.v1` write-latency observation for
+/// the durable append span of this import.
+///
+/// Telemetry is strictly downstream of the import: the observation is recorded
+/// after the product outcome is already determined and its result is discarded,
+/// so a failed or unavailable observation store can never change what the
+/// import returned. An import that ends in error retains `Partial` coverage
+/// because the measured span covers only the appends that were reached.
+///
+/// A user-level analytics database is not bound to a project scope; the
+/// observation authority refuses it and this becomes a no-op rather than an
+/// event attributed to the wrong scope.
+async fn observe_import_write_latency(
+    gdb: &RegisteredGlobalDb,
+    started: std::time::Instant,
+    complete: bool,
+) {
+    let Ok(duration_micros) = u64::try_from(started.elapsed().as_micros()) else {
+        return;
+    };
+    let _ = crate::observability::record_storage(
+        gdb,
+        StorageObservedV1 {
+            kind: StorageObservationKindV1::WriteLatency,
+            duration_micros: Some(duration_micros),
+            quantity: None,
+            coverage: if complete {
+                CoverageStateV1::Known
+            } else {
+                CoverageStateV1::Partial
+            },
+        },
+    )
+    .await;
 }
 
 /// Namespaced `parse_offsets` key so hook cursors never collide with the
