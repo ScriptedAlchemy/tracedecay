@@ -1,10 +1,8 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use sha2::{Digest as _, Sha256};
-use tracedecay_graph_db::{
-    GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision,
-};
+use tracedecay_graph_db::{GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision};
 
 use super::{
     CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION_V1,
@@ -14,7 +12,11 @@ use super::{
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
-const MISSING_VERIFIED_HEAD: &str =
+/// Exact unavailability message the graph registry emits when a projection
+/// has no installed verified head (see graph-db `publication_support`).
+/// Callers that treat "nothing published yet" as an empty start match on
+/// this sentinel; keep every copy pointed at this one constant.
+pub const MISSING_VERIFIED_HEAD: &str =
     "graph projection is not recovered into an installed verified head";
 
 /// A `(branch, worktree)` pair a session was observed on, with the widest span
@@ -177,7 +179,10 @@ pub fn stable_backfill_span(
         branch.unwrap_or("\0")
     );
     SessionGitSpan {
-        span_id: format!("backfill:{}", hex::encode(Sha256::digest(identity.as_bytes()))),
+        span_id: format!(
+            "backfill:{}",
+            hex::encode(Sha256::digest(identity.as_bytes()))
+        ),
         provider: provider.to_owned(),
         session_id: session_id.to_owned(),
         thread_id: None,
@@ -197,24 +202,20 @@ pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
     new_commits: &[CommitSessionRecord],
 ) -> Result<(usize, usize), GitCorrelationError> {
     let runtime = session_store.graph_runtime()?;
-    let identity = git_evidence_projection_identity(GraphNamespace::new(
-        GIT_EVIDENCE_GRAPH_NAMESPACE,
-    )?)?;
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));
-    let (mut spans, mut commits) = match recover_git_evidence_projection(
-        runtime,
-        &identity,
-        Arc::clone(&cancelled),
-    ) {
-        Ok(store) => (
-            store.projection().spans().to_vec(),
-            store.projection().commit_sessions().to_vec(),
-        ),
-        Err(GitCorrelationError::Unavailable(message)) if message == MISSING_VERIFIED_HEAD => {
-            (Vec::new(), Vec::new())
-        }
-        Err(error) => return Err(error),
-    };
+    let (mut spans, mut commits) =
+        match recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled)) {
+            Ok(store) => (
+                store.projection().spans().to_vec(),
+                store.projection().commit_sessions().to_vec(),
+            ),
+            Err(GitCorrelationError::Unavailable(message)) if message == MISSING_VERIFIED_HEAD => {
+                (Vec::new(), Vec::new())
+            }
+            Err(error) => return Err(error),
+        };
     let mut spans_changed = 0;
     for incoming in new_spans {
         if merge_span(&mut spans, incoming) {
@@ -227,11 +228,9 @@ pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
             commits_changed += 1;
         }
     }
-    let publication_key =
-        graph_evidence_publication_key(publication_prefix, &spans, &commits)?;
+    let publication_key = graph_evidence_publication_key(publication_prefix, &spans, &commits)?;
     let projection = GitEvidenceProjectionV1::new(&publication_key, spans, commits)?;
-    let revision =
-        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned())?;
+    let revision = GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned())?;
     publish_git_evidence_projection(
         runtime,
         identity,
@@ -257,7 +256,7 @@ fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> boo
         return false;
     }
     if let Some(existing) = spans.iter_mut().find(|span| {
-        span.provider == incoming.provider
+        providers_compatible(&span.provider, &incoming.provider)
             && span.session_id == incoming.session_id
             && span.thread_id == incoming.thread_id
             && span.branch == incoming.branch
@@ -267,6 +266,9 @@ fn merge_span(spans: &mut Vec<SessionGitSpan>, incoming: &SessionGitSpan) -> boo
             && incoming.last_ts >= span.first_ts
     }) {
         let previous = existing.clone();
+        if existing.provider.is_empty() && !incoming.provider.is_empty() {
+            existing.provider.clone_from(&incoming.provider);
+        }
         existing.first_ts = existing.first_ts.min(incoming.first_ts);
         existing.last_ts = existing.last_ts.max(incoming.last_ts);
         existing.event_count = existing.event_count.max(incoming.event_count);
@@ -287,9 +289,13 @@ fn merge_commit(commits: &mut Vec<CommitSessionRecord>, incoming: &CommitSession
     if existing == incoming {
         return false;
     }
-    if (incoming.relation == CommitRelation::Produced, incoming.confidence)
-        > (existing.relation == CommitRelation::Produced, existing.confidence)
-    {
+    if (
+        incoming.relation == CommitRelation::Produced,
+        incoming.confidence,
+    ) > (
+        existing.relation == CommitRelation::Produced,
+        existing.confidence,
+    ) {
         existing.clone_from(incoming);
         true
     } else {
@@ -312,9 +318,8 @@ where
     F: FnMut(&SpanScanTarget) -> TargetScan,
 {
     let runtime = session_store.graph_runtime()?;
-    let identity = git_evidence_projection_identity(GraphNamespace::new(
-        GIT_EVIDENCE_GRAPH_NAMESPACE,
-    )?)?;
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));
     let projection = match recover_git_evidence_projection(runtime, &identity, cancelled) {
         Ok(store) => store.projection().clone(),
@@ -351,8 +356,7 @@ where
     if records.is_empty() {
         return Ok(0);
     }
-    let (_, inserted) =
-        publish_graph_evidence(session_store, "git-attribution", &[], &records)?;
+    let (_, inserted) = publish_graph_evidence(session_store, "git-attribution", &[], &records)?;
     Ok(inserted)
 }
 

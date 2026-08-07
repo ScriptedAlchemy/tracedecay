@@ -748,6 +748,17 @@ pub async fn write_meta_value(
     Ok(())
 }
 
+/// Whether two span provider labels can identify the same session lineage.
+///
+/// An empty provider is an unattributed observation (hook routes cannot
+/// always name the provider); it matches any canonical provider, and the
+/// canonical map in [`GitEvidenceProjectionV1::new`] settles the final
+/// label. Two distinct non-empty providers never match — one session
+/// carrying both is rejected by `canonical_provider_map`.
+pub fn providers_compatible(left: &str, right: &str) -> bool {
+    left.is_empty() || right.is_empty() || left == right
+}
+
 fn validate_span(span: &SessionGitSpan) -> Result<(), GitCorrelationError> {
     if span.span_id.is_empty()
         || span.session_id.is_empty()
@@ -950,9 +961,9 @@ mod attribution;
 mod backfill;
 mod store;
 pub use attribution::{
-    ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
-    graph_evidence_publication_key, match_commit_to_spans, publish_graph_evidence,
-    run_commit_attribution_sweep,
+    MISSING_VERIFIED_HEAD, ScannedCommit, SpanScanTarget, SpanWindow, TargetScan,
+    commit_overlap_kind, graph_evidence_publication_key, match_commit_to_spans,
+    publish_graph_evidence, run_commit_attribution_sweep,
 };
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,

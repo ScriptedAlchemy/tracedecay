@@ -5,8 +5,8 @@
 //! façade methods.
 
 use std::borrow::Borrow;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::GraphNamespace;
@@ -17,20 +17,18 @@ use crate::global_db::{
     ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
 };
 use crate::sessions::git_correlation::{
-    AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats, BoundedBackfillOutcome,
-    BoundedGitControl, CommitRelationFilter, CommitSessionRecord, CorrelationIndexHealth,
-    GitCorrelationError, GitCorrelationSessionStore, GitEvidenceGraphRuntimePort,
-    GitEvidenceProjectionStore, GitReflogSource, SessionGitCorrelationHit, SessionGitSpan,
-    SessionsForQuery, SpanObservation, graph_evidence_publication_key,
-    git_evidence_projection_identity, normalize_worktree, observation_extends_span,
-    publish_graph_evidence, read_meta_value, recover_git_evidence_projection, run_backfill,
-    run_bounded_history_index_page, run_incremental_backfill, AUTO_BACKFILL_WATERMARK_KEY,
-    DEFAULT_SPAN_MERGE_GAP_SECS,
+    AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats,
+    BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter, CommitSessionRecord,
+    CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, MISSING_VERIFIED_HEAD,
+    GitCorrelationSessionStore, GitEvidenceGraphRuntimePort, GitEvidenceProjectionStore,
+    GitReflogSource, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
+    git_evidence_projection_identity, graph_evidence_publication_key, normalize_worktree,
+    observation_extends_span, providers_compatible, publish_graph_evidence, read_meta_value,
+    recover_git_evidence_projection, run_backfill, run_bounded_history_index_page,
+    run_incremental_backfill,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
-const MISSING_VERIFIED_HEAD: &str =
-    "graph projection is not recovered into an installed verified head";
 
 struct RegisteredProjectGraphRuntime(Arc<dyn ProjectGraphRuntimePortV1>);
 
@@ -120,12 +118,8 @@ where
         observation: &SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64, GitCorrelationError> {
-        let spans = self.transcript_spans(
-            std::slice::from_ref(observation),
-            merge_gap_secs,
-        )?;
-        let publication_key =
-            graph_evidence_publication_key("hook-route-span", &spans, &[])?;
+        let spans = self.transcript_spans(std::slice::from_ref(observation), merge_gap_secs)?;
+        let publication_key = graph_evidence_publication_key("hook-route-span", &spans, &[])?;
         let (changed, _) = publish_graph_evidence(self, &publication_key, &spans, &[])?;
         i64::try_from(changed).map_err(|_| {
             GitCorrelationError::Contract(
@@ -143,10 +137,7 @@ where
         if commit_records.is_empty() && span_observations.is_empty() {
             return Ok(());
         }
-        let spans = self.transcript_spans(
-            span_observations,
-            DEFAULT_SPAN_MERGE_GAP_SECS,
-        )?;
+        let spans = self.transcript_spans(span_observations, DEFAULT_SPAN_MERGE_GAP_SECS)?;
         let publication_key =
             graph_evidence_publication_key(publication_prefix, &spans, commit_records)?;
         publish_graph_evidence(self, &publication_key, &spans, commit_records)?;
@@ -168,26 +159,26 @@ where
         let mut candidates: Vec<SessionGitSpan> = Vec::new();
         for observation in observations {
             let worktree = normalize_worktree(&observation.worktree);
-            let existing = candidates
-                .iter()
-                .chain(current.iter())
-                .find(|span| {
-                    span.provider == observation.provider
-                        && span.session_id == observation.session_id
-                        && span.thread_id == observation.thread_id
-                        && span.branch == observation.branch
-                        && span.worktree == worktree
-                        && span.source == observation.source
-                        && observation_extends_span(
-                            span.first_ts,
-                            span.last_ts,
-                            observation.ts,
-                            merge_gap_secs,
-                        )
-                });
+            let existing = candidates.iter().chain(current.iter()).find(|span| {
+                providers_compatible(&span.provider, &observation.provider)
+                    && span.session_id == observation.session_id
+                    && span.thread_id == observation.thread_id
+                    && span.branch == observation.branch
+                    && span.worktree == worktree
+                    && span.source == observation.source
+                    && observation_extends_span(
+                        span.first_ts,
+                        span.last_ts,
+                        observation.ts,
+                        merge_gap_secs,
+                    )
+            });
             let span = match existing {
                 Some(existing) => {
                     let mut span = existing.clone();
+                    if span.provider.is_empty() && !observation.provider.is_empty() {
+                        span.provider.clone_from(&observation.provider);
+                    }
                     let extends = observation.ts < span.first_ts || observation.ts > span.last_ts;
                     span.first_ts = span.first_ts.min(observation.ts);
                     span.last_ts = span.last_ts.max(observation.ts);
@@ -264,8 +255,7 @@ where
         &self,
     ) -> Result<CorrelationIndexHealth, GitCorrelationError> {
         let snapshot = self.read_snapshot().await?;
-        let backfill_watermark =
-            read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
+        let backfill_watermark = read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY).await?;
         Ok(self.git_evidence_projection()?.health(backfill_watermark))
     }
 
@@ -277,6 +267,20 @@ where
         Ok(self
             .git_evidence_projection()?
             .sessions_for_with_relation(query, relation))
+    }
+
+    pub(crate) fn session_ids_for_scope(
+        &self,
+        filter: &crate::sessions::git_correlation::GitScopeFilter,
+    ) -> Result<std::collections::BTreeSet<(String, String)>, GitCorrelationError> {
+        self.git_evidence_projection()?
+            .session_ids_for_scope(filter)
+            .map(|ids| ids.into_iter().collect())
+            .ok_or_else(|| {
+                GitCorrelationError::Unavailable(
+                    "Git evidence scope could not be resolved".to_owned(),
+                )
+            })
     }
 }
 
@@ -291,11 +295,7 @@ fn transcript_span_id(observation: &SpanObservation, worktree: &str) -> String {
     };
     let material = format!(
         "{}\0{}\0{thread_id}\0{branch}\0{}\0{}\0{:?}",
-        observation.provider,
-        observation.session_id,
-        worktree,
-        observation.ts,
-        observation.source,
+        observation.provider, observation.session_id, worktree, observation.ts, observation.source,
     );
     format!(
         "transcript:{}",

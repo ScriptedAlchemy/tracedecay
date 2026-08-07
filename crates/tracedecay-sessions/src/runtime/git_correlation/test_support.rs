@@ -41,8 +41,7 @@ impl GitEvidenceGraphRuntimePort for MemoryEvidenceGraphRuntime {
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
         self.snapshot.lock().unwrap().clone().ok_or_else(|| {
             GraphDbError::Unavailable {
-                message: "graph projection is not recovered into an installed verified head"
-                    .to_owned(),
+                message: super::MISSING_VERIFIED_HEAD.to_owned(),
             }
         })
     }

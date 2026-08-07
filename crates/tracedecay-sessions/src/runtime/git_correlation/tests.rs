@@ -1,5 +1,5 @@
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -130,27 +130,18 @@ fn projection_is_canonical_and_normalizes_evidence() {
         vec!["span-a", "span-b", "span-c"]
     );
     assert_eq!(projection.spans()[0].worktree, "/repo");
+    // span-a arrives with an empty provider; the canonical session map
+    // must settle it from the sibling span of the same session.
+    assert_eq!(projection.spans()[0].provider, "claude");
     assert_eq!(projection.commit_sessions()[0].provider, "claude");
 }
 
 #[test]
 fn projection_rejects_duplicate_or_dangling_evidence() {
-    let duplicate = span(
-        "same",
-        "claude",
-        "session-a",
-        Some("main"),
-        "/repo",
-        1,
-        2,
-    );
+    let duplicate = span("same", "claude", "session-a", Some("main"), "/repo", 1, 2);
     assert!(
-        GitEvidenceProjectionV1::new(
-            "watermark",
-            vec![duplicate.clone(), duplicate],
-            Vec::new()
-        )
-        .is_err()
+        GitEvidenceProjectionV1::new("watermark", vec![duplicate.clone(), duplicate], Vec::new())
+            .is_err()
     );
 
     let mut dangling = commit(

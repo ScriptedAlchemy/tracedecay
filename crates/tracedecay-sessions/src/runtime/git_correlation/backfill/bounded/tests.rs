@@ -23,14 +23,23 @@ impl GitCorrelationWriteTxn for Transaction {
 
 struct TestStore {
     connection: TestConnection,
-    graph: MemoryEvidenceGraphRuntime,
+    graph: std::sync::Arc<MemoryEvidenceGraphRuntime>,
 }
 
 impl TestStore {
     fn open(path: &Path) -> Self {
+        Self::open_with_graph(
+            path,
+            std::sync::Arc::new(MemoryEvidenceGraphRuntime::default()),
+        )
+    }
+
+    /// Reopen against the graph state a prior store instance published, the
+    /// way a restarted daemon sees the durable graph next to its receipts.
+    fn open_with_graph(path: &Path, graph: std::sync::Arc<MemoryEvidenceGraphRuntime>) -> Self {
         Self {
             connection: TestConnection::open(path),
-            graph: MemoryEvidenceGraphRuntime::default(),
+            graph,
         }
     }
 }
@@ -57,7 +66,7 @@ impl GitCorrelationSessionStore for TestStore {
     }
 
     fn graph_runtime(&self) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
-        Ok(&self.graph)
+        Ok(self.graph.as_ref())
     }
 }
 
@@ -237,9 +246,10 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         1
     );
+    let durable_graph = std::sync::Arc::clone(&store.graph);
     drop(store);
 
-    let reopened = TestStore::open(&database);
+    let reopened = TestStore::open_with_graph(&database, durable_graph);
     let completed = run_bounded_history_index_page(
         &reopened,
         &options(false),
