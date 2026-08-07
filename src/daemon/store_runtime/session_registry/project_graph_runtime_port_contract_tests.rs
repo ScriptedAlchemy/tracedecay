@@ -3,12 +3,18 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use tempfile::TempDir;
+use tracedecay_domain::UtcMicros;
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
     VerifiedGraphSnapshot,
 };
-use tracedecay_store::ProjectId;
+use tracedecay_store::{
+    GraphPublicationInputDigestV1, GraphPublicationOperationContextV1, GraphPublicationStoreV1,
+    GraphReplayAppendOutcomeV1, ProjectId, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, StoreShardIdV1,
+};
 
 use super::DaemonSessionRuntimeRegistryV1;
 use crate::daemon::profile_identity;
@@ -320,6 +326,105 @@ async fn linked_worktree_roots_share_the_project_graph_runtime_authority() {
         .expect("linked worktree reads shared project graph");
 
     assert_eq!(linked_snapshot.generation(), &manifest.generation);
+}
+
+struct NeverInterruptedProbe {
+    cancellation: RuntimeCancellationIdentityV1,
+    deadline: RuntimeDeadlineV1,
+}
+
+impl RuntimeRequestProbeV1 for NeverInterruptedProbe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        &self.cancellation
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        &self.deadline
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        None
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        true
+    }
+}
+
+/// A publish interrupted between the relational journal append and the
+/// verified-head CAS leaves an active replay with no head. The next publish of
+/// the same publication must resume it to a verified snapshot — answering
+/// Conflict instead wedges the projection permanently (every later publish and
+/// read fails until the store is deleted).
+#[tokio::test]
+async fn journaled_publication_without_a_head_resumes_to_a_verified_snapshot() {
+    let fixture = ContractFixture::new("resume-journaled").await;
+    let project_id = project_id("resume-journaled");
+    let (project_database, sessions, _) = fixture.bind(&project_id).await;
+    let projection = projection("resume-journaled");
+    let manifest = manifest(&projection, "resume-journaled", "1");
+
+    // Journal the replay exactly as the interrupted publish leaves it: the
+    // append committed, the verified-head CAS never ran. The shard is built
+    // the same way the retained runtime builds its authority binding so the
+    // resumed publish resolves this exact journal row.
+    let identity = profile_identity::load_or_create(&fixture.root.join("profile"))
+        .expect("profile identity authority");
+    let shard_id = StoreShardIdV1::project(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let replay = manifest
+        .relational_replay(
+            shard_id,
+            key("resume-journaled"),
+            GraphPublicationInputDigestV1::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("input digest"),
+            None,
+            &|| Ok(()),
+        )
+        .expect("relational replay");
+    let cancellation_identity = RuntimeCancellationIdentityV1 {
+        cancellation_id: RuntimeCancellationIdV1::new("resume-journaled-cancellation")
+            .expect("cancellation id"),
+        generation: 1,
+    };
+    let deadline_identity = RuntimeDeadlineV1 {
+        deadline_id: RuntimeDeadlineIdV1::new("resume-journaled-deadline").expect("deadline id"),
+    };
+    let control = RuntimeRequestControlV1 {
+        requested_at: UtcMicros(1),
+        deadline: deadline_identity.clone(),
+        cancellation: cancellation_identity.clone(),
+    };
+    let probe = NeverInterruptedProbe {
+        cancellation: cancellation_identity,
+        deadline: deadline_identity,
+    };
+    let context = GraphPublicationOperationContextV1::new(&control, &probe)
+        .expect("publication operation context");
+    let mut storage = project_database
+        .graph_publication_storage()
+        .expect("graph publication storage");
+    assert!(matches!(
+        storage
+            .append_replay(&replay, &context)
+            .expect("journal the replay"),
+        GraphReplayAppendOutcomeV1::Appended(_)
+    ));
+    drop(storage);
+
+    let port = sessions
+        .project_graph_runtime()
+        .expect("bound project graph runtime")
+        .as_ref();
+    let published = publish_through_trait(port, &manifest, key("resume-journaled"), false)
+        .expect("journaled publication must resume to a verified snapshot");
+    assert_eq!(published.generation(), &manifest.generation);
+    let snapshot =
+        snapshot_through_trait(port, &projection).expect("verified snapshot after the resume");
+    assert_eq!(snapshot.generation(), &manifest.generation);
 }
 
 #[tokio::test]

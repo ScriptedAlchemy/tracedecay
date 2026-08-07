@@ -223,7 +223,20 @@ impl RetainedProjectGraphRuntimeV1 {
                         &relational_projection,
                     );
                 }
-                return Err(GraphDbError::Conflict);
+                // The replay is journaled but the verified head never advanced
+                // to it: an earlier publish was interrupted between the journal
+                // append and the head CAS. `publish_verified` is idempotent
+                // over the journaled replay and computes the authoritative
+                // verdict (completes the pending publication, dedupes an exact
+                // replay, or reports a true conflict) — answering Conflict here
+                // would wedge the projection permanently.
+                let publication = self.graph_registry.publish_verified(
+                    registration(),
+                    &mut storage,
+                    &context,
+                    &publication_key,
+                )?;
+                return Ok(publication.snapshot);
             }
             GraphPublicationReplayLookupV1::Retired(_) => {
                 return Err(GraphDbError::Conflict);
