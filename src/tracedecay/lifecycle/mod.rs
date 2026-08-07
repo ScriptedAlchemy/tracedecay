@@ -2,9 +2,7 @@
 //! registration helpers they rely on.
 
 use std::path::Path;
-#[cfg(not(any(test, feature = "test-transport")))]
 use std::path::PathBuf;
-#[cfg(not(any(test, feature = "test-transport")))]
 use std::sync::LazyLock;
 use std::sync::{Arc, OnceLock};
 
@@ -19,8 +17,9 @@ use crate::db::{Database, DatabaseAccessMode, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
-#[cfg(not(any(test, feature = "test-transport")))]
 use crate::support::weak_registry::WeakRegistry;
+#[cfg(any(test, feature = "test-transport"))]
+use tokio::sync::Mutex as AsyncMutex;
 use tracedecay_code_extraction::LanguageRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
@@ -45,6 +44,29 @@ pub(crate) use registry::git_remote_url;
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
     WeakRegistry<PathBuf, crate::db::OwnedMaintenanceDatabaseScope>,
 > = LazyLock::new(WeakRegistry::new);
+
+/// One retained standalone test runtime per (profile root, project root).
+///
+/// The daemon owns exactly one session runtime registry per profile, and the
+/// profile session-relation graph store has a single writer (an exclusive
+/// Grafeo file lock). A second independent runtime on the same profile
+/// therefore cannot open the store. Standalone test opens share one retained
+/// runtime per key, mirroring the production single-registry invariant (and
+/// `STANDALONE_MAINTENANCE_SCOPES` above); the underlying daemon session
+/// registry is additionally shared per profile inside the runtime
+/// constructor, the way one production daemon mounts many projects. Entries
+/// are weak: once every graph holding the runtime drops, the next open
+/// constructs a fresh runtime, so close-then-reopen journeys still observe
+/// fresh mounts.
+#[cfg(any(test, feature = "test-transport"))]
+static STANDALONE_TEST_RUNTIMES: LazyLock<
+    AsyncMutex<
+        WeakRegistry<
+            (PathBuf, PathBuf),
+            crate::application::host_admission::HostAdmissionTestRuntimeV1,
+        >,
+    >,
+> = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
 
 impl TraceDecay {
     #[cfg(not(any(test, feature = "test-transport")))]
@@ -101,13 +123,26 @@ impl TraceDecay {
         let project_id = ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
             message: format!("invalid standalone test project identity: {error}"),
         })?;
-        crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
-            profile_root,
-            project_root,
-            project_id,
-        )
-        .await
-        .map(Arc::new)
+        let registry_key = (
+            crate::lifecycle_lease::canonical_or_original(&profile_root),
+            crate::lifecycle_lease::canonical_or_original(project_root),
+        );
+        // The async lock is held across construction so two concurrent opens
+        // of the same key cannot race into two runtimes.
+        let runtimes = STANDALONE_TEST_RUNTIMES.lock().await;
+        if let Some(runtime) = runtimes.get_live(&registry_key) {
+            return Ok(runtime);
+        }
+        let runtime = Arc::new(
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile_root,
+                project_root,
+                project_id,
+            )
+            .await?,
+        );
+        runtimes.insert(registry_key, &runtime);
+        Ok(runtime)
     }
 
     pub(super) async fn mount_project_graph(
@@ -276,6 +311,8 @@ impl TraceDecay {
         // Computed once and reused below (for `active_branch`) instead of
         // calling `branch::current_branch` twice for the same project root.
         let active_branch = branch::current_branch(project_root);
+        let (serving_branch, fallback_warning) =
+            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
         let db = Self::mount_project_graph(
             runtime_registry.as_ref(),
             project_root,
@@ -321,8 +358,8 @@ impl TraceDecay {
             open_options,
             registry: LanguageRegistry::new(),
             active_branch,
-            serving_branch: None,
-            fallback_warning: None,
+            serving_branch,
+            fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
@@ -571,8 +608,8 @@ impl TraceDecay {
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
         let db_path = store_layout.graph_db_path.clone();
-        let serving_branch = None;
-        let fallback_warning = None;
+        let (serving_branch, fallback_warning) =
+            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
@@ -656,6 +693,37 @@ impl TraceDecay {
         ts.register_project_store_in_global_registry().await?;
         ts.schedule_graph_rebuild_if_needed().await?;
         Ok(ts)
+    }
+
+    /// Branch provenance for an ordinary open of the single project store.
+    ///
+    /// One store serves every branch, so this never chooses a database; it
+    /// decides only which tracked branch's publication provenance the open is
+    /// scoped to (`serving_branch`) and whether that provenance is a fallback
+    /// ancestor rather than the live branch itself (`fallback_warning`).
+    ///
+    /// A detached linked worktree is pinned to its own snapshot scope and has
+    /// no branch identity to drift from, so it resolves no provenance at all:
+    /// reporting the default branch's provenance there would be untrue, and
+    /// the branch-drift guard must stay inert for exactly that shape.
+    fn resolve_branch_provenance(
+        project_root: &Path,
+        store_layout: &StoreLayout,
+        active_branch: &Option<String>,
+    ) -> (Option<String>, Option<String>) {
+        let graph_scope = active_branch
+            .clone()
+            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
+        let (_, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
+            project_root,
+            &store_layout.data_root,
+            graph_scope.as_deref(),
+        );
+        if active_branch.is_none() && graph_scope.is_some() {
+            (None, None)
+        } else {
+            (serving_branch, fallback_warning)
+        }
     }
 
     /// Opens an existing project for read-only inspection.
@@ -752,8 +820,8 @@ impl TraceDecay {
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
         let db_path = store_layout.graph_db_path.clone();
-        let serving_branch = None;
-        let fallback_warning = None;
+        let (serving_branch, fallback_warning) =
+            Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {

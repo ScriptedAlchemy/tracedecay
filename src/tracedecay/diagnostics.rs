@@ -47,7 +47,7 @@ impl TraceDecay {
     /// branch resolution this request already made.
     ///
     /// The memo is only consulted on the drift-guard branch below, so a
-    /// read-only or fallback store still returns without resolving anything.
+    /// read-only store still returns without resolving anything.
     pub(super) fn ensure_branch_writable_with(
         &self,
         operation: &str,
@@ -59,41 +59,29 @@ impl TraceDecay {
             });
         }
 
-        if self.is_fallback() {
-            let active = self.active_branch.as_deref().unwrap_or("detached HEAD");
-            let serving = self.serving_branch.as_deref().unwrap_or("default branch");
-            let hint = self.active_branch.as_deref().map_or_else(
-                || " Check out a tracked branch before writing.".to_string(),
-                |branch| format!(" Run `tracedecay branch add {branch}` before writing."),
-            );
-
+        // Branch-drift guard. A long-running MCP server resolves its branch
+        // provenance once at open time. If the working tree switched branches
+        // since then, this instance is still scoped to the *old* branch's
+        // publication epoch, and a write would seal the live branch's files
+        // under the wrong provenance. Refuse until the reopen lands.
+        //
+        // The comparison is against the open-time branch, not the serving
+        // provenance: every branch is served by the one project store, so an
+        // untracked branch that legitimately falls back to an ancestor's
+        // provenance is writable once this instance opened on it. A fallback
+        // is no longer a wrong database to write into — per-branch SQLite
+        // copies are retired and branch identity is provenance-only.
+        if self.branch_drifted_with(live_branch) {
+            let opened = self.active_branch.as_deref().unwrap_or("detached HEAD");
+            let live = live_branch.resolve_for(&self.project_root);
+            let live_name = live.as_deref().unwrap_or("detached HEAD");
             return Err(TraceDecayError::Config {
                 message: format!(
-                    "cannot {operation}: active branch '{active}' is served from fallback branch \
-                     '{serving}'.{hint}"
+                    "cannot {operation}: index is open for branch '{opened}' but the working \
+                     tree is now on '{live_name}'. Reopen tracedecay so it serves '{live_name}' \
+                     (e.g. restart the MCP server)."
                 ),
             });
-        }
-
-        // Branch-drift guard. A long-running MCP server resolves its branch DB
-        // once at open time and caches `serving_branch`. If the working tree
-        // switched branches since then, this instance still holds the *old*
-        // branch's DB — a write would persist the new branch's files into the
-        // wrong DB. Re-read the live branch and refuse when it no longer matches
-        // the branch we serve. Single-DB mode (no branch metadata) leaves
-        // `serving_branch == None` and is exempt: there is only one DB (#2).
-        if let Some(serving) = self.serving_branch.as_deref() {
-            let live = live_branch.resolve_for(&self.project_root);
-            if live.as_deref() != Some(serving) {
-                let live_name = live.as_deref().unwrap_or("detached HEAD");
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "cannot {operation}: index is open for branch '{serving}' but the working \
-                         tree is now on '{live_name}'. Reopen tracedecay so it serves '{live_name}' \
-                         (e.g. restart the MCP server)."
-                    ),
-                });
-            }
         }
 
         Ok(())
@@ -102,15 +90,17 @@ impl TraceDecay {
     /// Returns `true` when the live git branch differs from the branch this
     /// instance resolved at open time (and branch tracking is active).
     ///
-    /// A long-running MCP server resolves its branch DB once at open time; a
-    /// mid-session `git checkout` makes the cached DB stale. Callers detect
-    /// that here and reopen the correct branch DB via
+    /// A long-running MCP server resolves its branch provenance once at open
+    /// time; a mid-session `git checkout` leaves it scoped to the previous
+    /// branch's publication epoch. Callers detect that here and reopen onto
+    /// the live branch via
     /// [`reopen_for_current_branch`](Self::reopen_for_current_branch) before
     /// serving reads or writes. The comparison is against the open-time branch
     /// (`active_branch`), so reopening clears the drift even when the new
-    /// branch is untracked and legitimately falls back to an ancestor DB —
-    /// avoiding a reopen loop. Returns `false` in single-DB mode (no branch
-    /// metadata), where every branch maps to the same DB.
+    /// branch is untracked and legitimately falls back to an ancestor's
+    /// provenance — avoiding a reopen loop. Returns `false` when the store
+    /// publishes no branch metadata at all, where there is no branch identity
+    /// to drift from.
     pub fn branch_drifted(&self) -> bool {
         self.branch_drifted_with(&self.branch_memo())
     }
@@ -118,7 +108,9 @@ impl TraceDecay {
     /// [`branch_drifted`](Self::branch_drifted) against a branch resolution
     /// this request already made.
     ///
-    /// Single-DB mode still short-circuits without resolving anything.
+    /// `serving_branch` is `Some` exactly when the store published branch
+    /// metadata, so an untracked store still short-circuits without resolving
+    /// anything.
     pub fn branch_drifted_with(&self, live_branch: &branch::BranchMemo) -> bool {
         if self.serving_branch.is_none() {
             return false;
