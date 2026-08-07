@@ -8,12 +8,14 @@ use std::sync::{Arc, Mutex};
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, ApplicationProblemKind, CancelWorkAttemptCommand,
     CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
-    GenerateProposalRequest, RequestContext, RequestId, ResolvedScope, ResumeWorkAttemptsCommand,
-    ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome, WorkAppendRequest,
-    WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome, WorkAttemptProviderOutcomeV1,
-    WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkProjectionPortError, WorkProjectionReadPort, WorkService,
-    WorkStorageError, WorkStoragePort,
+    GenerateProposalRequest, MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, RequestId,
+    ResolvedScope, ResumeWorkAttemptsCommand, ReviewProposalCommand, StartWorkAttemptCommand,
+    WorkAppendOutcome, WorkAppendRequest, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
+    WorkAttemptListCoverageV1, WorkAttemptListCursorV1, WorkAttemptListPageV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptProviderOutcomeV1, WorkAttemptService,
+    WorkAttemptStatusRequestV1, WorkAttemptStorageError, WorkAttemptStoragePort,
+    WorkAttemptTopologyBindingV1, WorkAttemptTopologyStateV1, WorkProjectionPortError,
+    WorkProjectionReadPort, WorkService, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
     ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProjectId,
@@ -309,6 +311,39 @@ impl WorkAttemptStoragePort for AttemptStore {
             })
             .collect()
     }
+
+    fn list(
+        &self,
+        authority: &WorkAuthority,
+        start_after: Option<&WorkAttemptIdentityV1>,
+        limit: u32,
+    ) -> Result<WorkAttemptListPageV1, WorkAttemptStorageError> {
+        let inner = self.inner.lock().unwrap();
+        let start_ordinal =
+            start_after.map(|identity| attempt_key(authority, identity).1);
+        let mut pending = Vec::new();
+        for ((row_authority, ordinal), payload) in inner.rows.iter() {
+            if row_authority != authority {
+                continue;
+            }
+            if let Some(start) = &start_ordinal {
+                if ordinal <= start {
+                    continue;
+                }
+            }
+            pending.push(
+                serde_json::from_str::<WorkAttemptV1>(payload)
+                    .map_err(|_| WorkAttemptStorageError::Unavailable)?,
+            );
+        }
+        let remaining =
+            u32::try_from(pending.len()).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        pending.truncate(limit as usize);
+        Ok(WorkAttemptListPageV1 {
+            attempts: pending,
+            remaining,
+        })
+    }
 }
 
 type Fixture = (
@@ -383,10 +418,12 @@ fn admit_work(work: &WorkService<TestStore>, context: &RequestContext, task: &st
     let proposal = work
         .generate_proposal(
             context,
+            digest('b'),
             GenerateProposalRequest {
                 task_id: task_id.clone(),
                 proposal_id: id(&format!("proposal.{task}")),
-                proposal_digest: digest('b'),
+                live_git_evidence: None,
+                occurred_at: UtcMicros(15),
             },
         )
         .unwrap();
@@ -711,4 +748,245 @@ fn provider_unavailability_is_a_typed_terminal_journey() {
         .fail_recovery(&context, &identity, &evidence)
         .unwrap_err();
     assert_eq!(repeated.kind(), ApplicationProblemKind::Conflict);
+}
+
+fn verified_topology(generation: &str, task_count: u32) -> WorkAttemptTopologyStateV1 {
+    WorkAttemptTopologyStateV1::Verified(WorkAttemptTopologyBindingV1 {
+        generation: generation.to_owned(),
+        task_count,
+    })
+}
+
+#[test]
+fn list_page_bounds_are_refused_before_any_topology_read() {
+    let (attempts, _, context) = fixture("project.attempt.list.bounds");
+    for page_size in [0, MAX_WORK_ATTEMPT_LIST_PAGE_SIZE + 1] {
+        let refused = attempts
+            .list(
+                &context,
+                &WorkAttemptListRequestV1 {
+                    page_size,
+                    cursor: None,
+                },
+                |_| panic!("an out-of-bounds page size must not resolve the topology"),
+            )
+            .unwrap_err();
+        assert_eq!(refused.kind(), ApplicationProblemKind::InvalidRequest);
+    }
+}
+
+#[test]
+fn list_pages_attempts_in_stable_order_and_resumes_from_the_cursor() {
+    let (attempts, work, context) = fixture("project.attempt.list.pages");
+    admit_work(&work, &context, "task.attempt.list");
+    for attempt_id in ["attempt.1", "attempt.2", "attempt.3"] {
+        let command = StartWorkAttemptCommand {
+            attempt_id: id(attempt_id),
+            ..start_command("task.attempt.list", attempt_id)
+        };
+        attempts.start(&context, command).unwrap();
+    }
+
+    let first = attempts
+        .list(
+            &context,
+            &WorkAttemptListRequestV1 {
+                page_size: 2,
+                cursor: None,
+            },
+            |_| Ok(verified_topology("generation.work.list.1", 1)),
+        )
+        .unwrap();
+    let WorkAttemptListV1::Listed {
+        topology,
+        attempts: page,
+        coverage,
+    } = first
+    else {
+        panic!("an authorized populated scope must list");
+    };
+    assert_eq!(topology.generation, "generation.work.list.1");
+    assert_eq!(topology.task_count, 1);
+    assert_eq!(page.len(), 2);
+    assert!(page[0].identity() < page[1].identity());
+    assert_eq!(page[0].identity().attempt_id().as_str(), "attempt.1");
+    assert_eq!(page[1].identity().attempt_id().as_str(), "attempt.2");
+    let WorkAttemptListCoverageV1::Capped {
+        returned,
+        remaining,
+        resume,
+    } = coverage
+    else {
+        panic!("a capped page must carry a resume cursor");
+    };
+    assert_eq!((returned, remaining), (2, 1));
+    assert_eq!(resume.generation, "generation.work.list.1");
+    assert_eq!(&resume.start_after, page[1].identity());
+
+    let second = attempts
+        .list(
+            &context,
+            &WorkAttemptListRequestV1 {
+                page_size: 2,
+                cursor: Some(resume),
+            },
+            |_| Ok(verified_topology("generation.work.list.1", 1)),
+        )
+        .unwrap();
+    let WorkAttemptListV1::Listed {
+        attempts: rest,
+        coverage,
+        ..
+    } = second
+    else {
+        panic!("the resumed page must list");
+    };
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].identity().attempt_id().as_str(), "attempt.3");
+    assert_eq!(
+        coverage,
+        WorkAttemptListCoverageV1::Complete { returned: 1 }
+    );
+}
+
+#[test]
+fn list_of_an_authorized_scope_without_attempts_is_an_explicit_zero_complete_page() {
+    let (attempts, work, context) = fixture("project.attempt.list.zero");
+    admit_work(&work, &context, "task.attempt.list.zero");
+    let listed = attempts
+        .list(
+            &context,
+            &WorkAttemptListRequestV1 {
+                page_size: 10,
+                cursor: None,
+            },
+            |_| Ok(verified_topology("generation.work.list.zero", 1)),
+        )
+        .unwrap();
+    let WorkAttemptListV1::Listed {
+        attempts: page,
+        coverage,
+        ..
+    } = listed
+    else {
+        panic!("an authorized empty scope must list, not conceal");
+    };
+    assert!(page.is_empty());
+    assert_eq!(
+        coverage,
+        WorkAttemptListCoverageV1::Complete { returned: 0 }
+    );
+}
+
+#[test]
+fn list_without_any_work_is_a_typed_absent_state() {
+    let (attempts, _, context) = fixture("project.attempt.list.absent");
+    let listed = attempts
+        .list(
+            &context,
+            &WorkAttemptListRequestV1 {
+                page_size: 10,
+                cursor: None,
+            },
+            |_| Ok(WorkAttemptTopologyStateV1::Absent),
+        )
+        .unwrap();
+    assert_eq!(listed, WorkAttemptListV1::Absent);
+}
+
+#[test]
+fn list_cursor_from_a_superseded_topology_generation_is_stale() {
+    let (attempts, work, context) = fixture("project.attempt.list.stale");
+    admit_work(&work, &context, "task.attempt.list.stale");
+    attempts
+        .start(
+            &context,
+            start_command("task.attempt.list.stale", "attempt.1"),
+        )
+        .unwrap();
+    let cursor = WorkAttemptListCursorV1 {
+        generation: "generation.work.list.old".to_owned(),
+        start_after: identity_of("task.attempt.list.stale", "attempt.1"),
+    };
+    // A newer verified generation refuses the old cursor.
+    let stale = attempts
+        .list(
+            &context,
+            &WorkAttemptListRequestV1 {
+                page_size: 2,
+                cursor: Some(cursor.clone()),
+            },
+            |_| Ok(verified_topology("generation.work.list.new", 1)),
+        )
+        .unwrap_err();
+    assert_eq!(stale.kind(), ApplicationProblemKind::Stale);
+    // A scope whose topology no longer exists refuses the cursor the same way.
+    let gone = attempts
+        .list(
+            &context,
+            &WorkAttemptListRequestV1 {
+                page_size: 2,
+                cursor: Some(cursor),
+            },
+            |_| Ok(WorkAttemptTopologyStateV1::Absent),
+        )
+        .unwrap_err();
+    assert_eq!(gone.kind(), ApplicationProblemKind::Stale);
+}
+
+#[test]
+fn list_conceals_foreign_scopes_behind_their_own_typed_states() {
+    let (attempts, work, owner) = fixture("project.attempt.list.conceal");
+    admit_work(&work, &owner, "task.attempt.list.conceal");
+    attempts
+        .start(
+            &owner,
+            start_command("task.attempt.list.conceal", "attempt.1"),
+        )
+        .unwrap();
+
+    // A foreign actor's authority resolves its own topology: absent, exactly
+    // like a scope that never had Work.
+    let foreign = context("project.attempt.list.conceal", "actor.attempt.foreign");
+    let absent = attempts
+        .list(
+            &foreign,
+            &WorkAttemptListRequestV1 {
+                page_size: 10,
+                cursor: None,
+            },
+            |_| Ok(WorkAttemptTopologyStateV1::Absent),
+        )
+        .unwrap();
+    assert_eq!(absent, WorkAttemptListV1::Absent);
+
+    // Even against a verified topology, the foreign authority scope holds no
+    // rows: nothing owned by another actor ever leaks into the page.
+    let empty = attempts
+        .list(
+            &foreign,
+            &WorkAttemptListRequestV1 {
+                page_size: 10,
+                cursor: None,
+            },
+            |_| Ok(verified_topology("generation.work.list.conceal", 1)),
+        )
+        .unwrap();
+    let WorkAttemptListV1::Listed {
+        attempts: page,
+        coverage,
+        ..
+    } = empty
+    else {
+        panic!("a foreign authorized scope lists its own (empty) attempt set");
+    };
+    assert!(page.is_empty());
+    assert_eq!(
+        coverage,
+        WorkAttemptListCoverageV1::Complete { returned: 0 }
+    );
+}
+
+fn identity_of(task: &str, attempt: &str) -> WorkAttemptIdentityV1 {
+    WorkAttemptIdentityV1::new(id(task), id(&format!("run.{task}")), id(attempt)).unwrap()
 }
