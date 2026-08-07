@@ -83,11 +83,55 @@ fn valid_lsp_control(deadline: &Deadline, cancellation: &CancellationContext) ->
 pub(crate) const DAEMON_INVOCATION_PROTOCOL: &str = "tracedecay.daemon.invocation";
 /// Initial revision of the daemon-owned invocation wire shape.
 pub(crate) const DAEMON_INVOCATION_REVISION: u16 = 1;
+const DAEMON_INVOCATION_CANCEL_OPERATION: &str = "invocation_cancel";
 
 const MAX_INVOCATION_REQUEST_ID_BYTES: usize = 128;
 const MAX_CLIENT_REVISION_BYTES: usize = 128;
 const MAX_ROOT_HINT_BYTES: usize = 4_096;
 const MAX_OPAQUE_HANDLE_BYTES: usize = 256;
+
+/// A separate authenticated control frame that can interrupt an in-flight
+/// read without contending on that invocation's response connection.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DaemonInvocationCancellationRequest {
+    protocol: String,
+    revision: u16,
+    request_id: String,
+    operation: String,
+    target_request_id: String,
+}
+
+impl DaemonInvocationCancellationRequest {
+    pub(crate) fn new(target_request_id: impl Into<String>) -> Self {
+        let target_request_id = target_request_id.into();
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: target_request_id.clone(),
+            operation: DAEMON_INVOCATION_CANCEL_OPERATION.to_owned(),
+            target_request_id,
+        }
+    }
+
+    pub(crate) fn target_request_id(&self) -> &str {
+        &self.target_request_id
+    }
+
+    fn validate(&self) -> bool {
+        self.protocol == DAEMON_INVOCATION_PROTOCOL
+            && self.revision == DAEMON_INVOCATION_REVISION
+            && self.operation == DAEMON_INVOCATION_CANCEL_OPERATION
+            && valid_token(&self.request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+            && valid_token(&self.target_request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+    }
+}
+
+pub(crate) fn parse_daemon_invocation_cancellation_request(
+    line: &str,
+) -> Option<DaemonInvocationCancellationRequest> {
+    let request = serde_json::from_str::<DaemonInvocationCancellationRequest>(line.trim()).ok()?;
+    request.validate().then_some(request)
+}
 
 /// Closed operations accepted by the daemon invocation connection.
 ///

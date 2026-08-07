@@ -482,6 +482,10 @@ pub(crate) fn is_mcp_discovery_method(method: &str) -> bool {
 }
 
 pub(crate) fn is_reserved_control_request(request_line: &str) -> bool {
+    if crate::daemon_contract::parse_daemon_invocation_cancellation_request(request_line).is_some()
+    {
+        return true;
+    }
     let Ok(request) = serde_json::from_str::<JsonRpcRequest>(request_line.trim()) else {
         return false;
     };

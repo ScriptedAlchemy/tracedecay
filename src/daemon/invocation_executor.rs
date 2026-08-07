@@ -563,6 +563,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
                 if !policy.may_interrupt(stage) {
                     return Ok(executor.invoke_once(request).await);
                 }
+                let request_id = request.request_id.clone();
                 let invocation = executor.invoke_once(request);
                 tokio::pin!(invocation);
                 let cancellation_wait = crate::daemon_client::wait_for_cancellation(cancellation);
@@ -570,9 +571,21 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
                 tokio::select! {
                     response = &mut invocation => Ok(response),
                     () = &mut cancellation_wait => {
+                        crate::daemon::request_cancellation::cancel(&request_id);
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            &mut invocation,
+                        )
+                        .await;
                         Err(crate::daemon_client::DaemonInvocationError::Cancelled { stage })
                     }
                     () = tokio::time::sleep(remaining) => {
+                        crate::daemon::request_cancellation::cancel(&request_id);
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            &mut invocation,
+                        )
+                        .await;
                         Err(crate::daemon_client::DaemonInvocationError::TimedOut { stage })
                     }
                 }
