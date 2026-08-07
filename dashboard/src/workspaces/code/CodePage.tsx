@@ -9,7 +9,7 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
-import { FigureRail, Readout } from '../../ui/instrument.tsx';
+import { FigureRail, Readout, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
@@ -171,7 +171,13 @@ export function CodePage() {
   );
 
   return (
-    <ExplorerSplit
+    <div className="flex h-full min-h-0 flex-col">
+      <WorkspaceHeader
+        path="/code"
+        title="Code"
+        note="indexed symbols and relations under one sealed graph generation"
+      />
+      <ExplorerSplit
       filters={
         <div className="flex flex-col gap-3">
           <SearchField
@@ -413,7 +419,8 @@ export function CodePage() {
           </InspectorPanel>
         ) : undefined
       }
-    />
+      />
+    </div>
   );
 }
 
