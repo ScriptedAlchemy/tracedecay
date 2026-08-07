@@ -217,6 +217,9 @@ fn erase_workflow_outcome(
 ) -> Result<ApplicationOutcome<Value>> {
     let outcome = match outcome {
         WorkflowApplicationOutcome::RegisterDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::ActivateDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::RetireDefinition(outcome) => serde_json::to_value(outcome),
+        WorkflowApplicationOutcome::RejectDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::ValidateDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::GetDefinition(outcome) => serde_json::to_value(outcome),
         WorkflowApplicationOutcome::ListDefinitions(outcome) => serde_json::to_value(outcome),
