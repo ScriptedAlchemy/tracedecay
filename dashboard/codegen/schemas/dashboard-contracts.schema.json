@@ -4401,6 +4401,21 @@
           "const": "unknown",
           "description": "The source state could not be determined.",
           "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The source could not be reached. Named separately from `Unknown`: the\nsource is identified and its unreachability is an observation, not an\nundetermined state.",
+          "type": "string"
+        },
+        {
+          "const": "reset_required",
+          "description": "The source must be rebuilt before it can be read again.",
+          "type": "string"
+        },
+        {
+          "const": "corrupt",
+          "description": "The source was read and found corrupt.",
+          "type": "string"
         }
       ]
     },

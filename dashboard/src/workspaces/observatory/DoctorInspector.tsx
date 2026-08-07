@@ -159,7 +159,15 @@ function DoctorReportCoverageGaps({
 }
 
 function consultationState(
-  reason: 'unwired' | 'unsupported' | 'absent' | 'denied' | 'unknown',
+  reason:
+    | 'unwired'
+    | 'unsupported'
+    | 'absent'
+    | 'denied'
+    | 'unknown'
+    | 'unavailable'
+    | 'reset_required'
+    | 'corrupt',
 ): DomainStateKind {
   switch (reason) {
     case 'denied':
@@ -170,6 +178,14 @@ function consultationState(
     case 'absent':
     case 'unknown':
       return 'unknown';
+    // An unreachable source is a source-level refusal, not a lost dashboard.
+    case 'unavailable':
+      return 'unavailable';
+    // Observed degradations of the source itself — a stronger claim than
+    // "could not be determined", and rendered as the fault it is.
+    case 'reset_required':
+    case 'corrupt':
+      return 'error';
     default:
       return assertNever(reason);
   }

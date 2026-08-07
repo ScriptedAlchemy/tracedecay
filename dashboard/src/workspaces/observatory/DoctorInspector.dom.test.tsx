@@ -47,6 +47,40 @@ describe('DoctorInspector', () => {
     );
   });
 
+  /** The three named degradation reasons must render as the observations they
+   * are — an unreachable source, a rebuild-required source, a corrupt source —
+   * and never collapse back into the undetermined "unknown" they were carried
+   * as before the reasons were named. */
+  it('names each degraded source coverage gap with its own reason', async () => {
+    const payload = findingsEnvelope();
+    payload.payload.report_coverage = {
+      families: [
+        { family: 'storage', consultation: { status: 'unavailable', reason: 'unavailable' } },
+        {
+          family: 'semantic_index',
+          consultation: { status: 'unavailable', reason: 'reset_required' },
+        },
+        { family: 'storage_runtime', consultation: { status: 'unavailable', reason: 'corrupt' } },
+      ],
+      completeness: 'partial',
+      statement: {
+        completeness: 'partial',
+        statement: 'three storage sources could not be consulted',
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(payload)),
+    );
+
+    renderDoctor();
+
+    const gaps = await screen.findByLabelText('Doctor source coverage gaps');
+    expect(gaps.textContent).toContain('unavailable');
+    expect(gaps.textContent).toContain('reset_required');
+    expect(gaps.textContent).toContain('corrupt');
+  });
+
   it('keeps every evidence label off its state hue while rendering each typed state', async () => {
     const response = findingsEnvelope();
     const template = response.payload.entries[0]!;

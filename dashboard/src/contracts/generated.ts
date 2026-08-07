@@ -826,7 +826,7 @@ export const DoctorFamilyCoverageV1Schema = z.object({
 export type DoctorFamilyCoverageV1 = z.infer<typeof DoctorFamilyCoverageV1Schema>;
 
 /** Why complete coverage of a finding family was unavailable. */
-export const DoctorFamilyUnavailableReasonV1Schema = z.union([z.literal("unwired"), z.literal("unsupported"), z.literal("absent"), z.literal("denied"), z.literal("unknown")]);
+export const DoctorFamilyUnavailableReasonV1Schema = z.union([z.literal("unwired"), z.literal("unsupported"), z.literal("absent"), z.literal("denied"), z.literal("unknown"), z.literal("unavailable"), z.literal("reset_required"), z.literal("corrupt")]);
 export type DoctorFamilyUnavailableReasonV1 = z.infer<typeof DoctorFamilyUnavailableReasonV1Schema>;
 
 /** Stable Doctor finding families.
