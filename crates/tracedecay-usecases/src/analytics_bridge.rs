@@ -122,10 +122,20 @@ pub async fn import_source(
         .map_or(0, |duration| duration.as_secs());
 
     let cursor_key = import_cursor_key(&source.path);
-    let start = match gdb.get_parse_offset(&cursor_key).await {
-        // Truncated/rotated files restart from the top.
-        Some(cursor) if cursor.byte_offset <= file_len => cursor.byte_offset,
-        _ => 0,
+    let expected_cursor = match gdb.get_parse_offset_result(&cursor_key).await {
+        Ok(Some(cursor)) => cursor,
+        Ok(None) => ParseOffset::default(),
+        Err(err) => {
+            result.error = Some(format!("read analytics import cursor: {err}"));
+            return result;
+        }
+    };
+    // Truncated/rotated files restart from the top while retaining the exact
+    // durable cursor as the compare-and-swap precondition.
+    let start = if expected_cursor.byte_offset <= file_len {
+        expected_cursor.byte_offset
+    } else {
+        0
     };
     if start == file_len {
         return result;
@@ -155,6 +165,7 @@ pub async fn import_source(
         }
     }
     let mut acknowledged = 0u64;
+    let mut claimed_cursor = expected_cursor;
     for chunk in batch.chunks(IMPORT_BATCH_SIZE) {
         let events = chunk
             .iter()
@@ -165,6 +176,7 @@ pub async fn import_source(
             .append_analytics_events_with_cursor(
                 &events,
                 &cursor_key,
+                claimed_cursor,
                 ParseOffset {
                     byte_offset: start + frontier,
                     mtime,
@@ -177,6 +189,11 @@ pub async fn import_source(
             return result;
         }
         acknowledged = frontier;
+        claimed_cursor = ParseOffset {
+            byte_offset: start + frontier,
+            mtime,
+            file_id: 0,
+        };
         result.imported = result.imported.saturating_add(events.len() as u64);
     }
     if acknowledged < consumed as u64
@@ -184,6 +201,7 @@ pub async fn import_source(
             .append_analytics_events_with_cursor(
                 &[],
                 &cursor_key,
+                claimed_cursor,
                 ParseOffset {
                     byte_offset: start + consumed as u64,
                     mtime,

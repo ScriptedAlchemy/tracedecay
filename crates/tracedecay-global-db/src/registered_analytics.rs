@@ -171,17 +171,24 @@ impl RegisteredGlobalDb {
     /// Atomically appends one imported JSONL frontier and advances its cursor.
     ///
     /// Keeping the cursor in the same transaction prevents a committed event
-    /// batch from being replayed when cursor persistence fails.
+    /// batch from being replayed when cursor persistence fails. `expected_cursor`
+    /// is the durable cursor the caller read before parsing: the append is
+    /// refused when another importer has already advanced it, so two concurrent
+    /// importers can never both claim the same byte range.
     pub async fn append_analytics_events_with_cursor(
         &self,
         events: &[AnalyticsEventInsert],
         cursor_path: &str,
+        expected_cursor: super::ParseOffset,
         cursor: super::ParseOffset,
     ) -> Result<Vec<i64>, String> {
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| format!("failed to begin analytics import transaction: {error}"))?;
+        super::transcript::require_expected_offset(&transaction, cursor_path, expected_cursor)
+            .await
+            .map_err(|error| format!("failed to claim analytics import cursor: {error}"))?;
         let mut ids = Vec::with_capacity(events.len());
         for event in events {
             ids.push(append_analytics_event_in_existing_tx(&transaction, event).await?);
