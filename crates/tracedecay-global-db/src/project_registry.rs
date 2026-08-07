@@ -15,6 +15,9 @@ use super::{
     global_db_operation_message,
 };
 
+#[cfg(test)]
+mod tests;
+
 // ---------------------------------------------------------------------------
 // Registry reap contract
 // ---------------------------------------------------------------------------
@@ -179,8 +182,15 @@ impl ProjectIdentityAliasKind {
     }
 }
 
+/// Canonical identity key for a project path, including paths that no longer
+/// exist. Plain `canonicalize` fails for a checkout that has moved away, which
+/// would leave the raw (symlink-aliased) old path as the lookup key and miss
+/// the alias row the registry retained under the old path's canonical form.
+/// Resolving the deepest existing ancestor keeps old-path lookups aligned with
+/// the keys written while the path existed, so a moved project stays
+/// resolvable by its former root (Plan 16: moves preserve identity).
 pub(super) fn canonical_project_path(project_path: &Path) -> PathBuf {
-    tracedecay_runtime_core::lifecycle_lease::canonical_or_original(project_path)
+    tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent(project_path)
 }
 
 pub(super) fn project_path_alias_key(project_path: &Path) -> String {
