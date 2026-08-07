@@ -594,8 +594,7 @@ fn execute_scope_retention_with_test_binding_cleanup(
     let candidate = observed
         .collectable_scopes
         .first()
-        .map(|scope| scope.scope_hash.clone())
-        .unwrap_or_else(|| "0".repeat(64));
+        .map_or_else(|| "0".repeat(64), |scope| scope.scope_hash.clone());
     let receipt = |revision: &str, digit: char| ScopeRootAuthorityReceiptV1 {
         revision: revision.to_owned(),
         terminal_count: 1,

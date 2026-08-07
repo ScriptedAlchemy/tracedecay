@@ -120,13 +120,13 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     .snapshot()
                     .source_revision
                     .as_ref()
-                    .map(|source| source.as_str())
+                    .map(tracedecay_domain::CommitId::as_str)
                     != Some(revision.as_str())
                     || generation
                         .snapshot()
                         .reference
                         .as_ref()
-                        .map(|source| source.as_str())
+                        .map(tracedecay_domain::RefId::as_str)
                         != Some(reference.as_str())
                     || generation.snapshot().content_identity.as_str()
                         != entry.snapshot_content_identity

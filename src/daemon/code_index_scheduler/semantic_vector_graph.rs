@@ -54,6 +54,11 @@ impl GraphCancellation for SchedulerGraphCancellationV1 {
     }
 }
 
+// `Ready` is read and constructed by field-destructuring match arms across
+// several call sites (doctor_kernel, git_watch/store_maintenance,
+// retention_inventory); boxing the receipts would ripple through every one
+// of them for a cold, infrequently-read diagnostic path.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProjectVectorReadableSources {
     Ready {
@@ -69,6 +74,11 @@ pub(crate) enum ProjectVectorReadableSources {
     Denied(String),
 }
 
+// `Ready` is matched by tuple-destructuring across several call sites
+// (doctor_kernel, git_watch/store_maintenance, retention_inventory); boxing
+// the census would ripple through every one of them for a cold,
+// infrequently-read diagnostic path.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ProjectSemanticVectorRetentionStep {
     Ready(tracedecay_graph_db::SemanticVectorRetentionCensus),
     ResetRequired(String),

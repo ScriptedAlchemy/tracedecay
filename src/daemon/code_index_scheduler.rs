@@ -729,14 +729,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                     .snapshot()
                     .reference
                     .as_ref()
-                    .map(|snapshot_reference| snapshot_reference.as_str())
+                    .map(tracedecay_domain::RefId::as_str)
                     != Some(reference.as_str())
             })
             || generation
                 .snapshot()
                 .source_revision
                 .as_ref()
-                .map(|revision| revision.as_str())
+                .map(tracedecay_domain::CommitId::as_str)
                 != entry.source_revision.as_deref()
         {
             return Err(Self::corruption(
@@ -2419,34 +2419,34 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
-        if classification.changes().is_empty() {
-            if let (Some(reference), Some(revision), Some(tree)) = (
+        if classification.changes().is_empty()
+            && let (Some(reference), Some(revision), Some(tree)) = (
                 self.identity.head_ref(),
                 self.identity.head_commit(),
                 self.identity.head_tree(),
-            ) {
-                return self
-                    .capture_exact_git_tree_snapshot(
-                        &git_tree_capture::ExactGitTreeSourceV1 {
-                            reference: reference.clone(),
-                            revision: revision.clone(),
-                            tree: tree.clone(),
-                        },
-                        &branch_generations::BranchGenerationReadControlV1 {
-                            deadline: None,
-                            cancellation: None,
-                        },
-                    )
-                    .map_err(|reason| match reason {
-                        tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled => {
-                            cancelled_code_index_reconcile()
-                        }
-                        _ => CodeIndexSchedulerErrorV1::Git(format!(
-                            "immutable HEAD-tree capture failed: {}",
-                            reason.as_str()
-                        )),
-                    });
-            }
+            )
+        {
+            return self
+                .capture_exact_git_tree_snapshot(
+                    &git_tree_capture::ExactGitTreeSourceV1 {
+                        reference: reference.clone(),
+                        revision: revision.clone(),
+                        tree: tree.clone(),
+                    },
+                    &branch_generations::BranchGenerationReadControlV1 {
+                        deadline: None,
+                        cancellation: None,
+                    },
+                )
+                .map_err(|reason| match reason {
+                    tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1::Cancelled => {
+                        cancelled_code_index_reconcile()
+                    }
+                    _ => CodeIndexSchedulerErrorV1::Git(format!(
+                        "immutable HEAD-tree capture failed: {}",
+                        reason.as_str()
+                    )),
+                });
         }
         let source_revision = classification
             .changes()

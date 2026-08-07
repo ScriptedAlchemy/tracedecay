@@ -89,10 +89,10 @@ pub(super) fn diff_symbols(
     {
         match (base.remove(&key), head.remove(&key)) {
             (None, Some(symbol)) => {
-                changes.push(code_search::CodeIndexBranchChangeV1::Added { symbol })
+                changes.push(code_search::CodeIndexBranchChangeV1::Added { symbol });
             }
             (Some(symbol), None) => {
-                changes.push(code_search::CodeIndexBranchChangeV1::Removed { symbol })
+                changes.push(code_search::CodeIndexBranchChangeV1::Removed { symbol });
             }
             (Some(base), Some(head)) if base.content_digest != head.content_digest => {
                 changes.push(code_search::CodeIndexBranchChangeV1::Changed { base, head });

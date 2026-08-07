@@ -252,7 +252,10 @@ impl CodeIndexSchedulerRegistryV1 {
         // sealed generation, which is an O(store) sweep. Do not hold an admission
         // slot across it.
         let task = tokio::task::spawn_blocking(move || {
-            if let Some(reason) = control.as_ref().and_then(|control| control.termination()) {
+            if let Some(reason) = control
+                .as_ref()
+                .and_then(super::branch_generations::BranchGenerationReadControlV1::termination)
+            {
                 return Err(reason);
             }
             if let Some(generation) = serving_generation
@@ -288,9 +291,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
                 std::time::Duration::from_millis(10),
                 || {
-                    terminal_control
-                        .as_ref()
-                        .and_then(|control| control.termination())
+                    terminal_control.as_ref().and_then(
+                        super::branch_generations::BranchGenerationReadControlV1::termination,
+                    )
                 },
             ),
         )
