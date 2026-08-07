@@ -18,10 +18,6 @@
 
 pub use tracedecay_usecases::*;
 
-// Only exercised through the `#[cfg(test)]`-gated host-admission hint-outcome
-// fixture (`host_admission::hint_outcome_test_support`); gate it the same way
-// so the production build does not carry test-only surface as dead code.
-#[cfg(test)]
 pub(crate) mod hint_outcomes;
 
 // The use-case crate owns transport-independent admission behavior. The root

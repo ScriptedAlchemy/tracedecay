@@ -65,6 +65,7 @@ pub(super) fn retain_codex_stop(
                 &ingest_args,
                 Some(&profile_root),
                 Some(global_db.as_ref()),
+                None,
                 authorities,
                 &cancellation,
             )

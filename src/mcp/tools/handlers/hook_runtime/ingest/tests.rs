@@ -82,6 +82,7 @@ async fn transcript_admission_rejects_unknown_provider_without_echoing_hook_payl
         }),
         None,
         None,
+        None,
         SessionAuthorities::default(),
     )
     .await
@@ -104,6 +105,7 @@ async fn supported_transcript_admission_requires_its_authority_without_echoing_p
             "provider": "claude",
             "event_json": format!("{{\"malformed\":\"{secret}\"}}"),
         }),
+        None,
         None,
         None,
         SessionAuthorities::default(),

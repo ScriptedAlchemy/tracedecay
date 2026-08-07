@@ -528,6 +528,7 @@ pub(super) async fn ingest_transcript(
     args: &Value,
     profile_root: Option<&Path>,
     global_db: Option<&RegisteredGlobalDb>,
+    accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<Value> {
     let cancellation = ObservationCancellation::default();
@@ -536,6 +537,7 @@ pub(super) async fn ingest_transcript(
         args,
         profile_root,
         global_db,
+        accounting_db,
         session_authorities,
         &cancellation,
     )
@@ -547,6 +549,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     args: &Value,
     profile_root: Option<&Path>,
     global_db: Option<&RegisteredGlobalDb>,
+    accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
     cancellation: &ObservationCancellation,
 ) -> Result<Value> {
@@ -649,6 +652,24 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         "admission": admission,
         "messages_upserted": messages_upserted,
     });
+    // Project-scope ingest is the production moment new post-hint session
+    // activity becomes durable, so settle emitted hook hints into
+    // `hint_outcome` analytics events here. Best-effort: unavailable or
+    // failed settlement is a typed field on the output, never an ingest
+    // failure.
+    if let Some(cg) = cg
+        && !user_scope
+    {
+        let settlement = crate::application::hint_outcomes::settle_project_hint_outcomes(
+            accounting_db,
+            session_authorities.project.map(std::sync::Arc::as_ref),
+            crate::analytics_bridge::hook_import_sources(Some(cg.project_root())),
+            cg.project_root(),
+            crate::tracedecay::current_timestamp(),
+        )
+        .await;
+        output["hint_outcomes"] = settlement.as_json();
+    }
     if let Some(capture) = snapshot_capture {
         output["observations_committed"] = json!(capture.stats.messages_upserted);
         output["bytes_consumed"] = json!(capture.bytes_consumed);

@@ -1,4 +1,16 @@
 //! Daemon composition for the application hint-outcome correlation port.
+//!
+//! The production caller is the daemon-side transcript ingest
+//! (`tracedecay_hook_runtime` action `ingest_transcript`): freshly ingested
+//! session activity is exactly what resolves previously emitted hints, so
+//! every project-scope ingest ends with a best-effort
+//! [`settle_project_hint_outcomes`] pass. Settlement imports the hook
+//! JSONL tail (where hooks record `hint_emitted`) into the durable
+//! `analytics_events` authority and then correlates outcomes into the same
+//! table — the one the `tracedecay_analytics` hints section and the
+//! dashboard analytics API already read.
+
+use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay_application::{
@@ -6,9 +18,11 @@ use tracedecay_application::{
     HintOutcomePortFuture, HintOutcomePortOperation, HintOutcomeResolution, HintToolActivity,
 };
 
+use crate::analytics_bridge::HookImportSource;
 use crate::global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb, SessionActivityRow,
 };
+use crate::hooks::hint_outcomes::HintOutcomeStats;
 
 pub(crate) struct RegisteredHintOutcomeCorrelationPort<'a> {
     analytics: &'a RegisteredGlobalDb,
@@ -139,13 +153,145 @@ pub(crate) async fn correlate_registered_hint_outcomes(
     sessions: &RegisteredGlobalDb,
     project_id: &str,
     now_secs: i64,
-) -> Result<crate::hooks::hint_outcomes::HintOutcomeStats, HintOutcomePortError> {
+) -> Result<HintOutcomeStats, HintOutcomePortError> {
     crate::hooks::hint_outcomes::correlate_hint_outcomes(
         &RegisteredHintOutcomeCorrelationPort::new(analytics, sessions),
         project_id,
         now_secs,
     )
     .await
+}
+
+/// Typed result of one best-effort post-ingest hint-outcome settlement pass.
+/// Observation never blocks or fails the ingest that triggered it: callers
+/// attach this state to their output instead of propagating an error.
+#[derive(Debug)]
+pub(crate) enum HintOutcomeSettlement {
+    /// The pass ran: hook JSONL rows were imported into `analytics_events`
+    /// and emitted hints were correlated against post-hint session activity.
+    Settled {
+        /// Hook JSONL rows imported this pass (all event kinds, not only
+        /// hint events); the import advances durable byte cursors.
+        imported_events: u64,
+        /// Per-source import failures. Import is per-file best-effort, so a
+        /// broken source is reported here while the others still land.
+        import_errors: Vec<String>,
+        stats: HintOutcomeStats,
+    },
+    /// A required store authority is not mounted; nothing ran.
+    Unavailable { reason: &'static str },
+    /// The correlation pass itself failed with a typed port error.
+    Failed(HintOutcomePortError),
+}
+
+impl HintOutcomeSettlement {
+    /// Renders the settlement into the ingest output object. Every state is
+    /// visible — an unavailable authority or failed pass is reported, not
+    /// silently dropped.
+    pub(crate) fn as_json(&self) -> Value {
+        match self {
+            Self::Settled {
+                imported_events,
+                import_errors,
+                stats,
+            } => json!({
+                "status": "ok",
+                "imported_events": imported_events,
+                "import_errors": import_errors,
+                "scanned": stats.scanned,
+                "acted": stats.acted,
+                "ignored": stats.ignored,
+                "unresolved": stats.unresolved,
+                "written": stats.written(),
+            }),
+            Self::Unavailable { reason } => json!({
+                "status": "unavailable",
+                "reason": reason,
+            }),
+            Self::Failed(error) => json!({
+                "status": "failed",
+                "operation": error.operation(),
+                "detail": error.detail(),
+            }),
+        }
+    }
+}
+
+/// Settles hint outcomes for one project after new session activity landed:
+/// imports the hook JSONL tail (the write path of `hint_emitted`) from
+/// `sources` into the durable analytics authority, then correlates
+/// unresolved hints against the project session store. Callers resolve
+/// `sources` themselves (production: `analytics_bridge::hook_import_sources`;
+/// fixtures: isolated temp files) so this pass never touches ambient
+/// operator state on its own. Best-effort by contract — failures come back
+/// as typed [`HintOutcomeSettlement`] states and are logged here so every
+/// caller inherits the same observability.
+pub(crate) async fn settle_project_hint_outcomes(
+    analytics: Option<&RegisteredGlobalDb>,
+    sessions: Option<&RegisteredGlobalDb>,
+    sources: Vec<HookImportSource>,
+    project_root: &Path,
+    now_secs: i64,
+) -> HintOutcomeSettlement {
+    let Some(analytics) = analytics else {
+        return HintOutcomeSettlement::Unavailable {
+            reason: "accounting_authority_unavailable",
+        };
+    };
+    let Some(sessions) = sessions else {
+        return HintOutcomeSettlement::Unavailable {
+            reason: "project_session_authority_unavailable",
+        };
+    };
+
+    let import = crate::analytics_bridge::import_hook_analytics(analytics, sources).await;
+    let import_errors: Vec<String> = import
+        .sources
+        .iter()
+        .filter_map(|source| {
+            source
+                .error
+                .as_ref()
+                .map(|error| format!("{}: {error}", source.path.display()))
+        })
+        .collect();
+    for error in &import_errors {
+        tracing::warn!(
+            project_root = %project_root.display(),
+            error = %error,
+            "hook analytics import failed for one source during hint-outcome settlement"
+        );
+    }
+
+    let project_id = RegisteredGlobalDb::canonical_project_key(project_root);
+    match correlate_registered_hint_outcomes(analytics, sessions, &project_id, now_secs).await {
+        Ok(stats) => {
+            if stats.scanned > 0 {
+                tracing::debug!(
+                    project_id = %project_id,
+                    scanned = stats.scanned,
+                    acted = stats.acted,
+                    ignored = stats.ignored,
+                    unresolved = stats.unresolved,
+                    "hint-outcome settlement pass completed"
+                );
+            }
+            HintOutcomeSettlement::Settled {
+                imported_events: import.imported(),
+                import_errors,
+                stats,
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                project_id = %project_id,
+                operation = error.operation(),
+                detail = error.detail(),
+                "hint-outcome settlement pass failed"
+            );
+            HintOutcomeSettlement::Failed(error)
+        }
+    }
 }
 
 fn required_event_field(

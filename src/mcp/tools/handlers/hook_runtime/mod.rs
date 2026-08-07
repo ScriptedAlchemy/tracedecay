@@ -57,7 +57,7 @@ pub async fn handle_hook_runtime(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    _accounting_db: Option<&RegisteredGlobalDb>,
+    accounting_db: Option<&RegisteredGlobalDb>,
     session_authorities: SessionAuthorities<'_>,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
@@ -90,7 +90,15 @@ pub async fn handle_hook_runtime(
                     "user transcript ingest requires projectless daemon routing",
                 ));
             }
-            ingest_transcript(Some(cg), &args, None, global_db, session_authorities).await?
+            ingest_transcript(
+                Some(cg),
+                &args,
+                None,
+                global_db,
+                accounting_db,
+                session_authorities,
+            )
+            .await?
         }
         "codex_stop" | "user_review" | "hermes_receipt" => {
             return Err(config_error(format!(
@@ -152,11 +160,15 @@ pub(crate) async fn handle_projectless_hook_runtime(
     }
     let output = match action {
         "ingest_transcript" => {
+            // Projectless (user-scope) ingest has no project session store to
+            // correlate hint outcomes against; the settlement runs on
+            // project-scope ingests only.
             ingest_transcript(
                 None,
                 &args,
                 Some(profile_root),
                 Some(global_db),
+                None,
                 session_authorities,
             )
             .await?
