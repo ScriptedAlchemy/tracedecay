@@ -526,35 +526,15 @@ pub(super) async fn production_project_server(
             let activation = Arc::clone(&hook_activation);
             Box::pin(async move { activation.notify_hook_paths(&root, rel_paths).await })
         });
-    // `load_settings` returns defaults as `Ok` when no settings file exists,
-    // so an `Err` is an unreadable or unparsable file. Serving silent defaults
-    // there would drop the user's `custom_adapters`; record the degradation on
-    // the broker instead (same pattern as
-    // `application::dashboard_diagnostics::open_diagnostic_broker`).
-    let diagnostic_broker =
-        match tracedecay_lsp::analyzer::settings::load_settings(&cg.store_layout().dashboard_root)
-            .await
-        {
-            Ok(settings) => Arc::new(tokio::sync::Mutex::new(
-                crate::application::dashboard_diagnostics::diagnostic_broker(
-                    canonical_project_path.to_path_buf(),
-                    settings,
-                ),
-            )),
-            Err(error) => {
-                tracing::warn!(
-                    dashboard_root = %cg.store_layout().dashboard_root.display(),
-                    error = %error,
-                    "code diagnostics settings could not be loaded; serving defaults as degraded"
-                );
-                let mut broker = crate::application::dashboard_diagnostics::diagnostic_broker(
-                    canonical_project_path.to_path_buf(),
-                    tracedecay_lsp::analyzer::settings::CodeDiagnosticsSettings::default(),
-                );
-                broker.record_settings_unavailable(error.to_string());
-                Arc::new(tokio::sync::Mutex::new(broker))
-            }
-        };
+    // The daemon mounts the same broker the MCP server and the directly
+    // served dashboard open: persisted analyzer settings (with a recorded
+    // degradation for an unreadable file) plus the home-level OpenCode
+    // analyzer-ownership registration adopted on top of the project-level one.
+    let diagnostic_broker = crate::application::dashboard_diagnostics::open_diagnostic_broker(
+        canonical_project_path.to_path_buf(),
+        &cg.store_layout().dashboard_root,
+    )
+    .await;
     let code_index_search_executor = code_index_search_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
