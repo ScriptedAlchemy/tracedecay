@@ -9,8 +9,8 @@ use super::context_scout_v2::{
     serialized_token_count,
 };
 use crate::automation::backend::{
-    AgentTaskBackend, AgentTaskContract, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    CodexAppServerBackend, backend_availability,
+    AgentTaskBackend, AgentTaskContract, AgentTaskError, AgentTaskKind, AgentTaskRequest,
+    AgentTaskResponse, CodexAppServerBackend, backend_availability,
 };
 use crate::automation::config::{AutomationBackend, AutomationConfig};
 use crate::ports::pricing::cost_of_turn;
@@ -101,9 +101,12 @@ impl ContextScoutModelAssistantV1 for ProductionContextScoutModelAssistantV1 {
             let deadline = tokio::time::Instant::from_std(execution.deadline.instant());
             let mut task = tokio::task::spawn_blocking(move || backend.run_task(&backend_request));
             let response = tokio::select! {
+                // A join failure means the backend worker terminated without
+                // producing a result: the run was lost mid-flight, which is a
+                // disconnect, not an unreachable backend.
                 result = &mut task => result
-                    .map_err(|_| ContextScoutModelErrorV1::Unavailable)?
-                    .map_err(|_| ContextScoutModelErrorV1::Unavailable)?,
+                    .map_err(|_| ContextScoutModelErrorV1::Disconnected)?
+                    .map_err(scout_model_error_from_agent_task)?,
                 () = cancellation.cancelled() => {
                     task.abort();
                     return Err(ContextScoutModelErrorV1::Cancelled);
@@ -144,6 +147,21 @@ impl ContextScoutModelAssistantV1 for UnavailableContextScoutModelAssistantV1 {
             | ContextScoutModelBackendV1::Unsupported => ContextScoutModelErrorV1::Unavailable,
         };
         Box::pin(async move { Err(error) })
+    }
+}
+
+/// Maps each typed backend failure onto its truthful Scout model state.
+/// Denial, disconnect, and unavailability stay distinct outcomes end to end;
+/// only the residual untyped `Failed` state collapses to `Unavailable`
+/// because the Scout taxonomy has no generic-failure outcome.
+fn scout_model_error_from_agent_task(error: AgentTaskError) -> ContextScoutModelErrorV1 {
+    match error {
+        AgentTaskError::Denied { .. } => ContextScoutModelErrorV1::Denied,
+        AgentTaskError::Disconnected { .. } => ContextScoutModelErrorV1::Disconnected,
+        AgentTaskError::Unavailable { .. } => ContextScoutModelErrorV1::Unavailable,
+        AgentTaskError::Timeout { .. } => ContextScoutModelErrorV1::DeadlineExceeded,
+        AgentTaskError::MalformedOutput { .. } => ContextScoutModelErrorV1::InvalidOutput,
+        AgentTaskError::Failed { .. } => ContextScoutModelErrorV1::Unavailable,
     }
 }
 
@@ -253,7 +271,6 @@ mod tests {
     use super::*;
     use crate::automation::backend::AgentTaskResponse;
     use crate::ports::context::{CancellationToken, MonotonicDeadline};
-    use tracedecay_automation::Result;
 
     #[derive(Clone)]
     struct RecordingBackend {
@@ -262,7 +279,10 @@ mod tests {
     }
 
     impl AgentTaskBackend for RecordingBackend {
-        fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> Result<AgentTaskResponse, AgentTaskError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.request.lock().unwrap() = Some(request.clone());
             Ok(AgentTaskResponse {
@@ -283,7 +303,10 @@ mod tests {
 
     #[cfg(feature = "token-counting")]
     impl AgentTaskBackend for MissingUsageBackend {
-        fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> Result<AgentTaskResponse, AgentTaskError> {
             Ok(AgentTaskResponse {
                 run_id: request.run_id.clone(),
                 task: request.task,
@@ -356,6 +379,64 @@ mod tests {
                 ..AutomationConfig::default()
             }),
             ContextScoutModelBackendV1::CodexAppServer
+        );
+    }
+
+    struct TypedFailureBackend {
+        error: AgentTaskError,
+    }
+
+    impl AgentTaskBackend for TypedFailureBackend {
+        fn run_task(
+            &self,
+            _request: &AgentTaskRequest,
+        ) -> Result<AgentTaskResponse, AgentTaskError> {
+            Err(self.error.clone())
+        }
+    }
+
+    async fn propose_with_backend_failure(
+        error: AgentTaskError,
+    ) -> Result<ContextScoutModelProposalV1, ContextScoutModelErrorV1> {
+        let assistant = ProductionContextScoutModelAssistantV1::new(
+            Arc::new(TypedFailureBackend { error }),
+            ContextScoutModelBackendV1::CodexAppServer,
+        );
+        assistant
+            .propose(request(), execution(CancellationToken::new()))
+            .await
+    }
+
+    #[tokio::test]
+    async fn denied_backend_surfaces_denied_not_unavailable() {
+        assert_eq!(
+            propose_with_backend_failure(AgentTaskError::Denied {
+                reason: "workspace scope was denied".to_string(),
+            })
+            .await,
+            Err(ContextScoutModelErrorV1::Denied)
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_backend_surfaces_disconnect_not_unavailable() {
+        assert_eq!(
+            propose_with_backend_failure(AgentTaskError::Disconnected {
+                reason: "connection reset by peer".to_string(),
+            })
+            .await,
+            Err(ContextScoutModelErrorV1::Disconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_backend_surfaces_unavailable() {
+        assert_eq!(
+            propose_with_backend_failure(AgentTaskError::Unavailable {
+                reason: "codex executable was not found".to_string(),
+            })
+            .await,
+            Err(ContextScoutModelErrorV1::Unavailable)
         );
     }
 

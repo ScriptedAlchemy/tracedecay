@@ -63,7 +63,7 @@ impl AgentTaskBackend for EchoBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
@@ -885,12 +885,14 @@ impl AgentTaskBackend for FlakyBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= self.fail_until {
-            return Err(tracedecay_automation::AutomationError::config(
-                self.fail_message,
-            ));
+            return Err(
+                tracedecay_automation::backend::AgentTaskError::from_backend_message(
+                    self.fail_message,
+                ),
+            );
         }
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),

@@ -7,12 +7,11 @@ use serde_json::Value;
 use tracedecay_automation::backend as leaf_backend;
 pub use tracedecay_automation::backend::{
     AGENT_TASK_MAX_ATTEMPTS, AGENT_TASK_RETRY_BACKOFFS, AgentBackendAvailability, AgentTaskBackend,
-    AgentTaskContract, AgentTaskFailureClass, AgentTaskFailureDisposition, AgentTaskKind,
-    AgentTaskRequest, AgentTaskResponse, AgentTaskRetryAttempt, AgentTaskRetryReport,
-    BackendRetryPolicy, agent_task_contract, agent_task_failure_disposition,
+    AgentTaskContract, AgentTaskError, AgentTaskFailureClass, AgentTaskFailureDisposition,
+    AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryAttempt,
+    AgentTaskRetryReport, BackendRetryPolicy, agent_task_contract, agent_task_failure_disposition,
     classify_agent_task_error_message, prompt_version, task_key,
 };
-use tracedecay_automation::{AutomationError, Result as AutomationResult};
 
 use crate::errors::Result;
 use crate::ports::codex_app_server::{
@@ -122,19 +121,31 @@ impl CodexAppServerBackend {
 }
 
 impl AgentTaskBackend for CodexAppServerBackend {
-    fn run_task(&self, request: &AgentTaskRequest) -> AutomationResult<AgentTaskResponse> {
-        let backend_message = request.backend_message()?;
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
+        let backend_message = request.backend_message().map_err(|error| {
+            AgentTaskError::Failed {
+                reason: error.to_string(),
+            }
+        })?;
+        // The app-server port renders its failure as one message; the typed
+        // taxonomy admits that string exactly once, at this boundary.
         let summary = run_prompt_with_codex_app_server(
             &backend_message,
             &self.config,
             "tracedecay_automation",
         )
-        .map_err(|error| AutomationError::port("codex_app_server", std::io::Error::other(error)))?;
+        .map_err(AgentTaskError::from_backend_message)?;
         let output_json = request
             .contract
             .strict_json
             .then(|| leaf_backend::extract_response_json_object(&summary.text, &request.contract))
-            .transpose()?;
+            .transpose()
+            .map_err(|error| AgentTaskError::MalformedOutput {
+                reason: error.to_string(),
+            })?;
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,

@@ -452,6 +452,10 @@ pub enum ContextScoutModelErrorV1 {
     Disabled,
     #[error("configured Context Scout model route is unavailable")]
     Unavailable,
+    #[error("configured Context Scout model route denied the request")]
+    Denied,
+    #[error("configured Context Scout model route disconnected mid-run")]
+    Disconnected,
     #[error("configured Context Scout model route was cancelled")]
     Cancelled,
     #[error("configured Context Scout model route exceeded its deadline")]
@@ -470,6 +474,8 @@ pub enum ContextScoutModelRunOutcomeV1 {
     Succeeded,
     Disabled,
     Unavailable,
+    Denied,
+    Disconnected,
     Cancelled,
     DeadlineExceeded,
     TokenBudgetExceeded,
@@ -481,6 +487,8 @@ impl From<ContextScoutModelErrorV1> for ContextScoutModelRunOutcomeV1 {
         match error {
             ContextScoutModelErrorV1::Disabled => Self::Disabled,
             ContextScoutModelErrorV1::Unavailable => Self::Unavailable,
+            ContextScoutModelErrorV1::Denied => Self::Denied,
+            ContextScoutModelErrorV1::Disconnected => Self::Disconnected,
             ContextScoutModelErrorV1::Cancelled => Self::Cancelled,
             ContextScoutModelErrorV1::DeadlineExceeded => Self::DeadlineExceeded,
             ContextScoutModelErrorV1::TokenBudgetExceeded => Self::TokenBudgetExceeded,

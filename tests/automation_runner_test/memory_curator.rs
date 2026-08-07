@@ -1,6 +1,5 @@
 use crate::support::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tracedecay_automation::AutomationError;
 
 struct TransientThenJsonBackend {
     calls: AtomicUsize,
@@ -10,12 +9,14 @@ impl AgentTaskBackend for TransientThenJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= 2 {
-            return Err(AutomationError::config(
-                "timed out waiting for transient test backend",
-            ));
+            return Err(
+                tracedecay_automation::backend::AgentTaskError::from_backend_message(
+                    "timed out waiting for transient test backend",
+                ),
+            );
         }
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),

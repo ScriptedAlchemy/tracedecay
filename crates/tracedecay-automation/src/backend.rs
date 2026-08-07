@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::config::AutomationBackend;
 use crate::{AutomationError, Result, config_error};
@@ -132,12 +133,20 @@ pub enum AgentTaskFailureClass {
     Permanent,
     Timeout,
     Unavailable,
+    Denied,
+    Disconnected,
     MalformedOutput,
 }
 
 impl AgentTaskFailureClass {
     pub fn is_retryable(self) -> bool {
-        matches!(self, Self::Retryable | Self::Timeout | Self::Unavailable)
+        // Denial is a policy state: retrying without a configuration change
+        // reproduces it, so it is never retried. A disconnect means the
+        // backend was reached and may be reachable again.
+        matches!(
+            self,
+            Self::Retryable | Self::Timeout | Self::Unavailable | Self::Disconnected
+        )
     }
 
     fn is_retryable_on_later_run(self) -> bool {
@@ -186,15 +195,25 @@ pub fn classify_agent_task_error_message(message: &str) -> AgentTaskFailureClass
     if normalized.contains("timed out") || normalized.contains("timeout") {
         return AgentTaskFailureClass::Timeout;
     }
+    if normalized.contains("denied")
+        || normalized.contains("unauthorized")
+        || normalized.contains("forbidden")
+    {
+        return AgentTaskFailureClass::Denied;
+    }
+    if normalized.contains("connection reset")
+        || normalized.contains("broken pipe")
+        || normalized.contains("closed stdout")
+        || normalized.contains("disconnect")
+    {
+        return AgentTaskFailureClass::Disconnected;
+    }
     if normalized.contains("not found")
         || normalized.contains("no such file")
         || normalized.contains("failed to spawn")
         || normalized.contains("failed to start")
         || normalized.contains("executable")
         || normalized.contains("connection refused")
-        || normalized.contains("connection reset")
-        || normalized.contains("broken pipe")
-        || normalized.contains("closed stdout")
     {
         return AgentTaskFailureClass::Unavailable;
     }
@@ -308,8 +327,81 @@ fn request_input_hash(
     format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
 }
 
+/// Typed failure surface of [`AgentTaskBackend::run_task`].
+///
+/// Denial, disconnect, and unavailability are distinct truthful states: a
+/// denied task must not be retried as if the backend were merely absent, and
+/// a mid-task disconnect is not a failure to reach the backend at all.
+/// Rendered transport messages enter the taxonomy exactly once, through
+/// [`AgentTaskError::from_backend_message`]; everything above the backend
+/// consumes the typed variant.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AgentTaskError {
+    /// The backend or its policy refused to run the task.
+    #[error("agent task denied: {reason}")]
+    Denied { reason: String },
+    /// The backend was reached but the transport or session ended mid-task.
+    #[error("agent task backend disconnected: {reason}")]
+    Disconnected { reason: String },
+    /// The backend could not be reached or started at all.
+    #[error("agent task backend unavailable: {reason}")]
+    Unavailable { reason: String },
+    /// The backend did not finish inside its wall-clock budget.
+    #[error("agent task timed out: {reason}")]
+    Timeout { reason: String },
+    /// The backend completed but its output violated the response contract.
+    #[error("agent task returned malformed output: {reason}")]
+    MalformedOutput { reason: String },
+    /// The task failed in a way that has no dedicated typed state.
+    #[error("agent task failed: {reason}")]
+    Failed { reason: String },
+}
+
+impl AgentTaskError {
+    /// Classifies one rendered transport failure message into the typed
+    /// state. This is the single string-evidence boundary of the taxonomy.
+    pub fn from_backend_message(reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        match classify_agent_task_error_message(&reason) {
+            AgentTaskFailureClass::Denied => Self::Denied { reason },
+            AgentTaskFailureClass::Disconnected => Self::Disconnected { reason },
+            AgentTaskFailureClass::Unavailable => Self::Unavailable { reason },
+            AgentTaskFailureClass::Timeout => Self::Timeout { reason },
+            AgentTaskFailureClass::MalformedOutput => Self::MalformedOutput { reason },
+            AgentTaskFailureClass::Retryable | AgentTaskFailureClass::Permanent => {
+                Self::Failed { reason }
+            }
+        }
+    }
+
+    /// The retry/report classification of this typed state. Only the
+    /// residual [`Self::Failed`] state consults its message.
+    pub fn failure_class(&self) -> AgentTaskFailureClass {
+        match self {
+            Self::Denied { .. } => AgentTaskFailureClass::Denied,
+            Self::Disconnected { .. } => AgentTaskFailureClass::Disconnected,
+            Self::Unavailable { .. } => AgentTaskFailureClass::Unavailable,
+            Self::Timeout { .. } => AgentTaskFailureClass::Timeout,
+            Self::MalformedOutput { .. } => AgentTaskFailureClass::MalformedOutput,
+            Self::Failed { reason } => classify_agent_task_error_message(reason),
+        }
+    }
+}
+
+impl From<AgentTaskError> for AutomationError {
+    fn from(error: AgentTaskError) -> Self {
+        Self::Port {
+            port: "agent_task_backend",
+            source: Box::new(error),
+        }
+    }
+}
+
 pub trait AgentTaskBackend: Send + Sync {
-    fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse>;
+    fn run_task(
+        &self,
+        request: &AgentTaskRequest,
+    ) -> std::result::Result<AgentTaskResponse, AgentTaskError>;
 }
 
 pub const AGENT_TASK_MAX_ATTEMPTS: u32 = 3;
@@ -412,7 +504,7 @@ pub async fn run_agent_task_with_retry_report(
                 return Ok(response);
             }
             Err(error) => {
-                let classification = classify_agent_task_error_message(&error.to_string());
+                let classification = error.failure_class();
                 let backoff = policy.backoff_before_attempt(attempt + 1);
                 let should_retry = attempt < max_attempts
                     && classification.is_retryable()
@@ -428,7 +520,7 @@ pub async fn run_agent_task_with_retry_report(
                     },
                 });
                 if !should_retry {
-                    return Err(error);
+                    return Err(error.into());
                 }
                 if !backoff.is_zero() {
                     tokio::time::sleep(backoff).await;
@@ -599,15 +691,37 @@ mod tests {
     struct FlakyBackend {
         failures: usize,
         calls: AtomicUsize,
+        error: AgentTaskError,
+    }
+
+    impl FlakyBackend {
+        fn timing_out(failures: usize) -> Self {
+            Self {
+                failures,
+                calls: AtomicUsize::new(0),
+                error: AgentTaskError::Timeout {
+                    reason: "timed out waiting for codex app-server response".to_string(),
+                },
+            }
+        }
+
+        fn failing_with(failures: usize, error: AgentTaskError) -> Self {
+            Self {
+                failures,
+                calls: AtomicUsize::new(0),
+                error,
+            }
+        }
     }
 
     impl AgentTaskBackend for FlakyBackend {
-        fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
+        fn run_task(
+            &self,
+            request: &AgentTaskRequest,
+        ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call < self.failures {
-                return Err(AutomationError::config(
-                    "timed out waiting for codex app-server response",
-                ));
+                return Err(self.error.clone());
             }
             Ok(AgentTaskResponse {
                 run_id: request.run_id.clone(),
@@ -658,6 +772,16 @@ mod tests {
                 true,
             ),
             (
+                "permission denied by the codex host policy",
+                AgentTaskFailureClass::Denied,
+                false,
+            ),
+            (
+                "connection reset by peer while streaming the turn",
+                AgentTaskFailureClass::Disconnected,
+                true,
+            ),
+            (
                 "json error: expected value at line 1 column 1",
                 AgentTaskFailureClass::MalformedOutput,
                 false,
@@ -685,10 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_recovers_transient_backend_failure_on_second_attempt() {
-        let backend = FlakyBackend {
-            failures: 1,
-            calls: AtomicUsize::new(0),
-        };
+        let backend = FlakyBackend::timing_out(1);
         let policy = BackendRetryPolicy::new(
             3,
             vec![Duration::ZERO, Duration::ZERO],
@@ -705,10 +826,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_report_records_transient_transient_success_attempts() {
-        let backend = FlakyBackend {
-            failures: 2,
-            calls: AtomicUsize::new(0),
-        };
+        let backend = FlakyBackend::timing_out(2);
         let policy = BackendRetryPolicy::new(
             3,
             vec![Duration::ZERO, Duration::ZERO],
@@ -738,10 +856,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_stops_at_attempt_limit() {
-        let backend = FlakyBackend {
-            failures: usize::MAX,
-            calls: AtomicUsize::new(0),
-        };
+        let backend = FlakyBackend::timing_out(usize::MAX);
         let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_secs(120));
 
         run_agent_task_with_retry(&backend, &request(), &policy)
@@ -758,9 +873,14 @@ mod tests {
         }
 
         impl AgentTaskBackend for PermanentBackend {
-            fn run_task(&self, _request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
+            fn run_task(
+                &self,
+                _request: &AgentTaskRequest,
+            ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
-                Err(AutomationError::config("policy rejected the prompt"))
+                Err(AgentTaskError::Failed {
+                    reason: "policy rejected the prompt".to_string(),
+                })
             }
         }
 
@@ -778,10 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_respects_exhausted_budget() {
-        let backend = FlakyBackend {
-            failures: usize::MAX,
-            calls: AtomicUsize::new(0),
-        };
+        let backend = FlakyBackend::timing_out(usize::MAX);
         let policy =
             BackendRetryPolicy::new(3, vec![Duration::from_secs(1)], Duration::from_millis(1));
 
@@ -790,6 +907,144 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn typed_backend_states_map_to_distinct_failure_classes() {
+        let reason = "typed state".to_string();
+        let classes = [
+            AgentTaskError::Denied {
+                reason: reason.clone(),
+            },
+            AgentTaskError::Disconnected {
+                reason: reason.clone(),
+            },
+            AgentTaskError::Unavailable {
+                reason: reason.clone(),
+            },
+            AgentTaskError::Timeout {
+                reason: reason.clone(),
+            },
+            AgentTaskError::MalformedOutput { reason },
+        ]
+        .map(|error| error.failure_class());
+
+        assert_eq!(
+            classes,
+            [
+                AgentTaskFailureClass::Denied,
+                AgentTaskFailureClass::Disconnected,
+                AgentTaskFailureClass::Unavailable,
+                AgentTaskFailureClass::Timeout,
+                AgentTaskFailureClass::MalformedOutput,
+            ]
+        );
+        for window in classes.windows(2) {
+            assert_ne!(window[0], window[1], "typed states must stay distinct");
+        }
+    }
+
+    #[test]
+    fn backend_message_boundary_types_denial_disconnect_and_unavailability() {
+        assert_eq!(
+            AgentTaskError::from_backend_message("permission denied by the codex host policy"),
+            AgentTaskError::Denied {
+                reason: "permission denied by the codex host policy".to_string()
+            }
+        );
+        assert_eq!(
+            AgentTaskError::from_backend_message("broken pipe writing the prompt"),
+            AgentTaskError::Disconnected {
+                reason: "broken pipe writing the prompt".to_string()
+            }
+        );
+        assert_eq!(
+            AgentTaskError::from_backend_message("codex executable was not found"),
+            AgentTaskError::Unavailable {
+                reason: "codex executable was not found".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn denied_task_is_never_retried_and_surfaces_denial() {
+        let backend = FlakyBackend::failing_with(
+            usize::MAX,
+            AgentTaskError::Denied {
+                reason: "workspace write scope was denied".to_string(),
+            },
+        );
+        let policy = BackendRetryPolicy::new(3, vec![Duration::ZERO], Duration::from_secs(120));
+        let mut report = AgentTaskRetryReport::default();
+
+        let error = run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
+            .await
+            .unwrap_err();
+
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(report.attempt_count(), 1);
+        assert_eq!(
+            report.attempts()[0].failure_classification,
+            Some(AgentTaskFailureClass::Denied)
+        );
+        assert!(
+            error.to_string().contains("agent task denied"),
+            "denial must survive the retry boundary: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnected_task_is_retried_and_classified_as_disconnect() {
+        let backend = FlakyBackend::failing_with(
+            1,
+            AgentTaskError::Disconnected {
+                reason: "connection reset by peer".to_string(),
+            },
+        );
+        let policy = BackendRetryPolicy::new(
+            3,
+            vec![Duration::ZERO, Duration::ZERO],
+            Duration::from_secs(120),
+        );
+        let mut report = AgentTaskRetryReport::default();
+
+        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            report.attempts()[0].failure_classification,
+            Some(AgentTaskFailureClass::Disconnected)
+        );
+        assert!(report.attempts()[1].succeeded);
+    }
+
+    #[tokio::test]
+    async fn unavailable_task_is_retried_and_classified_as_unavailable() {
+        let backend = FlakyBackend::failing_with(
+            1,
+            AgentTaskError::Unavailable {
+                reason: "codex executable was not found".to_string(),
+            },
+        );
+        let policy = BackendRetryPolicy::new(
+            3,
+            vec![Duration::ZERO, Duration::ZERO],
+            Duration::from_secs(120),
+        );
+        let mut report = AgentTaskRetryReport::default();
+
+        run_agent_task_with_retry_report(&backend, &request(), &policy, &mut report)
+            .await
+            .unwrap();
+
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            report.attempts()[0].failure_classification,
+            Some(AgentTaskFailureClass::Unavailable)
+        );
+        assert!(report.attempts()[1].succeeded);
     }
 
     #[test]

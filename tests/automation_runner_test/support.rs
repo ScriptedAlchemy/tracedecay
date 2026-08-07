@@ -331,7 +331,7 @@ impl AgentTaskBackend for JsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::MemoryCurator);
         assert_request_contract(request, "memory_curator", "memory_curator:v1", "ops");
@@ -413,7 +413,7 @@ impl AgentTaskBackend for SkillJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
@@ -492,7 +492,7 @@ impl AgentTaskBackend for InspectSkillWriterUsageBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let summaries = request.context["skill_writer_evidence"]["skill_usage_summaries"]
@@ -536,7 +536,7 @@ impl AgentTaskBackend for InspectSkillWriterUnderusedBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let families = request.context["skill_writer_evidence"]["underused_tool_families"]
@@ -623,10 +623,12 @@ impl AgentTaskBackend for FailingBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, self.task);
-        Err(tracedecay_automation::AutomationError::config(self.message))
+        Err(tracedecay_automation::backend::AgentTaskError::from_backend_message(
+            self.message,
+        ))
     }
 }
 
@@ -634,7 +636,7 @@ impl AgentTaskBackend for SkillTextBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         Ok(AgentTaskResponse {
@@ -668,7 +670,7 @@ impl AgentTaskBackend for MalformedTextBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, self.task);
         let (task_key, prompt_version, required_property) = match self.task {
@@ -711,7 +713,7 @@ impl AgentTaskBackend for SessionJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         assert_request_contract(
@@ -762,7 +764,7 @@ impl AgentTaskBackend for CombinedJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::CombinedReview);
         assert_eq!(request.contract.task_key, "combined_review");
@@ -806,7 +808,7 @@ impl AgentTaskBackend for InspectSessionEvidenceBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         assert_request_contract(
             request,
@@ -881,7 +883,7 @@ impl AgentTaskBackend for SessionReplayEvidenceBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         assert_request_contract(
             request,
@@ -944,7 +946,7 @@ impl AgentTaskBackend for SkillWriterReplayEvidenceBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> tracedecay_automation::Result<AgentTaskResponse> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
         assert_eq!(request.task, AgentTaskKind::SkillWriter);
         assert_request_contract(request, "skill_writer", "skill_writer:v2", "skills");
         let evidence = &request.context["skill_writer_evidence"];
