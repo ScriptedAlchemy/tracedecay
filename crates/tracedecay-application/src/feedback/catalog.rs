@@ -3,15 +3,16 @@
 //! These bindings project the feedback-cycle result. They never create a
 //! second finding store and never execute follow-up work.
 
+use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
     CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
-    PaginationContract, PrivacyClass, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
-    ScopeDimension, ScopeRequirement, StreamingContract, TerminalState, TerminalStateContract,
-    UnavailabilityReason, UseCaseId,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    IdempotencyContract, LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, TerminalState,
+    TerminalStateContract, UnavailabilityReason, UseCaseId,
 };
 
 use crate::current_bindings;
@@ -22,6 +23,10 @@ use crate::retrieval::catalog::{
     APPLICATION_COMPACT_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
 
+use super::read::{
+    FeedbackDiagnosticsReadResultV1, FeedbackExpandResultV1, FeedbackGetResultV1,
+    FeedbackHandleRequestV1, FeedbackListResultV1,
+};
 use super::{
     ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
@@ -246,13 +251,68 @@ fn feedback_surface_catalog_contribution_for_handlers(
         capabilities.push(capability(spec, capability_id, binding_ids, callable)?);
     }
 
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.feedback-surface")?,
         depends_on: Vec::new(),
         capabilities,
         retrieval_primitives: Vec::new(),
         bindings,
-    })?)
+    })?;
+    let schemas = feedback_executable_schemas(&contribution)?;
+    Ok(contribution.with_executable_schemas(schemas)?)
+}
+
+/// Rust-owned request/result schema bodies for the four canonical feedback
+/// reads.
+///
+/// Every read admits the same daemon-minted opaque handle
+/// ([`FeedbackHandleRequestV1`]) — the post-resolution internal request types
+/// are deliberately NOT registered because they are not the wire — and each
+/// result pair is the exact payload type the read service returns. The
+/// remaining feedback operations keep truthful `schema_unavailable`
+/// dispositions: their results are usecases-owned projections or ad-hoc
+/// composites with no wire type in this crate.
+fn feedback_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    let mut schemas = Vec::new();
+    macro_rules! add {
+        ($capability:expr, $result:ty) => {
+            schemas.push(feedback_executable_schema::<FeedbackHandleRequestV1, $result>(
+                contribution,
+                $capability,
+            )?)
+        };
+    }
+    add!(
+        FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
+        FeedbackDiagnosticsReadResultV1
+    );
+    add!(FEEDBACK_GET_CAPABILITY_ID_V1, FeedbackGetResultV1);
+    add!(FEEDBACK_EXPAND_CAPABILITY_ID_V1, FeedbackExpandResultV1);
+    add!(FEEDBACK_LIST_CAPABILITY_ID_V1, FeedbackListResultV1);
+    Ok(schemas)
+}
+
+fn feedback_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    capability: &str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let capability_id = CapabilityId::new(capability)?;
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == &capability_id)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "feedback schema capability",
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
+        manifest,
+    )?)
 }
 
 pub fn feedback_surface_handler_descriptors()

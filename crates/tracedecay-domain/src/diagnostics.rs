@@ -38,7 +38,19 @@ const DIAGNOSTIC_MESSAGE_DIGEST_DOMAIN: &str = "tracedecay.diagnostic-message.v1
 
 /// Diagnostic severity. Source severity is preserved exactly; TraceDecay
 /// never raises severity because several producers agree (Plan 35).
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverityV1 {
     Error,

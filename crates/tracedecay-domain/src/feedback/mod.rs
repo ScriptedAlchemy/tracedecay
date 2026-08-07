@@ -50,7 +50,7 @@ validated_string_newtype!(
 /// Exact repository scope used for a feedback evaluation. A path, current
 /// working directory, repository display name, or mutable branch label is not
 /// a substitute for this identity.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackScopeV1 {
     pub project_id: ProjectId,
@@ -79,7 +79,7 @@ impl FeedbackScopeV1 {
 /// Content identity distinguishes durable saved content from an authorized
 /// ephemeral document overlay. Overlay identity is deliberately local to its
 /// owning session and cannot be made durable by converting it to a digest.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum FeedbackContentIdentityV1 {
     SavedContent {
@@ -135,7 +135,9 @@ impl FeedbackContentIdentityV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackDurabilityV1 {
     Durable,
@@ -296,7 +298,7 @@ impl FeedbackCycleRuntimeSnapshotV1 {
 /// Exact changed-code address for one single-root feedback evaluation. The
 /// address carries canonical file/range/symbol identities, never a path or
 /// mutable line number.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackTargetV1 {
     pub file: FileOccurrenceId,
@@ -489,7 +491,9 @@ impl FeedbackSavedEvaluationV1 {
 
 /// Coverage state for graph impact and affected-test evidence. An empty impact
 /// set is clean only when its state is complete.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackImpactStateV1 {
     Complete,
@@ -501,7 +505,7 @@ pub enum FeedbackImpactStateV1 {
 /// Reference-only graph and test impact for one feedback target. The owning
 /// graph/query layer supplies these identities; this contract does not create
 /// another graph, test map, or evidence store.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackImpactV1 {
     pub target: FeedbackTargetV1,
@@ -551,7 +555,9 @@ fn has_duplicates<T: PartialEq>(values: &[T]) -> bool {
 
 /// Complete provider states remain distinct. Empty findings are clean only
 /// when every requested provider completed with complete supported coverage.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderEvaluationStateV1 {
     SupportedCompletedComplete,
@@ -566,7 +572,9 @@ pub enum ProviderEvaluationStateV1 {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackCycleTerminationV1 {
     Clean,
@@ -609,7 +617,9 @@ impl FeedbackCycleTerminationV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackFindingLifecycleV1 {
     Active,
@@ -618,7 +628,9 @@ pub enum FeedbackFindingLifecycleV1 {
     Cleared,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackDiagnosticClassificationV1 {
     New,
@@ -630,7 +642,9 @@ pub enum FeedbackDiagnosticClassificationV1 {
 /// diagnostic. An unavailable or partial baseline never upgrades a finding
 /// to `New`; only an authoritative `NoPriorBaseline` state may do so without
 /// a baseline record.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackBaselineStateV1 {
     Complete,
@@ -859,7 +873,7 @@ impl FeedbackDiagnosticV1 {
 /// Bounded code location used only to project an anchored advisory finding
 /// into an editor. The finding's `retrieval_anchor_id` remains the evidence
 /// expansion authority; this value carries no source body or provider payload.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDiagnosticProjectionV1 {
     pub file: FileOccurrenceId,
@@ -927,7 +941,7 @@ fn safe_diagnostic_code_description_uri(
 }
 
 /// Closed producer vocabulary for standard diagnostic projection.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackDiagnosticProducerV1 {
     GitHubReview,
@@ -937,7 +951,7 @@ pub enum FeedbackDiagnosticProducerV1 {
 
 /// Reference-only post-edit feedback finding. The safe preview is bounded display framing,
 /// never a source-text copy or a second diagnostic store.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackFindingV1 {
     pub finding_id: FeedbackFindingId,
@@ -1019,7 +1033,7 @@ pub fn derive_overlay_feedback_finding_id(
 
 /// One deterministic result for one trigger. The result represents a
 /// terminal advisory evaluation and contains no next-action execution hook.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackCycleResultV1 {
     pub result_id: FeedbackResultId,

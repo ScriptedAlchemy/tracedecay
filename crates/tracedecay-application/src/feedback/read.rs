@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::feedback::{
     FeedbackCycleId, FeedbackCycleResultV1, FeedbackFindingId, FeedbackFindingV1, FeedbackResultId,
@@ -45,7 +46,7 @@ pub type FeedbackReadPortFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
 
 /// Opaque daemon-minted handle accepted by the first feedback read invocation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackHandleRequestV1 {
     pub request_handle: String,
@@ -129,7 +130,7 @@ impl FeedbackListRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackFindingReadV1 {
     pub result_id: FeedbackResultId,
@@ -138,32 +139,37 @@ pub struct FeedbackFindingReadV1 {
     pub finding: FeedbackFindingV1,
     /// Server-minted request handle for `feedback_get`; durable identity remains
     /// `finding.finding_id`.
+    ///
+    /// Cursor identity types are deliberately absent from the generated schema
+    /// surface; the public wire form is the bounded opaque string.
+    #[schemars(with = "String")]
     pub get_handle: OpaqueCursor,
     /// Server-minted request handle for `feedback_expand`, present only when
     /// the canonical finding has a retained retrieval anchor.
+    #[schemars(with = "Option<String>")]
     pub expand_handle: Option<OpaqueCursor>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDiagnosticsReadResultV1 {
     pub cycle: FeedbackCycleResultV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackGetResultV1 {
     pub finding: FeedbackFindingReadV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackExpandResultV1 {
     pub finding: FeedbackFindingReadV1,
     pub expansion: AnchorExpandResult,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackListResultV1 {
     pub findings: Vec<FeedbackFindingReadV1>,

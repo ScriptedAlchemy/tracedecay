@@ -1,21 +1,27 @@
+use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
     CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1,
     ContributionContractRef, ContributionId, CoverageContractRef, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
-    OmissionContractRef, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RetrievalFamily, RetrievalPrimitiveManifestInputV1,
-    RetrievalPrimitiveManifestV1, RetrieverId, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ScoringContractRef,
-    SortContract, SortContractId, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
-    SurfaceOperationName, TemporalMode, TerminalState, TerminalStateContract,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    IdempotencyContract, LifecycleClass, OmissionContractRef, PaginationContract, PrivacyClass,
+    ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract, RetrievalFamily,
+    RetrievalPrimitiveManifestInputV1, RetrievalPrimitiveManifestV1, RetrieverId,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, ScoringContractRef, SortContract, SortContractId,
+    StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TemporalMode,
+    TerminalState, TerminalStateContract,
 };
 
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::retrieval::requests::{
+    HealthReadRequest, HealthReadResult, SessionLookupRequest, SessionLookupResult,
+    SourceLinesRequest, SourceLinesResult,
+};
 
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";
@@ -291,13 +297,67 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             required_features: Vec::new(),
         })?);
     }
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.primitive-reads")?,
         depends_on: Vec::new(),
         capabilities,
         retrieval_primitives: Vec::new(),
         bindings,
-    })?)
+    })?;
+    let schemas = primitive_executable_schemas(&contribution)?;
+    Ok(contribution.with_executable_schemas(schemas)?)
+}
+
+/// Rust-owned request/result schema bodies for the primitive reads whose wire
+/// types live in this crate.
+///
+/// The registered pairs are exactly the types the daemon parses and returns
+/// for these operations (`crate::retrieval::requests`), so the generated SDKs
+/// cannot describe a shape the surface does not speak. The remaining primitive
+/// reads keep truthful `schema_unavailable` dispositions: their wire request
+/// and result types live outside this crate's dependency cone (usecases-owned
+/// runtime types) or need a dedicated surface DTO before a registration here
+/// could be honest.
+fn primitive_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    let mut schemas = Vec::new();
+    macro_rules! add {
+        ($operation:literal, $request:ty, $result:ty) => {
+            schemas.push(primitive_executable_schema::<$request, $result>(
+                contribution,
+                $operation,
+            )?)
+        };
+    }
+    add!("session_lookup", SessionLookupRequest, SessionLookupResult);
+    add!("source_lines", SourceLinesRequest, SourceLinesResult);
+    add!("health_read", HealthReadRequest, HealthReadResult);
+    Ok(schemas)
+}
+
+fn primitive_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    operation: &str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let capability_id = CapabilityId::new(format!(
+        "capability.application.primitive.{}",
+        operation.replace('_', "-")
+    ))?;
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == &capability_id)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "primitive schema capability",
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
+        manifest,
+    )?)
 }
 
 pub fn symbol_search_request_schema() -> Result<SchemaRef, ApplicationContractError> {
