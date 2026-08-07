@@ -5,18 +5,25 @@
 //! and `git_apply`; query status/diff/history/blame/hunk reads are callable
 //! independently and expose no mutation capability.
 
+use schemars::JsonSchema;
+use tracedecay_domain::{GitIndexPreviewV1, GitIndexTransactionReceiptV1};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
     CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
-    PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
-    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
-    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    DeadlineContract, DeniedDisclosurePolicy, EffectClass, ExecutableSchemaAuthority,
+    IdempotencyContract, LifecycleClass, PrivacyClass, ProfileId, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, TerminalState,
+    TerminalStateContract, UseCaseId,
 };
 
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
+use crate::git::{
+    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest, GitHistorySurfaceRequest,
+    GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadResultV1, GitStatusSurfaceRequest,
+};
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
@@ -146,13 +153,73 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
         capabilities.push(capability(spec, capability_id, binding_ids)?);
     }
 
-    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
+    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.git-surface")?,
         depends_on: Vec::new(),
         capabilities,
         retrieval_primitives: Vec::new(),
         bindings,
-    })?)
+    })?;
+    let schemas = git_executable_schemas(&contribution)?;
+    Ok(contribution.with_executable_schemas(schemas)?)
+}
+
+/// Rust-owned request/result schema bodies for every public Git surface.
+///
+/// The shared `public_wire` types are the single wire authority: root
+/// transport parsing admits them and SDK generation emits them, so neither
+/// can drift from the other.
+fn git_executable_schemas(
+    contribution: &CatalogContributionV1,
+) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
+    let mut schemas = Vec::with_capacity(SURFACE_SPECS.len());
+    macro_rules! add {
+        ($operation:literal, $request:ty, $result:ty) => {
+            schemas.push(git_executable_schema::<$request, $result>(
+                contribution,
+                $operation,
+            )?)
+        };
+    }
+    add!("git_status", GitStatusSurfaceRequest, GitReadResultV1);
+    add!("git_diff", GitDiffSurfaceRequest, GitReadResultV1);
+    add!("git_history", GitHistorySurfaceRequest, GitReadResultV1);
+    add!("git_blame", GitBlameSurfaceRequest, GitReadResultV1);
+    add!("git_hunks", GitHunksSurfaceRequest, GitReadResultV1);
+    add!("git_preview", GitPreviewSurfaceRequest, GitIndexPreviewV1);
+    add!(
+        "git_apply",
+        GitApplySurfaceRequest,
+        GitIndexTransactionReceiptV1
+    );
+    Ok(schemas)
+}
+
+fn git_executable_schema<Request, Response>(
+    contribution: &CatalogContributionV1,
+    operation: &str,
+) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
+where
+    Request: JsonSchema,
+    Response: JsonSchema,
+{
+    let spec = SURFACE_SPECS
+        .iter()
+        .find(|spec| spec.operation == operation)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "git schema operation",
+        })?;
+    let capability_id = CapabilityId::new(spec.capability)?;
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == &capability_id)
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "git schema capability",
+        })?;
+    Ok(ExecutableSchemaAuthority::for_types::<Request, Response>(
+        manifest,
+    )?)
 }
 
 pub fn git_surface_handler_descriptors()

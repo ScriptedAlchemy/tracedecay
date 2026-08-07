@@ -16,7 +16,7 @@ use tracedecay_application::{AuthorizedScopeSet, ResolvedScope};
 use tracedecay_code_index::git_projection::{
     GitTopologyProjectionStore, git_topology_namespace, git_topology_projection_identity,
 };
-use tracedecay_domain::git::{GitBlameV1, GitDiffScopeV1, GitDiffV1, GitHistoryV1, HunkRefV1};
+use tracedecay_domain::git::GitDiffScopeV1;
 use tracedecay_domain::{
     GitIndexPreviewId, ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1,
     ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
@@ -75,21 +75,10 @@ pub struct DaemonGitHunkPreviewBindingV1 {
     pub expires_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitHunkPreviewEntryV1 {
-    pub digest: ManifestDigest,
-    pub hunk: HunkRefV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitHunkPreviewInputV1 {
-    pub preview_input_id: GitIndexPreviewId,
-    pub repository_snapshot_digest: ManifestDigest,
-    pub expires_at: UtcMicros,
-    pub hunks: Vec<GitHunkPreviewEntryV1>,
-}
+// The minted hunk preview payloads are canonical public wire contracts owned
+// by the application crate (`git::public_wire`), shared with SDK schema
+// generation.
+pub use tracedecay_application::git::{GitHunkPreviewEntryV1, GitHunkPreviewInputV1};
 
 impl GitReadRequestV1 {
     pub fn capability_id(&self) -> &'static str {
@@ -113,15 +102,10 @@ impl GitReadRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "query", content = "result", rename_all = "snake_case")]
-pub enum GitReadResultV1 {
-    Status(GitQueryEnvelopeV1<GitStatusSummaryV1>),
-    Diff(GitQueryEnvelopeV1<GitDiffV1>),
-    History(GitQueryEnvelopeV1<GitHistoryV1>),
-    Blame(GitQueryEnvelopeV1<GitBlameV1>),
-    Hunks(GitQueryEnvelopeV1<GitHunkPreviewInputV1>),
-}
+// The typed read payload enum is a canonical public wire contract owned by
+// the application crate (`git::public_wire`), shared with SDK schema
+// generation.
+pub use tracedecay_application::git::GitReadResultV1;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

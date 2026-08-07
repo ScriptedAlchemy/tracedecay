@@ -11,6 +11,7 @@
 //! submodule) are represented explicitly through [`GitCoverageV1`] rather
 //! than guessed.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::time::UtcMicros;
@@ -24,7 +25,9 @@ pub const HUNK_REF_DIGEST_DOMAIN: &str = "tracedecay.git.hunkref.v1";
 pub const HUNK_REF_SCHEMA_VERSION_V1: &str = "hunkref.v1";
 
 /// Repository object format, derived from object-id length.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitObjectFormatV1 {
     Sha1,
@@ -53,7 +56,7 @@ fn validate_git_oid(value: &str, field: &'static str) -> Result<(), DomainError>
 /// A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
 /// SHA-256 length. This is identity evidence only; it never authorizes
 /// object reconstruction or traversal outside native Git.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct GitOidV1(String);
 
@@ -117,7 +120,7 @@ fn validate_file_mode(value: &str, field: &'static str) -> Result<(), DomainErro
 
 /// A native Git file mode as stored in tree/index records (six octal digits,
 /// e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct GitFileModeV1(String);
 
@@ -175,7 +178,9 @@ impl std::fmt::Display for GitFileModeV1 {
 
 /// Native HEAD state. Missing, unborn, and detached states are explicit,
 /// never guessed (Plan 36, provenance rule carried into query reads).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum GitHeadStateV1 {
     Attached { branch: String, commit: GitOidV1 },
@@ -212,7 +217,18 @@ impl GitHeadStateV1 {
 
 /// In-progress native Git operation state, read from repository metadata.
 #[derive(
-    Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum GitOperationStateV1 {
@@ -230,7 +246,9 @@ pub enum GitOperationStateV1 {
 /// Typed coverage/degradation reasons for a read-only Git result. A result
 /// carrying any degradation is truthful but not complete; callers must not
 /// treat it as a clean full view.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitDegradationV1 {
     /// Ignored content shares a directory with live tracked/untracked
@@ -253,7 +271,7 @@ pub enum GitDegradationV1 {
 
 /// Typed coverage of a read-only Git result: the sorted, de-duplicated set
 /// of degradations observed while capturing it.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitCoverageV1 {
     pub degradations: Vec<GitDegradationV1>,
@@ -325,7 +343,9 @@ pub(super) fn validate_path_label(value: &str, field: &'static str) -> Result<()
 
 /// Native change kind for one side (index or worktree) of a status entry,
 /// or for a whole-file diff record.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitChangeKindV1 {
     Unmodified,
@@ -341,7 +361,7 @@ pub enum GitChangeKindV1 {
 /// One tracked status record (porcelain v2 ordinary, rename, or unmerged
 /// entry). `index` is the staged (HEAD→index) side; `worktree` is the
 /// unstaged (index→worktree) side.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitTrackedStatusV1 {
     pub path: String,
@@ -384,7 +404,7 @@ impl GitTrackedStatusV1 {
 
 /// One status entry: a tracked record with staged/unstaged sides, an
 /// untracked path, or an ignored path.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GitStatusEntryV1 {
     Tracked(GitTrackedStatusV1),
@@ -412,7 +432,7 @@ impl GitStatusEntryV1 {
 /// Typed repository status: HEAD state, in-progress operation, every
 /// staged/unstaged/untracked/ignored/renamed/conflicted/submodule entry,
 /// and explicit coverage.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitStatusV1 {
     pub repository: RepositoryId,
@@ -496,7 +516,7 @@ impl GitStatusV1 {
 /// Diff scope: unstaged worktree changes, staged index changes, or an exact
 /// commit range. Range diffs are read-only evidence and carry no index
 /// relationship, so they cannot mint an applicable `HunkRefV1`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(tag = "scope", rename_all = "snake_case")]
 pub enum GitDiffScopeV1 {
     WorkingTree,
@@ -507,7 +527,7 @@ pub enum GitDiffScopeV1 {
 /// One structured diff hunk. The hunk body is not retained; `patch_digest`
 /// is the canonical digest of the normalized header plus body lines, which
 /// is the stable hunk identity evidence (Plan 36 bounded-result rule).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitHunkV1 {
     pub old_start: u32,
@@ -547,7 +567,7 @@ impl GitHunkV1 {
 
 /// One file's structured diff record: change kind, modes, blob identities,
 /// binary/submodule classification, bounded line totals, and hunks.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitFileDiffV1 {
     pub path: String,
@@ -602,7 +622,7 @@ impl GitFileDiffV1 {
 }
 
 /// Typed diff result for one scope with explicit coverage.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitDiffV1 {
     pub repository: RepositoryId,
@@ -649,7 +669,7 @@ impl GitDiffV1 {
 }
 
 /// Author/committer identity and timestamp evidence for one commit.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitCommitIdentityV1 {
     pub name: String,
@@ -659,7 +679,7 @@ pub struct GitCommitIdentityV1 {
 
 /// Bounded commit metadata. The full message is not retained;
 /// `message_digest` is its canonical digest evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitCommitMetadataV1 {
     pub commit: GitOidV1,
@@ -675,7 +695,7 @@ pub struct GitCommitMetadataV1 {
 /// Bounded commit history in native traversal order. `truncated` is true
 /// when the capture bound cut the walk; shallow/partial-clone boundaries are
 /// coverage degradations, never silently clean.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitHistoryV1 {
     pub repository: RepositoryId,
@@ -700,7 +720,9 @@ impl GitHistoryV1 {
 }
 
 /// Why blame/line provenance is unavailable for a path.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitBlameAvailabilityV1 {
     Available,
@@ -710,7 +732,7 @@ pub enum GitBlameAvailabilityV1 {
 }
 
 /// Rename-following evidence for one blamed line (`previous` record).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitBlamePreviousV1 {
     pub commit: GitOidV1,
@@ -718,7 +740,7 @@ pub struct GitBlamePreviousV1 {
 }
 
 /// Line provenance for one final (current) line.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitBlameLineV1 {
     /// 1-based line number in the blamed revision.
@@ -748,7 +770,7 @@ impl GitBlameLineV1 {
 
 /// Typed blame result: per-line provenance plus boundary, rename-following,
 /// and unavailable states.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitBlameV1 {
     pub repository: RepositoryId,

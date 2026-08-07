@@ -210,7 +210,7 @@ pub enum GitIndexReceiptOutcomeV1 {
 }
 
 /// Durable, integrity-protected receipt for one Git index transaction.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitIndexTransactionReceiptV1 {
     pub receipt_id: GitIndexReceiptId,

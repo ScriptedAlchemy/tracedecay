@@ -4,6 +4,7 @@ mod catalog;
 #[cfg(feature = "native-git")]
 mod historical_blob;
 mod native_integration;
+mod public_wire;
 mod read;
 mod surface_catalog;
 mod transactions;
@@ -20,6 +21,12 @@ pub use native_integration::{
     NativeIntegrationService, NativeIntegrationStackResolutionOutcomeV1,
     NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
     NativeIntegrationStatusRequestV1,
+};
+pub use public_wire::{
+    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest, GitHistorySurfaceRequest,
+    GitHunkPreviewEntryV1, GitHunkPreviewInputV1, GitHunksSurfaceRequest, GitPreviewSurfaceRequest,
+    GitQueryEnvelopeV1, GitReadResultV1, GitStatusSummaryV1, GitStatusSurfaceRequest,
+    GitSurfaceDiffScopeV1,
 };
 pub use read::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,

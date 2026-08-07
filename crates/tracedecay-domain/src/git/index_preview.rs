@@ -1,5 +1,6 @@
 //! Immutable Git index transaction intent and preview contracts.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::time::UtcMicros;
@@ -10,7 +11,9 @@ use super::*;
 /// The only native Git mutations represented by the index-transaction runtime. Generic Git execution,
 /// ref rewrites, merge/rebase/cherry-pick, push, and worktree writes are
 /// deliberately absent.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitIndexTransactionOperationV1 {
     StageHunks,
@@ -30,7 +33,9 @@ impl GitIndexTransactionOperationV1 {
 
 /// Why a preview is intentionally read-only. A caller must re-preview after
 /// resolving the condition; no variant grants a relaxed or partial apply.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitIndexUnsupportedStateV1 {
     BareRepository,
@@ -58,7 +63,7 @@ pub enum GitIndexUnsupportedStateV1 {
 }
 
 /// Whether a captured preview may reach the daemon's native apply path.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state", content = "reason")]
 pub enum GitIndexPreviewDispositionV1 {
     Applicable,
@@ -73,7 +78,7 @@ impl GitIndexPreviewDispositionV1 {
 
 /// The fixed commit-signing policy understood by `commit_index`. It is not a
 /// generic collection of Git flags and does not authorize hook bypasses.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "policy")]
 pub enum GitIndexSigningPolicyV1 {
     UnsignedPermitted,
@@ -84,7 +89,7 @@ pub enum GitIndexSigningPolicyV1 {
 ///
 /// The daemon retains this exact input only in its expiring private preview
 /// authority. Public previews and durable receipts expose only its digest.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitIndexCommitIntentV1 {
     pub message: String,
@@ -446,7 +451,7 @@ impl<'de> Deserialize<'de> for GitIndexPreviewInputV1 {
 /// transaction. Applicability is only a precondition: the daemon must capture
 /// and compare the entire snapshot and every contained `HunkRefV1` again
 /// immediately before a native mutation.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitIndexPreviewV1 {
     pub preview_id: GitIndexPreviewId,

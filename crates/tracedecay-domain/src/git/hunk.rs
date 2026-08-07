@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::{DomainError, ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
@@ -10,7 +11,9 @@ use super::*;
 
 /// `HunkRef` operation direction (Plan 36): working tree to index, or index
 /// to HEAD/base. No other direction is encodable.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HunkDirectionV1 {
     WorkingTreeToIndex,
@@ -18,7 +21,7 @@ pub enum HunkDirectionV1 {
 }
 
 /// Expected blob identity, or explicit absent-file state.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum GitBlobExpectationV1 {
     Present(GitOidV1),
@@ -37,7 +40,7 @@ impl GitBlobExpectationV1 {
 /// Expected index entry state for compare-and-swap: blob identity (or
 /// absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
 /// merged (stage-0) entry.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct GitIndexEntryExpectationV1 {
     pub blob: GitBlobExpectationV1,
@@ -82,7 +85,7 @@ pub fn full_hunk_selection_bitmap(line_count: u32) -> Vec<u64> {
 ///
 /// query mints these as read-only identity evidence only. Applying them is a
 /// daemon Git mutation path and is not representable here.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HunkRefV1 {
     pub repository: RepositoryId,
@@ -204,7 +207,7 @@ pub const GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.previ
 pub const GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1: &str = "tracedecay.git-index.receipt.v1";
 
 crate::canonical_text::validated_string_newtype!(
-    plain,
+    schema,
     DomainError,
     validate_path_label;
     GitIndexPreviewId => "git index preview id",
