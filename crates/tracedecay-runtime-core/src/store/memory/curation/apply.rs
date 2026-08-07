@@ -43,8 +43,9 @@ use tracedecay_domain::{
 use tracedecay_store::{
     FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactCurationBatchV1,
     ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
-    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactRelationV1,
-    ProjectMemoryMemoryRepairStatsV1, ProjectMemoryResult,
+    ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1, ProjectMemoryFactMergeCommandV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactRelationV1, ProjectMemoryMemoryRepairStatsV1,
+    ProjectMemoryResult,
 };
 pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
     db: &Database,
@@ -333,8 +334,17 @@ async fn project_memory_replay_merge_tx(
             .map_err(FactStoreError::from)?,
         );
     }
-    let deleted_losers =
-        project_memory_curation_mappings_from_ids_tx(transaction, owner, &ids).await?;
+    // The original merge already retired each loser's fixed legacy mapping;
+    // at replay time only the canonical identity survives, so the replayed
+    // outcome carries the mapping in its retired shape (no legacy binding)
+    // rather than demanding a projection row the deletion removed.
+    let mut deleted_losers = Vec::with_capacity(ids.len());
+    for fact_id in &ids {
+        deleted_losers.push(ProjectMemoryFactMappingV1::new(
+            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
+            None,
+        )?);
+    }
     let content_updated = receipt
         .receipt
         .get("content_updated")
@@ -772,6 +782,7 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
     )
     .await?;
     let mut deleted_ids = Vec::new();
+    let mut deleted_losers = Vec::new();
     for (loser_id, previous_access, expected_last_event_id, mapping, category) in pending_deletes {
         let batch = project_memory_merge_removal_batch(
             request.owner(),
@@ -792,6 +803,14 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
             now,
         )
         .await?;
+        // The mirror delete just retired this loser's fixed legacy mapping;
+        // the merge outcome carries the mapping captured before the deletion
+        // (the only remaining witness of the legacy binding) instead of
+        // re-querying a row that no longer exists.
+        deleted_losers.push(ProjectMemoryFactMappingV1::new(
+            ProjectMemoryFactIdV1::new(request.owner().clone(), loser_id.clone())?,
+            Some(mapping),
+        )?);
         deleted_ids.push(loser_id);
     }
     let winner = project_memory_curation_mappings_from_ids_tx(
@@ -808,9 +827,6 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
             "compatibility merge winner mapping is missing",
         )
     })?;
-    let deleted_losers =
-        project_memory_curation_mappings_from_ids_tx(transaction, request.owner(), &deleted_ids)
-            .await?;
     let receipt = json!({
         "content_updated": content_updated,
         "deleted_loser_fact_ids": deleted_ids.iter().map(FactId::as_str).collect::<Vec<_>>(),
