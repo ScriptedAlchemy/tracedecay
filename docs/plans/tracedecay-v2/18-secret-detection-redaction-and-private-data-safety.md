@@ -32,6 +32,27 @@ Enabling it protects newly ingested values; it does not rewrite transcripts
 already at rest. Structural payload externalization remains independent of
 this sensitive-value setting.
 
+**Dated amendment (2026-08-07, recorded decision — supersedes the
+conditional guarantee above).** The owner setting described above no longer
+exists in code. `d69ffa3504 fix(privacy): hard cut durable content
+boundaries` deleted `IngestProtectionDefaults` and
+`UserConfig::lcm_sensitive_redaction_enabled`
+(`crates/tracedecay-sessions/src/runtime/lcm/raw.rs`,
+`ingest_protection_defaults_tests.rs` removed); sensitive-value redaction of
+`lcm_raw_messages` input is now mandatory and unconditional at ingest — there
+is no per-profile opt-in and no per-message metadata override. Ingest marks
+affected payloads `redacted: true, lossy: true` in metadata (`raw.rs:779-786`
+at the time of this note). This is a hard cut, stricter (safer) than the
+plan's prior "lossless LCM by default, irreversible redaction is opt-in"
+contract, and is consistent with the index's "capture sanitizes before
+persistence" doctrine, which outranks this plan's text. The former
+`UserConfig::lcm_sensitive_redaction_enabled` toggle referenced in
+`docs/USER-GUIDE.md` and `crates/tracedecay-sessions/SEAMS.md` is stale and
+should be treated as retired along with this note. Post-RC register items
+untouched by this amendment: at-rest rescan/quarantine/remediation UI on
+detector upgrade, and detector evaluation corpora remain absent (see the
+2026-08-07 plan-conformance audit, section 4D).
+
 ## Owns
 
 - Structured parsing and secret/private-data detection.
@@ -127,7 +148,10 @@ this sensitive-value setting.
 - Sanitized capture established shared parsing, detection, redaction, receipt, and safe-marker primitives.
 - Representative structured and malformed inputs prove parse-before-scan behavior.
 - Every covered sink rejects raw, tainted, unmarked, and stale-policy payloads;
-  LCM raw sensitive values follow the conditional guarantee above.
+  LCM raw sensitive values follow the conditional guarantee above (see the
+  2026-08-07 dated amendment above — this is now a mandatory hard cut, not a
+  conditional guarantee; the "conditional" and "profile setting" language in
+  this bullet and the next describes the retired mechanism).
 - End-to-end tests prove secrets do not appear in covered databases, indexes,
   facts, sanitized session projections, logs, analytics, API responses, UI
   payloads, exports, or diagnostic bundles. LCM raw tests prove the profile

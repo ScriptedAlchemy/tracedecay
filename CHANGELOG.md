@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- *(storage)* retire the `tracedecay-migrate` crate and the v0.0.67
+  released-shape migration exception. Operators on a v0.0.67-era store shape
+  now get a typed `ResetRequired` instead of an in-place upgrade path; this
+  is a deliberate removal (fresh-store/final-schema doctrine), not a
+  regression.
+
 ## [0.0.68](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.67...v0.0.68) - 2026-08-03
 
 ### Fixed

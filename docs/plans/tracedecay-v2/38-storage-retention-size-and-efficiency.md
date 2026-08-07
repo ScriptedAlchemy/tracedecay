@@ -146,6 +146,28 @@ measurements, not inferred table sizes.
    is gone) schedules its branch-DB removal through the daemon. A periodic
    daemon sweep reconciles `branches/` against live git refs. `branch gc`
    remains the manual verb; the automatic path is the default.
+
+   **Dated amendment (2026-08-07, recorded decision — supersedes the
+   per-branch-DB model above).** Per-branch SQLite copies are retired as the
+   write-side mechanism. Non-default-branch writes now land in the single
+   project store's next branch-graph publication epoch, fenced by the sync
+   lease and sealed through the branch-meta `graph_source` CAS
+   (`feat(graph): fence branch graph publication and mutation epochs`,
+   e19add066a; `feat(branch): serve tracked branches from the single project
+   store`, 712f69ec04). Tracking a branch publishes a metadata entry
+   referencing the canonical main database instead of copying a private
+   SQLite snapshot; `resolve_db_for_branch` always serves the main store,
+   with the branch argument deciding provenance and fallback warnings only;
+   branch admin Remove/RemoveAll/Gc retire single-store entries rather than
+   deleting per-branch files. This structurally removes the "live branch
+   stores scale as branches × full graph size" failure class described
+   above (Measured failure classes, item 1) instead of mitigating it through
+   GC — there is no longer a per-branch database to accumulate or collect.
+   Branch identity remains provenance-only; facts stay project-wide. One
+   known residual defect from this cutover: `serving_branch` resolves `None`
+   on ordinary opens, so `branch_drifted_with()` is vacuously false and the
+   MCP freshness drift test fails at HEAD (tracked as RC item G4 in the
+   2026-08-07 plan-conformance audit) — not yet fixed as of this note.
 2. **Registry orphan detection and collection.** The registry sweep detects
    stores whose project identity no longer resolves to a live repository
    root, reports them as a typed Doctor finding (with age and size), and

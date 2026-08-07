@@ -25,6 +25,32 @@ Plan 32 execution evidence. Normative like 11a/11b: every
 channel encodes a stated measurement, absence is drawn, degenerate
 distributions are said rather than drawn, caps are captioned.
 
+**Dated amendment (2026-08-07, recorded decision -- supersedes "not yet
+built"/"nine operations" above).** The DAG/critical-path, timeline/attempt-weave,
+causal, and workload-cortex projections are landed: the Work operation family
+grew from nine to **16 mounted `operation.work.*` operations**
+(`crates/tracedecay-sdk/src/operations.rs`): create, snapshot, delta, views,
+accept_task, generate_proposal, review_proposal, accept_proposal,
+admit_execution, attach_runtime_evidence, replan_dependencies, start_attempt,
+cancel_attempt, resume_attempts, attempt_status, list_attempts. The
+work-product graph gained a durable production authority
+(`c920bc8b8b`, `448cf7ecff`;
+`crates/tracedecay-rusqlite-runtime/src/work_product/{publication,read}.rs`),
+the `views` route was mounted on it (`c18a3af6b2`, `8255f399ac`;
+`crates/tracedecay-api/src/work.rs`), and the dashboard bound the four Work
+views to it (`709e9a5b6a`;
+`dashboard/src/workspaces/work/views/{WorkDagView,WorkTimelineView,WorkCausalView,WorkWorkloadView}.tsx`).
+The views-operation truthfulness constraint from the decision trail below is
+honored, not violated: genuinely unmeasured channels (`wall_clock`,
+`observed_order`) still render typed absence rather than fabricated readings
+(`dashboard/src/workspaces/work/workChannel.ts`, `workViewsModel.ts`).
+Residual open scope, unaffected by this amendment: the advanced-delivery
+slice (execution-topology lanes, placement UI, automation execution
+controls, expertise/calibration views, fan-out/synthesis/recovery UI,
+host/LSP handoff) remains MISSING per the 2026-07-28 core/advanced split,
+and the task-session weave join (advanced) still depends on the filed
+correlation fix.
+
 Plan 24's contract rule applies here: pure source-only/internal Work view
 helpers, branch-local V2 DTO revisions, and routes change in place.
 Persisted V2 state accepts only its exact final shape; any other database,

@@ -360,6 +360,28 @@ pub struct ProjectionBatchReceiptV1 {
   hint against native `gix` index/worktree/tree status; dropped-event or
   overflow signals trigger one bounded reconciliation before generation
   planning.
+
+  **Dated amendment (2026-08-07, recorded decision — supersedes the
+  opt-in-fallback text above).** The recursive `notify` working-tree watcher
+  (the "#80 working-tree watcher") was removed rather than shipped
+  off-by-default; no opt-in config key exists to enable a working-tree
+  watcher (only `user.watcher_debounce_ms.v1` tunes the replacement below).
+  The v6.x `notify-debouncer-full` watcher recursively watched the working
+  tree and drowned on monorepo `node_modules`/`target` churn. Its
+  replacement — landed and unconditional — is an always-on unix-only
+  git-metadata watcher (`src/daemon/git_watch.rs`, designs D3/D5) that
+  watches only `HEAD`, `packed-refs`, `refs/`, and `worktrees/` under
+  `<git_common_dir>` (~5-20 inotify watches per repository) and "never fires
+  on a source-file edit," plus a backstop timer
+  (`src/daemon/git_watch/backstop.rs`) that submits freshness requests on a
+  cadence independent of watcher liveness, feeding the same three-tier
+  freshness ladder described above. The full rationale for why this design
+  is safe without a working-tree watcher lives in the `git_watch.rs` module
+  doc comment ("Why this is safe (unlike the removed #80 working-tree
+  watcher)"); this note is the plan-text pointer to it. Intent (no standing
+  working-tree watcher; out-of-agent edits still caught) holds via the
+  ladder's tier-2 staleness threshold and the backstop; the letter of this
+  bullet (an opt-in recursive fallback existing at all) does not.
 - Use the existing ignore-aware parallel walker for cold discovery. Warm
   batches hash only reconciled candidate paths and reject duplicate event or
   save-without-change work by content plus descriptor digest before parsing.

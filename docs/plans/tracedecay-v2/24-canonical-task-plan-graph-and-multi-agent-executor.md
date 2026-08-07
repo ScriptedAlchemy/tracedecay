@@ -19,6 +19,28 @@ deliberately deleted in the Work restore and returns with Plan 32 execution
 evidence). The public SDK delivery stabilizes public SDK
 names for accepted operations; it does not add missing semantics.
 
+**Dated amendment (2026-08-07, recorded decision -- supersedes "not yet
+built"/"nine operations" above).** The DAG/critical-path, timeline, causal,
+and workload projections are landed. The Work operation family grew to **16
+mounted `operation.work.*` operations** in the SDK registries (Rust + TS
+regenerated), all with real callers across HTTP/SDK/CLI/MCP/dashboard: create,
+snapshot, delta, views, accept_task, generate_proposal, review_proposal,
+accept_proposal, admit_execution, attach_runtime_evidence,
+replan_dependencies, start_attempt, cancel_attempt, resume_attempts,
+attempt_status, list_attempts. The work-product graph gained a durable
+production authority (`c920bc8b8b`, `448cf7ecff`); the `views` route landed on
+it (`c18a3af6b2`, `8255f399ac`) and the dashboard bound the four views to it
+(`709e9a5b6a`). Proposal review, explicit admission, and accept/reject/replan
+operations (previously this plan's baseline-MISSING row) are CONFORMANT:
+`generate_proposal` runs over the deterministic policy evaluator
+(`crates/tracedecay-policy/src/work_loop.rs`), with `review_proposal`,
+`accept_proposal`, `admit_execution`, and `replan_dependencies` mounted as
+separate commands. Residual open scope, unaffected by this amendment: the
+advanced-delivery slice per the 2026-07-28 core/advanced split remains
+MISSING, and the 00-index states advanced workflow behavior "is not deferred
+to a later delivery stage" -- that scope question is tracked separately, not
+resolved by this doc reconciliation.
+
 Earlier task-schema names, operation registries, fixture catalogs, packet
 gates, and milestone/file inventories are historical evidence, not
 prerequisites or features that the advanced workflow delivery must recreate. Only actually independently
