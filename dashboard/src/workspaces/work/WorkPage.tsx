@@ -1,3 +1,4 @@
+import type { WorkProjectionSnapshotV1 } from '../../contracts/index.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Corners, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { type DashboardScope, useScope } from '../../data/scope/store.ts';
@@ -5,16 +6,38 @@ import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
 import { WorkTaskActivity } from './WorkTaskActivity.tsx';
 import { resumeCursor, useWorkDelta, useWorkSnapshot } from './workQueries.ts';
+import { WorkCausalView } from './views/WorkCausalView.tsx';
+import { WorkDagView } from './views/WorkDagView.tsx';
+import {
+  type WorkProjectionKind,
+  WorkProjectionSwitcher,
+  projectionNote,
+  tabId,
+  useWorkProjection,
+} from './views/WorkProjectionSwitcher.tsx';
+import { WorkTimelineView } from './views/WorkTimelineView.tsx';
+import { WorkWorkloadView } from './views/WorkWorkloadView.tsx';
 
 /**
  * Work — channel thirteen.
  *
  * This page reads. The daemon mounts the nine canonical Work routes and
- * contracts their payloads, so the board below is the daemon's own
+ * contracts their payloads, so the projections below are the daemon's own
  * `WorkProjectionSnapshotV1` rather than an inferred stand-in. Every value
  * here came off a generated contract; nothing is inferred, and a route that
  * refuses is reported as the refusal it was. Execution belongs to the Workflow
  * runtime, which has its own workspace — this channel is the task graph.
+ *
+ * Five projections over ONE read. The switcher moves the camera and the
+ * snapshot does not change underneath it, which is what makes the plan 11
+ * mandate hold: a task selected in any projection stays selected in all of
+ * them, because the selection lives in the address and no projection owns it.
+ *
+ * The four projections beside the board each encode at least one measurement
+ * this build cannot take — effort, wall clock, observed order, executor
+ * identity, concurrency. Those gaps are drawn inside each projection rather
+ * than hidden behind an empty axis; `workViewsModel.ts` explains which belongs
+ * to which and why.
  */
 
 export function workScopeProvenance(scope: DashboardScope): string {
@@ -45,9 +68,41 @@ export function workScopeProvenance(scope: DashboardScope): string {
   }
 }
 
+/** The camera, applied. Exhaustive so a projection added to the switcher
+ * cannot be left without something to draw. */
+function WorkProjectionView({
+  kind,
+  snapshot,
+  selected,
+  onSelect,
+}: {
+  kind: WorkProjectionKind;
+  snapshot: WorkProjectionSnapshotV1;
+  selected: string | null;
+  onSelect: (taskId: string) => void;
+}) {
+  switch (kind) {
+    case 'board':
+      return <WorkBoard snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+    case 'dag':
+      return <WorkDagView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+    case 'timeline':
+      return <WorkTimelineView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+    case 'causal':
+      return <WorkCausalView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+    case 'workload':
+      return <WorkWorkloadView snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+    default: {
+      const unhandled: never = kind;
+      return unhandled;
+    }
+  }
+}
+
 export function WorkPage() {
   const scope = useScope((state) => state.scope);
   const [selected, setSelected] = useSelectedTask();
+  const [projection, setProjection] = useWorkProjection();
   const snapshot = useWorkSnapshot();
   const result = snapshot.data;
   const value = result?.outcome === 'value' ? result.value : undefined;
@@ -92,6 +147,16 @@ export function WorkPage() {
             <WorkTaskActivity kind="partial" />
           </div>
 
+          {/* The camera sits above every state below it, including the
+            * refusals: which projection you are looking at is a property of
+            * the page, not of whether the read succeeded, and losing the
+            * switcher on a 503 would strand a reader in a projection they
+            * cannot leave. */}
+          <div className="flex min-w-0 flex-col gap-1.5">
+            <WorkProjectionSwitcher active={projection} onSelect={setProjection} />
+            <p className="text-3xs text-text-muted">{projectionNote(projection)}</p>
+          </div>
+
           {snapshot.isPending ? (
             <Panel legend="Work read model">
               <StateChip kind="loading" detail="reading the snapshot" />
@@ -113,7 +178,19 @@ export function WorkPage() {
 
           {value === undefined ? null : (
             <>
-              <WorkBoard snapshot={value} selected={selected} onSelect={setSelected} />
+              <div
+                role="tabpanel"
+                id="work-projection-panel"
+                aria-labelledby={tabId(projection)}
+                className="min-w-0"
+              >
+                <WorkProjectionView
+                  kind={projection}
+                  snapshot={value}
+                  selected={selected}
+                  onSelect={setSelected}
+                />
+              </div>
 
               {delta.data?.outcome === 'refused' ? (
                 <Panel legend="Continuation">
