@@ -277,6 +277,24 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
             .recv()
             .map_err(|_| "remote recovery fence reader ended before replying".to_owned())?
     }
+
+    /// Returns the already-published canonical project runtime used by replay,
+    /// backup, restore, and remote reads. Query callers receive no locator or
+    /// physical attachment and cannot open a caller-selected store.
+    pub(crate) fn registered_query_target(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<StoreRuntimeHandle, String> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err("remote replay target registry is unavailable".to_owned());
+        }
+        self.targets
+            .read()
+            .map_err(|_| "remote replay target registry lock is poisoned".to_owned())?
+            .get(project_id)
+            .map(|target| target.runtime.clone())
+            .ok_or_else(|| "remote query target is not registered".to_owned())
+    }
 }
 
 impl RemoteReplayTransactionPortV1 for DaemonRemoteReplayTransactionAuthorityV1 {

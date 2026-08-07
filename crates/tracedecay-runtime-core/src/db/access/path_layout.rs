@@ -64,17 +64,11 @@ fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
         return None;
     }
     let nodes_root = node_directory.parent()?;
-    if !nodes_root
-        .file_name()
-        .is_some_and(|name| name == "nodes")
-    {
+    if !nodes_root.file_name().is_some_and(|name| name == "nodes") {
         return None;
     }
     let remote_root = nodes_root.parent()?;
-    if !remote_root
-        .file_name()
-        .is_some_and(|name| name == "remote")
-    {
+    if !remote_root.file_name().is_some_and(|name| name == "remote") {
         return None;
     }
     remote_root.parent()

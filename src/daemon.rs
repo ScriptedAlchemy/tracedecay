@@ -201,6 +201,7 @@ use graph_resolution::retained_project_graph_resolver;
 mod http_application;
 mod http_application_router;
 mod remote_protocol;
+mod remote_query;
 mod remote_replay_transaction;
 use http_application_router::{
     install_http_application_cold_resolver, install_remote_http_application_router,

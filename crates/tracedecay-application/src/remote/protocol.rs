@@ -22,6 +22,7 @@ use crate::{
 pub const REMOTE_PROTOCOL_VERSION_V1: u16 = 1;
 pub const REMOTE_ENROLLMENT_USE_CASE_ID_V1: &str = "use-case.remote.enrollment";
 pub const REMOTE_REPLAY_USE_CASE_ID_V1: &str = "use-case.remote.replay";
+pub const REMOTE_CAPTURE_USE_CASE_ID_V1: &str = "use-case.remote.capture";
 
 pub fn remote_enrollment_result_contract_v1() -> ResultContractRef {
     ResultContractRef::new(
@@ -38,6 +39,15 @@ pub fn remote_replay_result_contract_v1() -> ResultContractRef {
         1,
     )
     .expect("static remote replay result contract is canonical")
+}
+
+pub fn remote_capture_result_contract_v1() -> ResultContractRef {
+    ResultContractRef::new(
+        SchemaId::new("remote.capture.result")
+            .expect("static remote capture result schema id is canonical"),
+        1,
+    )
+    .expect("static remote capture result contract is canonical")
 }
 
 /// Canonical semantic validation required before any authenticated remote
@@ -291,6 +301,34 @@ impl<T> RemoteProtocolResponseV1<T> {
             result,
         })
     }
+
+    /// Preserve a typed remote failure when an adapter returns internally
+    /// inconsistent authority or request evidence.
+    pub fn new_or_unavailable(
+        request_id: RequestId,
+        authority: CurrentRemoteAuthorityStateV1,
+        result: ApplicationResult<T>,
+        contract: ResultContractRef,
+        observed_at: UtcMicros,
+    ) -> Self {
+        let fallback_request_id = request_id.clone();
+        match Self::new(request_id, authority, result) {
+            Ok(response) => response,
+            Err(_) => Self {
+                protocol_version: REMOTE_PROTOCOL_VERSION_V1,
+                request_id: fallback_request_id.clone(),
+                authority: CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                    observed_at,
+                },
+                result: Err(remote_protocol_problem(
+                    contract,
+                    fallback_request_id,
+                    RemoteProtocolFailureV1::AuthorityUnavailable,
+                )),
+            },
+        }
+    }
 }
 
 /// Exact shard placement requested during current-authority discovery.
@@ -475,6 +513,8 @@ pub enum RemoteProtocolFailureV1 {
     ScopeMismatch,
     StaleCredentialRevision,
     StaleAuthorityFence,
+    AuthorityReachable,
+    SpoolSaturated,
     AuthorityUnavailable,
 }
 
@@ -514,6 +554,22 @@ pub fn remote_protocol_problem(
             ),
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
+        },
+        RemoteProtocolFailureV1::AuthorityReachable => ApplicationProblem::Conflict {
+            diagnostic: safe_diagnostic(
+                "remote.authority_reachable",
+                "Offline capture is rejected while the owning authority is reachable",
+            ),
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Refresh],
+        },
+        RemoteProtocolFailureV1::SpoolSaturated => ApplicationProblem::Saturated {
+            diagnostic: safe_diagnostic(
+                "remote.spool_saturated",
+                "The remote offline-capture spool has no remaining capacity",
+            ),
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
         },
         RemoteProtocolFailureV1::AuthorityUnavailable => ApplicationProblem::Unavailable {
             diagnostic: safe_diagnostic(
@@ -630,6 +686,39 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(response.request_id.as_str(), "request.remote");
+    }
+
+    #[test]
+    fn inconsistent_adapter_response_becomes_typed_unavailable() {
+        let request_id = RequestId::new("request.remote").unwrap();
+        let contract = ResultContractRef::new(SchemaId::new("remote.result").unwrap(), 1).unwrap();
+        let response = RemoteProtocolResponseV1::<()>::new_or_unavailable(
+            request_id.clone(),
+            CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+                observed_at: UtcMicros(20),
+            },
+            Err(remote_protocol_problem(
+                contract.clone(),
+                RequestId::new("request.foreign").unwrap(),
+                RemoteProtocolFailureV1::AuthorityUnavailable,
+            )),
+            contract,
+            UtcMicros(20),
+        );
+
+        assert_eq!(response.request_id, request_id);
+        assert!(matches!(
+            response.authority,
+            CurrentRemoteAuthorityStateV1::Unavailable {
+                reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                observed_at: UtcMicros(20),
+            }
+        ));
+        let Err(problem) = response.result else {
+            panic!("inconsistent response must not report success");
+        };
+        assert_eq!(problem.request_id, request_id);
     }
 
     #[test]

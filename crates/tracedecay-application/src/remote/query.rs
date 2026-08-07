@@ -800,7 +800,26 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
         credential: OpaqueRemoteCredential,
     ) -> RemoteProtocolResponseV1<Self::Output> {
         let request_id = request.request_id.clone();
-        let observed_at = self.service.now().unwrap_or(UtcMicros(0));
+        let observed_at = match self.service.now() {
+            Ok(observed_at) => observed_at,
+            Err(error) => {
+                return RemoteProtocolResponseV1::new_or_unavailable(
+                    request_id.clone(),
+                    CurrentRemoteAuthorityStateV1::Unavailable {
+                        reason:
+                            tracedecay_domain::RemoteAuthorityUnavailableReasonV1::RegistryUnavailable,
+                        observed_at: request.sent_at,
+                    },
+                    Err(remote_protocol_problem(
+                        remote_exact_observation_query_result_contract_v1(),
+                        request_id,
+                        query_protocol_failure(error),
+                    )),
+                    remote_exact_observation_query_result_contract_v1(),
+                    request.sent_at,
+                );
+            }
+        };
         let fallback_authority = CurrentRemoteAuthorityStateV1::Partial {
             known_fence: Some(request.body.expected_authority.clone()),
             missing: BTreeSet::from([
@@ -809,10 +828,13 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
             observed_at,
         };
         match self.service.query(&request, &credential) {
-            Ok(outcome) => {
-                RemoteProtocolResponseV1::new(request_id, outcome.authority, Ok(outcome.result))
-                    .expect("query owner preserves response identities")
-            }
+            Ok(outcome) => RemoteProtocolResponseV1::new_or_unavailable(
+                request_id,
+                outcome.authority,
+                Ok(outcome.result),
+                remote_exact_observation_query_result_contract_v1(),
+                observed_at,
+            ),
             Err(error) => {
                 let authority = if matches!(
                     &error,
@@ -830,7 +852,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                     fallback_authority
                 };
                 let failure = query_protocol_failure(error);
-                RemoteProtocolResponseV1::new(
+                RemoteProtocolResponseV1::new_or_unavailable(
                     request_id.clone(),
                     authority,
                     Err(remote_protocol_problem(
@@ -838,8 +860,9 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                         request_id,
                         failure,
                     )),
+                    remote_exact_observation_query_result_contract_v1(),
+                    observed_at,
                 )
-                .expect("query owner preserves problem identities")
             }
         }
     }

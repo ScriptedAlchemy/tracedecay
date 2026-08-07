@@ -380,5 +380,4 @@ mod tests {
             RetainedSurfaceOperation::ALL
         );
     }
-
 }
