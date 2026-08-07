@@ -96,9 +96,31 @@ impl DashboardGraphTestRuntimeV1 {
         project_root: &std::path::Path,
         project_id: tracedecay_domain::ProjectId,
     ) -> crate::errors::Result<std::sync::Arc<crate::global_db::RegisteredGlobalDb>> {
-        self.registry
-            .project_sessions(project_id, [project_root.to_path_buf()])
-            .await
+        let registered = self
+            .registry
+            .project_sessions(project_id.clone(), [project_root.to_path_buf()])
+            .await?;
+        // Production project open binds the retained project graph runtime to
+        // the registered project-sessions authority before any ingest runs;
+        // git-evidence publication (Loom spans) requires that mount, so the
+        // dashboard test composition provides the same binding. The registry
+        // caches the mount per project, so repeated opens reuse it.
+        if registered.project_graph_runtime().is_none() {
+            let project_database = self
+                .registry
+                .project_memory(project_id.clone(), [project_root.to_path_buf()])
+                .await?;
+            let graph_runtime = self
+                .registry
+                .retain_project_graph_runtime(project_id, project_database)
+                .await?;
+            let graph_runtime: std::sync::Arc<dyn crate::global_db::ProjectGraphRuntimePortV1> =
+                std::sync::Arc::new(graph_runtime);
+            // A lost set race means another caller already bound the same
+            // retained runtime; the required postcondition holds either way.
+            let _ = registered.bind_project_graph_runtime(graph_runtime);
+        }
+        Ok(registered)
     }
 
     pub async fn initialize(
