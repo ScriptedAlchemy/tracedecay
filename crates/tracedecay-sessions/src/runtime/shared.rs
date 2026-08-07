@@ -544,6 +544,16 @@ impl TranscriptScopeMatcher {
         registered_roots.map_or_else(|| Self::project(project_root), Self::profile)
     }
 
+    /// [`Self::project`] resolved through a source-lifetime matcher cache.
+    pub fn project_cached(project_root: &Path, cache: &ProjectRootMatcherCache) -> Self {
+        Self::Project(cache.get(project_root))
+    }
+
+    /// [`Self::profile`] resolved through a source-lifetime matcher cache.
+    pub fn profile_cached(registered_roots: &[PathBuf], cache: &ProjectRootMatcherCache) -> Self {
+        Self::Profile(registered_roots.iter().map(|root| cache.get(root)).collect())
+    }
+
     /// [`Self::for_scope`] resolved through a source-lifetime matcher cache,
     /// so a source parsing many transcripts reuses one git identity resolution
     /// per root instead of re-discovering it per file.
@@ -553,8 +563,8 @@ impl TranscriptScopeMatcher {
         cache: &ProjectRootMatcherCache,
     ) -> Self {
         match registered_roots {
-            None => Self::Project(cache.get(project_root)),
-            Some(roots) => Self::Profile(roots.iter().map(|root| cache.get(root)).collect()),
+            None => Self::project_cached(project_root, cache),
+            Some(roots) => Self::profile_cached(roots, cache),
         }
     }
 

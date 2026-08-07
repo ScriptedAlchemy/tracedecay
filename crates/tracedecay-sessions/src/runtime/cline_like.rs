@@ -25,9 +25,9 @@ use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
+    TranscriptLocationMetadataKeys, append_location_metadata, append_tool_calls_metadata,
+    append_usage_metadata, content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotCaptureOutcome,
@@ -76,6 +76,9 @@ pub struct ClineLikeSource {
     provider: &'static str,
     storage_roots: Vec<PathBuf>,
     user_registered_roots: Option<Vec<PathBuf>>,
+    /// Source-lifetime cache so one scan pass resolves git identity once per
+    /// root/task path instead of once per task directory.
+    project_matchers: ProjectRootMatcherCache,
 }
 
 impl ClineLikeSource {
@@ -108,6 +111,7 @@ impl ClineLikeSource {
                     .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -119,6 +123,7 @@ impl ClineLikeSource {
                     .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -131,6 +136,7 @@ impl ClineLikeSource {
                 home.join(".kilocode/cli/global/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -199,17 +205,33 @@ impl ClineLikeSource {
     ) -> Option<PathBuf> {
         let paths = metadata_project_paths(metadata);
         if let Some(roots) = &self.user_registered_roots {
-            if paths
-                .iter()
-                .any(|path| roots.iter().any(|root| path_belongs_to_project(path, root)))
-            {
+            // `Unknown` (bounded git timeout) excludes the task exactly like a
+            // registered-project match: a `None` here never persists a cursor,
+            // so the next scan pass re-resolves the membership instead of
+            // misfiling the task into the user store.
+            if paths.iter().any(|path| {
+                self.project_matchers.membership_against_roots(path, roots)
+                    != ProjectMembership::NoMatch
+            }) {
                 return None;
             }
             paths.into_iter().next()
         } else {
-            paths
-                .into_iter()
-                .find(|path| path_belongs_to_project(path, project_root))
+            let mut matched = None;
+            for path in paths {
+                match self.project_matchers.membership(&path, project_root) {
+                    ProjectMembership::Match => {
+                        if matched.is_none() {
+                            matched = Some(path);
+                        }
+                    }
+                    ProjectMembership::NoMatch => {}
+                    // Any undecided path defers the whole task: a partial
+                    // answer could persist rows under the wrong project.
+                    ProjectMembership::Unknown => return None,
+                }
+            }
+            matched
         }
     }
 
@@ -910,6 +932,7 @@ mod observation_tests {
                 provider,
                 storage_roots: vec![tasks],
                 user_registered_roots: None,
+                project_matchers: ProjectRootMatcherCache::default(),
             };
             let admission = MemoryHostAdmission::default();
 
@@ -1068,6 +1091,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![tasks],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
 
         let paths = source.transcript_paths(&project);
@@ -1111,6 +1135,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![first_tasks, second_tasks.clone()],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let paths = source.transcript_paths(&project);
         assert_eq!(paths.len(), 2);
@@ -1137,6 +1162,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![second_tasks],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let err = capture_cline_like_snapshot_observations(
             &admission,
@@ -1180,6 +1206,7 @@ mod observation_tests {
             provider: "cline",
             storage_roots: vec![temp.path().join("tasks")],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         };
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();

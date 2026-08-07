@@ -320,3 +320,72 @@ fn vibe_discovery_pagination_progresses_older_and_keeps_new_on_page_zero() {
         "oldest must yield page-0 slots to newer arrivals"
     );
 }
+
+/// A bounded git timeout (`Unknown` membership) must exclude the session
+/// without persisting any cursor, so a later pass can re-resolve it.
+#[cfg(unix)]
+#[tokio::test]
+async fn vibe_unknown_project_membership_defers_persistence_and_offset() {
+    const CHILD_ENV: &str = "TRACEDECAY_VIBE_UNKNOWN_MEMBERSHIP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let messages = write_vibe_session(&home, &nested, "unknown-vibe");
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let source = VibeSource::with_home(&home).for_user_scope(vec![project.clone()]);
+        assert_eq!(
+            try_ingest_source(&db, &source, tmp.path(), None)
+                .await
+                .unwrap()
+                .messages_upserted,
+            0
+        );
+        assert!(db.get_session("vibe", "unknown-vibe").await.is_none());
+        assert!(
+            db.get_parse_offset(messages.to_string_lossy().as_ref())
+                .await
+                .is_none()
+        );
+        return;
+    }
+
+    run_unknown_membership_child(
+        CHILD_ENV,
+        "vibe::vibe_unknown_project_membership_defers_persistence_and_offset",
+    );
+}
+
+/// Re-runs this test binary with `GIT` pointing at a script that outlives the
+/// bounded capture deadline, so every session-ingest git identity resolution
+/// times out into `Unknown` inside the child.
+#[cfg(unix)]
+pub(super) fn run_unknown_membership_child(child_env: &str, test_name: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let tmp = TempDir::new().unwrap();
+    let fake_git = tmp.path().join("git-timeout");
+    std::fs::write(&fake_git, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
+    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg(test_name)
+        .arg("--exact")
+        .env(child_env, "1")
+        .env("GIT", fake_git)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "child must defer unknown project membership\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // `--exact` exits 0 on a name miss; require the non-vacuous single run.
+    assert!(
+        stdout.contains("1 passed"),
+        "child filter must match exactly one test\nstdout:\n{stdout}"
+    );
+}

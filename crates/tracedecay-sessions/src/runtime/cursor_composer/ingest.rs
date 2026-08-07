@@ -16,7 +16,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::TranscriptScopeMatcher;
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
 use crate::runtime::source::{TranscriptIngestError, TranscriptIngestResult};
 
 use super::capture::{
@@ -54,6 +54,9 @@ struct ComposerIngestContext<'facade, 'root> {
     project_root: Option<&'root Path>,
     registered_roots: &'root [PathBuf],
     cancellation: &'root ObservationCancellation,
+    /// The source's matcher cache, so repeated sweeps reuse one git identity
+    /// resolution per root/workspace path.
+    matchers: &'root ProjectRootMatcherCache,
 }
 
 impl ComposerIngestContext<'_, '_> {
@@ -61,8 +64,8 @@ impl ComposerIngestContext<'_, '_> {
     /// envelope and per workspace directory.
     fn scope_matcher(&self) -> TranscriptScopeMatcher {
         self.project_root.map_or_else(
-            || TranscriptScopeMatcher::profile(self.registered_roots),
-            TranscriptScopeMatcher::project,
+            || TranscriptScopeMatcher::profile_cached(self.registered_roots, self.matchers),
+            |root| TranscriptScopeMatcher::project_cached(root, self.matchers),
         )
     }
 
@@ -145,6 +148,9 @@ async fn advance_composer_coverage(
 pub struct CursorComposerSource {
     state_db_path: PathBuf,
     chats_dir: PathBuf,
+    /// Source-lifetime cache so sweeps resolve git identity once per
+    /// root/workspace path instead of once per envelope or chats directory.
+    project_matchers: ProjectRootMatcherCache,
 }
 
 impl CursorComposerSource {
@@ -165,6 +171,7 @@ impl CursorComposerSource {
                 .join("globalStorage")
                 .join("state.vscdb"),
             chats_dir: home.join(".cursor").join("chats"),
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -183,6 +190,7 @@ impl CursorComposerSource {
             project_root: Some(project_root),
             registered_roots: &[],
             cancellation,
+            matchers: &self.project_matchers,
         };
         self.ingest_with_context(&context, envelope_cap, max_new_bytes)
             .await
@@ -202,6 +210,7 @@ impl CursorComposerSource {
             project_root: None,
             registered_roots,
             cancellation,
+            matchers: &self.project_matchers,
         };
         self.ingest_with_context(&context, envelope_cap, max_new_bytes)
             .await
@@ -409,7 +418,12 @@ impl CursorComposerSource {
                         byte_budget.defer();
                     }
                 }
-                if !scope_matcher.accepts(Some(Path::new(&project.path))) {
+                // `Unknown` (bounded git timeout) skips the envelope without
+                // advancing its watermark, so the next sweep re-resolves the
+                // membership instead of misfiling the session.
+                if scope_matcher.membership(Some(Path::new(&project.path)))
+                    != ProjectMembership::Match
+                {
                     continue;
                 }
                 let selected_project = ComposerProject {
@@ -721,7 +735,7 @@ impl CursorComposerSource {
             let Some(path) = workspace_paths.get(&ws_hash) else {
                 continue;
             };
-            if !scope_matcher.accepts(Some(Path::new(path))) {
+            if scope_matcher.membership(Some(Path::new(path))) != ProjectMembership::Match {
                 continue;
             }
             let project_path = context.scoped_project_label(path);

@@ -918,3 +918,40 @@ async fn kiro_observation_commit_before_ack_survives_reopen() {
         0
     );
 }
+
+/// A bounded git timeout (`Unknown` membership) must exclude the session
+/// without persisting any cursor, so a later pass can re-resolve it.
+#[cfg(unix)]
+#[tokio::test]
+async fn kiro_unknown_project_membership_defers_persistence_and_offset() {
+    const CHILD_ENV: &str = "TRACEDECAY_KIRO_UNKNOWN_MEMBERSHIP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let transcript = write_workspace_session_json(&home, &nested, "unknown-kiro");
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let source = KiroSource::with_home(&home).for_user_scope(vec![project]);
+        assert_eq!(
+            try_ingest_source(&db, &source, tmp.path(), None)
+                .await
+                .unwrap()
+                .messages_upserted,
+            0
+        );
+        assert!(db.get_session("kiro", "unknown-kiro").await.is_none());
+        assert!(
+            db.get_parse_offset(transcript.to_string_lossy().as_ref())
+                .await
+                .is_none()
+        );
+        return;
+    }
+
+    crate::vibe::run_unknown_membership_child(
+        CHILD_ENV,
+        "kiro::kiro_unknown_project_membership_defers_persistence_and_offset",
+    );
+}

@@ -1083,3 +1083,44 @@ async fn golden_fixture_ingests_through_each_provider_discriminator() {
         );
     }
 }
+
+/// A bounded git timeout (`Unknown` membership) must exclude the task
+/// without persisting any cursor, so a later pass can re-resolve it.
+#[cfg(unix)]
+#[tokio::test]
+async fn cline_like_unknown_project_membership_defers_persistence_and_offset() {
+    const CHILD_ENV: &str = "TRACEDECAY_CLINE_UNKNOWN_MEMBERSHIP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let api = write_task(
+            &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
+            &nested,
+            "unknown-cline",
+        );
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
+        assert_eq!(
+            try_ingest_source(&db, &source, tmp.path(), None)
+                .await
+                .unwrap()
+                .messages_upserted,
+            0
+        );
+        assert!(db.get_session("cline", "unknown-cline").await.is_none());
+        assert!(
+            parse_offset_for_task_history(&db, &project, &api)
+                .await
+                .is_none()
+        );
+        return;
+    }
+
+    crate::vibe::run_unknown_membership_child(
+        CHILD_ENV,
+        "cline_like::cline_like_unknown_project_membership_defers_persistence_and_offset",
+    );
+}

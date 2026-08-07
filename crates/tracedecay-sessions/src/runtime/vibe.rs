@@ -30,9 +30,10 @@ use crate::runtime::jsonl_observation_admission::{
     admit_jsonl_observations,
 };
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, TranscriptScopeMatcher,
-    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
+    TranscriptLocationMetadataKeys, TranscriptScopeMatcher, append_location_metadata,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_METADATA_BYTES, read_snapshot_text_bounded,
@@ -60,6 +61,9 @@ const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMet
 pub struct VibeSource {
     session_root: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
+    /// Source-lifetime cache so one scan pass resolves git identity once per
+    /// root/cwd instead of once per session directory.
+    project_matchers: ProjectRootMatcherCache,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,6 +91,7 @@ impl VibeSource {
         Self {
             session_root: vibe_home.join("logs").join("session"),
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -98,8 +103,16 @@ impl VibeSource {
 
     fn scoped_meta(&self, path: &Path, project_root: &Path) -> Option<VibeMeta> {
         let meta = read_meta(&path.parent()?.join("meta.json"))?;
-        if !TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref())
-            .accepts(Some(&meta.working_directory))
+        // `Unknown` (bounded git timeout) is excluded exactly like `NoMatch`:
+        // no cursor is persisted for a `None` here, so the next scan pass
+        // re-resolves the membership instead of misfiling the session.
+        if TranscriptScopeMatcher::for_scope_cached(
+            project_root,
+            self.user_registered_roots.as_deref(),
+            &self.project_matchers,
+        )
+        .membership(Some(&meta.working_directory))
+            != ProjectMembership::Match
         {
             return None;
         }

@@ -1286,3 +1286,53 @@ async fn composer_envelope_todo_status_update_after_restart_admits_new_checkpoin
     first_orders.sort_unstable();
     assert_eq!(first_orders, vec![0, 1]);
 }
+
+/// A bounded git timeout (`Unknown` membership) must skip the envelope
+/// without advancing its watermark, so a later sweep can re-resolve it.
+#[cfg(unix)]
+#[tokio::test]
+async fn composer_unknown_project_membership_defers_persistence_and_watermark() {
+    const CHILD_ENV: &str = "TRACEDECAY_COMPOSER_UNKNOWN_MEMBERSHIP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let tmp = TempDir::new().unwrap();
+        let project = init_project(&tmp);
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let home = tmp.path().join("home");
+        let env = envelope("unknown-composer", &nested, &["b-user"]);
+        let bubble = serde_json::json!({"type": 1, "text": "defer this session"});
+        write_state_vscdb(
+            &home,
+            &[
+                kv("composerData:unknown-composer", &env),
+                kv("bubbleId:unknown-composer:b-user", &bubble),
+            ],
+        )
+        .await;
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let outcome = CursorComposerSource::with_home(&home)
+            .ingest(
+                &db.runtime().facade(),
+                &project,
+                db.project_id().clone(),
+                CAP,
+            )
+            .await
+            .expect("composer sweep");
+        assert_eq!(outcome.sessions_upserted, 0);
+        assert!(outcome.owned_session_ids.is_empty());
+        assert!(db.get_session("cursor", "unknown-composer").await.is_none());
+        assert!(
+            observation_source_cursor(&db, "cursor", "unknown-composer", &project)
+                .await
+                .is_none()
+        );
+        return;
+    }
+
+    crate::vibe::run_unknown_membership_child(
+        CHILD_ENV,
+        "cursor_composer::composer_unknown_project_membership_defers_persistence_and_watermark",
+    );
+}
