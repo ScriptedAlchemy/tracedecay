@@ -246,10 +246,15 @@ fn curate_apply_ops_contract() {
                 &agent,
                 &format!("{}/api/plugins/holographic/fact/{gone_id}", fixture.base_url),
             );
-            assert_eq!(status, 404, "fact {gone_id} must no longer be visible");
-            assert!(
-                missing["detail"].as_str().unwrap_or_default().contains(&gone_id.to_string()),
-                "missing fact response should identify the requested projection"
+            assert_eq!(status, 200, "fact {gone_id} read must answer typed");
+            assert_eq!(
+                missing["domain_state"], "complete_zero_findings",
+                "fact {gone_id} must no longer be visible: {missing}"
+            );
+            assert_eq!(
+                missing["payload"],
+                Value::Null,
+                "deleted fact {gone_id} must not fabricate a payload"
             );
         }
 
@@ -262,7 +267,7 @@ fn curate_apply_ops_contract() {
             ),
         );
         assert_eq!(status, 200);
-        let facts = overview["holographic"]["facts"]
+        let facts = overview["payload"]["holographic"]["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("expected facts array"));
         assert!(
@@ -293,7 +298,7 @@ fn curate_apply_ops_contract() {
         );
         assert_eq!(status, 200, "loser must be untouched when the winner is missing");
         assert!(
-            survivor["fact"]["content"]
+            survivor["payload"]["fact"]["content"]
                 .as_str()
                 .unwrap_or_default()
                 .contains("(merged)"),
@@ -337,7 +342,7 @@ fn curate_apply_merge_with_missing_loser_is_atomic() {
             ),
         );
         assert_eq!(status, 200);
-        let original_winner = original["fact"]["content"].clone();
+        let original_winner = original["payload"]["fact"]["content"].clone();
 
         let (status, response) = post_json_body(
             &agent,
@@ -374,7 +379,7 @@ fn curate_apply_merge_with_missing_loser_is_atomic() {
         );
         assert_eq!(status, 200);
         assert_eq!(
-            winner_after["fact"]["content"], original_winner,
+            winner_after["payload"]["fact"]["content"], original_winner,
             "failed merge must not update winner content"
         );
         let (status, loser_after) = get_json(
@@ -385,6 +390,6 @@ fn curate_apply_merge_with_missing_loser_is_atomic() {
             ),
         );
         assert_eq!(status, 200, "failed merge must not delete valid losers");
-        assert_eq!(loser_after["fact"]["fact_id"], loser_id);
+        assert_eq!(loser_after["payload"]["fact"]["fact_id"], loser_id);
     });
 }

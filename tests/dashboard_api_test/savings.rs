@@ -521,6 +521,8 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
             &format!("{}/api/plugins/savings/overview", fixture.base_url),
         );
         assert_eq!(status, 200);
+        assert_eq!(overview["schema_revision"], 1);
+        let overview = &overview["payload"];
         let savings = &overview["savings"];
         assert_eq!(savings["available"], true);
         // The dashboard surfaces the ledger-recording gate state so an
@@ -643,6 +645,7 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
             &agent,
             &format!("{}/api/plugins/savings/overview", fixture.base_url),
         );
+        let overview = &overview["payload"];
         let counting = overview["sessions"]["token_counting"] == true;
         let nonusage_basis = if counting { "tokenized" } else { "estimated" };
 
@@ -788,7 +791,15 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
         assert_eq!(sessions["available"], true);
         assert_eq!(sessions["session_count"], 5);
         assert_eq!(sessions["messages"], 7);
-        assert_eq!(sessions["provider_usage_events"], 0);
+        // No observation projection checkpoint exists in this fixture, so the
+        // canonical usage-event count is unknowable and stays null — the same
+        // typed state `provider_usage.available == false` below encodes. A
+        // fabricated 0 here would claim a measured absence that was never
+        // observed.
+        assert!(
+            sessions["provider_usage_events"].is_null(),
+            "canonical usage-event count must stay unknown without a projection checkpoint: {sessions}"
+        );
         if counting {
             assert_eq!(sessions["tokenized_messages"], 7);
             assert_eq!(sessions["estimated_messages"], 0);
@@ -799,8 +810,13 @@ fn session_content_counts_ignore_metadata_usage_without_canonical_provider_evide
         assert_eq!(sessions["unknown_model_messages"], 1);
         assert_eq!(sessions["model_count"], 4);
         assert_eq!(sessions["cost_basis"], nonusage_basis);
+        // The provider-usage aggregate resolves the exact project scope but
+        // no observation projection checkpoint exists, so the read is typed
+        // unavailable: zero deltas were scanned (a real count over the scan,
+        // not a claimed measurement) and no token totals are fabricated.
         assert_eq!(overview["provider_usage"]["available"], false);
-        assert!(overview["provider_usage"]["usage_event_count"].is_null());
+        assert_eq!(overview["provider_usage"]["status"], "unavailable");
+        assert_eq!(overview["provider_usage"]["usage_event_count"], 0);
         assert!(overview["provider_usage"]["total_tokens"].is_null());
     });
 }
@@ -841,7 +857,7 @@ fn pricing_serves_content_addressed_bundled_snapshot() {
             &agent,
             &format!("{}/api/plugins/savings/overview", fixture.base_url),
         );
-        assert_eq!(overview["pricing"]["source"], "bundled");
-        assert_eq!(overview["pricing"]["offline"], true);
+        assert_eq!(overview["payload"]["pricing"]["source"], "bundled");
+        assert_eq!(overview["payload"]["pricing"]["offline"], true);
     });
 }

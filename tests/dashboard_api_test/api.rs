@@ -191,6 +191,8 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             ),
         );
         assert_eq!(status, 200);
+        assert_eq!(overview["schema_revision"], 1);
+        let overview = &overview["payload"];
         assert_eq!(overview["providers"]["memory_provider"], "tracedecay");
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
         assert_eq!(overview["holographic"]["overview"]["banks"], 3);
@@ -270,6 +272,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             &format!("{}/api/plugins/holographic/status", fixture.base_url),
         );
         assert_eq!(status, 200);
+        let memory_status = &memory_status["payload"];
         assert!(
             memory_status["feedback_history_repair"]["state"].is_string()
                 && memory_status["feedback_history_repair"]["processed"].is_number()
@@ -462,6 +465,8 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             ),
         );
         assert_eq!(status, 200);
+        assert_eq!(detail["domain_state"], "ready");
+        let detail = &detail["payload"];
         assert_eq!(detail["error"], "");
         assert_eq!(detail["fact"]["fact_id"], tool_fact_id);
         assert_eq!(detail["fact"]["category"], "tool");
@@ -489,19 +494,15 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             "fact detail must list linked entities sorted by name"
         );
 
-        // Unknown ids are a 404 with the FastAPI-style detail body.
+        // Unknown ids are a typed empty read: HTTP 200 with a
+        // complete-zero-findings envelope and no fabricated payload.
         let (status, missing) = get_json(
             &agent,
             &format!("{}/api/plugins/holographic/fact/99999", fixture.base_url),
         );
-        assert_eq!(status, 404);
-        assert!(
-            missing["detail"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("99999"),
-            "404 body should carry the requested fact id"
-        );
+        assert_eq!(status, 200);
+        assert_eq!(missing["domain_state"], "complete_zero_findings");
+        assert_eq!(missing["payload"], Value::Null);
     });
 }
 

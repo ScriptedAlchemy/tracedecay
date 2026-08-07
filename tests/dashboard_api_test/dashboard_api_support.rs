@@ -466,7 +466,7 @@ pub(crate) fn fixture_fact_id(
         &format!("{}/api/plugins/holographic/?limit=100", fixture.base_url),
     );
     assert_eq!(status, 200, "dashboard fixture overview must succeed");
-    overview["holographic"]["facts"]
+    overview["payload"]["holographic"]["facts"]
         .as_array()
         .and_then(|facts| {
             facts.iter().find_map(|fact| {

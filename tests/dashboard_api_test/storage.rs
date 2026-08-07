@@ -43,12 +43,19 @@ fn storage_telemetry_endpoint_reports_observed_or_typed_budget_states() {
                     .is_some_and(|key| key.contains("store_soft_budgets_bytes")),
                 "unset state should identify its owner setting: {store}"
             );
+            // No daemon-owned store-size watermark authority exists yet;
+            // the growth dimension is typed unknown with its reason rather
+            // than a fabricated baseline. When the execution-owned watermark
+            // producer lands, this pins to `baseline`/`observed`.
+            assert_eq!(
+                store["growth"]["state"], "unknown",
+                "growth without an execution-owned watermark stays typed unknown: {store}"
+            );
             assert!(
-                matches!(
-                    store["growth"]["state"].as_str(),
-                    Some("baseline" | "observed")
-                ),
-                "growth must be a measured daemon-lifetime state: {store}"
+                store["growth"]["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("watermark")),
+                "unknown growth must name the missing watermark authority: {store}"
             );
         }
     });

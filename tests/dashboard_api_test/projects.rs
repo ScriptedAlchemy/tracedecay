@@ -66,6 +66,8 @@ fn dashboard_projects_endpoint_lists_registered_projects_and_active_project() {
 
         let (status, projects) = get_json(&agent, &format!("{}/api/projects", fixture.base_url));
         assert_eq!(status, 200);
+        assert_eq!(projects["domain_state"], "ready");
+        let projects = &projects["payload"];
         assert_eq!(projects["status"], "ok");
         assert_eq!(
             projects["active_project_root"],
@@ -149,8 +151,28 @@ fn dashboard_projects_endpoint_does_not_launder_registry_read_failure() {
 
         let (status, projects) = get_json(&agent, &format!("{}/api/projects", fixture.base_url));
 
-        assert_eq!(status, 503, "{projects}");
+        // The registry read failure is carried typed in the envelope: an
+        // unknown domain state whose coverage names the exact failure, and a
+        // payload that fabricates no project rows. Nothing is laundered into
+        // a "ready" read.
+        assert_eq!(status, 200, "{projects}");
+        assert_eq!(projects["domain_state"], "unknown", "{projects}");
+        assert!(
+            projects["coverage"]["omission_reasons"][0]
+                .as_str()
+                .unwrap_or_default()
+                .contains("code_projects"),
+            "coverage must carry the registry read failure: {projects}"
+        );
+        let projects = &projects["payload"];
         assert_eq!(projects["status"], "registry_unavailable");
+        assert!(
+            projects["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("code_projects"),
+            "payload must carry the registry read failure: {projects}"
+        );
         assert_eq!(projects["summary"], serde_json::Value::Null);
         assert_eq!(projects["projects"], serde_json::Value::Null);
         assert_eq!(projects["project_tree"], serde_json::Value::Null);
@@ -202,7 +224,7 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
         );
         assert_eq!(active_status, 200);
         assert_eq!(
-            active_payload["holographic"]["facts"]
+            active_payload["payload"]["holographic"]["facts"]
                 .as_array()
                 .map(Vec::len),
             Some(0),
@@ -217,7 +239,7 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
             ),
         );
         assert_eq!(selected_status, 200);
-        let selected_facts = selected_payload["holographic"]["facts"]
+        let selected_facts = selected_payload["payload"]["holographic"]["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("expected selected project facts: {selected_payload}"));
         assert_eq!(selected_facts.len(), 1);
@@ -249,8 +271,18 @@ fn project_scoped_gateway_reports_registry_read_failures_as_unavailable() {
             &agent,
             &format!("{}/api/projects/{target_project_id}", fixture.base_url),
         );
-        assert_eq!(context_status, 503);
-        assert_eq!(context["status"], "registry_unavailable");
+        // Registry read failures stay typed in the envelope: an unknown
+        // domain state carrying the exact error, never a laundered "ready".
+        assert_eq!(context_status, 200, "{context}");
+        assert_eq!(context["domain_state"], "unknown", "{context}");
+        assert_eq!(context["payload"]["status"], "registry_unavailable");
+        assert!(
+            context["payload"]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("project_aliases"),
+            "context must carry the registry read failure: {context}"
+        );
 
         let (gateway_status, gateway) = get_json(
             &agent,
@@ -259,8 +291,9 @@ fn project_scoped_gateway_reports_registry_read_failures_as_unavailable() {
                 fixture.base_url
             ),
         );
-        assert_eq!(gateway_status, 503);
-        assert_eq!(gateway["status"], "registry_unavailable");
+        assert_eq!(gateway_status, 200, "{gateway}");
+        assert_eq!(gateway["domain_state"], "unknown", "{gateway}");
+        assert_eq!(gateway["payload"]["status"], "registry_unavailable");
     });
 }
 
