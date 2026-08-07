@@ -188,6 +188,17 @@ mod tests {
         git(root, &["commit", "-q", "-m", "initial"]);
     }
 
+    fn write_identity_marker(root: &Path, project_id: &str) {
+        let written =
+            tracedecay_runtime_core::storage::write_repository_identity_marker(root, project_id)
+                .expect("write repository identity marker");
+        assert!(
+            written,
+            "repository identity marker must land in the git common dir of '{}'",
+            root.display()
+        );
+    }
+
     fn owner_for(canonical_root: &Path, project_id: &str) -> ProjectRegistryContext {
         ProjectRegistryContext {
             project: CodeProjectRecord {
@@ -210,6 +221,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
         init_repo(&root);
+        write_identity_marker(&root, "project.mcp-scope-test");
         let owner = owner_for(&root, "project.mcp-scope-test");
 
         let first = resolve_query_scope(&owner, &root).unwrap();
@@ -234,6 +246,8 @@ mod tests {
     fn subdirectory_request_converges_to_registered_canonical_root() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
+        init_repo(&root);
+        write_identity_marker(&root, "project.mcp-scope-test");
         let subdir = root.join("src/deep");
         std::fs::create_dir_all(&subdir).unwrap();
         let owner = owner_for(&root, "project.mcp-scope-test");
@@ -303,6 +317,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         init_repo(&root);
         let root = root.canonicalize().unwrap();
+        write_identity_marker(&root, "project.mcp-scope-test");
         let linked = temp.path().join("linked-feature");
         git(
             &root,
@@ -345,6 +360,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         init_repo(&root);
         let root = root.canonicalize().unwrap();
+        write_identity_marker(&root, "project.mcp-scope-test");
         let linked = temp.path().join("linked-feature");
         git(
             &root,
@@ -382,6 +398,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         init_repo(&root);
         let root = root.canonicalize().unwrap();
+        write_identity_marker(&root, "project.mcp-scope-test");
         let linked = temp.path().join("linked-feature");
         git(
             &root,

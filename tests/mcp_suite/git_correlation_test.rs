@@ -253,7 +253,7 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
         "{diag_populated}"
     );
     assert_eq!(
-        diag_populated["session_correlation"]["tables_present"], true,
+        diag_populated["session_correlation"]["projection_available"], true,
         "{diag_populated}"
     );
 }

@@ -844,6 +844,15 @@ pub(crate) async fn dashboard_state_fixture(
 
     let project = tempfile::tempdir().expect("project tempdir");
     std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n").expect("fixture source");
+    // Scope resolution requires the registered root to be a real repository
+    // carrying the on-disk repository identity marker; a bare tempdir would
+    // fail closed with `resolved_scope = None`.
+    let git_init = std::process::Command::new("git")
+        .current_dir(project.path())
+        .args(["init", "-q"])
+        .status()
+        .expect("git init starts");
+    assert!(git_init.success(), "git init failed for fixture project");
     let database_path = project.path().join("dashboard.db");
     crate::register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(&database_path, "dashboard API state fixture")
@@ -857,6 +866,14 @@ pub(crate) async fn dashboard_state_fixture(
     .expect("fixture database");
     let database = Arc::new(database);
     let project_identity = ProjectId::new(project_id).expect("fixture project id");
+    assert!(
+        tracedecay_runtime_core::storage::write_repository_identity_marker(
+            project.path(),
+            project_identity.as_str(),
+        )
+        .expect("fixture identity marker"),
+        "fixture project root must accept a repository identity marker"
+    );
     let project_root = project.path().to_path_buf();
     let store_root = project_root.join("store");
     let dashboard_root = store_root.join("dashboard");

@@ -270,7 +270,12 @@ fn provider_arguments(
 ) -> Option<Vec<&'static str>> {
     match (backend, protocol) {
         (WorkProviderBackendV1::ClaudeCodeCli, WorkProviderProtocol::ClaudeStreamJson) => {
-            Some(vec!["--print", "--output-format", "stream-json", "--verbose"])
+            Some(vec![
+                "--print",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ])
         }
         (WorkProviderBackendV1::CodexAppServer, WorkProviderProtocol::CodexAppServerJsonRpc) => {
             Some(Vec::new())

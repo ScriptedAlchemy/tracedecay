@@ -3607,10 +3607,16 @@ mod tests {
     fn feedback_registration_snapshot_rejects_pre_activation_edit() {
         let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
-        let integration = tracedecay::agents::get_integration("cursor").unwrap();
+        let integration = tracedecay::agents::get_integration("opencode").unwrap();
+        let registration_paths =
+            super::feedback_registration_paths(home.path(), integration.as_ref()).unwrap();
+        let config = home.path().join(".config/opencode/opencode.json");
+        assert!(
+            registration_paths.contains(&config),
+            "the mutated file must be part of the host registration inventory: {registration_paths:?}"
+        );
         let snapshot =
             super::snapshot_feedback_registration(home.path(), integration.as_ref()).unwrap();
-        let config = home.path().join(".cursor/mcp.json");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(
             &config,
@@ -3639,8 +3645,14 @@ mod tests {
 
         let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
-        let integration = tracedecay::agents::get_integration("cursor").unwrap();
-        let config = home.path().join(".cursor/mcp.json");
+        let integration = tracedecay::agents::get_integration("opencode").unwrap();
+        let config = home.path().join(".config/opencode/opencode.json");
+        assert!(
+            super::feedback_registration_paths(home.path(), integration.as_ref())
+                .unwrap()
+                .contains(&config),
+            "the mutated file must be part of the host registration inventory"
+        );
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(
             &config,
@@ -5310,10 +5322,13 @@ mod tests {
         let results =
             reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
                 .await;
-        assert!(matches!(
-            results.as_slice(),
-            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
-        ));
+        assert!(
+            matches!(
+                results.as_slice(),
+                [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+            ),
+            "{results:?}"
+        );
         let lifecycle_root = resolved_host_bundle_lifecycle_root().unwrap();
         assert!(
             latest_host_component_receipt_at(
@@ -5345,10 +5360,13 @@ mod tests {
         let recovered =
             reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
                 .await;
-        assert!(matches!(
-            recovered.as_slice(),
-            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
-        ));
+        assert!(
+            matches!(
+                recovered.as_slice(),
+                [(id, Ok(AgentReinstallOutcome::Installed))] if id == "codex"
+            ),
+            "{recovered:?}"
+        );
     }
 
     #[tokio::test]

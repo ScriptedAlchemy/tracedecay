@@ -9,7 +9,8 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, DurableObservationV1,
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
-    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+    ObservationSourceRangeV1,
     PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId, RetentionClass,
     RetrievalAnchorRecord, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
@@ -440,6 +441,15 @@ impl RegisteredTemporalHarness {
         let receipt = observation.receipt();
         let receipt_json = serde_json::to_string(receipt).unwrap();
         let observation_json = serde_json::to_string(observation).unwrap();
+        let committed_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            observation.identity().generation(),
+            observation.identity().ordering_domain(),
+            observation.identity().position().end(),
+        )
+        .unwrap();
+        let committed_cursor_json = serde_json::to_string(&committed_cursor).unwrap();
         let anchor_json = serde_json::to_string(&anchor).unwrap();
         let owner_json = serde_json::to_string(anchor.owner()).unwrap();
         let transaction = self
@@ -466,12 +476,13 @@ impl RegisteredTemporalHarness {
                 "INSERT INTO observations (
                     observation_id, payload_digest, receipt_id,
                     observation_json, committed_cursor_json
-                 ) VALUES (?1, ?2, ?3, ?4, '{}')",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     observation.observation_id().as_str(),
                     observation.payload_reference().digest().as_str(),
                     receipt.receipt().receipt_id().as_str(),
-                    observation_json
+                    observation_json,
+                    committed_cursor_json
                 ],
             )
             .await

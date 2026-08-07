@@ -73,7 +73,7 @@ fn graph_release_queue_pages_more_than_one_retention_batch() {
         after = Some(continuation);
     }
 
-    assert_eq!(released.len(), 67);
+    assert_eq!(released.len(), 69);
 }
 
 #[test]

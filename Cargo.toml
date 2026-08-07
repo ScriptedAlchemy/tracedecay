@@ -236,6 +236,14 @@ name = "host_lifecycle_cli_acceptance"
 path = "tests/host_lifecycle_cli_acceptance.rs"
 required-features = ["test-transport"]
 
+# OpenCode one-analyzer conformance journey (Plans 27/35): drives the real CLI
+# lifecycle with a pre-existing analyzer and the broker's ownership gates; the
+# rollback phase uses the test-transport fault hook.
+[[test]]
+name = "opencode_one_analyzer_journey"
+path = "tests/opencode_one_analyzer_journey.rs"
+required-features = ["test-transport"]
+
 [[test]]
 name = "graph_rebuild_status_test"
 path = "tests/graph_rebuild_status_test.rs"

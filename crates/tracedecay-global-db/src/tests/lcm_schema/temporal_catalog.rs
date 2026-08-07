@@ -521,58 +521,78 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
          UPDATE session_temporal_generations
          SET state = 'ready', ready_at = 1;
          UPDATE session_temporal_generations
-         SET state = 'active', activated_at = 2;
-         WITH RECURSIVE sequence(value) AS (
-            VALUES(0)
-            UNION ALL
-            SELECT value + 1 FROM sequence WHERE value < 99999
-         )
-         INSERT INTO session_occurrences (
-            session_id, generation, occurrence_id, source_observation_id,
-            source_provider, projection_output_ordinal, retrieval_anchor_id,
-            role, knowledge_at, valid_time_json, evidence_json,
-            sanitized_content_digest, sanitized_content_bytes,
-            snippet_text, index_text
-         )
-         SELECT
-            printf('root-session-%02d', value % 8),
-            1,
-            printf('root-occurrence-%06d', value),
-            'root-observation',
-            'test',
-            value,
-            'root-anchor',
-            'assistant',
-            value / 8,
-            json_object('kind', 'unknown'),
-            '{}',
-            '0000000000000000000000000000000000000000000000000000000000000000',
-            15,
-            'root occurrence',
-            'root occurrence'
-         FROM sequence;
-         WITH RECURSIVE sequence(value) AS (
-            VALUES(0)
-            UNION ALL
-            SELECT value + 1 FROM sequence WHERE value < 99999
-         )
-         INSERT INTO session_summary_nodes (
-            summary_id, session_id, summary_anchor_id, summary_text, index_text,
-            source_horizon_json, created_at
-         )
-         SELECT
-            printf('root-summary-%06d', value),
-            printf('root-session-%02d', value % 8),
-            'root-anchor',
-            'root summary',
-            'root summary',
-            '{}',
-            value / 8
-         FROM sequence;
-         ANALYZE;",
+         SET state = 'active', activated_at = 2;",
     )
     .await
     .unwrap();
+
+    // Planner-scale rows are seeded in chunks so no single exact-SQL batch
+    // approaches the statement time guard under load; the total row count and
+    // value distribution stay identical to a single 100k insert.
+    const FIXTURE_ROWS: usize = 100_000;
+    const FIXTURE_CHUNK: usize = 20_000;
+    for start in (0..FIXTURE_ROWS).step_by(FIXTURE_CHUNK) {
+        let end = start + FIXTURE_CHUNK - 1;
+        conn.execute_batch(&format!(
+            "WITH RECURSIVE sequence(value) AS (
+                VALUES({start})
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < {end}
+             )
+             INSERT INTO session_occurrences (
+                session_id, generation, occurrence_id, source_observation_id,
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
+                role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
+             )
+             SELECT
+                printf('root-session-%02d', value % 8),
+                1,
+                printf('root-occurrence-%06d', value),
+                'root-observation',
+                'test',
+                value,
+                'root-anchor',
+                'assistant',
+                value / 8,
+                json_object('kind', 'unknown'),
+                '{{}}',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                15,
+                'root occurrence',
+                'root occurrence'
+             FROM sequence;"
+        ))
+        .await
+        .unwrap();
+    }
+    for start in (0..FIXTURE_ROWS).step_by(FIXTURE_CHUNK) {
+        let end = start + FIXTURE_CHUNK - 1;
+        conn.execute_batch(&format!(
+            "WITH RECURSIVE sequence(value) AS (
+                VALUES({start})
+                UNION ALL
+                SELECT value + 1 FROM sequence WHERE value < {end}
+             )
+             INSERT INTO session_summary_nodes (
+                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                source_horizon_json, created_at
+             )
+             SELECT
+                printf('root-summary-%06d', value),
+                printf('root-session-%02d', value % 8),
+                'root-anchor',
+                'root summary',
+                'root summary',
+                '{{}}',
+                value / 8
+             FROM sequence;"
+        ))
+        .await
+        .unwrap();
+    }
+    conn.execute_batch("ANALYZE;").await.unwrap();
 
     for table in ["session_occurrences", "session_summary_nodes"] {
         let mut rows = conn

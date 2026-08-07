@@ -17,7 +17,7 @@ use tracedecay_domain::{
     CompactContextConflictV1, CompactContextLineageEdgeV1, CompactContextOmissionV1,
     ContextOmissionReasonV1, HydrationStateV1, RetrievalAnchorId, RetrieverCoverage,
     SessionAuthorityClassV1, SessionSummaryRecordV1, TemporalAssertionKindV1,
-    TemporalCoverageCountsV1, TemporalModeV1,
+    TemporalCoverageCountsV1,
 };
 use zeroize::Zeroizing;
 
@@ -307,16 +307,12 @@ pub async fn execute_temporal_candidate_export(
         .map(|cursor| verify_cursor(cursor, snapshot, authenticator))
         .transpose()?;
     check_control(snapshot)?;
+    // An empty query is a scope browse — the authorized scope's records in
+    // temporal order — never a zero-clause (structurally empty) plan. Text
+    // queries rank through the lexical/phrase/entity channels instead.
     let plan = if let Some(anchor_id) = request.direct_anchor.as_ref() {
         candidates::plan_anchor(anchor_id)
-    } else if snapshot.request().semantic_filter().goals
-        || (request.query.trim().is_empty()
-            && snapshot.temporal_mode() == TemporalModeV1::Forensic
-            && matches!(
-                snapshot.request().retrieval_scope(),
-                TemporalRetrievalScope::Session(_)
-            ))
-    {
+    } else if snapshot.request().semantic_filter().goals || request.query.trim().is_empty() {
         candidates::plan_scope_candidates()
     } else {
         candidates::plan_candidates(&request.query)

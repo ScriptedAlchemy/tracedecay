@@ -17,9 +17,9 @@ use crate::mcp::tools::handlers::selected_registered_project_reader;
 
 #[tokio::test]
 async fn exact_root_reader_resolves_same_project_and_scope_via_application_type() {
-    let (cg, _dir, _authority) = init_indexed_repo().await;
+    let (cg, _dir, authority) = init_indexed_repo().await;
     let project_root = cg.project_root().to_path_buf();
-    let context = registered_context(cg).await;
+    let context = registered_context(cg, &authority);
     let server = McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server");
@@ -97,8 +97,8 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
 
 #[tokio::test]
 async fn unregistered_selector_still_fails_closed_without_substitution() {
-    let (cg, _dir, _authority) = init_indexed_repo().await;
-    let context = registered_context(cg).await;
+    let (cg, _dir, authority) = init_indexed_repo().await;
+    let context = registered_context(cg, &authority);
     let server = McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server");
@@ -126,8 +126,8 @@ async fn unregistered_selector_still_fails_closed_without_substitution() {
 
 #[tokio::test]
 async fn registered_but_unmounted_project_still_reports_unavailable() {
-    let (cg, _dir, _authority) = init_indexed_repo().await;
-    let runtime = super::writer_test_support::registered_runtime(&cg).await;
+    let (cg, _dir, authority) = init_indexed_repo().await;
+    let runtime = super::writer_test_support::registered_runtime(&authority);
     // A second project known to the registry but never mounted: the resolver
     // has no graph for it, so the route reports unavailable rather than
     // fabricating a graph or a scope. Its root must live OUTSIDE the mounted
@@ -147,7 +147,7 @@ async fn registered_but_unmounted_project_still_reports_unavailable() {
         .await
         .expect("phantom project registers");
     let context = runtime
-        .into_mcp_server_context_for_test(cg, None)
+        .mcp_server_context_for_test(cg, None)
         .expect("registered MCP server context");
     let server = McpServer::new_with_registered_test_context(context, Vec::new())
         .await

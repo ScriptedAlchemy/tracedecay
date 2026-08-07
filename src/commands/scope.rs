@@ -190,10 +190,35 @@ fn config_error(message: String) -> tracedecay::errors::TraceDecayError {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use serde_json::Value;
 
     use super::{ResolvedCliScope, scope_from_registry_payload};
+
+    fn git_init(root: &Path) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn write_identity_marker(root: &Path, project_id: &str) {
+        let written =
+            tracedecay_runtime_core::storage::write_repository_identity_marker(root, project_id)
+                .expect("write repository identity marker");
+        assert!(
+            written,
+            "repository identity marker must land in the git common dir of '{}'",
+            root.display()
+        );
+    }
 
     fn ok_payload(canonical_root: &Path) -> Value {
         serde_json::json!({
@@ -219,6 +244,8 @@ mod tests {
     fn exact_root_resolves_same_project_and_scope_via_application_type() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
+        git_init(&root);
+        write_identity_marker(&root, "project.cli-scope-test");
 
         let first: ResolvedCliScope =
             scope_from_registry_payload(&root, &ok_payload(&root)).unwrap();
@@ -234,6 +261,8 @@ mod tests {
     fn subdirectory_request_converges_to_registered_canonical_root() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
+        git_init(&root);
+        write_identity_marker(&root, "project.cli-scope-test");
         let subdir = root.join("src/deep");
         std::fs::create_dir_all(&subdir).unwrap();
 
@@ -388,6 +417,8 @@ mod tests {
         let sibling = temp.path().join("sibling");
         std::fs::create_dir_all(&registered).unwrap();
         std::fs::create_dir_all(&sibling).unwrap();
+        git_init(&registered);
+        git_init(&sibling);
 
         let error = scope_from_registry_payload(&sibling, &ok_payload(&registered)).unwrap_err();
 

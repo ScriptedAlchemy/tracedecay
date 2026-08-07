@@ -5,7 +5,9 @@ mod gix_adapter;
 mod topology;
 mod transaction;
 
-pub use authorization::{DaemonNativeIntegrationAuthorization, NativeIntegrationAuthorizationError};
+pub use authorization::{
+    DaemonNativeIntegrationAuthorization, NativeIntegrationAuthorizationError,
+};
 pub use gix_adapter::GixNativeIntegrationAdapter;
 pub use topology::ExactPairNativeIntegrationTopology;
 pub use transaction::{

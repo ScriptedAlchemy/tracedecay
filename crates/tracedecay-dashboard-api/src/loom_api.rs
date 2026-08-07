@@ -66,8 +66,9 @@ pub struct DashboardGitCorrelationReadErrorV1 {
 
 pub type DashboardGitCorrelationReadFutureV1<'a> = Pin<
     Box<
-        dyn Future<Output = Result<DashboardGitCorrelationReadV1, DashboardGitCorrelationReadErrorV1>>
-            + Send
+        dyn Future<
+                Output = Result<DashboardGitCorrelationReadV1, DashboardGitCorrelationReadErrorV1>,
+            > + Send
             + 'a,
     >,
 >;
@@ -590,9 +591,8 @@ fn resolve_git_sources(
                 .iter()
                 .map(|record| loom_commit(record))
                 .collect::<Result<Vec<_>, _>>()?;
-            let reason = format!(
-                "recovered from the verified Git evidence generation {generation}"
-            );
+            let reason =
+                format!("recovered from the verified Git evidence generation {generation}");
             let span_providers = distinct_strings(page_spans.iter().map(|span| &span.provider));
             let commit_providers =
                 distinct_strings(page_commits.iter().map(|record| &record.provider));

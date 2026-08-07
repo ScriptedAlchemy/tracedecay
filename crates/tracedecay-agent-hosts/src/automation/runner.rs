@@ -1410,23 +1410,40 @@ mod tests {
         };
         let serialized = serialize_automation_temporal_evidence(
             AutomationTemporalEvidence {
-                items: vec![AutomationTemporalEvidenceItem {
-                    anchor_id: "anchor-1".to_string(),
-                    stable_id: "stable-1".to_string(),
-                    provider: "cursor".to_string(),
-                    session_id: "session-1".to_string(),
-                    message_id: Some("message-1".to_string()),
-                    source_id: Some("occurrence-1".to_string()),
-                    store_id: None,
-                    role: Some("user".to_string()),
-                    ordinal: Some(1),
-                    session_total_messages: Some(1),
-                    knowledge_at_micros: 1_715_000_001_000_000,
-                    normalized_score_micros: 1_000_000,
-                    snippet: oversized,
-                }],
+                items: vec![
+                    AutomationTemporalEvidenceItem {
+                        anchor_id: "anchor-1".to_string(),
+                        stable_id: "stable-1".to_string(),
+                        provider: "cursor".to_string(),
+                        session_id: "session-1".to_string(),
+                        message_id: Some("message-1".to_string()),
+                        source_id: Some("occurrence-1".to_string()),
+                        store_id: None,
+                        role: Some("user".to_string()),
+                        ordinal: Some(1),
+                        session_total_messages: Some(1),
+                        knowledge_at_micros: 1_715_000_001_000_000,
+                        normalized_score_micros: 1_000_000,
+                        snippet: oversized,
+                    },
+                    AutomationTemporalEvidenceItem {
+                        anchor_id: "anchor-2".to_string(),
+                        stable_id: "stable-2".to_string(),
+                        provider: "cursor".to_string(),
+                        session_id: "session-1".to_string(),
+                        message_id: None,
+                        source_id: Some("occurrence-1".to_string()),
+                        store_id: None,
+                        role: None,
+                        ordinal: None,
+                        session_total_messages: Some(1),
+                        knowledge_at_micros: 1_715_000_000_000_000,
+                        normalized_score_micros: 900_000,
+                        snippet: "summary payload".to_string(),
+                    },
+                ],
                 coverage: TemporalCoverageCountsV1 {
-                    visible: 1,
+                    visible: 2,
                     hidden: 0,
                     unknown: 0,
                     redacted: 0,
@@ -1435,16 +1452,28 @@ mod tests {
             filters,
         );
 
+        // Raw-message citations carry `message_id` only; `node_id` is the
+        // summary-node citation arm and must stay empty here.
         assert_eq!(serialized.hits[0].kind, "raw_message");
         assert_eq!(serialized.hits[0].session_id, "session-1");
         assert_eq!(serialized.hits[0].message_id.as_deref(), Some("message-1"));
-        assert_eq!(serialized.hits[0].node_id.as_deref(), Some("occurrence-1"));
+        assert!(serialized.hits[0].node_id.is_none());
         assert_eq!(serialized.hits[0].anchor_id, "anchor-1");
         assert_eq!(serialized.hits[0].stable_id, "stable-1");
         assert_eq!(
             serialized.hits[0].snippet.chars().count(),
             SESSION_REPLAY_SNIPPET_CHARS
         );
+
+        // Summary items (no message_id) cite through `node_id`, sourced from
+        // the occurrence id.
+        let summary_hit = serialized
+            .hits
+            .iter()
+            .find(|hit| hit.message_id.is_none())
+            .expect("summary evidence item must survive serialization");
+        assert_eq!(summary_hit.kind, "summary_node");
+        assert_eq!(summary_hit.node_id.as_deref(), Some("occurrence-1"));
         let replay = serialized.recent_session_slices.unwrap();
         assert_eq!(
             replay["sessions"][0]["head"][0]["message_id"],

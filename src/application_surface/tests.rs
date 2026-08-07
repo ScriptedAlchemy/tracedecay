@@ -280,19 +280,18 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
         let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
             .expect("operation name");
         let resolution_profile = &profile_id;
-        let expected_surfaces = if matches!(
-            operation,
-            ApplicationSurfaceOperation::GitPreview | ApplicationSurfaceOperation::GitApply
-        ) {
+        // The production HTTP-exposure authority decides which operations
+        // carry a public HTTP binding; everything resolves via CLI and MCP.
+        let expected_surfaces = if operation.is_http_exposed() {
             &[
                 (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
                 (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+                (tracedecay_tool_catalog::BindingSurface::Http, "http"),
             ][..]
         } else {
             &[
                 (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
                 (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
-                (tracedecay_tool_catalog::BindingSurface::Http, "http"),
             ][..]
         };
         for &(surface, surface_name) in expected_surfaces {
@@ -659,6 +658,7 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
             "message_search",
             "move_symbol",
             "multi_str_replace",
+            "rename_symbol",
             "replace_symbol",
             "session_end",
             "session_refresh",

@@ -1,6 +1,8 @@
 use crate::common::EnvVarGuard;
 use crate::mcp_server_test::support::*;
 use serde_json::json;
+#[cfg(feature = "test-transport")]
+use std::sync::Arc;
 
 #[tokio::test]
 async fn search_call_writes_savings_ledger_row() {
@@ -32,20 +34,39 @@ async fn search_call_writes_savings_ledger_row() {
     settled_ledger_total(&server_handle, db_path, proj_tmp.path(), 1).await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn search_call_writes_mcp_runtime_analytics_event() {
-    let fixture = setup_accounted_savings_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
-    let project_path = proj_tmp
-        .path()
+    // Search lanes are served by the daemon-owned code-index authority, so
+    // this analytics journey runs through the production composition. The
+    // warm-up searches settle real ledger rows of their own, so ledger
+    // assertions work on per-call deltas.
+    let fixture = crate::support::production_composition_fixture_with_sources(|root| {
+        std::fs::create_dir_all(root.join("src")).expect("savings project src");
+        std::fs::write(root.join("src/main.rs"), savings_project_source())
+            .expect("savings project source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
+    server.ledger_writes_settled().await;
+    let project_path = fixture
+        .project_root
         .canonicalize()
         .expect("project path canonicalizes")
         .to_string_lossy()
         .to_string();
+    let baseline = fixture
+        .harness
+        .sum_profile_savings(Some(&project_path), 0)
+        .await
+        .expect("baseline settled savings");
 
     let resp = call_tool(
-        server,
+        Arc::clone(&server),
         9002,
         "tracedecay_search",
         json!({
@@ -58,14 +79,26 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     assert!(resp["error"].is_null(), "search should not error");
     let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
 
-    settled_ledger_total(&server_handle, db_path, proj_tmp.path(), 1).await;
+    server.ledger_writes_settled().await;
+    let total = fixture
+        .harness
+        .sum_profile_savings(Some(&project_path), 0)
+        .await
+        .expect("settled savings after the accounted call");
     assert_eq!(
-        mcp_runtime_event_count(db_path, "mcp-session-9002").await,
+        total.calls,
+        baseline.calls + 1,
+        "the accounted call must settle exactly one new ledger row"
+    );
+    assert_eq!(
+        harness_mcp_runtime_events(&fixture.harness, "mcp-session-9002")
+            .await
+            .len(),
         1,
         "one MCP runtime analytics event should be recorded per tool call"
     );
-    let event = expect_mcp_runtime_event(
-        db_path,
+    let event = expect_harness_mcp_runtime_event(
+        &fixture.harness,
         "tracedecay_search",
         "mcp-session-9002",
         "durable MCP runtime analytics event",
@@ -88,18 +121,25 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     assert_eq!(metadata["tokens_saved"], before - after);
     assert_eq!(metadata["transport"], "mcp");
     assert_eq!(metadata["tool_kind"], "mcp_tool");
+    fixture.harness.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
-    let fixture = setup_accounted_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let db_path = &fixture.global_db_path;
+    // Context retrieval lanes are served by the daemon-owned code-index
+    // authority, so this journey runs through the production composition.
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
 
     let fact_content =
         "Durable context memory analytics should report counts without leaking fact bodies.";
     let added = call_tool(
-        server.clone(),
+        Arc::clone(&server),
         9005,
         "tracedecay_fact_store",
         json!({
@@ -115,7 +155,7 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
     assert!(added["error"].is_null(), "fact add should not error");
 
     let resp = call_tool(
-        server,
+        Arc::clone(&server),
         9006,
         "tracedecay_context",
         json!({
@@ -137,9 +177,9 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
         "internal analytics metadata must not leak inside response content"
     );
 
-    server_handle.ledger_writes_settled().await;
-    let event = expect_mcp_runtime_event(
-        db_path,
+    server.ledger_writes_settled().await;
+    let event = expect_harness_mcp_runtime_event(
+        &fixture.harness,
         "tracedecay_context",
         "mcp-session-9006",
         "durable context MCP runtime analytics event",
@@ -159,6 +199,7 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
         !metadata.to_string().contains(fact_content),
         "analytics metadata must not persist fact bodies"
     );
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -455,15 +496,43 @@ async fn full_file_read_credits_zero_net_savings() {
 /// The lifetime counter and the ledger must agree: both credit the net
 /// saving (before - after) per call, so after a single compressed call the
 /// per-project counter equals the ledger total.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lifetime_counter_matches_ledger_net_savings() {
-    let fixture = setup_accounted_savings_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
-    let project_path = proj_tmp.path().to_path_buf();
+    // Search lanes are served by the daemon-owned code-index authority, so
+    // the accounted journey runs through the production composition; warm-up
+    // searches settle ledger rows of their own, so both the ledger total and
+    // the lifetime counter are asserted as per-call deltas.
+    let fixture = crate::support::production_composition_fixture_with_sources(|root| {
+        std::fs::create_dir_all(root.join("src")).expect("savings project src");
+        std::fs::write(root.join("src/main.rs"), savings_project_source())
+            .expect("savings project source");
+    })
+    .await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
+    server.ledger_writes_settled().await;
+    let project_path = fixture
+        .project_root
+        .canonicalize()
+        .expect("project path canonicalizes");
+    let project_key = project_path.to_string_lossy().to_string();
+    let baseline = fixture
+        .harness
+        .sum_profile_savings(Some(&project_key), 0)
+        .await
+        .expect("baseline settled savings");
+    let baseline_lifetime = fixture
+        .harness
+        .project_lifetime_saved_tokens(&project_path)
+        .await
+        .expect("baseline lifetime counter");
 
     let responses = run_server_with_messages(
-        server,
+        Arc::clone(&server),
         vec![jsonrpc_request(
             json!(9102),
             "tools/call",
@@ -488,20 +557,31 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         "compressed search should save tokens (before={before}, after={after})"
     );
 
-    let total = settled_ledger_total(&server_handle, db_path, &project_path, 1).await;
+    server.ledger_writes_settled().await;
+    let total = fixture
+        .harness
+        .sum_profile_savings(Some(&project_key), 0)
+        .await
+        .expect("settled savings after the accounted call");
     assert_eq!(
-        total.saved_tokens,
+        total.calls,
+        baseline.calls + 1,
+        "the accounted call must settle exactly one new ledger row"
+    );
+    assert_eq!(
+        total.saved_tokens - baseline.saved_tokens,
         before - after,
         "ledger net saving must match the metrics line"
     );
-    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::profile(
-        db_path.parent().expect("global db has a profile root"),
-    )
-    .await
-    .expect("registered profile runtime opens at isolated path");
+    let lifetime = fixture
+        .harness
+        .project_lifetime_saved_tokens(&project_path)
+        .await
+        .expect("lifetime counter after the accounted call");
     assert_eq!(
-        runtime.get_project_tokens(&project_path).await,
-        total.saved_tokens,
+        lifetime - baseline_lifetime,
+        before - after,
         "lifetime counter must equal the ledger's net saving, not the gross before"
     );
+    fixture.harness.shutdown().await;
 }

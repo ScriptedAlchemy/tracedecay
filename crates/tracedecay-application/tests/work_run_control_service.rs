@@ -150,7 +150,11 @@ impl WorkRunControlStoragePort for TestStore {
         next: &WorkRunControlV1,
     ) -> Result<(), WorkRunControlStorageError> {
         let mut controls = self.controls.lock().unwrap();
-        let key = (authority.clone(), next.task_id().clone(), next.run_id().clone());
+        let key = (
+            authority.clone(),
+            next.task_id().clone(),
+            next.run_id().clone(),
+        );
         let current = controls.get(&key).map(WorkRunControlV1::authority);
         if current != expected {
             return Err(WorkRunControlStorageError::AuthorityConflict);
@@ -194,7 +198,10 @@ fn pausing_a_run_nobody_leased_an_attempt_for_is_concealed_absence() {
     let problem = service
         .pause(&context, pause_command(None, 100))
         .expect_err("an unadmitted run cannot be paused");
-    assert_eq!(problem.kind(), ApplicationProblemKind::NotFoundOrNotAuthorized);
+    assert_eq!(
+        problem.kind(),
+        ApplicationProblemKind::NotFoundOrNotAuthorized
+    );
     // Nothing was published for a run the authority does not hold.
     assert!(store.stored(&authority_of(&context)).is_none());
 

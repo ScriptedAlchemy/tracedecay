@@ -43,6 +43,41 @@ impl SelectorRegistry {
     }
 }
 
+/// A second registered project fixture mounted through the caller's existing
+/// test runtime. The profile session-relation graph has exactly one writer,
+/// so multi-project tests must mount sibling projects through the first
+/// runtime's daemon session registry instead of constructing another runtime
+/// on the same profile.
+pub(super) async fn init_sibling_registered_fixture(
+    runtime: &crate::application::host_admission::HostAdmissionTestRuntimeV1,
+    project_root: &Path,
+    project_id: &str,
+) -> (
+    TraceDecay,
+    Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+) {
+    let profile_root = crate::storage::default_profile_root().expect("sibling profile root");
+    let project_id =
+        tracedecay_domain::ProjectId::new(project_id).expect("typed sibling project identity");
+    let sibling = Arc::new(
+        runtime
+            .sibling_project(project_root, project_id)
+            .await
+            .expect("sibling registered runtime"),
+    );
+    let graph = sibling
+        .initialize_project_graph_for_test(
+            project_root,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root),
+                global_db_path: None,
+            },
+        )
+        .await
+        .expect("sibling project graph");
+    (graph, sibling)
+}
+
 pub(super) fn selector_options(
     registry: &SelectorRegistry,
     graphs: Vec<Arc<TraceDecay>>,

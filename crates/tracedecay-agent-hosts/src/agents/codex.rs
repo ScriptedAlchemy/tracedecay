@@ -781,6 +781,24 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
         matcher: None,
     },
     CodexManagedHook {
+        event: "UserPromptSubmit",
+        subcommand: "hook-codex-user-prompt-submit",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "SubagentStart",
+        subcommand: "hook-codex-subagent-start",
+        timeout_secs: 5,
+        matcher: None,
+    },
+    CodexManagedHook {
+        event: "PostToolUse",
+        subcommand: "hook-codex-post-tool-use",
+        timeout_secs: 60,
+        matcher: Some("Bash|apply_patch"),
+    },
+    CodexManagedHook {
         event: "PostCompact",
         subcommand: "hook-codex-post-compact",
         timeout_secs: 5,

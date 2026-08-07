@@ -2023,6 +2023,10 @@ mod tests {
     /// is foreign mutation and must abort the apply.
     #[test]
     fn undeclared_directory_reappearing_is_still_drift() {
+        // Hold the process-global profile pin across the whole fixture and
+        // prepare lifetime so concurrent tests cannot repoint discovery
+        // mid-transaction.
+        let _profile = crate::config::PinnedUserDataDir::new();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let foreign = home.path().join(".claude");
@@ -2045,6 +2049,10 @@ mod tests {
 
     #[test]
     fn rollback_refuses_an_unattributed_directory() {
+        // Hold the process-global profile pin for the whole fixture+restore
+        // lifetime; without it a concurrent test can repoint profile
+        // discovery between backup and rollback.
+        let _profile = crate::config::PinnedUserDataDir::new();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let orphaned = home.path().join(".claude");
@@ -2078,6 +2086,8 @@ mod tests {
     /// Recovery refuses unattributed content and preserves it byte-for-byte.
     #[test]
     fn rollback_leaves_a_non_empty_unattributed_directory_in_place() {
+        // Same profile-pin discipline as `rollback_refuses_an_unattributed_directory`.
+        let _profile = crate::config::PinnedUserDataDir::new();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
         let orphaned = home.path().join(".claude");

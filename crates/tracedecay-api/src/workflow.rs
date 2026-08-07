@@ -226,11 +226,9 @@ impl WorkflowOperation {
             Self::DiffDefinition => schema_name::<WorkflowDefinitionDiff>(),
             Self::HandoffIssue => schema_name::<TaskHandoffGrant>(),
             Self::HandoffRedeem => schema_name::<TaskHandoffRedeemed>(),
-            Self::StartRun
-            | Self::PauseRun
-            | Self::ResumeRun
-            | Self::CancelRun
-            | Self::GetRun => schema_name::<WorkflowRunProjection>(),
+            Self::StartRun | Self::PauseRun | Self::ResumeRun | Self::CancelRun | Self::GetRun => {
+                schema_name::<WorkflowRunProjection>()
+            }
         }
     }
 

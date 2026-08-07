@@ -7,15 +7,45 @@
         "timeout": 5
       }
     ],
+    "sessionEnd": [
+      {
+        "command": "tracedecay hook-cursor-session-end",
+        "timeout": 5
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "tracedecay hook-cursor-post-tool-use",
+        "timeout": 5
+      }
+    ],
     "preCompact": [
       {
         "command": "tracedecay hook-cursor-pre-compact",
         "timeout": 5
       }
     ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "tracedecay hook-cursor-before-submit-prompt",
+        "timeout": 5
+      }
+    ],
     "afterFileEdit": [
       {
         "command": "tracedecay hook-cursor-after-file-edit",
+        "timeout": 5
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "tracedecay hook-cursor-after-shell",
+        "timeout": 5
+      }
+    ],
+    "workspaceOpen": [
+      {
+        "command": "tracedecay hook-cursor-workspace-open",
         "timeout": 5
       }
     ],

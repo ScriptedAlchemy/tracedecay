@@ -4,7 +4,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::common;
 use crate::common::{
@@ -15,6 +15,13 @@ use tempfile::TempDir;
 use tracedecay::storage::{
     EnrollmentMarker, StorageMode, default_profile_project_id, profile_sharded_data_root,
     write_enrollment_marker,
+};
+use tracedecay_domain::UtcMicros;
+use tracedecay_hooks::{
+    HOOK_CONFIGURATION_SCHEMA_VERSION, HookCapabilityV1, HookConfigurationFileWriterV1,
+    HookConfigurationPublisherV1, HookConfigurationSnapshotV1, HookEventFamily, HookEventSupportV1,
+    HookEventV2, HookHostV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolV1,
+    hook_configuration_path,
 };
 
 /// Bound for waits that depend on spawning and running the real `tracedecay`
@@ -116,68 +123,103 @@ fn spawn_scripted_daemon(
             .expect("set listener nonblocking");
         ready_tx.send(()).expect("notify fake daemon readiness");
 
+        // The CLI may open preliminary connections before the scripted tool
+        // call (for example the startup readiness probe's `initialize`
+        // roundtrip), so the fake daemon serves accepted connections in a
+        // loop until the expected `tools/call` arrives.
         let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
-        let (stream, _) = common::poll_until(
-            deadline,
-            Duration::from_millis(10),
-            || match listener.accept() {
-                Ok(accepted) => Some(accepted),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
-                Err(e) => panic!("accept fake daemon client: {e}"),
-            },
-            || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
-        );
-        stream
-            .set_nonblocking(false)
-            .expect("set accepted stream blocking");
-        stream
-            .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
-            .expect("write timeout");
-        let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
+        loop {
+            let (stream, _) = common::poll_until(
+                deadline,
+                Duration::from_millis(10),
+                || match listener.accept() {
+                    Ok(accepted) => Some(accepted),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
+                    Err(e) => panic!("accept fake daemon client: {e}"),
+                },
+                || "timed out waiting for tool CLI to connect to fake daemon".to_string(),
+            );
+            stream
+                .set_nonblocking(false)
+                .expect("set accepted stream blocking");
+            stream
+                .set_write_timeout(Some(CLI_ROUNDTRIP_TIMEOUT))
+                .expect("write timeout");
+            let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
 
-        let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
-        let mut handshake = String::new();
-        reader
-            .read_line(&mut handshake)
-            .expect("read daemon handshake");
-        let _handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone fake daemon stream"));
+            // Skip preamble lines (auth preface, handshake) until the first
+            // JSON-RPC frame carrying a `method`; a connection that closes
+            // without one is ignored.
+            let request = loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break None,
+                    Ok(_) => {}
+                }
+                let value: Value =
+                    serde_json::from_str(line.trim()).expect("fake daemon preamble JSON");
+                if value.get("method").is_some() {
+                    break Some(value);
+                }
+            };
+            let Some(request) = request else {
+                continue;
+            };
 
-        let mut request = String::new();
-        reader
-            .read_line(&mut request)
-            .expect("read JSON-RPC request");
-        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
-        assert_eq!(request["method"], "tools/call");
-        assert_eq!(request["params"]["name"], expected_tool_name);
-        request_tx
-            .send(request.clone())
-            .expect("send observed JSON-RPC request");
-
-        match response {
-            FakeDaemonResponse::Complete { text } => {
+            if request["method"] == "initialize" {
+                // Answer the readiness probe with this build's identity so
+                // the CLI proceeds to the scripted tool call.
                 let response = json!({
                     "jsonrpc": "2.0",
                     "id": request["id"].clone(),
                     "result": {
-                        "content": [{
-                            "type": "text",
-                            "text": text
-                        }]
+                        "serverInfo": {
+                            "name": "tracedecay",
+                            "version": tracedecay::version::build_version(),
+                        }
                     }
                 });
                 let mut writer = stream;
                 writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
-                    .expect("write fake daemon response");
+                    .expect("write fake daemon initialize response");
+                continue;
             }
-            FakeDaemonResponse::TruncatedJsonRpc => {
-                let mut writer = stream;
-                write!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":").expect("write truncated frame");
-                // Close without a terminating newline so the client sees EOF mid-frame.
+
+            assert_eq!(request["method"], "tools/call");
+            assert_eq!(request["params"]["name"], expected_tool_name);
+            request_tx
+                .send(request.clone())
+                .expect("send observed JSON-RPC request");
+
+            match response {
+                FakeDaemonResponse::Complete { text } => {
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": request["id"].clone(),
+                        "result": {
+                            "content": [{
+                                "type": "text",
+                                "text": text
+                            }]
+                        }
+                    });
+                    let mut writer = stream;
+                    writeln!(writer, "{}", serde_json::to_string(&response).unwrap())
+                        .expect("write fake daemon response");
+                }
+                FakeDaemonResponse::TruncatedJsonRpc => {
+                    let mut writer = stream;
+                    write!(writer, "{{\"jsonrpc\":\"2.0\",\"id\":")
+                        .expect("write truncated frame");
+                    // Close without a terminating newline so the client sees EOF mid-frame.
+                }
+                FakeDaemonResponse::HoldOpen => {
+                    // Keep the accepted socket open without writing a matching response.
+                    std::thread::sleep(CLI_CHILD_KILL_TIMEOUT + Duration::from_secs(2));
+                }
             }
-            FakeDaemonResponse::HoldOpen => {
-                // Keep the accepted socket open without writing a matching response.
-                std::thread::sleep(CLI_CHILD_KILL_TIMEOUT + Duration::from_secs(2));
-            }
+            break;
         }
     });
 
@@ -470,107 +512,65 @@ fn spawn_sentinel_daemon_with_notification(
     request_rx
 }
 
-fn spawn_hook_event_daemon(socket_path: PathBuf) -> mpsc::Receiver<Value> {
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let (request_tx, request_rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let _ = std::fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon socket");
-        listener
-            .set_nonblocking(true)
-            .expect("set listener nonblocking");
-        ready_tx.send(()).expect("notify fake daemon readiness");
-
-        let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
-        let (stream, _) = common::poll_until(
-            deadline,
-            Duration::from_millis(10),
-            || match listener.accept() {
-                Ok(accepted) => Some(accepted),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => None,
-                Err(e) => panic!("accept fake daemon client: {e}"),
-            },
-            || "timed out waiting for hook to connect to fake daemon".to_string(),
-        );
-        // The listener above is intentionally nonblocking so the accept loop
-        // can poll against a deadline. The accepted stream must be switched
-        // back to blocking (matching spawn_sentinel_daemon_with_notification)
-        // before reading: on some platforms an accepted Unix socket can carry
-        // over the listener's nonblocking flag, which would otherwise make
-        // read_line() return a transient WouldBlock-shaped I/O error instead
-        // of blocking until the CLI child has written its handshake line.
-        stream
-            .set_nonblocking(false)
-            .expect("set accepted stream blocking");
-        // Best-effort: fire-and-forget hook CLIs (the cursor notifications)
-        // connect, write, and exit before this line runs, and on macOS
-        // setsockopt(SO_RCVTIMEO) fails with EINVAL once the peer has hung
-        // up — while the written bytes remain buffered and readable. The
-        // timeout is only defense-in-depth (nextest's per-test timeout is
-        // the real backstop), so a failure here must not panic the helper.
-        let _ = stream.set_read_timeout(Some(CLI_ROUNDTRIP_TIMEOUT));
-        let mut reader = BufReader::new(stream);
-        let mut handshake = String::new();
-        reader
-            .read_line(&mut handshake)
-            .expect("read daemon handshake");
-        let handshake: Value = serde_json::from_str(handshake.trim()).expect("handshake JSON");
-        assert!(
-            handshake["project_path"].is_string(),
-            "hook notifications must be scoped to a project"
-        );
-        assert!(
-            !handshake
-                .get("allow_init")
-                .and_then(Value::as_bool)
-                .unwrap_or(true),
-            "hook notifications must not permit daemon-side init"
-        );
-
-        let mut request = String::new();
-        reader
-            .read_line(&mut request)
-            .expect("read hook JSON-RPC notification");
-        let request: Value = serde_json::from_str(request.trim()).expect("request JSON");
-        assert_eq!(request["method"], "tracedecay/hookEvent");
-        assert!(
-            request.get("id").is_none(),
-            "hook event must be a notification, not a request"
-        );
-        request_tx
-            .send(request)
-            .expect("send observed hook event notification");
-    });
-
-    ready_rx
-        .recv_timeout(LOCAL_READY_TIMEOUT)
-        .expect("fake daemon should become ready");
-    request_rx
+/// Enroll a project for the native hook capture contract: an enrollment
+/// marker binds the project root to a profile shard, and a daemon-issued
+/// hook configuration binding is published under that shard's data root so
+/// `run_native_capture` resolves `Bound` instead of `Unbound`.
+fn enroll_native_capture_project(
+    home: &Path,
+    project: &Path,
+    project_id: &str,
+    host: HookHostV1,
+    families: &[HookEventFamily],
+) -> PathBuf {
+    write_enrollment_marker(
+        project,
+        &EnrollmentMarker {
+            project_id: project_id.to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let data_root = home.join(".tracedecay/projects").join(project_id);
+    std::fs::create_dir_all(&data_root).unwrap();
+    let now = capture_test_now();
+    HookConfigurationPublisherV1::new(HookConfigurationFileWriterV1::new(
+        hook_configuration_path(&data_root, host),
+    ))
+    .publish(HookConfigurationSnapshotV1 {
+        schema_version: HOOK_CONFIGURATION_SCHEMA_VERSION,
+        revision: 1,
+        published_at: UtcMicros(now.0 - 1_000_000),
+        expires_at: UtcMicros(now.0 + 600_000_000),
+        binding: HookScopeBindingV1 {
+            host,
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: 4,
+            binding_token: [5; 32],
+            capabilities: families
+                .iter()
+                .map(|family| HookCapabilityV1 {
+                    family: *family,
+                    support: HookEventSupportV1::Native,
+                })
+                .collect(),
+        },
+    })
+    .unwrap();
+    data_root
 }
 
-fn assert_hook_notification(
-    command_arg: &str,
-    fail_open_label: &str,
-    expected_agent: &str,
-    expected_event: &str,
-    build_event: impl FnOnce(&Path) -> Value,
-    assert_extra_params: impl FnOnce(&Value, &Path),
-) {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let socket_dir = TempDir::new().unwrap();
-    let home_path = canonical_existing_path(home.path());
-    let project_path = canonical_existing_path(project.path());
-    init_project_with_cli(&home_path, &project_path);
+fn capture_test_now() -> UtcMicros {
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    UtcMicros(i64::try_from(elapsed.as_micros()).unwrap())
+}
 
-    let socket_path = socket_dir.path().join("tracedecay.sock");
-    let observed_request = spawn_hook_event_daemon(socket_path.clone());
-    let event = build_event(&project_path).to_string();
-
-    let output = tracedecay_command_with_home(&home_path)
-        .current_dir(&project_path)
-        .env("TRACEDECAY_DAEMON_SOCKET", &socket_path)
+fn run_native_capture_hook(home: &Path, project: &Path, command_arg: &str, event: &Value) -> Output {
+    let event = event.to_string();
+    tracedecay_command_with_home(home)
+        .current_dir(project)
         .arg(command_arg)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -584,73 +584,149 @@ fn assert_hook_notification(
                 .write_all(event.as_bytes())?;
             child.wait_with_output()
         })
-        .expect("hook command should run");
+        .expect("hook command should run")
+}
 
-    assert!(
-        output.status.success(),
-        "{fail_open_label} hook should fail open\nstdout:\n{}\nstderr:\n{}",
+fn native_capture_spool_root(data_root: &Path, host: HookHostV1) -> PathBuf {
+    data_root.join("hook-v2-spool").join(host.hook_key())
+}
+
+/// Assert the transport-only response contract shared by every native
+/// capture outcome: `{}` on stdout, nothing on stderr, and the exit code the
+/// `NativeHookCaptureOutcomeV1` mapping assigns to the outcome.
+fn assert_capture_transport_response(label: &str, output: &Output, expected_exit: i32) {
+    assert_eq!(
+        output.status.code(),
+        Some(expected_exit),
+        "{label}: unexpected exit\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-
-    let request = observed_request
-        .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
-        .expect("fake daemon should receive hook event");
-    assert_eq!(request["params"]["agent"], expected_agent);
-    assert_eq!(request["params"]["event"], expected_event);
-    assert_extra_params(&request, &project_path);
+    assert_eq!(output.stdout, b"{}\n", "{label}: {output:?}");
+    assert!(output.stderr.is_empty(), "{label}: {output:?}");
 }
 
 #[test]
-fn cursor_after_file_edit_hook_notifies_daemon() {
-    assert_hook_notification(
+fn cursor_after_file_edit_hook_captures_bound_spool_record() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = HookHostV1::CursorDesktop;
+    let data_root = enroll_native_capture_project(
+        &home_path,
+        &project_path,
+        "proj_cursor_after_file_edit_capture",
+        host,
+        &[HookEventFamily::SavedEdit],
+    );
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    let edited = project_path.join("src/lib.rs");
+    std::fs::write(&edited, "pub fn answer() -> u32 { 43 }\n").unwrap();
+
+    // A payload without Cursor's documented identity fields (edits,
+    // conversation/generation/session identity) is typed Rejected: exit 1,
+    // transport-only `{}` response, and no spool artifact.
+    let rejected = run_native_capture_hook(
+        &home_path,
+        &project_path,
         "hook-cursor-after-file-edit",
-        "afterFileEdit",
-        "cursor",
-        "afterFileEdit",
-        |project_path| {
-            let edited = project_path.join("src/lib.rs");
-            std::fs::write(&edited, "pub fn answer() -> u32 { 43 }\n").unwrap();
-            json!({
-                "hook_event_name": "afterFileEdit",
-                "file_path": edited,
-                "workspace_roots": [project_path],
-            })
-        },
-        |request, _| {
-            assert_eq!(request["params"]["rel_paths"], json!(["src/lib.rs"]));
-        },
+        &json!({
+            "hook_event_name": "afterFileEdit",
+            "file_path": edited,
+            "workspace_roots": [project_path],
+        }),
+    );
+    assert_capture_transport_response("afterFileEdit rejected", &rejected, 1);
+    assert!(
+        !native_capture_spool_root(&data_root, host).exists(),
+        "rejected payload must not leave a spool artifact"
+    );
+
+    // The authentic Cursor afterFileEdit shape (mirroring the checked-in
+    // host fixture) is Captured into the bounded replay spool.
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-cursor-after-file-edit",
+        &json!({
+            "conversation_id": "conv-1",
+            "generation_id": "gen-1",
+            "model": "test-model",
+            "file_path": edited,
+            "edits": [{
+                "old_string": "pub fn answer() -> u32 { 42 }",
+                "new_string": "pub fn answer() -> u32 { 43 }",
+            }],
+            "session_id": "session-1",
+            "hook_event_name": "afterFileEdit",
+            "cursor_version": "1.7.0",
+            "workspace_roots": [project_path],
+            "user_email": "dev@example.com",
+            "transcript_path": home_path.join("transcripts/session-1.jsonl"),
+        }),
+    );
+    assert_capture_transport_response("afterFileEdit captured", &output, 0);
+
+    let (mut spool, report) = HookSpoolV1::open(
+        native_capture_spool_root(&data_root, host),
+        HookSpoolConfigV1::stock(host),
+        capture_test_now(),
+    )
+    .expect("open captured spool");
+    assert_eq!(report.pending_records, 1, "captured record must be spooled");
+    let batches = spool
+        .claim_replay_batches(capture_test_now(), 1)
+        .expect("claim spooled batch");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].records.len(), 1);
+    assert_eq!(batches[0].records[0].envelope.producer, host);
+    assert!(
+        matches!(
+            batches[0].records[0].envelope.event,
+            HookEventV2::SavedEdit { .. }
+        ),
+        "afterFileEdit must capture a SavedEdit envelope: {:?}",
+        batches[0].records[0].envelope.event
     );
 }
 
 #[test]
-fn cursor_after_shell_hook_notifies_daemon() {
-    assert_hook_notification(
+fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = HookHostV1::CursorDesktop;
+    // Bind every family Cursor natively supports so the absence of a spool
+    // record is attributable to the unsupported event, not a missing binding.
+    let data_root = enroll_native_capture_project(
+        &home_path,
+        &project_path,
+        "proj_cursor_after_shell_capture",
+        host,
+        &[HookEventFamily::SessionBoundary, HookEventFamily::SavedEdit],
+    );
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
         "hook-cursor-after-shell",
-        "afterShellExecution",
-        "cursor",
-        "afterShellExecution",
-        |project_path| {
-            json!({
-                "hook_event_name": "afterShellExecution",
-                "command": "git pull --rebase",
-                "cwd": project_path,
-                "workspace_roots": [project_path],
-            })
-        },
-        |request, project_path| {
-            // Shell text is never forwarded: `DaemonHookEvent` carries the
-            // working directory so native Git reconciliation owns the effect,
-            // and command text cannot become sync or branch authority.
-            assert!(
-                request["params"]["command"].is_null(),
-                "shell command text must not reach the daemon: {request}"
-            );
-            assert_eq!(
-                request["params"]["cwd"],
-                project_path.to_string_lossy().to_string()
-            );
-        },
+        &json!({
+            "hook_event_name": "afterShellExecution",
+            "command": "git pull --rebase",
+            "cwd": project_path,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    // Shell events have no native capture family for Cursor (ToolLifecycle
+    // is typed Unavailable), so the outcome is Unsupported: fail-open exit 0
+    // and no spool artifact — command text can never enter the spool.
+    assert_capture_transport_response("afterShellExecution unsupported", &output, 0);
+    assert!(
+        !native_capture_spool_root(&data_root, host).exists(),
+        "unsupported shell event must not leave a spool artifact"
     );
 }
 
@@ -729,54 +805,116 @@ fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
 }
 
 #[test]
-fn cursor_workspace_open_hook_notifies_daemon() {
-    assert_hook_notification(
+fn cursor_workspace_open_hook_is_typed_unsupported_without_spool_record() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = HookHostV1::CursorDesktop;
+    let data_root = enroll_native_capture_project(
+        &home_path,
+        &project_path,
+        "proj_cursor_workspace_open_capture",
+        host,
+        &[HookEventFamily::SessionBoundary, HookEventFamily::SavedEdit],
+    );
+
+    let output = run_native_capture_hook(
+        &home_path,
+        &project_path,
         "hook-cursor-workspace-open",
-        "workspaceOpen",
-        "cursor",
-        "workspaceOpen",
-        |project_path| {
-            json!({
-                "hook_event_name": "workspaceOpen",
-                "cwd": project_path,
-                "workspace_roots": [project_path],
-            })
-        },
-        |request, project_path| {
-            assert_eq!(
-                request["params"]["cwd"],
-                project_path.to_string_lossy().to_string()
-            );
-        },
+        &json!({
+            "hook_event_name": "workspaceOpen",
+            "cwd": project_path,
+            "workspace_roots": [project_path],
+        }),
+    );
+
+    // workspaceOpen is not a native capture event for Cursor: the decode is
+    // typed Unsupported, the hook fails open, and no spool artifact appears
+    // even with a live bound configuration.
+    assert_capture_transport_response("workspaceOpen unsupported", &output, 0);
+    assert!(
+        !native_capture_spool_root(&data_root, host).exists(),
+        "unsupported workspaceOpen event must not leave a spool artifact"
     );
 }
 
 #[test]
-fn kiro_post_tool_use_hook_notifies_daemon() {
-    assert_hook_notification(
+fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    let host = HookHostV1::Kiro;
+    let data_root = enroll_native_capture_project(
+        &home_path,
+        &project_path,
+        "proj_kiro_capture",
+        host,
+        &[HookEventFamily::PromptBoundary],
+    );
+    std::fs::create_dir_all(project_path.join("src")).unwrap();
+    std::fs::write(
+        project_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 44 }\n",
+    )
+    .unwrap();
+
+    // Kiro's only native capture family is PromptBoundary; postToolUse is
+    // typed Unsupported (fail-open exit 0) and never enters the spool.
+    let post_tool_use = run_native_capture_hook(
+        &home_path,
+        &project_path,
         "hook-kiro-post-tool-use",
-        "Kiro postToolUse",
-        "kiro",
-        "postToolUse",
-        |project_path| {
-            let edited = project_path.join("src/lib.rs");
-            std::fs::write(&edited, "pub fn answer() -> u32 { 44 }\n").unwrap();
-            json!({
-                "hook_event_name": "postToolUse",
-                "cwd": project_path,
-                "tool_name": "fs_write",
-                "tool_input": {
-                    "path": "src/lib.rs"
-                },
-            })
-        },
-        |request, project_path| {
-            assert_eq!(
-                request["params"]["cwd"],
-                project_path.to_string_lossy().to_string()
-            );
-            assert_eq!(request["params"]["rel_paths"], json!(["src/lib.rs"]));
-        },
+        &json!({
+            "hook_event_name": "postToolUse",
+            "cwd": project_path,
+            "tool_name": "fs_write",
+            "tool_input": {
+                "path": "src/lib.rs"
+            },
+        }),
+    );
+    assert_capture_transport_response("Kiro postToolUse unsupported", &post_tool_use, 0);
+    assert!(
+        !native_capture_spool_root(&data_root, host).exists(),
+        "unsupported Kiro postToolUse must not leave a spool artifact"
+    );
+
+    let prompt_submit = run_native_capture_hook(
+        &home_path,
+        &project_path,
+        "hook-kiro-prompt-submit",
+        &json!({
+            "hook_event_name": "userPromptSubmit",
+            "session_id": "session-1",
+            "cwd": project_path,
+            "prompt": "redacted prompt text",
+        }),
+    );
+    assert_capture_transport_response("Kiro userPromptSubmit captured", &prompt_submit, 0);
+
+    let (mut spool, report) = HookSpoolV1::open(
+        native_capture_spool_root(&data_root, host),
+        HookSpoolConfigV1::stock(host),
+        capture_test_now(),
+    )
+    .expect("open captured spool");
+    assert_eq!(report.pending_records, 1, "prompt boundary must be spooled");
+    let batches = spool
+        .claim_replay_batches(capture_test_now(), 1)
+        .expect("claim spooled batch");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].records.len(), 1);
+    assert_eq!(batches[0].records[0].envelope.producer, host);
+    assert!(
+        matches!(
+            batches[0].records[0].envelope.event,
+            HookEventV2::PromptBoundary
+        ),
+        "userPromptSubmit must capture a PromptBoundary envelope: {:?}",
+        batches[0].records[0].envelope.event
     );
 }
 
@@ -1299,7 +1437,6 @@ fn doctor_keeps_live_daemon_database_healthy_without_compaction() {
     let first_tool_calls = tool_status_server_tool_calls(&home_path, &project_path);
     let output = tracedecay_command_with_home(&home_path)
         .arg("doctor")
-        .args(["--agent", "claude"])
         .current_dir(&project_path)
         .output()
         .expect("doctor should run");
@@ -1926,7 +2063,7 @@ fn hermes_read_only_preflight_keeps_project_lcm_grep_available() {
         "action": "ingest_transcript",
         "provider": "hermes",
         "session_id": "stock-check-session",
-        "storage_scope": "user",
+        "user_scope": true,
         "messages": [
             {
                 "role": "user",

@@ -1076,11 +1076,19 @@ mod runtime_configuration_cutover {
 
     use tempfile::TempDir;
     use tracedecay_domain::configuration::{
-        AuthorityRef, ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-        SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId,
+        AuthorityRef, ConfigurationGrantId, ConfigurationGrantReceiptId,
+        ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationEffectV1,
+        ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
+        ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
+        DIAGNOSTICS_PREWARM_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
+        ScopeSourceBinding, SettingKey, SourceBindingId,
     };
-    use tracedecay_domain::{ProjectId, UtcMicros};
+    use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId, UtcMicros};
 
+    use crate::application::configuration::{
+        ConfigurationControlStore, ConfigurationMutationAuthority, DirectConfigurationMutation,
+        ProjectConfigurationRuntime,
+    };
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
@@ -1103,11 +1111,23 @@ mod runtime_configuration_cutover {
     fn cached_runtime_reads_ignore_legacy_input_after_publication() {
         let project_id = project_id("project.runtime-cache-only");
         let root = TempDir::new().expect("temporary project root");
+        // Publish with an explicit auto-watch=true settings layer so the
+        // published-snapshot-wins assertion below stays valid regardless of
+        // the registry default's polarity.
         let snapshot = resolve_configuration(
             &ConfigurationRegistry::core().expect("registry is available"),
-            &[],
+            &[ConfigurationLayerV1 {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: project_id.clone(),
+                },
+                revision_id: revision_id("revision.runtime-cache-only.settings"),
+                entries: BTreeMap::from([(
+                    SettingKey::new(SYNC_AUTO_WATCH_SETTING_KEY).expect("auto-watch setting key"),
+                    ConfigurationValueV1::Boolean(true),
+                )]),
+            }],
         )
-        .expect("defaults resolve")
+        .expect("explicit settings layer resolves")
         .snapshot;
         let pinned = PinnedRuntimeConfiguration::new(
             RuntimeConfigurationTarget {
@@ -1200,6 +1220,92 @@ mod runtime_configuration_cutover {
         assert_eq!(first.target.project_root, first_root);
         assert_eq!(second.target.project_root, second_root);
         assert_ne!(first.config.root_dir, second.config.root_dir);
+    }
+
+    #[tokio::test]
+    async fn runtime_current_reads_the_store_after_startup_snapshot_drifts() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary project root");
+        let project_id = project_id("project.configuration-runtime-drift");
+        crate::storage::write_enrollment_marker(
+            root.path(),
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let host_runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("open retained project runtime");
+        let database = host_runtime
+            .registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            )
+            .expect("bind registered project database");
+        crate::config::install_usecase_runtime_configuration_authority()
+            .expect("install the root runtime configuration authority");
+        let opened =
+            tracedecay_usecases::config::open_runtime_configuration_for_registered_database(
+                root.path(),
+                &layout,
+                database,
+            )
+            .await
+            .expect("open runtime configuration through the installed authority");
+        let (runtime, startup) =
+            ProjectConfigurationRuntime::open(opened).expect("open project configuration runtime");
+        let mutation = DirectConfigurationMutation::Set {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
+            value: ConfigurationValueV1::Boolean(true),
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                ConfigurationGrantReceiptId::new("configuration.grant-receipt.drift").unwrap(),
+                ConfigurationGrantId::new("configuration.grant.drift").unwrap(),
+                ActorId::new("actor.configuration-runtime-drift").unwrap(),
+                ConfigurationMutationOperationV1::DirectMutation,
+                mutation.target_scope_digest().unwrap(),
+                startup.revision_id.clone(),
+                1,
+                AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                Some(
+                    ConfigurationIdempotencyKey::new("configuration.idempotency.runtime-drift")
+                        .unwrap(),
+                ),
+                UtcMicros(1),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let store = runtime.configuration_store();
+        let receipt = ConfigurationControlStore::commit_direct(
+            &store,
+            &authority,
+            &mutation,
+            &startup.revision_id,
+        )
+        .await
+        .unwrap();
+
+        let current = runtime.client().current().await.unwrap();
+        assert_eq!(current.revision_id, receipt.result_revision_id);
+        assert_ne!(current.revision_id, startup.revision_id);
+        assert!(!startup.config.diagnostics_prewarm);
+        assert!(current.config.diagnostics_prewarm);
+        assert_eq!(runtime.configuration_target(), &current.target);
     }
 
     #[tokio::test]

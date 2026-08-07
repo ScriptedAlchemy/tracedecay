@@ -24,11 +24,11 @@ pub use tracedecay_tool_catalog as operation;
 /// Canonical Work commands, projections, and executable capability inventory.
 pub mod work {
     pub use tracedecay_application::{
-        AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand,
-        AdmitWorkPlacementCommand, AttachRuntimeEvidenceCommand, CreateWorkCommand,
-        PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
-        ResumeWorkRunCommand, ReviewProposalCommand, WorkPlacementPreflightRequestV1,
-        WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
+        AcceptProposalCommand, AcceptTaskCommand, AdmitExecutionCommand, AdmitWorkPlacementCommand,
+        AttachRuntimeEvidenceCommand, CreateWorkCommand, PauseWorkRunCommand,
+        ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkRunCommand,
+        ReviewProposalCommand, WorkPlacementPreflightRequestV1, WorkPlacementReadingV1,
+        WorkPlacementStatusRequestV1, WorkProjectionDeltaRequestV1,
         WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
         work_executable_binding_registry as executable_binding_registry,
     };

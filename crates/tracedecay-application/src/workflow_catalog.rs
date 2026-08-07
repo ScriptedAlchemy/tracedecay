@@ -165,14 +165,18 @@ fn workflow_binding(
             operation,
             "/application/workflow/handoff-redeem",
         ),
-        "start_run" => available::<WorkflowRunStartRequest, tracedecay_domain::WorkflowRunProjection>(
-            operation,
-            "/application/workflow/start-run",
-        ),
-        "pause_run" => available::<WorkflowRunPauseRequest, tracedecay_domain::WorkflowRunProjection>(
-            operation,
-            "/application/workflow/pause-run",
-        ),
+        "start_run" => {
+            available::<WorkflowRunStartRequest, tracedecay_domain::WorkflowRunProjection>(
+                operation,
+                "/application/workflow/start-run",
+            )
+        }
+        "pause_run" => {
+            available::<WorkflowRunPauseRequest, tracedecay_domain::WorkflowRunProjection>(
+                operation,
+                "/application/workflow/pause-run",
+            )
+        }
         "resume_run" => available::<
             WorkflowRunResumeRequest,
             tracedecay_domain::WorkflowRunProjection,

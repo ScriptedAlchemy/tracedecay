@@ -9,6 +9,7 @@ mod common;
 
 use std::path::Path;
 use std::process::{Output, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tracedecay::application_surface::{
@@ -21,8 +22,8 @@ use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_application::retrieval::SymbolGraphScope;
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationOutcome, OpaqueCursor, OperationTermination, RequestId,
-    ResultProjection, RetrievalOrder,
+    ApplicationEnvelope, ApplicationOutcome, LegalAction, OpaqueCursor, OperationTermination,
+    ProblemTerminality, RequestId, ResultProjection, RetrievalOrder,
 };
 
 /// Every surface pins its page size to ten rows, so a query with more matches
@@ -343,26 +344,112 @@ fn terminal_disposition(value: &Value) -> (&str, &str) {
     let kind = problem["kind"]
         .as_str()
         .unwrap_or_else(|| panic!("typed application problem: {value:#}"));
+    // Every problem variant serializes a top-level `code` — the diagnostic
+    // code when a diagnostic exists, else the variant's canonical code
+    // (`ApplicationProblemRecord::new` in `result/envelope.rs`). Variants like
+    // `NotFoundOrNotAuthorized` structurally carry no diagnostic
+    // (anti-enumeration, `result/problem.rs`), so the diagnostic code is only
+    // required when a diagnostic is present.
     assert!(
-        problem["diagnostic"]["code"].is_string(),
+        problem["code"].is_string(),
         "application problem must identify its observed terminal state: {value:#}"
     );
+    if !problem["diagnostic"].is_null() {
+        assert!(
+            problem["diagnostic"]["code"].is_string(),
+            "a problem that carries a diagnostic must code it: {value:#}"
+        );
+    }
     ("problem", kind)
+}
+
+/// Total budget for honouring production's pre-admission retry contract on
+/// one operation before the test fails with the last published problem.
+const READINESS_RETRY_DEADLINE: Duration = Duration::from_secs(60);
+/// The canonical `after_delay` floor: an advertised `retry_after_millis`
+/// below this is never spun faster than the contract default.
+const READINESS_RETRY_FLOOR_MILLIS: u64 = 250;
+
+/// Re-invokes an MCP application read while production publishes its typed
+/// pre-admission readiness problem.
+///
+/// Production's cold-open design completes project open before the first
+/// code-index generation seals (`project_open_owners.rs` defers owner
+/// registration as `SkippedUnindexed`, and the symbol-graph identity gate
+/// abstains while the index is busy or stale). The first generation-backed
+/// read may therefore legally return a `PreAdmission` problem with
+/// `retryable: true` and the `Retry` legal action. That problem is a published
+/// instruction, and this helper spends it exactly as published: re-invoke
+/// after the greater of the advertised `retry_after_millis` and the 250ms
+/// contract floor, bounded by [`READINESS_RETRY_DEADLINE`] in total.
+///
+/// No assertion is loosened here. Any problem that does not offer `Retry`
+/// (wrong terminality, not retryable, or without the `Retry` legal action) is
+/// returned untouched for the caller's existing assertions, and the eventual
+/// admitted result is asserted exactly as before. On deadline the panic
+/// carries the LAST problem record verbatim, so a never-resolving admission
+/// (for example a defective initial identity capture) stays diagnostic
+/// instead of collapsing into an opaque timeout.
+async fn admitted_mcp_invocation(
+    client: &DaemonInvocationClient,
+    operation: ApplicationSurfaceOperation,
+    request_id: &str,
+    build_request: impl Fn() -> ApplicationSurfaceRequest,
+) -> ApplicationSurfaceInvocationResult {
+    let started = Instant::now();
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        let result = resolve_mcp_application_surface(
+            operation,
+            RequestId::new(format!("{request_id}.attempt-{attempt:03}")).expect("request id"),
+            build_request(),
+            RequestedOutputFormat::Json,
+            Some(client),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("dispatch MCP {}: {error}", operation.as_str()));
+        let Err(problem) = &result.result else {
+            return result;
+        };
+        let record = problem.problem.as_ref();
+        let retry_offered = record.retryable
+            && record.terminality == ProblemTerminality::PreAdmission
+            && record.legal_actions.contains(&LegalAction::Retry);
+        if !retry_offered {
+            return result;
+        }
+        let delay = Duration::from_millis(
+            record
+                .retry_after_millis
+                .unwrap_or(READINESS_RETRY_FLOOR_MILLIS)
+                .max(READINESS_RETRY_FLOOR_MILLIS),
+        );
+        if started.elapsed() + delay > READINESS_RETRY_DEADLINE {
+            panic!(
+                "{} ({request_id}) retried the published Retry legal action for {:?} across \
+                 {attempt} attempts and was still refused admission; last problem code \
+                 {:?}: {record:#?}",
+                operation.as_str(),
+                started.elapsed(),
+                record.code,
+            );
+        }
+        tokio::time::sleep(delay).await;
+    }
 }
 
 async fn invoke_mcp_symbol_search(
     client: &DaemonInvocationClient,
     request_id: &str,
 ) -> ApplicationSurfaceInvocationResult {
-    resolve_mcp_application_surface(
+    admitted_mcp_invocation(
+        client,
         ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new(request_id).expect("request id"),
-        symbol_search_surface_request(PROBE_TOKEN, None),
-        RequestedOutputFormat::Json,
-        Some(client),
+        request_id,
+        || symbol_search_surface_request(PROBE_TOKEN, None),
     )
     .await
-    .expect("MCP application dispatch")
 }
 
 /// Asserts the page is the first of several and was produced by the cursor
@@ -442,23 +529,24 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     let fixture = production_fixture().await;
 
     // This is the first application request after the packaged `init` returns.
-    // It makes publication ordering externally observable at the only boundary
-    // users can rely on: an independent owner must already be callable without
-    // waiting for the generation-backed symbol owner used below.
-    let immediate_tests = resolve_mcp_application_surface(
+    // `test_results` is NOT generation-independent: production sources its
+    // `head_commit_id`/`code_generation_id` from the code-index generation
+    // (`managed_test_scope.rs`), so this read is generation-backed like the
+    // symbol reads below and honours the same published pre-admission retry
+    // contract.
+    let immediate_tests = admitted_mcp_invocation(
+        &fixture.client,
         ApplicationSurfaceOperation::TestResults,
-        RequestId::new("request.application-reachability.open.immediate-tests")
-            .expect("request id"),
-        parse_application_surface_request(
-            ApplicationSurfaceOperation::TestResults,
-            serde_json::json!({}),
-        )
-        .expect("test-results request"),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
+        "request.application-reachability.open.immediate-tests",
+        || {
+            parse_application_surface_request(
+                ApplicationSurfaceOperation::TestResults,
+                serde_json::json!({}),
+            )
+            .expect("test-results request")
+        },
     )
-    .await
-    .expect("immediate test-results dispatch");
+    .await;
     let immediate_tests = evidence_payload(&immediate_tests);
     assert!(
         immediate_tests["head_commit_id"].is_string(),
@@ -579,21 +667,20 @@ async fn operation_family_executes_through_cli_mcp_and_http() {
     ];
 
     for (operation, arguments) in cases {
-        let request = parse_application_surface_request(operation, arguments.clone())
-            .unwrap_or_else(|error| panic!("parse {} request: {error}", operation.as_str()));
-        let mcp = resolve_mcp_application_surface(
+        // The MCP read runs first and honours the pre-admission retry
+        // contract; readiness is monotonic for this static fixture, so the
+        // HTTP and CLI reads below observe the same admitted owner. Terminal
+        // problems that do not offer `Retry` pass through unchanged.
+        let mcp = admitted_mcp_invocation(
+            &fixture.client,
             operation,
-            RequestId::new(format!(
-                "request.application-family.mcp.{}",
-                operation.as_str()
-            ))
-            .expect("MCP request id"),
-            request,
-            RequestedOutputFormat::Json,
-            Some(&fixture.client),
+            &format!("request.application-family.mcp.{}", operation.as_str()),
+            || {
+                parse_application_surface_request(operation, arguments.clone())
+                    .unwrap_or_else(|error| panic!("parse {} request: {error}", operation.as_str()))
+            },
         )
-        .await
-        .unwrap_or_else(|error| panic!("dispatch MCP {}: {error}", operation.as_str()));
+        .await;
         let request = parse_application_surface_request(operation, arguments.clone())
             .unwrap_or_else(|error| panic!("parse {} request: {error}", operation.as_str()));
         let http = resolve_http_application_surface(
@@ -676,15 +763,11 @@ async fn operation_family_executes_through_cli_mcp_and_http() {
 #[tokio::test(flavor = "multi_thread")]
 async fn production_project_open_serves_a_paginated_symbol_graph_read() {
     let fixture = production_fixture().await;
-    let result = resolve_mcp_application_surface(
-        ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new("request.application-reachability.symbol-search.mcp").expect("request id"),
-        symbol_search_surface_request(PROBE_TOKEN, None),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
+    let result = invoke_mcp_symbol_search(
+        &fixture.client,
+        "request.application-reachability.symbol-search.mcp",
     )
-    .await
-    .expect("MCP application dispatch");
+    .await;
     let first = evidence_payload(&result).clone();
     assert_first_page_of_many("MCP", &first);
 
@@ -733,15 +816,8 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
 async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     let fixture = production_fixture().await;
 
-    let mcp = resolve_mcp_application_surface(
-        ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new("request.application-reachability.parity.mcp").expect("request id"),
-        symbol_search_surface_request(PROBE_TOKEN, None),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
-    )
-    .await
-    .expect("MCP application dispatch");
+    let mcp = invoke_mcp_symbol_search(&fixture.client, "request.application-reachability.parity.mcp")
+        .await;
     let mcp = evidence_payload(&mcp).clone();
     assert_first_page_of_many("MCP", &mcp);
 
@@ -824,16 +900,13 @@ impl ProbeAnchors {
 }
 
 async fn resolve_probe_node_id(fixture: &ProductionFixture, name: &str) -> String {
-    let result = resolve_mcp_application_surface(
+    let result = admitted_mcp_invocation(
+        &fixture.client,
         ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new(format!("request.application-continuation.anchor.{name}"))
-            .expect("request id"),
-        symbol_search_surface_request(name, None),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
+        &format!("request.application-continuation.anchor.{name}"),
+        || symbol_search_surface_request(name, None),
     )
-    .await
-    .expect("MCP application dispatch");
+    .await;
     let payload = evidence_payload(&result);
     payload["items"]
         .as_array()
@@ -1052,38 +1125,36 @@ async fn continuation_page(
     label: &str,
     arguments: Value,
 ) -> Value {
-    let request =
+    let build_request = || {
         parse_application_surface_request(operation, arguments.clone()).unwrap_or_else(|error| {
             panic!(
                 "parse {} {label} request: {error}\n{arguments:#}",
                 operation.as_str()
             )
-        });
+        })
+    };
     // The surface decodes exactly its cursor-carrying operations into these two
     // request families, so a case that stopped carrying a cursor would land in
     // another family and fail here rather than pass with nothing to continue.
     assert!(
         matches!(
-            request,
+            build_request(),
             ApplicationSurfaceRequest::CallableCode(_)
                 | ApplicationSurfaceRequest::PrimitiveCode(_)
         ),
         "{} must decode into a request that carries a surface cursor",
         operation.as_str()
     );
-    let result = resolve_mcp_application_surface(
+    let result = admitted_mcp_invocation(
+        &fixture.client,
         operation,
-        RequestId::new(format!(
+        &format!(
             "request.application-continuation.{}.{label}",
             operation.as_str()
-        ))
-        .expect("request id"),
-        request,
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
+        ),
+        build_request,
     )
-    .await
-    .unwrap_or_else(|error| panic!("dispatch {} {label}: {error}", operation.as_str()));
+    .await;
     evidence_payload(&result).clone()
 }
 

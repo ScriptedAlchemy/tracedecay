@@ -149,6 +149,25 @@ pub(crate) fn extract_real_server_text(result: &Value) -> &str {
         .expect("MCP text result")
 }
 
+/// Polls the daemon-owned code-index search authority through its typed
+/// cold-activation state (`authority_unavailable`) until it answers; any
+/// other failure surfaces immediately through the caller's assertions.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn warm_code_index_search(server: &McpServer, query: &str) {
+    for _ in 0..60 {
+        let result =
+            handle_real_server_tool_call(server, "tracedecay_search", json!({ "query": query }))
+                .await;
+        let payload: Value =
+            serde_json::from_str(extract_real_server_text(&result)).expect("search payload JSON");
+        if payload["reason"].as_str() != Some("authority_unavailable") {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("code-index search authority did not activate within the polling budget");
+}
+
 #[cfg(feature = "test-transport")]
 pub(crate) struct ProductionCompositionFixture {
     pub(crate) harness: ProductionProjectCompositionHarnessV1,
@@ -158,10 +177,20 @@ pub(crate) struct ProductionCompositionFixture {
 
 #[cfg(feature = "test-transport")]
 pub(crate) async fn production_composition_fixture() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(fixture::write_indexed_fixture_sources).await
+}
+
+/// As [`production_composition_fixture`], but the caller seeds the project
+/// sources (e.g. the accounted-savings project whose payload is large enough
+/// to prove compression savings).
+#[cfg(feature = "test-transport")]
+pub(crate) async fn production_composition_fixture_with_sources(
+    write_sources: impl FnOnce(&Path),
+) -> ProductionCompositionFixture {
     let isolation = test_temp_dir();
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).expect("production composition project");
-    fixture::write_indexed_fixture_sources(&project_root);
+    write_sources(&project_root);
     let init = Command::new(common::git_program())
         .args(["init", "-q"])
         .current_dir(&project_root)
@@ -1747,7 +1776,7 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
         }],
     };
     let envelope = CanonicalObservationEnvelopeV1::new(
-        provider,
+        provider.clone(),
         "message",
         stable_record_id.clone(),
         relations,
@@ -1839,6 +1868,16 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
         .project_observation(observation.observation_id())
         .await
         .unwrap();
+    // The projection lands `lcm_raw_messages` rows without ingest-protection
+    // receipts by design; production hydrates them through the canonical
+    // protection pass before any verified raw load. Mirror that second phase
+    // here so fixture-seeded sessions read back like production ones.
+    runtime
+        .registered_database(HostAdmissionScope::Project)
+        .expect("registered project session database")
+        .lcm_protect_session_raw_messages(provider.as_str(), session_id.as_str())
+        .await
+        .expect("hydrate LCM ingest-protection receipts for projected raw messages");
     let output_ordinal = ProjectionOutputOrdinalV1::new(0);
     let occurrence = serde_json::from_value(json!({
         "occurrence_id": MessageOccurrenceIdV1::derive(

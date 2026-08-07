@@ -23,54 +23,54 @@ pub(super) fn git(root: &Path, args: &[&str]) {
 
 pub(crate) struct WriterTestFixtureAuthority {
     _pin: PinnedUserDataDir,
-    _runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    runtime: Arc<HostAdmissionTestRuntimeV1>,
 }
 
 impl WriterTestFixtureAuthority {
     pub(super) async fn reopen_project_graph(&self, project_root: &Path) -> TraceDecay {
-        self._runtime
+        self.runtime
             .open_project_graph_for_test(
                 project_root,
                 crate::tracedecay::TraceDecayOpenOptions {
-                    profile_root: Some(self._runtime.profile_root_for_test().to_path_buf()),
+                    profile_root: Some(self.runtime.profile_root_for_test().to_path_buf()),
                     global_db_path: None,
                 },
             )
             .await
             .expect("reopen registered project graph")
     }
+
+    /// Releases the retained runtime — the profile's only session-relation
+    /// writer — while keeping the profile pin alive, so a test can reopen the
+    /// profile the way a fresh process would.
+    pub(super) fn release_runtime_for_reopen(self) -> PinnedUserDataDir {
+        self._pin
+    }
 }
 
-/// A registered project runtime for `cg`, rooted at the isolated profile the
-/// fixture already pinned. This is the registry authority the daemon holds in
-/// production, so a server built from it resolves path selectors — including
-/// hook workspace routes — instead of reporting the project unregistered.
-pub(super) async fn registered_runtime(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
-    let project_id = tracedecay_domain::ProjectId::new(
-        cg.store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .expect("project identity"),
-    )
-    .expect("typed project identity");
-    HostAdmissionTestRuntimeV1::project(
-        crate::config::user_data_dir().expect("isolated profile root"),
-        cg.project_root(),
-        project_id,
-    )
-    .await
-    .expect("registered host-admission runtime")
+/// The registered project runtime the fixture retained at init. The profile
+/// session-relation graph has exactly one writer, so tests must share this
+/// runtime instead of constructing a second one on the same profile. This is
+/// the registry authority the daemon holds in production, so a server built
+/// from it resolves path selectors — including hook workspace routes —
+/// instead of reporting the project unregistered.
+pub(super) fn registered_runtime(
+    authority: &WriterTestFixtureAuthority,
+) -> Arc<HostAdmissionTestRuntimeV1> {
+    Arc::clone(&authority.runtime)
 }
 
-/// A registered construction context for `cg`.
+/// A registered construction context for `cg`, built from the fixture's
+/// retained runtime.
 ///
 /// Pair it with [`crate::mcp::server::McpServer::new_with_registered_test_context`],
 /// which adds the retained project-graph resolver.
-pub(super) async fn registered_context(cg: TraceDecay) -> McpServerConstructionContext {
-    registered_runtime(&cg)
-        .await
-        .into_mcp_server_context_for_test(cg, None)
+pub(super) fn registered_context(
+    cg: TraceDecay,
+    authority: &WriterTestFixtureAuthority,
+) -> McpServerConstructionContext {
+    registered_runtime(authority)
+        .mcp_server_context_for_test(cg, None)
         .expect("registered MCP server context")
 }
 
@@ -97,9 +97,6 @@ pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtu
     (
         cg,
         dir,
-        WriterTestFixtureAuthority {
-            _pin: pin,
-            _runtime: runtime,
-        },
+        WriterTestFixtureAuthority { _pin: pin, runtime },
     )
 }

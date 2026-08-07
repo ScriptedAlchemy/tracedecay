@@ -280,6 +280,49 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    /// Sums the retained profile's settled savings-ledger rows, optionally
+    /// scoped to one project path — the production accounting authority the
+    /// MCP analytics journeys assert against.
+    pub async fn sum_profile_savings(
+        &self,
+        project: Option<&str>,
+        since: i64,
+    ) -> Result<crate::global_db::SavingsTotal> {
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        Ok(resources
+            .store_administration
+            .registered_profile_database()
+            .await?
+            .sum_savings(project, since)
+            .await)
+    }
+
+    /// Reads one project's lifetime saved-token counter from the retained
+    /// profile authority.
+    pub async fn project_lifetime_saved_tokens(&self, project_root: &Path) -> Result<u64> {
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        resources
+            .store_administration
+            .registered_profile_database()
+            .await?
+            .try_get_project_tokens(project_root)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                message,
+                operation: "read project lifetime saved tokens".to_owned(),
+            })
+    }
+
     pub fn server(&self, project_root: impl AsRef<Path>) -> Result<Arc<crate::mcp::McpServer>> {
         let canonical_project_path =
             std::fs::canonicalize(project_root.as_ref()).map_err(|error| {

@@ -385,14 +385,16 @@ fn contract_problem(error: WorkRunControlContractError) -> ApplicationProblem {
         | WorkRunControlContractError::AuthorityVersionOverflow
         | WorkRunControlContractError::InvalidDeadlineCheckpoint
         | WorkRunControlContractError::TooManyFencedAttempts
-        | WorkRunControlContractError::DuplicateFencedAttempt => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
-                code: "application.work-run-control.invalid-transition".to_owned(),
-                message: "The Work run control command or stored state is invalid.".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+        | WorkRunControlContractError::DuplicateFencedAttempt => {
+            ApplicationProblem::InvalidRequest {
+                diagnostic: SafeDiagnostic {
+                    code: "application.work-run-control.invalid-transition".to_owned(),
+                    message: "The Work run control command or stored state is invalid.".to_owned(),
+                },
+                retry: RetryDirective::Never,
+                legal_actions: vec![LegalAction::CorrectRequest],
+            }
+        }
     }
 }
 

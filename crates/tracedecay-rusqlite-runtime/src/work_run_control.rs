@@ -54,8 +54,8 @@ impl WorkRunControlStoragePort for WorkSqliteStorage {
                 exact_sql_text(&row.values, 0).ok_or(WorkRunControlStorageError::Unavailable)?;
             let attempt: WorkAttemptV1 = serde_json::from_str(payload)
                 .map_err(|_| WorkRunControlStorageError::Unavailable)?;
-            let terminal = exact_sql_integer(&row.values, 1)
-                .ok_or(WorkRunControlStorageError::Unavailable)?;
+            let terminal =
+                exact_sql_integer(&row.values, 1).ok_or(WorkRunControlStorageError::Unavailable)?;
             // The earliest attempt in stable order carries the admitted
             // deadline: later attempts of the same run were admitted under the
             // same snapshot, and taking the first one keeps the answer stable

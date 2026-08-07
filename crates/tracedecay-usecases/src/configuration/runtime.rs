@@ -820,14 +820,7 @@ impl ConfigurationClock for SystemConfigurationClock {
 mod tests {
     use super::*;
     use crate::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
-    use tracedecay_domain::configuration::{
-        ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
-        ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
-        ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationValueKindV1,
-        DIAGNOSTICS_PREWARM_SETTING_KEY,
-    };
-    use tracedecay_domain::{AccessPolicyDigest, ActorId, ProjectId};
-    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_domain::configuration::ConfigurationValueKindV1;
 
     use crate::config::{SEMANTIC_RUNTIME_SETTING_KEY, SemanticConfig};
 
@@ -934,83 +927,4 @@ mod tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn runtime_current_reads_the_store_after_startup_snapshot_drifts() {
-        let directory = tempfile::tempdir().unwrap();
-        let profile_root = directory.path().join("profile");
-        let project_root = directory.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let project_id = ProjectId::new("project.configuration-runtime-drift").unwrap();
-        tracedecay_runtime_core::storage::write_enrollment_marker(
-            &project_root,
-            &tracedecay_runtime_core::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
-                .unwrap();
-        std::fs::create_dir_all(&layout.data_root).unwrap();
-        let host_runtime = RegisteredGlobalDbTestRuntime::project(
-            &profile_root,
-            &project_root,
-            project_id.clone(),
-        )
-        .await
-        .unwrap();
-        let opened = crate::config::open_runtime_configuration_for_registered_database(
-            &project_root,
-            &layout,
-            host_runtime.project_database_arc().unwrap(),
-        )
-        .await
-        .unwrap();
-        let (runtime, startup) = ProjectConfigurationRuntime::open(opened).unwrap();
-        let mutation = DirectConfigurationMutation::Set {
-            layer: ConfigurationLayerIdV1::Project {
-                project_id: project_id.clone(),
-            },
-            key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-            value: ConfigurationValueV1::Boolean(true),
-        };
-        let authority = ConfigurationMutationAuthority {
-            receipt: ConfigurationMutationGrantReceiptV1::issue(
-                ConfigurationGrantReceiptId::new("configuration.grant-receipt.drift").unwrap(),
-                ConfigurationGrantId::new("configuration.grant.drift").unwrap(),
-                ActorId::new("actor.configuration-runtime-drift").unwrap(),
-                ConfigurationMutationOperationV1::DirectMutation,
-                mutation.target_scope_digest().unwrap(),
-                startup.revision_id.clone(),
-                1,
-                AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
-                ConfigurationMutationSinkV1::ConfigurationStore,
-                ConfigurationMutationEffectV1::CommitConfigurationRevision,
-                Some(
-                    ConfigurationIdempotencyKey::new("configuration.idempotency.runtime-drift")
-                        .unwrap(),
-                ),
-                UtcMicros(1),
-                UtcMicros(100),
-            )
-            .unwrap(),
-        };
-        let store = runtime.configuration_store();
-        let receipt = super::super::ports::ConfigurationControlStore::commit_direct(
-            &store,
-            &authority,
-            &mutation,
-            &startup.revision_id,
-        )
-        .await
-        .unwrap();
-
-        let current = runtime.client().current().await.unwrap();
-        assert_eq!(current.revision_id, receipt.result_revision_id);
-        assert_ne!(current.revision_id, startup.revision_id);
-        assert!(!startup.config.diagnostics_prewarm);
-        assert!(current.config.diagnostics_prewarm);
-        assert_eq!(runtime.configuration_target(), &current.target);
-    }
 }

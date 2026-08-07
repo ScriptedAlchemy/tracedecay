@@ -194,9 +194,12 @@ where
         if !preflight.is_admissible() {
             return Err(blocked_problem(&preflight.blockers));
         }
-        let placement =
-            WorkPlacementV1::admit(&preflight, command.retention_eligible_at, command.occurred_at)
-                .map_err(contract_problem)?;
+        let placement = WorkPlacementV1::admit(
+            &preflight,
+            command.retention_eligible_at,
+            command.occurred_at,
+        )
+        .map_err(contract_problem)?;
         self.storage
             .publish_placement(&authority, None, &placement)
             .map_err(storage_problem)?;
@@ -316,12 +319,10 @@ fn storage_problem(error: WorkPlacementStorageError) -> ApplicationProblem {
     match error {
         WorkPlacementStorageError::NotFoundOrNotAuthorized => not_found_problem(),
         WorkPlacementStorageError::AuthorityConflict => authority_conflict_problem(),
-        WorkPlacementStorageError::Unavailable => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "application.work-placement.storage-unavailable".to_owned(),
-                message: "The Work placement authority is unavailable.".to_owned(),
-            })
-        }
+        WorkPlacementStorageError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "application.work-placement.storage-unavailable".to_owned(),
+            message: "The Work placement authority is unavailable.".to_owned(),
+        }),
     }
 }
 

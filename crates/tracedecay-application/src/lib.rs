@@ -100,8 +100,8 @@ pub use dashboard_graph::{
     DashboardGraphOverviewV1, DashboardGraphPathV1, DashboardGraphReadErrorV1,
     DashboardGraphReadFutureV1, DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1,
     DashboardGraphReadPortV1, DashboardGraphReadRequestV1, DashboardGraphReadV1,
-    DashboardGraphSearchV1, DashboardGraphSpanV1, DashboardGraphSubgraphV1,
-    DashboardGraphTotalsV1, VerifiedDashboardGraphGenerationV1,
+    DashboardGraphSearchV1, DashboardGraphSpanV1, DashboardGraphSubgraphV1, DashboardGraphTotalsV1,
+    VerifiedDashboardGraphGenerationV1,
 };
 pub use diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,

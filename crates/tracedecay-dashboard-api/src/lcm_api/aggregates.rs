@@ -12,12 +12,15 @@ use super::{
 pub(super) fn render_canonical_payload<T>(
     request: DashboardLcmReadRequestV1,
     page: DashboardLcmCanonicalPageV1,
+    storage_scope: &str,
 ) -> Result<T, ()>
 where
     T: serde::de::DeserializeOwned,
 {
     let value = match request {
-        DashboardLcmReadRequestV1::Overview { query, limit } => overview_json(page, query, limit)?,
+        DashboardLcmReadRequestV1::Overview { query, limit } => {
+            overview_json(page, query, limit, storage_scope)?
+        }
         DashboardLcmReadRequestV1::Search {
             query,
             limit,
@@ -40,7 +43,7 @@ where
                 .collect::<Vec<_>>();
             serde_json::json!({
                 "path": "daemon://session-temporal",
-                "storage_scope": "project",
+                "storage_scope": storage_scope,
                 "exists": true,
                 "query": query,
                 "limit": limit,
@@ -82,7 +85,7 @@ where
             let returned_summary_nodes = saturating_usize_to_i64(summary_nodes.len());
             serde_json::json!({
                 "path": "daemon://session-temporal",
-                "storage_scope": "project",
+                "storage_scope": storage_scope,
                 "exists": page.stats.message_count > 0 || page.stats.summary_node_count > 0,
                 "session_id": session_id,
                 "limit": limit,
@@ -104,7 +107,7 @@ where
             bucket,
             session_id,
             limit,
-        } => timeline_json(page, bucket, session_id, limit),
+        } => timeline_json(page, bucket, session_id, limit, storage_scope),
     };
     serde_json::from_value(value).map_err(|_| ())
 }
@@ -113,6 +116,7 @@ fn overview_json(
     page: DashboardLcmCanonicalPageV1,
     query: String,
     limit: i64,
+    storage_scope: &str,
 ) -> Result<serde_json::Value, ()> {
     let mut role_counts = BTreeMap::<String, i64>::new();
     let mut source_counts = BTreeMap::<String, i64>::new();
@@ -176,7 +180,7 @@ fn overview_json(
     let summary_nodes_total = saturating_usize_to_i64(page.summary_nodes.len());
     Ok(serde_json::json!({
         "path": "daemon://session-temporal",
-        "storage_scope": "project",
+        "storage_scope": storage_scope,
         "exists": true,
         "overview": {
             "messages_total": messages_total,
@@ -286,6 +290,7 @@ fn timeline_json(
     bucket: DashboardLcmTimelineBucketV1,
     session_id: Option<String>,
     limit: i64,
+    storage_scope: &str,
 ) -> serde_json::Value {
     let mut dated = BTreeMap::<String, TokenCountAggregate>::new();
     let mut undated = TokenCountAggregate::default();
@@ -340,7 +345,7 @@ fn timeline_json(
         .collect::<Vec<_>>();
     serde_json::json!({
         "path": "daemon://session-temporal",
-        "storage_scope": "project",
+        "storage_scope": storage_scope,
         "exists": true,
         "bucket": bucket.as_str(),
         "session_id": session_id,
@@ -621,7 +626,7 @@ mod tests {
 
     #[test]
     fn overview_reduction_preserves_exact_counts_and_deterministic_recency() {
-        let value = overview_json(aggregate_page(), String::new(), 1).expect("valid aggregate");
+        let value = overview_json(aggregate_page(), String::new(), 1, "profile_sharded").expect("valid aggregate");
 
         assert_eq!(value["overview"]["messages_total"], 2);
         assert_eq!(value["overview"]["sessions_total"], 2);
@@ -636,7 +641,7 @@ mod tests {
         let mut page = aggregate_page();
         page.messages[1].metadata_json =
             Some(r#"{"usage":{"input_tokens":900,"output_tokens":8}}"#.to_owned());
-        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 1);
+        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 1, "profile_sharded");
 
         assert_eq!(value["buckets"][0]["bucket"], "1970-01-02");
         #[cfg(feature = "token-counting")]
@@ -670,7 +675,7 @@ mod tests {
         page.messages[0].role = "assistant".to_owned();
         page.messages[0].metadata_json = Some(r#"{"usage":{"output_tokens":91}}"#.to_owned());
 
-        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 25);
+        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 25, "profile_sharded");
         let bucket = &value["buckets"][0];
         assert_eq!(bucket["count"], 2);
         assert!(bucket["token_count"].is_null());
@@ -687,7 +692,7 @@ mod tests {
         page.messages[0].role = "assistant".to_owned();
         page.messages[0].metadata_json = Some(r#"{"usage":{"output_tokens":91}}"#.to_owned());
 
-        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 25);
+        let value = timeline_json(page, DashboardLcmTimelineBucketV1::Day, None, 25, "profile_sharded");
         let bucket = &value["buckets"][0];
         assert!(bucket["token_count"].as_i64().is_some());
         assert_eq!(bucket["token_count_provenance"], "o200k_approximate");
@@ -701,7 +706,7 @@ mod tests {
         page.summary_nodes[0].source_token_count = None;
 
         let value =
-            overview_json(page, String::new(), 25).expect("other overview fields remain valid");
+            overview_json(page, String::new(), 25, "profile_sharded").expect("other overview fields remain valid");
         assert!(value["overview"]["compression"]["source_token_count"].is_null());
         assert!(value["overview"]["compression"]["ratio"].is_null());
     }

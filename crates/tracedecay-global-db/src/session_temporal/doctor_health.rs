@@ -1001,7 +1001,9 @@ mod cache_tests {
 
     #[tokio::test]
     async fn registered_doctor_reports_an_unbound_relation_graph_as_partial() {
-        let harness = RegisteredGlobalDbHarness::open("doctor-unbound-relation-graph").await;
+        let harness =
+            RegisteredGlobalDbHarness::open_without_relation_graph("doctor-unbound-relation-graph")
+                .await;
 
         let report = harness.registered.session_temporal_doctor_health().await;
 

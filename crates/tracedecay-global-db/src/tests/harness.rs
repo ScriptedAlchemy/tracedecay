@@ -10,8 +10,25 @@ static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct RegisteredGlobalDbHarness {
     pub registered: Arc<RegisteredGlobalDb>,
+    /// Retains the shared database runtime slot so concurrent remounts
+    /// singleflight to the one runtime the daemon would hold in production.
+    _database: tracedecay_runtime_core::db::Database,
     _directory: TempDir,
     _scope: Option<DaemonDatabaseScope>,
+}
+
+/// Which write authority a registered test fixture attaches to the database.
+///
+/// `Fixture` keeps the unconditional Test-role escape hatch for fixtures whose
+/// daemon scope outlives every write. `DaemonScoped` acquires real daemon-role
+/// authority under the fixture's entered daemon database scope, so dropping
+/// that scope revokes retained writers exactly as a lost daemon election does
+/// in production.
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Clone, Copy)]
+enum RegisteredTestWriteAuthority {
+    Fixture,
+    DaemonScoped,
 }
 
 /// Standalone registered-database fixture for downstream use-case tests.
@@ -145,6 +162,15 @@ impl RegisteredGlobalDbTestRuntime {
 
 impl RegisteredGlobalDbHarness {
     pub async fn open(label: &str) -> Self {
+        let harness = Self::open_without_relation_graph(label).await;
+        bind_test_session_relation_graph(&harness.registered)
+            .expect("bind registered profile-sessions relation graph");
+        harness
+    }
+
+    /// Opens the registered store without binding the session relation graph,
+    /// staging the unbound state doctor health must report as partial.
+    pub async fn open_without_relation_graph(label: &str) -> Self {
         crate::register_test_schema_installer();
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
@@ -152,16 +178,16 @@ impl RegisteredGlobalDbHarness {
         let scope =
             tracedecay_runtime_core::db::enter_daemon_database_scope(&profile_root, nonce, label)
                 .expect("daemon database scope");
-        let registered = open_registered_test_database(
+        let (registered, database) = open_registered_test_database_with(
             &tracedecay_sessions::runtime::user_sessions_db_path(&profile_root),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+            RegisteredTestWriteAuthority::DaemonScoped,
         )
         .await
         .expect("open registered profile-sessions runtime");
-        bind_test_session_relation_graph(&registered)
-            .expect("bind registered profile-sessions relation graph");
         Self {
             registered,
+            _database: database,
             _directory: directory,
             _scope: Some(scope),
         }
@@ -171,11 +197,13 @@ impl RegisteredGlobalDbHarness {
     pub(super) async fn remount_profile_database_for_test(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
-        open_registered_test_database(
+        Ok(open_registered_test_database_with(
             self.registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+            RegisteredTestWriteAuthority::DaemonScoped,
         )
-        .await
+        .await?
+        .0)
     }
 
     #[cfg(test)]
@@ -187,25 +215,30 @@ impl RegisteredGlobalDbHarness {
     }
 
     pub async fn mount(&self) -> Arc<RegisteredGlobalDb> {
-        open_registered_test_database(
+        open_registered_test_database_with(
             self.registered.db_path(),
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+            RegisteredTestWriteAuthority::DaemonScoped,
         )
         .await
         .expect("remount registered profile-sessions runtime")
+        .0
     }
 
     pub async fn restart(self) -> Self {
         let Self {
             registered,
+            _database,
             _directory,
             _scope,
         } = self;
         let path = registered.db_path().to_path_buf();
         drop(registered);
-        let registered = open_registered_test_database(
+        drop(_database);
+        let (registered, database) = open_registered_test_database_with(
             &path,
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+            RegisteredTestWriteAuthority::DaemonScoped,
         )
         .await
         .expect("restart registered profile-sessions runtime");
@@ -213,6 +246,7 @@ impl RegisteredGlobalDbHarness {
             .expect("bind restarted profile-sessions relation graph");
         Self {
             registered,
+            _database: database,
             _directory,
             _scope,
         }
@@ -904,6 +938,22 @@ async fn open_registered_test_database(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
 ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+    Ok(
+        open_registered_test_database_with(path, scope, RegisteredTestWriteAuthority::Fixture)
+            .await?
+            .0,
+    )
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+async fn open_registered_test_database_with(
+    path: &std::path::Path,
+    scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,
+    write_authority: RegisteredTestWriteAuthority,
+) -> tracedecay_runtime_core::errors::Result<(
+    Arc<RegisteredGlobalDb>,
+    tracedecay_runtime_core::db::Database,
+)> {
     crate::register_test_schema_installer();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -939,15 +989,26 @@ async fn open_registered_test_database(
     let runtime = database.retained_runtime().clone();
     let expected_binding = runtime.binding().clone();
     let expected_locator = runtime.locator().verified().clone();
-    let authority = runtime
-        .database_authority("attach registered global-db test runtime")
-        .map_err(
-            |failure| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "attach registered global-db test runtime".to_owned(),
-                message: format!("{failure:?}"),
-            },
-        )?;
-    Ok(Arc::new(
+    let authority = match write_authority {
+        RegisteredTestWriteAuthority::Fixture => runtime
+            .database_authority("attach registered global-db test runtime")
+            .map_err(
+                |failure| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                    operation: "attach registered global-db test runtime".to_owned(),
+                    message: format!("{failure:?}"),
+                },
+            )?,
+        // Real daemon-role authority under the fixture's entered daemon
+        // database scope: dropping the scope revokes every retained writer,
+        // matching a lost daemon election in production.
+        RegisteredTestWriteAuthority::DaemonScoped => {
+            tracedecay_runtime_core::db::DatabaseAuthority::for_owned_runtime(
+                path,
+                "attach registered global-db daemon-scoped test runtime",
+            )?
+        }
+    };
+    let registered = Arc::new(
         RegisteredGlobalDb::migrate_and_attach(
             runtime,
             expected_binding,
@@ -955,7 +1016,8 @@ async fn open_registered_test_database(
             authority,
         )
         .await?,
-    ))
+    );
+    Ok((registered, database))
 }
 
 #[cfg(test)]

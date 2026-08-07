@@ -1,6 +1,12 @@
 use super::super::safe_write_json_file;
 use super::*;
 use serde_json::json;
+use std::path::PathBuf;
+
+/// Shared `plugin/` source tree at the repo root, relative to this crate.
+fn plugin_source_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
+}
 
 fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
     let source = plugin_deploy_dir(home);
@@ -230,9 +236,7 @@ fn project_only_legacy_residue_does_not_claim_plugin_registration() {
 }
 
 fn plugin_subdir_names(rel: &str) -> Vec<String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("plugin")
-        .join(rel);
+    let root = plugin_source_root().join(rel);
     let mut names: Vec<String> = std::fs::read_dir(&root)
         .expect("plugin source dir should be readable")
         .flatten()
@@ -286,7 +290,7 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
     assert_eq!(skills.len(), 15, "expected 15 shared skill dirs");
     // Every file under plugin/skills/ (SKILL.md *and* any support files) is
     // deployed — the recursive embed leaves nothing on disk unwired.
-    let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");
+    let skills_root = plugin_source_root().join("skills");
     for relative in plugin_skill_tree_files(&skills_root) {
         let expected = format!("skills/{relative}");
         assert!(
@@ -311,7 +315,7 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
     // Every agent on disk under plugin/agents is deployed — dir-walk rather
     // than hardcode, so a future agent added to the shared source tree but
     // not wired into Claude's deploy set is caught here.
-    let agents_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/agents");
+    let agents_root = plugin_source_root().join("agents");
     for entry in std::fs::read_dir(&agents_root).expect("plugin/agents readable") {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         let expected = format!("agents/{name}");
@@ -322,7 +326,7 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
     }
 
     // Every command in plugin/commands is deployed.
-    let commands_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/commands");
+    let commands_root = plugin_source_root().join("commands");
     for entry in std::fs::read_dir(&commands_root).expect("plugin/commands readable") {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         let expected = format!("commands/{name}");
@@ -475,7 +479,7 @@ fn install_claude_md_rules_surfaces_append_failures() {
     let err = install_claude_md_rules(Path::new("/dev/full")).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("failed to append tracedecay rules to /dev/full"),
+        msg.contains("failed to capture metadata for /dev/full"),
         "unexpected error message: {msg}"
     );
 }

@@ -51,15 +51,19 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     let cg = TestTraceDecay::new(TraceDecay::open(project).await.unwrap());
     git(project, &["checkout", "-b", "feature"]);
 
-    let result = handle_tool_call(&cg, "tracedecay_branch_list", json!({}), None, None)
+    // Branch drift diagnostics moved off `tracedecay_branch_list` (now the
+    // paginated branch-ref snapshot read) to the active-project context's
+    // `branch` block.
+    let result = handle_tool_call(&cg, "tracedecay_active_project", json!({}), None, None)
         .await
         .unwrap();
     let report: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(report["current_branch"], json!("feature"));
-    assert_eq!(report["open_active_branch"], json!("main"));
-    assert_eq!(report["serving_branch"], json!("main"));
-    assert_eq!(report["branch_drifted"], json!(true));
-    assert_eq!(report["branch_resolution"], json!("stale_serving_branch"));
+    let branch = &report["branch"];
+    assert_eq!(branch["current_branch"], json!("feature"));
+    assert_eq!(branch["open_active_branch"], json!("main"));
+    assert_eq!(branch["serving_branch"], json!("main"));
+    assert_eq!(branch["branch_drifted"], json!(true));
+    assert_eq!(branch["branch_resolution"], json!("stale_serving_branch"));
 }
 
 // ---------------------------------------------------------------------------
@@ -629,7 +633,33 @@ async fn test_dead_code_custom_kinds() {
 /// report that state instead of opening a branch database in the handler.
 #[tokio::test]
 async fn direct_branch_diff_reports_missing_daemon_authority() {
-    let (cg, _env, _dir) = setup_empty_project().await;
+    fn git(project: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(project)
+            .output()
+            .expect("git command failed to spawn");
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    // The branch refs must resolve so the handler reaches the executor gate:
+    // an unresolvable ref is its own earlier typed refusal
+    // (`branch_reference_unavailable`), not the missing-authority state.
+    let dir = test_temp_dir();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+    git(project, &["init"]);
+    git(project, &["config", "user.email", "test@test.com"]);
+    git(project, &["config", "user.name", "Test"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "-m", "initial"]);
+    git(project, &["branch", "-M", "master"]);
+    let (cg, _env) = init_test_project(project).await;
 
     let result = handle_tool_call(
         &cg,
@@ -643,8 +673,9 @@ async fn direct_branch_diff_reports_missing_daemon_authority() {
 
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).expect("response must be valid JSON");
-    assert_eq!(output["outcome"], "unavailable");
-    assert_eq!(output["reason"], "graph_authority_unavailable");
+    assert_eq!(output["status"], "unavailable");
+    assert_eq!(output["reason"], "code_index_unavailable");
+    assert_eq!(output["retryable"], false);
     assert_eq!(result.semantic_error(), Some(true));
     close_test_graph(cg).await;
 }

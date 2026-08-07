@@ -685,7 +685,7 @@ mod tests {
             (
                 HostKindV1::KimiCode,
                 HostBundleComponentV1::Core,
-                ".kimi-code/",
+                ".tracedecay/host-bundle-stage/kimi/tracedecay/",
             ),
             (
                 HostKindV1::Hermes,

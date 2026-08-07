@@ -375,18 +375,18 @@ async fn graph_reader_selector_dispatch_targets_registered_project() {
     fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
     fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
 
-    let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         &active_project,
         "project.mcp-active-selector",
     )
     .await
     .unwrap();
-    let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (target, _target_runtime) = init_sibling_registered_fixture(
+        &active_runtime,
         &target_project,
         "project.mcp-target-selector",
     )
-    .await
-    .unwrap();
+    .await;
     let target = Arc::new(target);
     let target_still_stale = target
         .sync_if_stale(&["src/target.rs".to_string()])
@@ -449,18 +449,18 @@ async fn graph_reader_selector_dispatch_accepts_unique_project_basename() {
     fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
     fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
 
-    let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         &active_project,
         "project.mcp-active-basename",
     )
     .await
     .unwrap();
-    let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (target, _target_runtime) = init_sibling_registered_fixture(
+        &active_runtime,
         &target_project,
         "project.mcp-target-basename",
     )
-    .await
-    .unwrap();
+    .await;
     let target = Arc::new(target);
     target.index_all().await.unwrap();
     let registry = SelectorRegistry::open().await;
@@ -510,24 +510,24 @@ async fn graph_reader_selector_rejects_ambiguous_project_basename() {
     fs::create_dir_all(&first_target).unwrap();
     fs::create_dir_all(&second_target).unwrap();
 
-    let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         &active_project,
         "project.mcp-active-ambiguous",
     )
     .await
     .unwrap();
-    let (first, _first_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (first, _first_runtime) = init_sibling_registered_fixture(
+        &active_runtime,
         &first_target,
         "project.mcp-first-ambiguous",
     )
-    .await
-    .unwrap();
-    let (second, _second_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    .await;
+    let (second, _second_runtime) = init_sibling_registered_fixture(
+        &active_runtime,
         &second_target,
         "project.mcp-second-ambiguous",
     )
-    .await
-    .unwrap();
+    .await;
     let registry = SelectorRegistry::open().await;
 
     let err = handle_tool_call_with_registry_and_implicit_project(
@@ -782,18 +782,18 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     }
     fs::write(target_project.join("src/lib.rs"), target_source).unwrap();
 
-    let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         &active_project,
         "project.mcp-active-retrieval",
     )
     .await
     .unwrap();
-    let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (target, _target_runtime) = init_sibling_registered_fixture(
+        &active_runtime,
         &target_project,
         "project.mcp-target-retrieval",
     )
-    .await
-    .unwrap();
+    .await;
     let target = Arc::new(target);
     active.index_all().await.unwrap();
     target.index_all().await.unwrap();

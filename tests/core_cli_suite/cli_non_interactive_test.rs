@@ -18,6 +18,7 @@ use tracedecay::storage::{
     profile_sharded_layout, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
+use tracedecay_agent_hosts::PRODUCT_VERSION;
 use tracedecay_domain::ProjectId;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
@@ -195,7 +196,10 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
-    std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+    // The daemon's full project open reads an attached git HEAD for the
+    // feedback scope; without a committed repository the open degrades and
+    // the registered project session authority is never exposed to the CLI.
+    write_git_fixture(&project_root);
     init_project_fixture(home.path(), &project_root);
     let project_id = default_profile_project_id(&project_root);
 
@@ -331,7 +335,11 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     })
     .join()
     .unwrap();
-    write_sqlite_placeholder(&shard_root.join("sessions.db"));
+    // The sessions store must be fresh (zero tables) so the daemon's own
+    // registered-schema admission installs the production shape on first
+    // mount; a non-empty wrong-shape file trips the workflow persisted-shape
+    // gate and is refused as reset-required.
+    write_empty_sqlite_fixture(&shard_root.join("sessions.db"));
     write_branch_meta(&shard_root, &[], false);
     let manifest = StoreManifest {
         schema_version: STORE_MANIFEST_SCHEMA_VERSION,
@@ -348,23 +356,6 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
         shard_root.join(STORE_MANIFEST_FILENAME),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
-    .unwrap();
-}
-
-fn write_sqlite_placeholder(path: &Path) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    let path = path.to_path_buf();
-    std::thread::spawn(move || {
-        create_runtime().block_on(async {
-            let (db, _) = crate::common::initialize_test_database(&path)
-                .await
-                .unwrap();
-            db.close();
-        });
-    })
-    .join()
     .unwrap();
 }
 
@@ -538,11 +529,88 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     assert!(!kimi_home.join("plugins/installed.json").exists());
 }
 
+fn copy_dir_recursive(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_recursive(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
+/// Drives the staged Codex activation journey non-interactively: the first
+/// install stages the plugin source and defers activation to the user's
+/// native `codex plugin add` (non-zero exit with remediation), the test
+/// simulates that native activation, and the retry completes install plus
+/// daemon-loop automation enablement.
 fn run_codex_automation_install(
     home: &TempDir,
     project_root: &Path,
     extra_args: &[&str],
 ) -> Output {
+    let home_path = canonical_temp_path(home.path());
+
+    let mut deferred = tracedecay_command(home.path(), project_root);
+    let _shim = add_tracedecay_path_shim(&mut deferred, home.path());
+    deferred.args(["install", "--agent", "codex", "--automation"]);
+    deferred.args(extra_args);
+    let deferred_output = run_with_timeout(deferred, cli_timeout());
+    assert!(
+        !deferred_output.status.success(),
+        "codex install must defer to the user's native plugin activation\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&deferred_output.stdout),
+        String::from_utf8_lossy(&deferred_output.stderr)
+    );
+    let deferred_stderr = String::from_utf8_lossy(&deferred_output.stderr);
+    assert!(
+        deferred_stderr.contains("codex plugin add tracedecay@personal"),
+        "deferred install must name the native activation remediation\nstderr:\n{deferred_stderr}"
+    );
+    let staged_source = home_path.join(".codex/plugins/tracedecay");
+    assert!(
+        staged_source.join(".codex-plugin/plugin.json").is_file(),
+        "deferred install must stage the Codex plugin source package"
+    );
+    assert!(
+        home_path.join(".agents/plugins/marketplace.json").is_file(),
+        "deferred install must stage the personal marketplace entry"
+    );
+    let projects_dir = profile_root(home.path()).join("projects");
+    let premature_sidecars = std::fs::read_dir(&projects_dir)
+        .map(|entries| {
+            entries
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .join("dashboard/automation_config.json")
+                })
+                .filter(|path| path.is_file())
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        premature_sidecars, 0,
+        "automation sidecar must not be written before native activation"
+    );
+
+    // Simulate the user's native `codex plugin add tracedecay@personal`:
+    // enable the plugin in Codex's config and load the staged source into
+    // Codex's versioned plugin cache.
+    let config_path = home_path.join(".codex/config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("[plugins.\"tracedecay@personal\"]\nenabled = true\n");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, config).unwrap();
+    let cache_root = home_path
+        .join(".codex/plugins/cache/personal/tracedecay")
+        .join(PRODUCT_VERSION);
+    copy_dir_recursive(&staged_source, &cache_root);
+
     let mut install = tracedecay_command(home.path(), project_root);
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
     install.args(["install", "--agent", "codex", "--automation"]);
@@ -550,7 +618,7 @@ fn run_codex_automation_install(
     let output = run_with_timeout(install, cli_timeout());
     assert!(
         output.status.success(),
-        "codex automation install should succeed non-interactively\nstdout:\n{}\nstderr:\n{}",
+        "codex automation install should succeed after native activation\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1715,6 +1783,7 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
+    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
     let shard_root = profile_shard_root(home.path());
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
@@ -1801,6 +1870,7 @@ async fn gitignore_reads_effective_config_for_primary_and_linked_worktrees() {
         ],
     );
     write_profile_sharded_fixture(home.path(), &main);
+    write_repository_identity_marker(&main, "proj_cli").unwrap();
 
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
@@ -1940,12 +2010,19 @@ fn branch_add_tracks_the_branch_on_the_single_project_store() {
     );
 }
 
-#[test]
-fn branch_remove_deletes_branch_db_from_profile_shard() {
+#[tokio::test]
+async fn branch_remove_deletes_branch_db_from_profile_shard() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
+    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
@@ -1975,6 +2052,7 @@ async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
+    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
@@ -2012,12 +2090,19 @@ async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
     );
 }
 
-#[test]
-fn branch_removeall_deletes_profile_shard_branch_dbs() {
+#[tokio::test]
+async fn branch_removeall_deletes_profile_shard_branch_dbs() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
+    write_repository_identity_marker(project.path(), "proj_cli").unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
@@ -2045,11 +2130,19 @@ fn branch_removeall_deletes_profile_shard_branch_dbs() {
     );
 }
 
-#[test]
-fn branch_gc_preserves_profile_shard_without_repository_evidence() {
+#[tokio::test]
+async fn branch_gc_preserves_profile_shard_without_repository_evidence() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_profile_sharded_fixture(home.path(), project.path());
+    // No git fixture and no repository identity marker: the premise under
+    // test is that gc fails closed without repository branch evidence.
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,

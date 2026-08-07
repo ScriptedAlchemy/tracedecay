@@ -673,7 +673,9 @@ fn pinned_executable(
     executable_id: &str,
     body: &str,
 ) -> (WorkExecutableReference, PathBuf) {
-    let path = fake_executable(directory, name, body).canonicalize().unwrap();
+    let path = fake_executable(directory, name, body)
+        .canonicalize()
+        .unwrap();
     let reference =
         WorkExecutableReference::new(executable_id.to_owned(), sha256_digest(body.as_bytes()))
             .unwrap();
@@ -705,7 +707,10 @@ fn resolver_over(
                 project_id: project_id.clone(),
             },
             revision_id: revision_id.clone(),
-            entries: BTreeMap::from([(key, ConfigurationValueV1::WorkExecutableBindings(bindings))]),
+            entries: BTreeMap::from([(
+                key,
+                ConfigurationValueV1::WorkExecutableBindings(bindings),
+            )]),
         }],
     )
     .unwrap();

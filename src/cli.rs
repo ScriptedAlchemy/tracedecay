@@ -17,6 +17,50 @@ pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
 pub use work::WorkInvocationArgs;
 pub use workflow::WorkflowInvocationArgs;
 
+const WORK_LONG_ABOUT: &str = "\
+Invokes exactly one typed, daemon-owned Work application operation from the \
+closed catalog (proposal generation and review, work creation, dependency \
+replanning, attempt start/status/cancel/resume, run pause/resume/control, and \
+projection snapshot/delta/views reads). The strict typed request is read as \
+JSON from --request-file (`-` reads stdin); the daemon admits the selected \
+project and answers through the same catalogued application surface used by \
+agent hosts. Use it when driving or inspecting work items and attempts from \
+scripts or hooks; `--json` emits the one canonical application envelope.";
+
+const WORK_AFTER_HELP: &str = "\
+Examples:
+  tracedecay work snapshot --request-file request.json      Read the work projection
+  tracedecay work delta --request-file - --json             Typed delta read from stdin
+  tracedecay work create --request-file create.json --json  Create work items
+  tracedecay work start-attempt --request-file attempt.json --project /path/to/project
+  tracedecay work attempt-status --request-file status.json --json
+  tracedecay work run-control --request-file control.json   Read the run-control state
+
+Related: tracedecay workflow (workflow definition lifecycle), tracedecay tool
+(the MCP tool surface for retrieval and editing).";
+
+const WORKFLOW_LONG_ABOUT: &str = "\
+Invokes exactly one typed, daemon-owned Workflow application operation from \
+the closed catalog: registering, validating, activating, rejecting, or \
+retiring workflow definitions, reading a definition or its history, listing \
+and diffing definitions, and issuing or redeeming workflow handoffs. The \
+strict typed request is read as JSON from --request-file (`-` reads stdin); \
+the daemon admits the selected project and answers through the same \
+catalogued application surface used by agent hosts. `--json` emits the one \
+canonical application envelope.";
+
+const WORKFLOW_AFTER_HELP: &str = "\
+Examples:
+  tracedecay workflow register-definition --request-file definition.json
+  tracedecay workflow validate-definition --request-file - --json
+  tracedecay workflow activate-definition --request-file activate.json
+  tracedecay workflow list-definitions --request-file list.json --json
+  tracedecay workflow definition-history --request-file history.json
+  tracedecay workflow handoff-issue --request-file handoff.json --project /path/to/project
+
+Related: tracedecay work (typed work-item and attempt operations), tracedecay
+tool (the MCP tool surface for retrieval and editing).";
+
 fn agent_value_parser() -> PossibleValuesParser {
     PossibleValuesParser::new(tracedecay::agents::available_integrations())
 }
@@ -226,11 +270,13 @@ pub enum Commands {
         args: Vec<String>,
     },
     /// Invoke one typed daemon-owned Work application operation.
+    #[command(long_about = WORK_LONG_ABOUT, after_help = WORK_AFTER_HELP)]
     Work {
         #[command(flatten)]
         invocation: WorkInvocationArgs,
     },
     /// Invoke one typed daemon-owned Workflow application operation.
+    #[command(long_about = WORKFLOW_LONG_ABOUT, after_help = WORKFLOW_AFTER_HELP)]
     Workflow {
         #[command(flatten)]
         invocation: WorkflowInvocationArgs,

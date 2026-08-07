@@ -37,8 +37,32 @@ pub fn resolve_dashboard_scope(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::process::Command;
+
     use super::resolve_dashboard_scope;
     use tracedecay_domain::ProjectId;
+
+    /// A registered root is a real repository whose git common directory
+    /// carries the on-disk repository identity marker; resolution fails closed
+    /// on anything less (see the bare-tempdir fail-closed tests below).
+    fn registered_root(project_id: &str) -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("root tempdir");
+        let git_init = Command::new("git")
+            .current_dir(root.path())
+            .args(["init", "-q"])
+            .status()
+            .expect("git init starts");
+        assert!(git_init.success(), "git init failed for registered root");
+        assert!(
+            tracedecay_runtime_core::storage::write_repository_identity_marker(
+                root.path(),
+                project_id,
+            )
+            .expect("identity marker"),
+            "registered root must accept a repository identity marker"
+        );
+        root
+    }
 
     #[test]
     fn dashboard_scope_fails_closed_without_registered_project_id() {
@@ -60,8 +84,8 @@ mod tests {
 
     #[test]
     fn dashboard_scope_resolves_the_exact_root_through_the_application_type() {
-        let root = tempfile::tempdir().expect("root tempdir");
         let project_id = ProjectId::new("project.dashboard-scope").expect("project id");
+        let root = registered_root(project_id.as_str());
 
         let scope = resolve_dashboard_scope(root.path(), Some(project_id.as_str()))
             .expect("exact resolved scope");
@@ -80,9 +104,9 @@ mod tests {
 
     #[test]
     fn dashboard_scope_distinguishes_sibling_roots() {
-        let first = tempfile::tempdir().expect("first root tempdir");
-        let second = tempfile::tempdir().expect("second root tempdir");
         let project_id = "project.dashboard-scope";
+        let first = registered_root(project_id);
+        let second = registered_root(project_id);
 
         let first_scope =
             resolve_dashboard_scope(first.path(), Some(project_id)).expect("first scope");

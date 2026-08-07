@@ -137,7 +137,10 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
         .await
         .expect("registered read snapshot");
 
-    let expansion = expand(
+    // Canonical content that cannot be verified against the stored payload
+    // hash must be refused outright: fabricating a full raw message from
+    // metadata plus unverifiable content is no longer a journey.
+    let error = expand(
         &snapshot,
         LcmExpandRequest {
             provider: "codex".to_string(),
@@ -151,12 +154,10 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
         &[],
     )
     .await
-    .expect("metadata-only raw message expansion");
-    let rendered = serde_json::to_value(&expansion).expect("serializable expansion");
+    .expect_err("unverifiable canonical content must not fabricate a raw message");
 
     assert!(
-        rendered["raw_message"].is_null(),
-        "metadata-only read fabricated a full raw message: {rendered}"
+        matches!(error, LcmError::PayloadIntegrityMismatch),
+        "expected a payload-integrity refusal, got: {error:?}"
     );
-    assert_eq!(rendered["raw_message_metadata"]["message_id"], "message-b");
 }

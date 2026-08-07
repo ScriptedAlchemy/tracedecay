@@ -161,9 +161,7 @@ impl WorkPlacementStoragePort for TestStore {
     ) -> Result<(), WorkPlacementStorageError> {
         let mut placements = self.placements.lock().unwrap();
         let key = (authority.clone(), next.identity().clone());
-        let current = placements
-            .get(&key)
-            .map(WorkPlacementV1::authority_version);
+        let current = placements.get(&key).map(WorkPlacementV1::authority_version);
         if current != expected {
             return Err(WorkPlacementStorageError::AuthorityConflict);
         }
@@ -223,14 +221,22 @@ fn a_clean_preflight_admits_and_re_admission_of_the_same_target_replays() {
     assert!(preflight.is_admissible());
 
     let placement = service
-        .admit_placement(&context, admit_command("run.placement.a", 200), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.a", 200),
+            observer(clean()),
+        )
         .expect("admit");
     assert_eq!(placement.state(), WorkPlacementStateV1::Admitted);
     assert_eq!(placement.authority_version(), 1);
 
     // Re-admitting the same target is a replay, not a second row.
     let replayed = service
-        .admit_placement(&context, admit_command("run.placement.a", 300), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.a", 300),
+            observer(clean()),
+        )
         .expect("replay");
     assert_eq!(replayed, placement);
     assert_eq!(store.placements.lock().unwrap().len(), 1);
@@ -242,13 +248,21 @@ fn a_second_run_cannot_take_a_root_an_admitted_placement_already_holds() {
     let service = WorkPlacementService::new(store);
     let context = context("actor.placement.exclusive");
     service
-        .admit_placement(&context, admit_command("run.placement.a", 200), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.a", 200),
+            observer(clean()),
+        )
         .expect("first admission");
 
     // The observation is clean; exclusivity is the service's own reading of
     // storage, so a caller cannot observe its way past it.
     let problem = service
-        .admit_placement(&context, admit_command("run.placement.b", 300), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.b", 300),
+            observer(clean()),
+        )
         .expect_err("a held root is exclusive");
     assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
 
@@ -309,7 +323,11 @@ fn release_quarantines_uniquely_valuable_bytes_and_frees_the_root_only_when_clea
     let service = WorkPlacementService::new(store.clone());
     let context = context("actor.placement.release");
     let admitted = service
-        .admit_placement(&context, admit_command("run.placement.a", 200), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.a", 200),
+            observer(clean()),
+        )
         .expect("admit");
 
     // An unmeasured reachability is "unknown", which Plan 32 forbids cleaning.
@@ -336,7 +354,11 @@ fn release_quarantines_uniquely_valuable_bytes_and_frees_the_root_only_when_clea
     );
     // Quarantine still holds the root, so nobody else may take it.
     let problem = service
-        .admit_placement(&context, admit_command("run.placement.b", 500), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.b", 500),
+            observer(clean()),
+        )
         .expect_err("a quarantined root is still held");
     assert_eq!(problem.kind(), ApplicationProblemKind::Conflict);
 
@@ -356,7 +378,11 @@ fn release_quarantines_uniquely_valuable_bytes_and_frees_the_root_only_when_clea
     assert_eq!(released.state(), WorkPlacementStateV1::Released);
     // Only now is the root free for another run.
     service
-        .admit_placement(&context, admit_command("run.placement.b", 700), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.b", 700),
+            observer(clean()),
+        )
         .expect("the released root is available");
     assert_eq!(
         store
@@ -374,7 +400,11 @@ fn a_stale_release_version_conflicts_instead_of_republishing() {
     let service = WorkPlacementService::new(store);
     let context = context("actor.placement.stale");
     let admitted = service
-        .admit_placement(&context, admit_command("run.placement.a", 200), observer(clean()))
+        .admit_placement(
+            &context,
+            admit_command("run.placement.a", 200),
+            observer(clean()),
+        )
         .expect("admit");
     let problem = service
         .release(

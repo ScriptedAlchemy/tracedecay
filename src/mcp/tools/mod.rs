@@ -8,6 +8,8 @@ pub(crate) mod binding;
 mod definitions;
 pub mod dispatch;
 pub(crate) mod handlers;
+#[cfg(test)]
+mod plugin_conformance_tests;
 pub(crate) mod render;
 pub(crate) mod renderers;
 

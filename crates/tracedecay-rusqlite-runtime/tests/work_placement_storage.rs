@@ -91,7 +91,10 @@ fn an_unplaced_run_has_no_row_and_no_holder() {
             .unwrap(),
         None
     );
-    assert_eq!(store.storage().target_holder(&authority, ROOT).unwrap(), None);
+    assert_eq!(
+        store.storage().target_holder(&authority, ROOT).unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -173,7 +176,11 @@ fn a_released_placement_frees_its_root_and_a_quarantined_one_does_not() {
         .unwrap();
     store
         .storage()
-        .publish_placement(&authority, Some(placement.authority_version()), &quarantined)
+        .publish_placement(
+            &authority,
+            Some(placement.authority_version()),
+            &quarantined,
+        )
         .unwrap();
     // Quarantine retains the bytes, so the root is still held.
     assert_eq!(
@@ -188,17 +195,18 @@ fn a_released_placement_frees_its_root_and_a_quarantined_one_does_not() {
         WorkPlacementStorageError::AuthorityConflict
     );
 
-    let released = quarantined.release(BTreeSet::new(), UtcMicros(600)).unwrap();
+    let released = quarantined
+        .release(BTreeSet::new(), UtcMicros(600))
+        .unwrap();
     store
         .storage()
-        .publish_placement(
-            &authority,
-            Some(quarantined.authority_version()),
-            &released,
-        )
+        .publish_placement(&authority, Some(quarantined.authority_version()), &released)
         .unwrap();
     assert_eq!(released.state(), WorkPlacementStateV1::Released);
-    assert_eq!(store.storage().target_holder(&authority, ROOT).unwrap(), None);
+    assert_eq!(
+        store.storage().target_holder(&authority, ROOT).unwrap(),
+        None
+    );
     // Only now can another run take it.
     store
         .storage()

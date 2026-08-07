@@ -12,7 +12,9 @@ use std::time::Duration;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::writer_test_support::{init_indexed_repo, registered_context};
+use super::writer_test_support::{
+    WriterTestFixtureAuthority, init_indexed_repo, registered_context,
+};
 use super::{HookBranchWriteRequest, HookBranchWriteResult, HookBranchWriter, McpServer};
 use crate::application::host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, HostAdmissionStatus, SharedHostAdmissionBroker,
@@ -28,10 +30,11 @@ fn session_start(root: PathBuf) -> Value {
 
 async fn server_with_broker(
     cg: crate::tracedecay::TraceDecay,
+    authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
     writer: HookBranchWriter,
 ) -> Arc<McpServer> {
-    let mut context = registered_context(cg).await.with_hook_branch_writer(writer);
+    let mut context = registered_context(cg, authority).with_hook_branch_writer(writer);
     context.host_admission_broker = Some(broker);
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
@@ -40,9 +43,10 @@ async fn server_with_broker(
 
 async fn server_without_broker(
     cg: crate::tracedecay::TraceDecay,
+    authority: &WriterTestFixtureAuthority,
     writer: HookBranchWriter,
 ) -> Arc<McpServer> {
-    let context = registered_context(cg).await.with_hook_branch_writer(writer);
+    let context = registered_context(cg, authority).with_hook_branch_writer(writer);
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server")
@@ -73,7 +77,7 @@ fn counting_success_writer(writes: Arc<Mutex<usize>>) -> HookBranchWriter {
 
 #[tokio::test]
 async fn matrix_duplicate_is_exact_duplicate_without_frontier_corruption() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -82,6 +86,7 @@ async fn matrix_duplicate_is_exact_duplicate_without_frontier_corruption() {
     let writes = Arc::new(Mutex::new(0usize));
     let server = server_with_broker(
         cg,
+        &authority,
         Arc::clone(&broker),
         counting_success_writer(Arc::clone(&writes)),
     )
@@ -104,7 +109,7 @@ async fn matrix_duplicate_is_exact_duplicate_without_frontier_corruption() {
 
 #[tokio::test]
 async fn matrix_reordered_completion_waits_for_contiguous_frontier() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -112,6 +117,7 @@ async fn matrix_reordered_completion_waits_for_contiguous_frontier() {
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let server = server_with_broker(
         cg,
+        &authority,
         Arc::clone(&broker),
         failing_writer("injected retain for reorder"),
     )
@@ -198,7 +204,7 @@ async fn matrix_timeout_cancels_in_flight_replay_and_preserves_durable_frontier(
 
 #[tokio::test]
 async fn matrix_daemon_unavailable_without_broker_skips_writer_and_frontier() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let attempted = Arc::new(Mutex::new(false));
     let writer: HookBranchWriter = {
         let attempted = Arc::clone(&attempted);
@@ -213,7 +219,7 @@ async fn matrix_daemon_unavailable_without_broker_skips_writer_and_frontier() {
             })
         })
     };
-    let server = server_without_broker(cg, writer).await;
+    let server = server_without_broker(cg, &authority, writer).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -233,7 +239,7 @@ async fn matrix_daemon_unavailable_without_broker_skips_writer_and_frontier() {
 
 #[tokio::test]
 async fn matrix_backpressure_overflow_rejects_before_writer_without_pending_growth() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     // One durable slot: first failing admit retains pending=1; second overflows.
     let runtime = HostAdmissionRuntime::open(
@@ -256,7 +262,7 @@ async fn matrix_backpressure_overflow_rejects_before_writer_without_pending_grow
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let mut routes = HookProjectRouteCache::default();
     let event = session_start(project.path().to_path_buf());
 
@@ -291,6 +297,7 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let server = server_with_broker(
         cg,
+        &authority,
         Arc::clone(&broker),
         failing_writer("injected unavailable"),
     )
@@ -319,6 +326,7 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
     let reopened_cg = authority.reopen_project_graph(project.path()).await;
     let server = server_with_broker(
         reopened_cg,
+        &authority,
         Arc::clone(&broker),
         counting_success_writer(Arc::clone(&writes)),
     )
@@ -336,7 +344,7 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
 /// `daemon.rs` from the daemon-owned scheduler registry.
 #[tokio::test]
 async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let expected_root = cg.project_root().to_path_buf();
     type RecordedDeliveries = Arc<Mutex<Vec<(PathBuf, Vec<String>)>>>;
     let recorded: RecordedDeliveries = Arc::new(Mutex::new(Vec::new()));
@@ -349,7 +357,7 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
             true
         })
     });
-    let context = registered_context(cg).await.with_code_index_hook_sink(sink);
+    let context = registered_context(cg, &authority).with_code_index_hook_sink(sink);
     let server = McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server");

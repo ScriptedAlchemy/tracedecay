@@ -170,8 +170,11 @@ fn succeeded(attempt: &WorkAttemptV1) -> WorkAttemptV1 {
         .unwrap()
 }
 
-fn paused(reason: WorkRunControlReasonV1, at: UtcMicros, fenced: Vec<AttemptId>) -> WorkRunControlV1
-{
+fn paused(
+    reason: WorkRunControlReasonV1,
+    at: UtcMicros,
+    fenced: Vec<AttemptId>,
+) -> WorkRunControlV1 {
     WorkRunControlV1::admitted(task(), run(), ADMITTED_DEADLINE, UtcMicros(0))
         .unwrap()
         .pause(reason, at, fenced)
@@ -212,13 +215,7 @@ fn run_admission_reads_the_deadline_and_live_frontier_off_the_attempt_rows() {
     let finished = succeeded(&done);
     store
         .storage()
-        .update(
-            &authority,
-            done.lease(),
-            done.state(),
-            &finished,
-            None,
-        )
+        .update(&authority, done.lease(), done.state(), &finished, None)
         .unwrap();
 
     let admission = store
@@ -253,7 +250,11 @@ fn run_admission_reads_the_deadline_and_live_frontier_off_the_attempt_rows() {
 fn the_first_publication_inserts_and_a_racing_first_publication_conflicts() {
     let store = RegisteredWorkStore::start("run-control-first");
     let authority = authority("actor.run-control.first");
-    let control = paused(WorkRunControlReasonV1::OperatorRequest, UtcMicros(400), Vec::new());
+    let control = paused(
+        WorkRunControlReasonV1::OperatorRequest,
+        UtcMicros(400),
+        Vec::new(),
+    );
     store
         .storage()
         .publish_run_control(&authority, None, &control)
@@ -282,7 +283,11 @@ fn the_first_publication_inserts_and_a_racing_first_publication_conflicts() {
 fn publication_is_a_compare_and_swap_on_the_monotonic_authority_version() {
     let store = RegisteredWorkStore::start("run-control-cas");
     let authority = authority("actor.run-control.cas");
-    let paused_control = paused(WorkRunControlReasonV1::HumanWait, UtcMicros(400), Vec::new());
+    let paused_control = paused(
+        WorkRunControlReasonV1::HumanWait,
+        UtcMicros(400),
+        Vec::new(),
+    );
     store
         .storage()
         .publish_run_control(&authority, None, &paused_control)
@@ -317,7 +322,10 @@ fn publication_is_a_compare_and_swap_on_the_monotonic_authority_version() {
     assert_eq!(stored.state(), WorkRunControlStateV1::Running);
     assert_eq!(stored.authority().get(), 3);
     // Resuming preserved the remaining budget rather than extending it.
-    assert_eq!(stored.deadline().remaining_micros, ADMITTED_DEADLINE.0 - 400);
+    assert_eq!(
+        stored.deadline().remaining_micros,
+        ADMITTED_DEADLINE.0 - 400
+    );
 }
 
 #[test]

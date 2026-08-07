@@ -854,7 +854,7 @@ fn canonical_problem_markdown_matches_the_golden_contract() {
             "\n- Retryable: `true`",
             "\n- Retry: `after_delay`",
             "\n- Retry scope: `same_request`",
-            "\n- Retry after: `none`",
+            "\n- Retry after: `250ms`",
             "\n- Cancellation stage: `none`",
             "\n- Details: none",
             "\n- Legal actions: `retry`",

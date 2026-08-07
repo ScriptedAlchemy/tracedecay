@@ -2348,6 +2348,7 @@ mod tests {
     use super::{INDEXES, TABLES};
 
     const REBUILD_TABLES: &[&str] = &[
+        "observation_projection_rebuild_provider_usage",
         "observation_projection_rebuilds",
         "observation_projection_rebuild_aliases",
         "observation_projection_rebuild_sessions",

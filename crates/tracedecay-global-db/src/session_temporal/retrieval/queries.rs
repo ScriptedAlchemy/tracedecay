@@ -36,39 +36,50 @@ pub(super) const EXACT_CANDIDATE_QUERY: &str = "
     ORDER BY o.knowledge_at DESC, o.occurrence_id
     LIMIT ?12";
 
+// A scope browse enumerates the frozen generation's occurrences AND the
+// session's published summary nodes — the same union the direct-anchor query
+// serves — so an empty-query page is the complete scope listing, never a
+// summary-blind slice.
 pub(super) const SCOPE_CANDIDATE_QUERY: &str = "
-    SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
-           o.message_id, o.turn_id, o.session_id, o.role,
-           COALESCE(json_extract(
-               provider_observation.observation_json, '$.identity.source.provider'
-           ), 'claude')
-    FROM session_occurrences AS o
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = o.source_observation_id
-    WHERE o.session_id = ?1 AND o.generation = ?2
-      AND (?3 IS NULL OR COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') = ?3)
-      AND (o.knowledge_at < ?4 OR (o.knowledge_at = ?4 AND o.occurrence_id > ?5))
-      AND length(CAST(o.occurrence_id AS BLOB)) <= ?6
-      AND length(CAST(o.retrieval_anchor_id AS BLOB)) <= ?7
-      AND length(CAST(COALESCE(o.message_id, '') AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(o.turn_id, '') AS BLOB)) <= ?8
-      AND length(CAST(o.session_id AS BLOB)) <= ?8
-      AND length(CAST(o.role AS BLOB)) <= ?8
-      AND length(CAST(COALESCE(json_extract(
-          provider_observation.observation_json, '$.identity.source.provider'
-      ), 'claude') AS BLOB)) <= ?8
-      AND length(CAST(o.occurrence_id AS BLOB))
-          + length(CAST(o.retrieval_anchor_id AS BLOB))
-          + length(CAST(COALESCE(o.message_id, '') AS BLOB))
-          + length(CAST(COALESCE(o.turn_id, '') AS BLOB))
-          + length(CAST(o.session_id AS BLOB))
-          + length(CAST(o.role AS BLOB))
-          + length(CAST(COALESCE(json_extract(
+    SELECT stable_id, anchor_id, knowledge_at, logical_message, turn_id,
+           session_id, evidence_role, provider
+    FROM (
+        SELECT o.occurrence_id AS stable_id, o.retrieval_anchor_id AS anchor_id,
+               o.knowledge_at AS knowledge_at, o.message_id AS logical_message,
+               o.turn_id AS turn_id, o.session_id AS session_id, o.role AS evidence_role,
+               COALESCE(json_extract(
+                   provider_observation.observation_json, '$.identity.source.provider'
+               ), 'claude') AS provider
+        FROM session_occurrences AS o
+        JOIN observations AS provider_observation
+          ON provider_observation.observation_id = o.source_observation_id
+        WHERE o.session_id = ?1 AND o.generation = ?2
+          AND (?3 IS NULL OR COALESCE(json_extract(
               provider_observation.observation_json, '$.identity.source.provider'
-          ), 'claude') AS BLOB)) <= ?9
-    ORDER BY o.knowledge_at DESC, o.occurrence_id
+          ), 'claude') = ?3)
+        UNION ALL
+        SELECT n.summary_id, n.summary_anchor_id, n.created_at, NULL, NULL, n.session_id,
+               'summary', json_extract(n.publication_json, '$.provider')
+        FROM session_summary_nodes AS n
+        WHERE n.session_id = ?1
+          AND (?3 IS NULL OR json_extract(n.publication_json, '$.provider') = ?3)
+    )
+    WHERE (knowledge_at < ?4 OR (knowledge_at = ?4 AND stable_id > ?5))
+      AND length(CAST(stable_id AS BLOB)) <= ?6
+      AND length(CAST(anchor_id AS BLOB)) <= ?7
+      AND length(CAST(COALESCE(logical_message, '') AS BLOB)) <= ?8
+      AND length(CAST(COALESCE(turn_id, '') AS BLOB)) <= ?8
+      AND length(CAST(session_id AS BLOB)) <= ?8
+      AND length(CAST(evidence_role AS BLOB)) <= ?8
+      AND length(CAST(provider AS BLOB)) <= ?8
+      AND length(CAST(stable_id AS BLOB))
+          + length(CAST(anchor_id AS BLOB))
+          + length(CAST(COALESCE(logical_message, '') AS BLOB))
+          + length(CAST(COALESCE(turn_id, '') AS BLOB))
+          + length(CAST(session_id AS BLOB))
+          + length(CAST(evidence_role AS BLOB))
+          + length(CAST(provider AS BLOB)) <= ?9
+    ORDER BY knowledge_at DESC, stable_id
     LIMIT ?10";
 
 pub(super) const ANCHOR_CANDIDATE_QUERY: &str = "

@@ -1,5 +1,11 @@
 use super::*;
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+
+/// Shared `plugin/` source tree at the repo root, relative to this crate.
+fn plugin_source_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
+}
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
 /// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`
@@ -329,7 +335,7 @@ fn codex_embedded_file_list_covers_the_whole_source_bundle() {
         .collect();
 
     // Every skill dir under plugin/skills is deployed by Codex (all 14).
-    let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");
+    let skills_root = plugin_source_root().join("skills");
     let mut skill_dirs: Vec<String> = std::fs::read_dir(&skills_root)
         .expect("plugin/skills should be readable")
         .flatten()

@@ -325,11 +325,21 @@ async fn test_tools_list() {
 // 6. test_tools_call_search
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_tools_call_search() {
-    let (server, _dir) = setup_server().await;
+    // Search lanes are served by the daemon-owned code-index authority; a
+    // server outside the production composition has no executor and answers
+    // typed-unavailable, so this protocol journey runs through the real
+    // composition (the same cutover migration as `search_large_response`).
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
     let responses = run_server_with_messages(
-        server,
+        std::sync::Arc::clone(&server),
         vec![jsonrpc_request(
             json!(30),
             "tools/call",
@@ -357,6 +367,7 @@ async fn test_tools_call_search() {
         .iter()
         .any(|c| c["text"].as_str().is_some_and(|t| t.contains("helper")));
     assert!(has_helper, "search results should contain 'helper'");
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -494,6 +505,7 @@ async fn test_tools_call_timings_can_be_disabled() {
 /// The CLI and the stdio proxy shut down their write half as soon as the
 /// request is on the wire, so a live-cancellable tool must still be answered
 /// after end-of-input rather than being cancelled with no response.
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn cancellable_tool_call_is_answered_after_client_half_close() {
     struct HalfClosedTransport {
@@ -516,7 +528,14 @@ async fn cancellable_tool_call_is_answered_after_client_half_close() {
         }
     }
 
-    let (server, _dir) = setup_server().await;
+    // Search lanes require the daemon-owned code-index authority, so the
+    // half-close journey runs against the production composition's server.
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
     let mut transport = HalfClosedTransport {
         request: Some(jsonrpc_request(
             json!(41),
@@ -541,6 +560,7 @@ async fn cancellable_tool_call_is_answered_after_client_half_close() {
         extract_tool_text(&resp["result"]).contains("helper"),
         "expected search results, got: {resp}"
     );
+    fixture.harness.shutdown().await;
 }
 
 /// A full peer close is distinct from the write-half close above. Once the

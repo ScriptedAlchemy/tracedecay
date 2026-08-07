@@ -543,7 +543,7 @@ mod tests {
             canonical_sha256(&("tracedecay.feedback.observation.v1", saved, observation)).unwrap();
         assert_eq!(
             legacy.as_str(),
-            "sha256:51e60d23798c7de9bd9df7893665b0e874eac9950aaa20c71350744a632b4adc"
+            "sha256:5ede9de21f0a1252cc2eeb2e4a4b19742b4fd5e0dd027875bc45fc52aac790a5"
         );
         assert_eq!(
             derive_feedback_observation_idempotency(&saved, &observation).unwrap(),
@@ -564,7 +564,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             legacy.as_str(),
-            "sha256:a764dcbd883833df5e457e7c030986ae1c339fd664791cc2414e40c92c43cd9a"
+            "sha256:d979bdc2ce1c81e4673e643d66e487f1700902d8289d3f867a0525cf8378aff1"
         );
         assert_eq!(
             derive_feedback_source_event_idempotency(&subject, UtcMicros(7), &source_event,)

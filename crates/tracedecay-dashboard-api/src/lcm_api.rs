@@ -521,7 +521,7 @@ where
             } else {
                 DashboardCoverageV1::unknown()
             };
-            match aggregates::render_canonical_payload(request, page) {
+            match aggregates::render_canonical_payload(request, page, &state.lcm_scope) {
                 Ok(payload) => {
                     if let Some((eligible, examined, true)) = timeline_coverage {
                         Json(DashboardEnvelopeV1::partial(
@@ -546,7 +546,7 @@ where
         DashboardLcmReadOutcomeV1::Partial { page, omitted } => {
             let examined = aggregates::returned_count(&page);
             let eligible = examined.saturating_add(omitted);
-            match aggregates::render_canonical_payload(request, page) {
+            match aggregates::render_canonical_payload(request, page, &state.lcm_scope) {
                 Ok(payload) => Json(DashboardEnvelopeV1::partial(
                     scope,
                     eligible,

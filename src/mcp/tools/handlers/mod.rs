@@ -231,6 +231,13 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub(crate) dashboard_lcm_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
+    /// The canonical profile identity bound by the daemon handshake. A
+    /// dashboard profile write resolves its configuration layer through this
+    /// identity, so it must not be derived from the project-session store —
+    /// that authority mounts behind the core project-open publication and is
+    /// absent on the core server that answers the first tool calls.
+    pub(crate) daemon_user_profile_id:
+        Option<tracedecay_domain::configuration::UserProfileId>,
     pub profile_root: Option<&'a Path>,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
@@ -282,6 +289,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             registered_project_session_db: None,
             registered_savings_db: None,
             dashboard_lcm_retrieval_service: None,
+            daemon_user_profile_id: None,
             profile_root: None,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,

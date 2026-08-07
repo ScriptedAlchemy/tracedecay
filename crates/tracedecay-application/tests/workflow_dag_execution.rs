@@ -728,13 +728,13 @@ impl WorkflowStepExecutionPort for SynthesizingExecutor {
             .unwrap(),
             outputs,
             artifact_payloads,
-            synthesis: self.claim.then(|| {
-                tracedecay_application::WorkflowSynthesisDraft {
+            synthesis: self
+                .claim
+                .then(|| tracedecay_application::WorkflowSynthesisDraft {
                     output_name: id::<WorkflowOutputName>("candidates"),
                     synthesis_attempt,
                     cited_source_digests: self.cited.clone(),
-                }
-            }),
+                }),
         })
     }
 }

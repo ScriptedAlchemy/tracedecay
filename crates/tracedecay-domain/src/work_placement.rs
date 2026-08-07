@@ -61,7 +61,9 @@ pub enum WorkPlacementContractError {
 }
 
 /// The supported placement choices, and only those.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "WorkPlacementKindV1")]
 pub enum WorkPlacementKindV1 {
@@ -91,7 +93,9 @@ impl WorkPlacementKindV1 {
 }
 
 /// Exactly the conditions Plan 32 names as blocking admission or removal.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 #[schemars(title = "WorkPlacementBlockerV1")]
 pub enum WorkPlacementBlockerV1 {
@@ -504,9 +508,7 @@ fn validate_placement(
         WorkPlacementStateV1::Quarantined if blockers.is_empty() => {
             Err(WorkPlacementContractError::QuarantineWithoutBlocker)
         }
-        WorkPlacementStateV1::Admitted | WorkPlacementStateV1::Released
-            if !blockers.is_empty() =>
-        {
+        WorkPlacementStateV1::Admitted | WorkPlacementStateV1::Released if !blockers.is_empty() => {
             Err(WorkPlacementContractError::BlockedPlacement)
         }
         _ => Ok(()),
@@ -680,13 +682,9 @@ mod tests {
             BTreeSet::from([WorkPlacementBlockerV1::TargetUnreadable])
         );
         // An unmanaged placement owns no bytes, so removal destroys nothing.
-        let unmanaged = WorkPlacementTargetV1::new(
-            WorkPlacementKindV1::NoManagedPlacement,
-            None,
-            false,
-            false,
-        )
-        .expect("unmanaged target");
+        let unmanaged =
+            WorkPlacementTargetV1::new(WorkPlacementKindV1::NoManagedPlacement, None, false, false)
+                .expect("unmanaged target");
         assert!(unknown.removal_blockers(&unmanaged).is_empty());
     }
 
@@ -723,9 +721,10 @@ mod tests {
 
     #[test]
     fn release_publishes_released_or_quarantined_and_never_a_removal() {
-        let preflight = WorkPlacementPreflightV1::evaluate(identity(), linked(), clean_observation());
-        let admitted =
-            WorkPlacementV1::admit(&preflight, Some(UtcMicros(5_000)), UtcMicros(200)).expect("admit");
+        let preflight =
+            WorkPlacementPreflightV1::evaluate(identity(), linked(), clean_observation());
+        let admitted = WorkPlacementV1::admit(&preflight, Some(UtcMicros(5_000)), UtcMicros(200))
+            .expect("admit");
         assert_eq!(admitted.state(), WorkPlacementStateV1::Admitted);
         assert!(admitted.holds_target());
 
@@ -758,7 +757,8 @@ mod tests {
 
     #[test]
     fn the_wire_shape_round_trips_and_refuses_a_quarantine_with_no_reason() {
-        let preflight = WorkPlacementPreflightV1::evaluate(identity(), linked(), clean_observation());
+        let preflight =
+            WorkPlacementPreflightV1::evaluate(identity(), linked(), clean_observation());
         let admitted = WorkPlacementV1::admit(&preflight, None, UtcMicros(200)).expect("admit");
         let quarantined = admitted
             .release(

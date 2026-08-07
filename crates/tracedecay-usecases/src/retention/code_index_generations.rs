@@ -2795,17 +2795,33 @@ mod tests {
             "generation-{}.json",
             state_digest.strip_prefix("sha256:").expect("digest prefix")
         );
+        let size_bytes = u64::try_from(bytes.len()).expect("fixture size fits u64");
         std::fs::write(generations_root.join(&file), bytes).expect("write padded generation");
         std::fs::remove_file(old_path).expect("remove unpadded generation");
         generation.file = file.clone();
         generation.state_digest = state_digest.clone();
+        generation.size_bytes = size_bytes;
         if active {
             let pointer_path = store.path().join(ACTIVE_POINTER_FILE);
             let mut pointer: DurablePublicationPointerV1 =
                 serde_json::from_slice(&std::fs::read(&pointer_path).expect("read active pointer"))
                     .expect("decode active pointer");
-            pointer.generation_file = file;
-            pointer.state_digest = state_digest;
+            pointer.generation_file = file.clone();
+            pointer.state_digest = state_digest.clone();
+            for entry in &mut pointer.generation_index {
+                if entry.generation_id == generation.id.as_str() {
+                    entry.generation_file = file.clone();
+                    entry.state_digest = state_digest.clone();
+                    entry.size_bytes = size_bytes;
+                }
+            }
+            pointer.generation_index_digest = Some(
+                durable_generation_index_digest(
+                    &pointer.generation_index,
+                    pointer.generation_index_truncated,
+                )
+                .expect("index digest"),
+            );
             std::fs::write(
                 pointer_path,
                 serde_json::to_vec(&pointer).expect("serialize active pointer"),

@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::Notify;
 
-use super::writer_test_support::{init_indexed_repo, registered_context, registered_runtime};
+use super::writer_test_support::{
+    WriterTestFixtureAuthority, init_indexed_repo, registered_context, registered_runtime,
+};
 use super::{
     HookBranchWriteRequest, HookBranchWriteResult, HookBranchWriter, McpServer,
     McpServerConstructionContext,
@@ -49,10 +51,11 @@ fn terminal_receipt(root: PathBuf) -> Value {
 
 async fn server_with_broker(
     cg: crate::tracedecay::TraceDecay,
+    authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
     writer: HookBranchWriter,
 ) -> Arc<McpServer> {
-    let context = with_broker(registered_context(cg).await, broker, writer);
+    let context = with_broker(registered_context(cg, authority), broker, writer);
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server")
@@ -60,10 +63,11 @@ async fn server_with_broker(
 
 async fn server_with_owned_project_replay_worker(
     cg: crate::tracedecay::TraceDecay,
+    authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
     writer: HookBranchWriter,
 ) -> Arc<McpServer> {
-    let context = with_broker(registered_context(cg).await, broker, writer)
+    let context = with_broker(registered_context(cg, authority), broker, writer)
         .with_owned_project_host_admission_replay();
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
@@ -114,7 +118,7 @@ fn success_writer() -> HookBranchWriter {
 
 #[tokio::test]
 async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -136,7 +140,7 @@ async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -173,7 +177,7 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), failing_writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), failing_writer).await;
     let mut routes = HookProjectRouteCache::default();
     Box::pin(server.handle_hook_event_notification(
         Some(&session_start(project.path().to_path_buf())),
@@ -208,7 +212,7 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, Arc::clone(&broker), duplicate_writer).await;
+    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), duplicate_writer).await;
 
     // The constructor schedules startup replay. This explicit pass joins the
     // same single-flight, so either ordering leaves one authoritative attempt
@@ -221,7 +225,7 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
 
 #[tokio::test]
 async fn authoritative_commit_deletes_the_durable_hook_event() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -235,7 +239,7 @@ async fn authoritative_commit_deletes_the_durable_hook_event() {
             })
         })
     });
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -251,7 +255,7 @@ async fn authoritative_commit_deletes_the_durable_hook_event() {
 
 #[tokio::test]
 async fn oversized_event_is_rejected_before_canonical_attempt() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::new(8, 128, 256, 4))
         .unwrap()
@@ -271,7 +275,7 @@ async fn oversized_event_is_rejected_before_canonical_attempt() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -309,7 +313,7 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), Arc::clone(&writer)).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), Arc::clone(&writer)).await;
     let admitted = broker
         .admit(
             "codex:invalid-plan-fixture",
@@ -340,7 +344,7 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
 
     let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
 
@@ -353,7 +357,7 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
 
 #[tokio::test]
 async fn unsupported_payload_version_is_retryable_and_retained_across_reopen() {
-    let (cg, _project, _pin) = init_indexed_repo().await;
+    let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -373,7 +377,7 @@ async fn unsupported_payload_version_is_retryable_and_retained_across_reopen() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let payload = br#"{"version":2,"plan":{"kind":"future_host_event","opaque":"private"}}"#;
     let admitted = broker
         .admit("codex:future-plan-fixture", payload)
@@ -411,7 +415,7 @@ async fn unsupported_payload_version_is_retryable_and_retained_across_reopen() {
 
 #[tokio::test]
 async fn quarantine_releases_active_capacity_then_full_fails_closed() {
-    let (cg, _project, _pin) = init_indexed_repo().await;
+    let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let bounds = SpoolBounds::new(256, 128, 1024, 1).with_quarantine_limits(1024, 1);
     let runtime = HostAdmissionRuntime::open(spool.path(), bounds).unwrap().0;
@@ -430,7 +434,7 @@ async fn quarantine_releases_active_capacity_then_full_fails_closed() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
 
     let first = broker
         .admit(
@@ -473,7 +477,7 @@ async fn quarantine_releases_active_capacity_then_full_fails_closed() {
 
 #[tokio::test]
 async fn malformed_source_does_not_starve_valid_sibling_source() {
-    let (cg, _project, _pin) = init_indexed_repo().await;
+    let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -497,7 +501,7 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let malformed = broker
         .admit(
             "codex:malformed-source",
@@ -538,7 +542,7 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
 
 #[tokio::test]
 async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -567,7 +571,7 @@ async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let event = session_start(project.path().to_path_buf());
     let attempt = {
         let server = Arc::clone(&server);
@@ -639,7 +643,7 @@ fn unique_sibling(project: &std::path::Path, suffix: &str) -> PathBuf {
 
 #[tokio::test]
 async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let worktree = linked_worktree_on(project.path());
     let payload = add_branch_at_payload(worktree.clone(), "feature/admission");
 
@@ -662,7 +666,7 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let admitted = broker
         .admit("codex:add-branch-at-stale", &payload)
         .await
@@ -694,7 +698,7 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
 
 #[tokio::test]
 async fn add_branch_at_replay_rejects_stale_branch_after_switch() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let worktree = linked_worktree_on(project.path());
     let payload = add_branch_at_payload(worktree.clone(), "feature/admission");
     super::writer_test_support::git(&worktree, &["switch", "-c", "feature/other"]);
@@ -718,7 +722,7 @@ async fn add_branch_at_replay_rejects_stale_branch_after_switch() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let admitted = broker
         .admit("codex:add-branch-at-stale-branch", &payload)
         .await
@@ -735,7 +739,7 @@ async fn add_branch_at_replay_rejects_stale_branch_after_switch() {
 
 #[tokio::test]
 async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let payload = add_branch_payload_for("main");
 
     let spool = TempDir::new().unwrap();
@@ -757,7 +761,7 @@ async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let admitted = broker
         .admit("codex:add-branch-stale-delayed", &payload)
         .await
@@ -818,7 +822,7 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -837,7 +841,7 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
 
 #[tokio::test]
 async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let payload = sync_current_branch_payload("main");
 
     let spool = TempDir::new().unwrap();
@@ -859,7 +863,7 @@ async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() 
             })
         })
     };
-    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
     let admitted = broker
         .admit("codex:sync-current-branch-stale-delayed", &payload)
         .await
@@ -919,7 +923,7 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -990,7 +994,7 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -1056,7 +1060,7 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -1091,11 +1095,11 @@ async fn server_with_broker_and_runtime(
     cg: crate::tracedecay::TraceDecay,
     broker: SharedHostAdmissionBroker,
     writer: HookBranchWriter,
-    runtime: HostAdmissionTestRuntimeV1,
+    runtime: Arc<HostAdmissionTestRuntimeV1>,
 ) -> Arc<McpServer> {
     let context = with_broker(
         runtime
-            .into_mcp_server_context_for_test(cg, None)
+            .mcp_server_context_for_test(cg, None)
             .expect("registered MCP server context"),
         broker,
         writer,
@@ -1107,8 +1111,8 @@ async fn server_with_broker_and_runtime(
 
 #[tokio::test]
 async fn failed_admission_does_not_emit_hook_route_analytics() {
-    let (cg, project, _pin) = init_indexed_repo().await;
-    let test_runtime = registered_runtime(&cg).await;
+    let (cg, project, authority) = init_indexed_repo().await;
+    let test_runtime = registered_runtime(&authority);
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -1157,8 +1161,8 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
 
 #[tokio::test]
 async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
-    let (cg, project, _pin) = init_indexed_repo().await;
-    let test_runtime = registered_runtime(&cg).await;
+    let (cg, project, authority) = init_indexed_repo().await;
+    let test_runtime = registered_runtime(&authority);
     let git_dir = project.path().join(".git");
     let registered = test_runtime
         .upsert_code_project(
@@ -1290,8 +1294,8 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
 
 #[tokio::test]
 async fn committed_admissions_emit_post_commit_private_route_analytics() {
-    let (cg, project, _pin) = init_indexed_repo().await;
-    let test_runtime = registered_runtime(&cg).await;
+    let (cg, project, authority) = init_indexed_repo().await;
+    let test_runtime = registered_runtime(&authority);
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -1360,7 +1364,7 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
 
 #[tokio::test]
 async fn credential_canary_receipt_analytics_and_git_span_survive_database_reopen() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     let profile_root = crate::config::user_data_dir().expect("isolated profile root");
     let project_id = tracedecay_domain::ProjectId::new(
@@ -1371,10 +1375,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
             .expect("project identity"),
     )
     .expect("typed project identity");
-    let test_runtime =
-        HostAdmissionTestRuntimeV1::project(&profile_root, project.path(), project_id.clone())
-            .await
-            .expect("registered host-admission runtime");
+    let test_runtime = registered_runtime(&authority);
     let git_dir = project.path().join(".git");
     let registered = test_runtime
         .upsert_code_project(
@@ -1499,7 +1500,12 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     );
 
     server.shutdown().await;
+    // The profile session-relation graph has exactly one writer, so every
+    // retained handle must drop before a fresh-process reopen can mount it.
+    // `test_runtime` borrows the server, so it has to be released first.
+    drop(test_runtime);
     drop(server);
+    let _profile_pin = authority.release_runtime_for_reopen();
     let reopened = HostAdmissionTestRuntimeV1::project(&profile_root, project.path(), project_id)
         .await
         .expect("reopen registered host-admission runtime");
@@ -1553,7 +1559,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
 
 #[tokio::test]
 async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
-    let (cg, _project, _pin) = init_indexed_repo().await;
+    let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -1569,7 +1575,8 @@ async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
     assert_eq!(broker.pending_count().await, 65);
 
     let server =
-        server_with_owned_project_replay_worker(cg, Arc::clone(&broker), success_writer()).await;
+        server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), success_writer())
+            .await;
 
     assert!(
         server
@@ -1587,7 +1594,7 @@ async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
 
 #[tokio::test]
 async fn owned_project_replay_worker_backoffs_on_retryable_failure() {
-    let (cg, _project, _pin) = init_indexed_repo().await;
+    let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -1611,7 +1618,7 @@ async fn owned_project_replay_worker_backoffs_on_retryable_failure() {
         })
     };
 
-    let server = server_with_owned_project_replay_worker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while server.project_host_admission_replay_backoff_count().await < 2
@@ -1630,7 +1637,7 @@ async fn owned_project_replay_worker_backoffs_on_retryable_failure() {
 
 #[tokio::test]
 async fn owned_project_replay_worker_is_cancelled_and_joined_on_shutdown() {
-    let (cg, _project, _pin) = init_indexed_repo().await;
+    let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -1659,7 +1666,7 @@ async fn owned_project_replay_worker_is_cancelled_and_joined_on_shutdown() {
         })
     };
 
-    let server = server_with_owned_project_replay_worker(cg, Arc::clone(&broker), writer).await;
+    let server = server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .expect("worker must enter an in-flight canonical attempt");

@@ -412,7 +412,10 @@ mod tests {
         assert_eq!(paused.authority().get(), 2);
         assert_eq!(paused.deadline().remaining_micros, 600);
         assert_eq!(paused.fenced_attempts().len(), 1);
-        assert_eq!(paused.reason(), Some(WorkRunControlReasonV1::OperatorRequest));
+        assert_eq!(
+            paused.reason(),
+            Some(WorkRunControlReasonV1::OperatorRequest)
+        );
     }
 
     #[test]
@@ -467,11 +470,7 @@ mod tests {
     #[test]
     fn a_clock_that_runs_backwards_cannot_buy_budget() {
         let paused = control()
-            .pause(
-                WorkRunControlReasonV1::Recovery,
-                UtcMicros(900),
-                Vec::new(),
-            )
+            .pause(WorkRunControlReasonV1::Recovery, UtcMicros(900), Vec::new())
             .expect("pause");
         assert_eq!(paused.deadline().remaining_micros, 100);
         assert_eq!(

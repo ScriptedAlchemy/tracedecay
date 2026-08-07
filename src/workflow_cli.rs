@@ -82,22 +82,22 @@ fn decode_workflow_invocation(
         }
         WorkflowOperation::HandoffRedeem => decode::<TaskHandoffRedeemRequest>(body)
             .map(WorkflowApplicationInvocation::HandoffRedeem),
-        WorkflowOperation::StartRun => decode::<tracedecay_application::WorkflowRunStartRequest>(
-            body,
-        )
-        .map(WorkflowApplicationInvocation::StartRun),
-        WorkflowOperation::PauseRun => decode::<tracedecay_application::WorkflowRunPauseRequest>(
-            body,
-        )
-        .map(WorkflowApplicationInvocation::PauseRun),
-        WorkflowOperation::ResumeRun => decode::<tracedecay_application::WorkflowRunResumeRequest>(
-            body,
-        )
-        .map(WorkflowApplicationInvocation::ResumeRun),
-        WorkflowOperation::CancelRun => decode::<tracedecay_application::WorkflowRunCancelRequest>(
-            body,
-        )
-        .map(WorkflowApplicationInvocation::CancelRun),
+        WorkflowOperation::StartRun => {
+            decode::<tracedecay_application::WorkflowRunStartRequest>(body)
+                .map(WorkflowApplicationInvocation::StartRun)
+        }
+        WorkflowOperation::PauseRun => {
+            decode::<tracedecay_application::WorkflowRunPauseRequest>(body)
+                .map(WorkflowApplicationInvocation::PauseRun)
+        }
+        WorkflowOperation::ResumeRun => {
+            decode::<tracedecay_application::WorkflowRunResumeRequest>(body)
+                .map(WorkflowApplicationInvocation::ResumeRun)
+        }
+        WorkflowOperation::CancelRun => {
+            decode::<tracedecay_application::WorkflowRunCancelRequest>(body)
+                .map(WorkflowApplicationInvocation::CancelRun)
+        }
         WorkflowOperation::GetRun => decode::<tracedecay_application::WorkflowRunGetRequest>(body)
             .map(WorkflowApplicationInvocation::GetRun),
     }

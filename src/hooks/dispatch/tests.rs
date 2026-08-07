@@ -678,6 +678,24 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
                 },
                 "output": {
                     "metadata": {
+                        "files": [{"filePath": "/project/first.rs"}]
+                    }
+                }
+            }"#,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        UtcMicros(43),
+    )
+    .unwrap();
+    let path_changed = native_material(
+        r#"{
+                "input": {
+                    "tool": "write",
+                    "sessionID": "session-29",
+                    "callID": "call-31",
+                    "args": {"patchText": "unrelated payload"}
+                },
+                "output": {
+                    "metadata": {
                         "files": [{"filePath": "/elsewhere/alias.rs"}]
                     }
                 }
@@ -701,6 +719,8 @@ fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
 
     assert_eq!(aliases_changed.event_id, first.event_id);
     assert_eq!(aliases_changed.file_id, first.file_id);
+    assert_ne!(path_changed.event_id, first.event_id);
+    assert_ne!(path_changed.file_id, first.file_id);
     assert_ne!(different_native_event.event_id, first.event_id);
     assert_ne!(different_native_event.file_id, first.file_id);
 }

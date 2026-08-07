@@ -325,26 +325,47 @@ mod tests {
     }
 
     /// Two graphs enrolled in one profile, both registered in the profile
-    /// registry the active graph reads selectors against.
-    async fn cross_project_memory_pair() -> (tempfile::TempDir, TraceDecay, TraceDecay) {
+    /// registry the active graph reads selectors against. The profile
+    /// session-relation graph has exactly one writer, so the target project
+    /// mounts through the runtime the active init retained instead of
+    /// constructing a second runtime on the same profile; the returned
+    /// sibling runtime guard keeps that mount alive.
+    async fn cross_project_memory_pair() -> (
+        tempfile::TempDir,
+        TraceDecay,
+        TraceDecay,
+        std::sync::Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    ) {
         let tmp = tempfile::tempdir().unwrap();
         let profile_root = tmp.path().join("profile");
-        let mut graphs = Vec::new();
-        for name in ["active", "target"] {
-            let project_root = tmp.path().join(name);
-            std::fs::create_dir_all(&project_root).unwrap();
-            graphs.push(
-                TraceDecay::init_with_options(&project_root, open_options(&profile_root))
-                    .await
-                    .unwrap(),
-            );
-        }
-        let target = graphs.pop().unwrap();
-        let active = graphs.pop().unwrap();
+        let active_root = tmp.path().join("active");
+        std::fs::create_dir_all(&active_root).unwrap();
+        let active = TraceDecay::init_with_options(&active_root, open_options(&profile_root))
+            .await
+            .unwrap();
+        let runtime = active
+            .test_runtime_for_test()
+            .expect("standalone fixture runtime");
+        let target_root = tmp.path().join("target");
+        std::fs::create_dir_all(&target_root).unwrap();
+        let target_project_id = tracedecay_domain::ProjectId::new(
+            crate::storage::default_profile_project_id(&target_root),
+        )
+        .expect("typed target project identity");
+        let sibling = std::sync::Arc::new(
+            runtime
+                .sibling_project(&target_root, target_project_id)
+                .await
+                .expect("sibling registered runtime"),
+        );
+        let target = sibling
+            .initialize_project_graph_for_test(&target_root, open_options(&profile_root))
+            .await
+            .expect("sibling project graph");
         for graph in [&active, &target] {
             register_project(&active, &project_id_of(graph), graph.project_root()).await;
         }
-        (tmp, active, target)
+        (tmp, active, target, sibling)
     }
 
     async fn denied_selector(cg: &TraceDecay, args: Value) -> TraceDecayError {
@@ -489,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn project_selector_reads_the_selected_registered_projects_memory() {
-        let (_tmp, active, target) = cross_project_memory_pair().await;
+        let (_tmp, active, target, _sibling_runtime) = cross_project_memory_pair().await;
         add_project_fact(&active, "active project selector fixture fact").await;
         for content in ["target selector fixture one", "target selector fixture two"] {
             add_project_fact(&target, content).await;
@@ -517,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn active_and_selected_project_memory_stay_isolated() {
-        let (_tmp, active, target) = cross_project_memory_pair().await;
+        let (_tmp, active, target, _sibling_runtime) = cross_project_memory_pair().await;
         add_project_fact(&active, "active project selector fixture fact").await;
         add_project_fact(&target, "target selector fixture fact").await;
 
@@ -560,7 +581,7 @@ mod tests {
 
     #[tokio::test]
     async fn unresolved_project_selector_is_denied_without_falling_back() {
-        let (_tmp, active, _target) = cross_project_memory_pair().await;
+        let (_tmp, active, _target, _sibling_runtime) = cross_project_memory_pair().await;
 
         let error = denied_selector(&active, json!({ "project_id": "proj_does_not_exist" })).await;
 
@@ -573,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn registered_project_without_profile_enrollment_is_denied() {
-        let (tmp, active, _target) = cross_project_memory_pair().await;
+        let (tmp, active, _target, _sibling_runtime) = cross_project_memory_pair().await;
         // Registered in the profile registry, but never opened here, so no
         // enrollment marker names it and this profile holds no memory store.
         let unenrolled_root = tmp.path().join("unenrolled");
@@ -591,7 +612,7 @@ mod tests {
 
     #[tokio::test]
     async fn ambiguous_project_name_selector_is_denied_as_ambiguous() {
-        let (tmp, active, _target) = cross_project_memory_pair().await;
+        let (tmp, active, _target, _sibling_runtime) = cross_project_memory_pair().await;
         for (index, parent) in ["first", "second"].into_iter().enumerate() {
             let root = tmp.path().join(parent).join("shared");
             std::fs::create_dir_all(&root).unwrap();

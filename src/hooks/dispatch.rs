@@ -69,7 +69,6 @@ pub(crate) const NATIVE_HOOK_HOSTS: &[HookHostV1] = &[
     HookHostV1::ClaudeCode,
     HookHostV1::Codex,
     HookHostV1::CursorDesktop,
-    HookHostV1::CursorCloud,
     HookHostV1::Hermes,
     HookHostV1::Kiro,
     HookHostV1::KimiCode,

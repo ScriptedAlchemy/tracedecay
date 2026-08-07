@@ -30,8 +30,8 @@ pub mod watermark;
 pub mod work;
 pub mod work_attempt;
 pub mod work_placement;
-pub mod work_run_control;
 pub mod work_product;
+pub mod work_run_control;
 pub mod workflow;
 mod writer;
 

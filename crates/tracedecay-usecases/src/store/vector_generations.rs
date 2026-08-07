@@ -2738,7 +2738,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_generation_recomputes_immutable_manifest_content() {
+    fn persisted_generation_identity_is_plan_bound_and_survives_output_rewrite() {
         let mut generation = logical_generation(
             'a',
             admitted_embedding(),
@@ -2751,6 +2751,48 @@ mod tests {
         generation
             .validate_persisted()
             .expect("canonical generation");
+        let original_generation_id = generation.generation_id.clone();
+        let original_manifest_digest = generation.manifest_digest.clone();
+
+        // Content evidence still lives in the row and receipt validators: a
+        // values rewrite without a recomputed output digest is rejected.
+        let mut raw_tamper = generation.clone();
+        raw_tamper
+            .vectors
+            .values_mut()
+            .next()
+            .expect("fixture vector")
+            .values = vec![0.75];
+        assert!(
+            raw_tamper.validate_persisted().is_err(),
+            "vector values that no longer match their output digest must be rejected"
+        );
+
+        // A recomputed output digest that is not carried through the batch
+        // receipts breaks the receipt evidence chain.
+        let mut receipt_tamper = generation.clone();
+        let vector = receipt_tamper
+            .vectors
+            .values_mut()
+            .next()
+            .expect("fixture vector");
+        vector.values = vec![0.75];
+        vector.output_digest = tracedecay_semantic::projector::vector_output_digest(
+            &vector.projection_key,
+            &vector.chunk_id,
+            &vector.chunk_digest,
+            &vector.values,
+        )
+        .expect("rewritten vector digest");
+        assert!(
+            receipt_tamper.validate_persisted().is_err(),
+            "an output rewrite that skips the batch receipts must be rejected"
+        );
+
+        // A fully self-consistent output rewrite (values, output digest,
+        // receipts, checkpoint) is fresh execution evidence: the plan-bound
+        // generation identity does not move because the projection key,
+        // source corpus, and chunk membership are unchanged.
         let vector = generation
             .vectors
             .values_mut()
@@ -2763,18 +2805,19 @@ mod tests {
             &vector.chunk_digest,
             &vector.values,
         )
-        .expect("tampered vector digest");
+        .expect("rewritten vector digest");
         generation.receipts[0].receipts[0].output_digest = Some(vector.output_digest.clone());
         generation.receipts[0].publication_digest =
             expected_publication_digest(&generation.receipts[0])
-                .expect("tampered publication digest");
+                .expect("rewritten publication digest");
         generation.checkpoint.last_publication_digest =
             Some(generation.receipts[0].publication_digest.clone());
 
-        assert!(
-            generation.validate_persisted().is_err(),
-            "self-consistent vector/receipt tampering must not retain the immutable generation id"
-        );
+        generation
+            .validate_persisted()
+            .expect("self-consistent output rewrite keeps the plan-bound identity valid");
+        assert_eq!(generation.generation_id, original_generation_id);
+        assert_eq!(generation.manifest_digest, original_manifest_digest);
     }
 
     /// Retiring a generation must release the interner keys it introduced, or

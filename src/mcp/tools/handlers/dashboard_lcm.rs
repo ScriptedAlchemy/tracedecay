@@ -166,37 +166,30 @@ impl DashboardLcmReadAdapter {
         let omitted = aggregate_omitted;
 
         let mut partial_description_count = 0_u64;
-        let session_description = match &request {
+        // A session read's stats come from the canonical describe authority,
+        // addressed by the session's measured provider — taken from the
+        // hydrated page itself, never a wildcard the exact-identity describe
+        // reads would treat as a provider named "all".
+        let session_request_id = match &request {
             DashboardLcmReadRequestV1::Session { session_id, .. } => {
-                let session_id = match SessionId::new(session_id) {
-                    Ok(session_id) => session_id,
+                match SessionId::new(session_id) {
+                    Ok(session_id) => Some(session_id),
                     Err(_) => {
                         return not_ready(
                             DashboardLcmReadStateV1::Unavailable,
                             "lcm_dashboard_request_invalid",
                         );
                     }
-                };
-                match self
-                    .describe(
-                        "all",
-                        session_id,
-                        LcmDescribeTarget::Session,
-                        RetrievalGrainV1::Session,
-                    )
-                    .await
-                {
-                    Ok((description, partial)) => {
-                        partial_description_count = u64::from(partial);
-                        Some(description)
-                    }
-                    Err((state, reason)) => return not_ready(state, reason),
                 }
             }
-            DashboardLcmReadRequestV1::Search { .. } => None,
-            DashboardLcmReadRequestV1::Overview { .. }
+            DashboardLcmReadRequestV1::Search { .. }
+            | DashboardLcmReadRequestV1::Overview { .. }
             | DashboardLcmReadRequestV1::Timeline { .. } => None,
         };
+        let session_provider = page
+            .results
+            .first()
+            .map(|result| result.message.provider.clone());
 
         let mut messages = Vec::new();
         let mut summary_requests = Vec::new();
@@ -250,12 +243,34 @@ impl DashboardLcmReadAdapter {
             }
         }
 
-        let stats = if let Some(description) = session_description {
-            DashboardLcmCanonicalStatsV1 {
-                message_count: description.raw_message_count,
-                summary_node_count: description.summary_node_count,
-                summary_token_count: None,
-                source_token_count: None,
+        let stats = if let Some(session_id) = session_request_id {
+            match session_provider {
+                Some(provider) => {
+                    let (description, partial) = match self
+                        .describe(
+                            &provider,
+                            session_id,
+                            LcmDescribeTarget::Session,
+                            RetrievalGrainV1::Session,
+                        )
+                        .await
+                    {
+                        Ok(described) => described,
+                        Err((state, reason)) => return not_ready(state, reason),
+                    };
+                    partial_description_count =
+                        partial_description_count.saturating_add(u64::from(partial));
+                    DashboardLcmCanonicalStatsV1 {
+                        message_count: description.raw_message_count,
+                        summary_node_count: description.summary_node_count,
+                        summary_token_count: None,
+                        source_token_count: None,
+                    }
+                }
+                // No temporal record surfaced for the session, so there is no
+                // measured provider to describe under: the zero stats feed the
+                // typed session-absent state below.
+                None => DashboardLcmCanonicalStatsV1::default(),
             }
         } else {
             DashboardLcmCanonicalStatsV1::default()
@@ -266,13 +281,13 @@ impl DashboardLcmReadAdapter {
             && stats.message_count == 0
             && stats.summary_node_count == 0
         {
-            let reason = match request {
-                DashboardLcmReadRequestV1::Overview { .. }
-                | DashboardLcmReadRequestV1::Search { .. }
-                | DashboardLcmReadRequestV1::Timeline { .. } => "lcm_no_temporal_results",
-                DashboardLcmReadRequestV1::Session { .. } => "lcm_session_absent",
-            };
-            return not_ready(DashboardLcmReadStateV1::Absent, reason);
+            // Only a session read has a subject that can be absent. An
+            // aggregate read over a readable store with zero temporal
+            // results is a measured zero, served as a complete empty page —
+            // never collapsed into the Absent state.
+            if let DashboardLcmReadRequestV1::Session { .. } = request {
+                return not_ready(DashboardLcmReadStateV1::Absent, "lcm_session_absent");
+            }
         }
 
         let next_cursor = page.temporal.cursor;

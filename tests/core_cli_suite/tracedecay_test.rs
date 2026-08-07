@@ -478,6 +478,10 @@ async fn open_auto_tracks_branch_and_sync_does_not_mutate_main_db() {
 
     let cg = TraceDecay::init(project).await.unwrap();
     cg.index_all().await.unwrap();
+    // The user-sessions graph is single-writer: the init handle must be
+    // released before `open` acquires the project again, or the second open
+    // is refused with a typed locked state.
+    drop(cg);
 
     run_git(project, &["checkout", "-b", "feature/sync-safety"]);
     fs::write(

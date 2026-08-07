@@ -70,10 +70,12 @@ impl WorkPlacementStoragePort for WorkSqliteStorage {
         let Some(row) = rows.rows.first() else {
             return Ok(None);
         };
-        let task_id = exact_sql_text(&row.values, 0).ok_or(WorkPlacementStorageError::Unavailable)?;
-        let run_id = exact_sql_text(&row.values, 1).ok_or(WorkPlacementStorageError::Unavailable)?;
-        let task_id = TaskId::new(task_id.to_owned())
-            .map_err(|_| WorkPlacementStorageError::Unavailable)?;
+        let task_id =
+            exact_sql_text(&row.values, 0).ok_or(WorkPlacementStorageError::Unavailable)?;
+        let run_id =
+            exact_sql_text(&row.values, 1).ok_or(WorkPlacementStorageError::Unavailable)?;
+        let task_id =
+            TaskId::new(task_id.to_owned()).map_err(|_| WorkPlacementStorageError::Unavailable)?;
         let run_id =
             RunId::new(run_id.to_owned()).map_err(|_| WorkPlacementStorageError::Unavailable)?;
         Ok(Some(WorkPlacementIdentityV1::new(task_id, run_id)))

@@ -416,6 +416,43 @@ pub(crate) async fn expect_mcp_runtime_event(
         .unwrap_or_else(|| panic!("{label}"))
 }
 
+/// As [`mcp_runtime_events`], but through the production composition's
+/// retained profile authority — a second profile-scoped test runtime cannot
+/// open the daemon-owned profile stores.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn harness_mcp_runtime_events(
+    harness: &tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+    session_id: &str,
+) -> Vec<tracedecay::global_db::AnalyticsEventRecord> {
+    harness
+        .read_profile_analytics_events(&tracedecay::global_db::AnalyticsEventQuery {
+            provider: Some("mcp".to_string()),
+            project_id: None,
+            session_id: Some(session_id.to_string()),
+            event_kind: Some("mcp_tool_call".to_string()),
+            since: None,
+            until: None,
+            before_id: None,
+            limit: 100,
+        })
+        .await
+        .expect("query runtime analytics events")
+}
+
+#[cfg(feature = "test-transport")]
+pub(crate) async fn expect_harness_mcp_runtime_event(
+    harness: &tracedecay::daemon::ProductionProjectCompositionHarnessV1,
+    tool_name: &str,
+    session_id: &str,
+    label: &str,
+) -> tracedecay::global_db::AnalyticsEventRecord {
+    harness_mcp_runtime_events(harness, session_id)
+        .await
+        .into_iter()
+        .find(|event| event.tool_name.as_deref() == Some(tool_name))
+        .unwrap_or_else(|| panic!("{label}"))
+}
+
 pub(crate) async fn mcp_runtime_event_count(
     global_db_path: &std::path::Path,
     session_id: &str,
@@ -478,13 +515,18 @@ pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
 
 /// Drives one `tools/call` through the JSON-RPC transport and returns the full
 /// parsed response for the given id.
+///
+/// Runs as one client connection (the daemon's per-socket entry point), so a
+/// journey can issue several serial calls against one live server; a full
+/// `run` would latch the server's terminal shutdown after the first call and
+/// every later dispatch would be refused as `tool_dispatch_shutdown`.
 pub(crate) async fn tool_call_via_transport(
     server: Arc<McpServer>,
     id: i64,
     name: &str,
     arguments: Value,
 ) -> Value {
-    let responses = run_server_with_messages(
+    let responses = run_client_connection_with_messages(
         server,
         vec![jsonrpc_request(
             json!(id),
