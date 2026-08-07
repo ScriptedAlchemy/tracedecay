@@ -162,10 +162,18 @@ impl GitRepositoryAuthority {
     }
 
     /// Parsed in-progress operation state.
+    ///
+    /// `gix::state::InProgress` has no sequencer variant. An interrupted
+    /// `cherry-pick`/`revert` sequence whose `CHERRY_PICK_HEAD`/`REVERT_HEAD`
+    /// is already gone still leaves `.git/sequencer` behind, and `gix` reports
+    /// no in-progress state at all for it. Reading the directory marker keeps
+    /// [`GitOperationStateV1::Sequencer`] reachable through the status path
+    /// instead of collapsing an in-progress sequence to `None`.
     pub fn operation_state(&self) -> GitOperationStateV1 {
         use gix::state::InProgress;
 
         match self.repository.to_thread_local().state() {
+            None if self.git_dir.join("sequencer").is_dir() => GitOperationStateV1::Sequencer,
             None => GitOperationStateV1::None,
             Some(InProgress::Merge) => GitOperationStateV1::Merge,
             Some(
