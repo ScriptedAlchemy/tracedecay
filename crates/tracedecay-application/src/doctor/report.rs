@@ -803,9 +803,7 @@ const fn storage_incomplete_reason(
         DoctorStorageIncompleteReasonV1::ResetRequired { .. } => {
             DoctorFamilyUnavailableReasonV1::ResetRequired
         }
-        DoctorStorageIncompleteReasonV1::Corrupt { .. } => {
-            DoctorFamilyUnavailableReasonV1::Corrupt
-        }
+        DoctorStorageIncompleteReasonV1::Corrupt { .. } => DoctorFamilyUnavailableReasonV1::Corrupt,
     }
 }
 
@@ -872,7 +870,13 @@ fn storage_unavailable(
 fn sanitized_detail(detail: &str) -> Option<String> {
     let folded: String = detail
         .chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect();
     let bounded = truncate_at_char_boundary(folded.trim(), PLACEHOLDER_DETAIL_MAX_BYTES);
     let bounded = bounded.trim();
