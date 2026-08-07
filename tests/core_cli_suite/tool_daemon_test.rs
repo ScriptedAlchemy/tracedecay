@@ -1815,12 +1815,15 @@ fn status_json_rejects_truncated_tool_payload_without_partial_stdout() {
     let project_path = canonical_existing_path(project.path());
     init_project_with_cli(&home_path, &project_path);
 
+    // A truncation envelope carrying a retrieval handle is transparently
+    // recovered by the CLI via `tracedecay_retrieve`; the rejection contract
+    // covers the unrecoverable envelope that omits the handle. It must fail
+    // closed: non-zero exit, no partial stdout, and a truncation diagnostic.
     let truncated = json!({
         "truncated": true,
         "original_chars": 20_000,
         "preview_chars": 32,
         "preview": "{\"node_count\":1}",
-        "handle": "rh_status_test",
     })
     .to_string();
     let socket_path = socket_dir.path().join("tracedecay.sock");
