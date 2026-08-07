@@ -241,6 +241,10 @@ pub struct WorkflowEffectPreparedV1 {
     mutation: WorkflowEffectMutationV1,
 }
 
+// A wire mutation record whose lifecycle commands sit beside the full
+// definition payload; boxing would ripple through its construction and
+// match sites for a contract type (daemon_contract precedent).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "operation", content = "input")]
 pub enum WorkflowEffectMutationV1 {
