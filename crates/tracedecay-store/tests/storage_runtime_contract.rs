@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use serde::Serialize;
@@ -618,6 +618,7 @@ struct Probe {
     identity: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     interruption: AtomicU8,
+    commit_started: AtomicBool,
 }
 
 impl Probe {
@@ -630,6 +631,7 @@ impl Probe {
                 Some(RuntimeInterruptionV1::Cancelled) => 1,
                 Some(RuntimeInterruptionV1::DeadlineExceeded) => 2,
             }),
+            commit_started: AtomicBool::new(false),
         }
     }
 }
@@ -651,6 +653,26 @@ impl RuntimeRequestProbeV1 for Probe {
             _ => unreachable!("test probe has a closed interruption state"),
         }
     }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+            && self
+                .commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+}
+
+#[test]
+fn runtime_commit_probe_grants_at_most_one_commit() {
+    let control = control();
+    let probe = Probe::new(&control, None);
+
+    assert!(probe.try_begin_commit());
+    assert!(!probe.try_begin_commit());
+
+    let cancelled = Probe::new(&control, Some(RuntimeInterruptionV1::Cancelled));
+    assert!(!cancelled.try_begin_commit());
 }
 
 struct FakeReadPort {

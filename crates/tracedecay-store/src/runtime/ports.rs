@@ -37,11 +37,10 @@ pub trait RuntimeRequestProbeV1: Send + Sync {
     fn deadline_identity(&self) -> &RuntimeDeadlineV1;
     fn interruption(&self) -> Option<RuntimeInterruptionV1>;
 
-    /// Atomically arbitrates cancellation against the first irreversible
-    /// durable commit.
-    fn try_begin_commit(&self) -> bool {
-        self.interruption().is_none()
-    }
+    /// Atomically arbitrates cancellation against the sole irreversible
+    /// durable commit. A probe must return `true` at most once across every
+    /// context that shares it. Read-only probes return `false`.
+    fn try_begin_commit(&self) -> bool;
 
     /// An externally arbitrated request cannot share its commit transaction
     /// with unrelated work.

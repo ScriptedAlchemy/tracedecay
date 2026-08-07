@@ -36,6 +36,11 @@ pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
 pub const WORK_EXECUTABLE_BINDINGS_SETTING_KEY: &str = "work.executable_bindings.v1";
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 
+/// Canonical user-profile settings.
+pub const USER_UPLOAD_ENABLED_SETTING_KEY: &str = "user.upload_enabled.v1";
+pub const USER_WATCHER_DEBOUNCE_MS_SETTING_KEY: &str = "user.watcher_debounce_ms.v1";
+pub const USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY: &str = "user.extraction_timeout_secs.v1";
+
 /// Canonical project-scoped runtime settings.
 pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";
 pub const INDEX_INCLUDE_SETTING_KEY: &str = "index.include.v1";
@@ -75,6 +80,9 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
     crate::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1,
+    USER_UPLOAD_ENABLED_SETTING_KEY,
+    USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
     INDEX_EXCLUDE_SETTING_KEY,
     INDEX_INCLUDE_SETTING_KEY,
     INDEX_MAX_FILE_SIZE_SETTING_KEY,
@@ -178,6 +186,7 @@ pub struct ConfigurationMutationGrantReceiptV1 {
     pub policy_digest: AccessPolicyDigest,
     pub sink: ConfigurationMutationSinkV1,
     pub effect: ConfigurationMutationEffectV1,
+    pub idempotency_key: Option<ConfigurationIdempotencyKey>,
     pub issued_at: UtcMicros,
     pub expires_at: UtcMicros,
     pub receipt_digest: ManifestDigest,
@@ -196,6 +205,7 @@ impl ConfigurationMutationGrantReceiptV1 {
         policy_digest: AccessPolicyDigest,
         sink: ConfigurationMutationSinkV1,
         effect: ConfigurationMutationEffectV1,
+        idempotency_key: Option<ConfigurationIdempotencyKey>,
         issued_at: UtcMicros,
         expires_at: UtcMicros,
     ) -> Result<Self, DomainError> {
@@ -210,6 +220,7 @@ impl ConfigurationMutationGrantReceiptV1 {
             policy_digest,
             sink,
             effect,
+            idempotency_key,
             issued_at,
             expires_at,
             receipt_digest: canonical_sha256(&("pending",))?,
@@ -262,6 +273,40 @@ impl ConfigurationMutationGrantReceiptV1 {
         self.scope_digest.validate()?;
         self.expected_configuration_revision.validate()?;
         self.policy_digest.validate()?;
+        match (self.operation, self.idempotency_key.as_ref()) {
+            (
+                ConfigurationMutationOperationV1::DirectMutation
+                | ConfigurationMutationOperationV1::CredentialWrite
+                | ConfigurationMutationOperationV1::ProtectedApply
+                | ConfigurationMutationOperationV1::RollbackApply,
+                Some(key),
+            ) => key.validate()?,
+            (
+                ConfigurationMutationOperationV1::DirectMutation
+                | ConfigurationMutationOperationV1::CredentialWrite
+                | ConfigurationMutationOperationV1::ProtectedApply
+                | ConfigurationMutationOperationV1::RollbackApply,
+                None,
+            ) => {
+                return Err(DomainError::NonCanonical {
+                    field: "configuration mutation grant receipt idempotency",
+                });
+            }
+            (
+                ConfigurationMutationOperationV1::ProtectedDryRun
+                | ConfigurationMutationOperationV1::RollbackDryRun,
+                None,
+            ) => {}
+            (
+                ConfigurationMutationOperationV1::ProtectedDryRun
+                | ConfigurationMutationOperationV1::RollbackDryRun,
+                Some(_),
+            ) => {
+                return Err(DomainError::NonCanonical {
+                    field: "configuration mutation preview idempotency",
+                });
+            }
+        }
         if self.policy_epoch == 0 || self.expires_at <= self.issued_at {
             return Err(DomainError::NonCanonical {
                 field: "configuration mutation grant receipt lifetime",
@@ -283,6 +328,7 @@ impl ConfigurationMutationGrantReceiptV1 {
             &self.policy_digest,
             self.sink,
             self.effect,
+            &self.idempotency_key,
             self.issued_at,
             self.expires_at,
         ))
@@ -797,7 +843,10 @@ pub struct CredentialReferenceMetadataV1 {
     pub reference_id: CredentialReferenceId,
     pub kind: CredentialKindV1,
     pub reference_digest: ManifestDigest,
+    pub operation_digest: ManifestDigest,
+    pub settlement_authority: ConfigurationSettlementAuthorityV1,
     pub created_at: UtcMicros,
+    pub effective_deadline_at: UtcMicros,
     pub rotation: u64,
 }
 
@@ -806,14 +855,20 @@ impl CredentialReferenceMetadataV1 {
         reference_id: CredentialReferenceId,
         kind: CredentialKindV1,
         reference_digest: ManifestDigest,
+        operation_digest: ManifestDigest,
+        settlement_authority: ConfigurationSettlementAuthorityV1,
         created_at: UtcMicros,
+        effective_deadline_at: UtcMicros,
         rotation: u64,
     ) -> Result<Self, DomainError> {
         let metadata = Self {
             reference_id,
             kind,
             reference_digest,
+            operation_digest,
+            settlement_authority,
             created_at,
+            effective_deadline_at,
             rotation,
         };
         metadata.validate()?;
@@ -822,7 +877,39 @@ impl CredentialReferenceMetadataV1 {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.reference_id.validate()?;
-        self.reference_digest.validate()
+        self.reference_digest.validate()?;
+        self.operation_digest.validate()?;
+        self.settlement_authority.validate()?;
+        if self.settlement_authority.revalidated_at > self.created_at
+            || self.effective_deadline_at <= self.created_at
+        {
+            return Err(DomainError::NonCanonical {
+                field: "credential write receipt deadline",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Original authorization evidence pinned to a durable configuration effect.
+/// A retry reauthorizes access separately without replacing these fields.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationSettlementAuthorityV1 {
+    pub policy_epoch: u64,
+    pub policy_digest: AccessPolicyDigest,
+    pub revalidated_at: UtcMicros,
+}
+
+impl ConfigurationSettlementAuthorityV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.policy_digest.validate()?;
+        if self.policy_epoch == 0 {
+            return Err(DomainError::NonCanonical {
+                field: "configuration settlement policy epoch",
+            });
+        }
+        Ok(())
     }
 }
 

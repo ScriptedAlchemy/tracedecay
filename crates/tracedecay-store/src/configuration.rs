@@ -12,7 +12,9 @@ use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationSnapshotV1, ProtectedChange, ProtectedChangePlan,
     RollbackModeV1,
 };
-use tracedecay_domain::{ActorId, DomainError, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    AccessPolicyDigest, ActorId, DomainError, ManifestDigest, UtcMicros, canonical_sha256,
+};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ConfigurationStoreError {
@@ -73,8 +75,12 @@ pub struct ConfigurationMutationReceiptV1 {
     pub base_revision_id: ConfigurationRevisionId,
     pub result_revision_id: ConfigurationRevisionId,
     pub operation_digest: ManifestDigest,
+    pub authorization_policy_epoch: u64,
+    pub authorization_policy_digest: AccessPolicyDigest,
+    pub authority_revalidated_at: UtcMicros,
     pub receipt_digest: ManifestDigest,
     pub created_at: UtcMicros,
+    pub effective_deadline_at: UtcMicros,
 }
 
 impl ConfigurationMutationReceiptV1 {
@@ -85,7 +91,17 @@ impl ConfigurationMutationReceiptV1 {
         self.base_revision_id.validate()?;
         self.result_revision_id.validate()?;
         self.operation_digest.validate()?;
-        self.receipt_digest.validate()
+        self.authorization_policy_digest.validate()?;
+        self.receipt_digest.validate()?;
+        if self.authorization_policy_epoch == 0
+            || self.authority_revalidated_at > self.created_at
+            || self.effective_deadline_at <= self.created_at
+        {
+            return Err(DomainError::InvalidRange {
+                field: "configuration mutation receipt deadline",
+            });
+        }
+        Ok(())
     }
 }
 

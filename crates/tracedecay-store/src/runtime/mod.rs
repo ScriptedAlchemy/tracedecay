@@ -11,6 +11,7 @@
 
 mod consistency;
 mod error;
+mod graph_publication;
 mod identity;
 mod lifecycle;
 mod operation;
@@ -18,10 +19,12 @@ mod outbox;
 mod ports;
 mod repository_read;
 mod scope_set;
+mod semantic_vector_staging;
 mod telemetry;
 
 pub use consistency::*;
 pub use error::*;
+pub use graph_publication::*;
 pub use identity::*;
 pub use lifecycle::*;
 pub use operation::*;
@@ -29,4 +32,5 @@ pub use outbox::*;
 pub use ports::*;
 pub use repository_read::*;
 pub use scope_set::*;
+pub use semantic_vector_staging::*;
 pub use telemetry::*;

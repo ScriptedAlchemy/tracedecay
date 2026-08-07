@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use tracedecay_domain::configuration::{
     AccessRuleId, AuthorityRef, CONFIGURATION_SETTING_KEYS_V1, CapabilityResolutionContextV1,
-    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
-    ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1,
+    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
+    ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
+    ConfigurationSettlementAuthorityV1, ConfigurationValueV1, CredentialKindV1,
     CredentialReferenceId, CredentialReferenceMetadataV1, RuleEffect, SEMANTIC_RUNTIME_SETTING_KEY,
     ScopeAccessRule, ScopeAccessSubjectV1, ScopeSourceBinding, SettingKey, SourceBindingId,
     SourceKindV1, UserProfileId, WorktreePlacementModeV1, resolve_restrictive_capabilities,
@@ -125,7 +126,14 @@ fn credential_metadata_has_no_plaintext_value_surface() {
         id::<CredentialReferenceId>("credential.reference"),
         CredentialKindV1::ApiToken,
         digest('c'),
+        digest('d'),
+        ConfigurationSettlementAuthorityV1 {
+            policy_epoch: 1,
+            policy_digest: id::<AccessPolicyDigest>(&format!("sha256:{}", "e".repeat(64))),
+            revalidated_at: UtcMicros(42),
+        },
         UtcMicros(42),
+        UtcMicros(84),
         1,
     )
     .unwrap();
@@ -135,6 +143,7 @@ fn credential_metadata_has_no_plaintext_value_surface() {
     assert!(encoded.get("plaintext").is_none());
     assert!(encoded.get("secret").is_none());
     assert!(encoded.get("reference_digest").is_some());
+    assert!(encoded.get("operation_digest").is_some());
 }
 
 #[test]
@@ -177,6 +186,7 @@ fn mutation_receipt() -> ConfigurationMutationGrantReceiptV1 {
         AccessPolicyDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
         ConfigurationMutationSinkV1::ConfigurationStore,
         ConfigurationMutationEffectV1::CommitConfigurationRevision,
+        Some(ConfigurationIdempotencyKey::new("configuration.idempotency.fixture").unwrap()),
         UtcMicros(10),
         UtcMicros(20),
     )
@@ -225,6 +235,18 @@ fn mutation_receipt_rejects_expiry_and_binding_replay() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn mutation_receipt_digest_rejects_a_swapped_direct_idempotency_key() {
+    let mut receipt = mutation_receipt();
+    receipt.idempotency_key =
+        Some(ConfigurationIdempotencyKey::new("configuration.idempotency.tampered").unwrap());
+
+    assert!(matches!(
+        receipt.validate(),
+        Err(tracedecay_domain::DomainError::DigestMismatch)
+    ));
 }
 
 #[test]

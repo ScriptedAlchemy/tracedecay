@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -32,10 +33,16 @@ pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> 
 use crate::canonical_text::validate_canonical_identity as validate_code_identity;
 
 validated_string_newtype!(
-    plain,
+    schema,
     DomainError,
     validate_code_identity;
     CodeGenerationId,
+);
+
+validated_string_newtype!(
+    plain,
+    DomainError,
+    validate_code_identity;
     FileOccurrenceId,
     SymbolOccurrenceId,
     CodeSearchChunkId,

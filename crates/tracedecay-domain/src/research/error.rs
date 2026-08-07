@@ -25,6 +25,8 @@ pub enum DomainError {
     AuthorshipWithoutProviderLinkage,
     #[error("time interval start must be before its end")]
     InvalidTimeInterval,
+    #[error("{field} violates its required ordering or range")]
+    InvalidRange { field: &'static str },
     #[error("redacted and rejected counts cannot exceed scanned count")]
     InvalidRedactionCounts,
     #[error(

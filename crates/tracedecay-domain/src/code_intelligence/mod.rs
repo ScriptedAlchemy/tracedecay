@@ -17,12 +17,14 @@ pub mod identity;
 pub mod index;
 pub mod language;
 pub mod search;
+mod vector_contract;
 
 pub use graph::*;
 pub use identity::*;
 pub use index::*;
 pub use language::*;
 pub use search::*;
+pub use vector_contract::*;
 
 #[cfg(test)]
 mod tests {
