@@ -92,6 +92,13 @@
         assert!(!destination.path().exists());
     }
 
+    // Restart re-admission of an explicitly imported artifact (its digest is
+    // not the catalog package digest) verifies the manifest against
+    // `RuntimeEnvironmentV1::detect_fastembed_process()`, which is a typed
+    // capability absence without the bundled runtime. Workspace builds unify
+    // `semantic-fastembed` on via the root crate's `production` default; the
+    // gate keeps scoped `-p tracedecay-semantic` runs truthful.
+    #[cfg(feature = "semantic-fastembed")]
     #[test]
     fn restart_re_admits_explicit_import_without_legacy_acquisition() {
         let fixture = tempfile::tempdir().unwrap();
@@ -551,6 +558,9 @@
         }
     }
 
+    // Reranker publication admits the artifact for runtime against
+    // `detect_fastembed_process()` evidence; see the gate rationale above.
+    #[cfg(feature = "semantic-fastembed")]
     #[test]
     fn independent_reranker_import_rotates_active_and_rollback_leases() {
         let fixture = tempfile::tempdir().unwrap();
@@ -599,11 +609,13 @@
         assert_eq!(rolled_back.rollback_artifact_digest, Some(second_digest));
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     struct FixtureRerankerHttpsTransport {
         members: BTreeMap<String, Vec<u8>>,
         revision: String,
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     impl ExplicitHttpsArtifactTransportV1 for FixtureRerankerHttpsTransport {
         fn fetch_range(
             &self,
@@ -631,6 +643,8 @@
         }
     }
 
+    // Same runtime-evidence gate as the local reranker import above.
+    #[cfg(feature = "semantic-fastembed")]
     #[test]
     fn configured_https_reranker_acquisition_uses_immutable_member_pins() {
         let fixture = tempfile::tempdir().unwrap();
