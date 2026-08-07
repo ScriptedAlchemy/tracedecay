@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router';
 import { CodePage } from './CodePage.tsx';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 
@@ -95,13 +96,15 @@ function serveReadFailure() {
   );
 }
 
-function renderCode() {
+function renderCode(entry = '/code') {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <CodePage />
+      <MemoryRouter initialEntries={[entry]}>
+        <CodePage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -156,5 +159,31 @@ describe('a graph read that failed', () => {
     expect((await screen.findAllByText(/HTTP 500/i)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/symbols indexed/i)).toBeNull();
     expect(screen.queryByText(/no symbols are indexed/i)).toBeNull();
+  });
+});
+
+describe('the URL-stable structure lens', () => {
+  it('resolves an exact symbol deep link into the CORE source sample', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const { pathname, search } = new URL(String(input), 'http://localhost');
+        return jsonOk(resolveFixture(pathname, search));
+      }),
+    );
+
+    renderCode('/code?structureLens=core&structureFocus=sym-0');
+
+    expect(await screen.findByRole('heading', { name: 'CORE sample' })).toBeTruthy();
+    expect(
+      screen
+        .getByRole('button', { name: /CORE.*file sample/i })
+        .getAttribute('aria-current'),
+    ).toBe('step');
+    expect(
+      screen.getByRole('table', {
+        name: /all source-positioned symbols in the returned subgraph/i,
+      }),
+    ).toBeTruthy();
   });
 });

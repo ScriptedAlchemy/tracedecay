@@ -1,5 +1,6 @@
 import { Suspense, lazy, useState, type ComponentProps } from 'react';
-import { ArrowLeft, Waypoints } from 'lucide-react';
+import { Waypoints } from 'lucide-react';
+import { useSearchParams } from 'react-router';
 import {
   DataRow,
   ExplorerSplit,
@@ -24,6 +25,14 @@ import { CodeDiagnostics } from './CodeDiagnostics.tsx';
 import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
 import type { TraceFocus } from './TraceView.tsx';
+import { CoreSample } from './CoreSample.tsx';
+import { StructureLensRuler } from './StructureLensRuler.tsx';
+import { TraceChunkFallback } from './TraceChunkFallback.tsx';
+import {
+  readStructureLocation,
+  writeStructureLocation,
+  type StructureLens,
+} from './structureLens.ts';
 import {
   type GraphNodeV1,
   type GraphOverviewPayloadV1,
@@ -52,6 +61,8 @@ const BASE = '/api/plugins/graph';
  * symbol search, node inspector. The virtualized list beside the canvas is
  * its accessible equivalent. */
 export function CodePage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const structure = readStructureLocation(searchParams);
   const overview = useEnvelope(
     ['graph', 'overview'],
     `${BASE}/overview`,
@@ -63,18 +74,50 @@ export function CodePage() {
     ['graph', 'search', submitted],
     `${BASE}/search?q=${encodeURIComponent(submitted)}&limit=100`,
     GraphSearchPayloadV1Schema,
-    { enabled: submitted !== '' },
+    {
+      enabled: submitted !== '',
+      activity:
+        submitted === ''
+          ? undefined
+          : {
+              id: 'code-symbol-search',
+              label: 'Searching indexed symbols',
+              cancelable: true,
+            },
+    },
   );
   const [selected, setSelected] = useState<TraceFocus | null>(null);
-  // The TRACE drill-in (plan 11b). It is a state of THIS page, not a route:
-  // the spine and the trace are two zoom positions on one field, and a URL
-  // change between them would break the "one navigable space" model. Escape
-  // and the back control return to the spine.
-  const [traced, setTraced] = useState<TraceFocus | null>(null);
+  // The URL identity is authoritative. Every local selection writes it in the
+  // same gesture, so a back/forward navigation or a pasted deep link can never
+  // be silently retargeted by an older in-memory row.
+  const focusId = structure.focusId;
   const subgraph = useEnvelope(
-    ['graph', 'subgraph', selected?.id ?? ''],
-    `${BASE}/subgraph${selected ? `?node_id=${encodeURIComponent(selected.id)}` : ''}`,
+    ['graph', 'subgraph', focusId ?? ''],
+    `${BASE}/subgraph${focusId ? `?node_id=${encodeURIComponent(focusId)}` : ''}`,
     GraphSubgraphPayloadV1Schema,
+  );
+  const subgraphPayload = envelopePayload(subgraph.data);
+  const resolvedFocus =
+    selected !== null && selected.id === focusId
+      ? selected
+      : (subgraphPayload?.nodes.find((node) => node.id === focusId) ?? null);
+  const coreAvailable =
+    resolvedFocus?.file_path != null &&
+    resolvedFocus.start_line != null &&
+    resolvedFocus.end_line != null &&
+    subgraphPayload !== undefined;
+  const navigateStructure = useCallback(
+    (lens: StructureLens, node: TraceFocus | null = resolvedFocus) => {
+      const nextFocus = node?.id ?? structure.focusId;
+      setSearchParams(
+        writeStructureLocation(searchParams, {
+          lens: lens === 'cortex' || nextFocus !== null ? lens : 'cortex',
+          focusId: nextFocus,
+        }),
+        { replace: true },
+      );
+    },
+    [resolvedFocus, searchParams, setSearchParams, structure.focusId],
   );
   const canvasNodes = useMemo(() => {
     const payload = envelopePayload(subgraph.data);
@@ -105,12 +148,25 @@ export function CodePage() {
   }, [search.data]);
   const selectFromCanvas = useCallback(
     (id: string | null) => {
-      if (id == null) return setSelected(null);
+      if (id == null) {
+        setSelected(null);
+        setSearchParams(
+          writeStructureLocation(searchParams, { lens: 'cortex', focusId: null }),
+          { replace: true },
+        );
+        return;
+      }
       const payload = envelopePayload(subgraph.data);
       const node = payload?.nodes.find((candidate) => candidate.id === id);
-      if (node) setSelected(node);
+      if (node) {
+        setSelected(node);
+        setSearchParams(
+          writeStructureLocation(searchParams, { lens: 'cortex', focusId: node.id }),
+          { replace: true },
+        );
+      }
     },
-    [subgraph.data],
+    [searchParams, setSearchParams, subgraph.data],
   );
 
   return (
@@ -208,20 +264,45 @@ export function CodePage() {
         </div>
       }
       list={
-        traced ? (
-          <Suspense
-            fallback={<TraceChunkFallback focus={traced} onClose={() => setTraced(null)} />}
-          >
-            <TraceView
-              focus={traced}
-              onClose={() => setTraced(null)}
-              onFocusChange={(node) => {
-                setTraced(node);
-                setSelected(node);
-              }}
+        <div className="flex h-full min-h-0 flex-col">
+          <StructureLensRuler
+            lens={structure.lens}
+            focusAvailable={resolvedFocus !== null}
+            coreAvailable={coreAvailable}
+            onChange={navigateStructure}
+          />
+          {structure.lens === 'trace' && resolvedFocus !== null ? (
+            <Suspense
+              fallback={
+                <TraceChunkFallback
+                  focus={resolvedFocus}
+                  onClose={() => navigateStructure('cortex')}
+                />
+              }
+            >
+              <TraceView
+                focus={resolvedFocus}
+                onClose={() => navigateStructure('cortex')}
+                onFocusChange={(node) => {
+                  setSelected(node);
+                  navigateStructure('trace', node);
+                }}
+              />
+            </Suspense>
+          ) : structure.lens === 'core' &&
+            resolvedFocus !== null &&
+            subgraphPayload !== undefined ? (
+            <CoreSample payload={subgraphPayload} focusId={resolvedFocus.id} />
+          ) : structure.lens !== 'cortex' ? (
+            <CenteredState
+              title={
+                subgraph.isPending
+                  ? 'Resolving the exact structure focus'
+                  : 'The requested lens is unavailable for this graph identity'
+              }
+              kind={subgraph.isPending ? 'loading' : 'unavailable'}
             />
-          </Suspense>
-        ) : (
+          ) : (
           // Two scroll containers, one inside the other: the archetype already
           // scrolls the list slot, and this pane pinned itself to `h-full` of
           // it and then divided that height between a canvas that cannot
@@ -258,26 +339,42 @@ export function CodePage() {
                     // symbol = TRACE floods" is the navigation model, not a
                     // secondary action hidden behind a second click.
                     setSelected(node);
-                    setTraced(node);
+                    navigateStructure('trace', node);
                   }}
-                  selected={selected}
+                  selected={resolvedFocus}
                 />
               ) : (
                 <SymbolMatches
                   pending={search.isPending}
                   result={search.data}
                   submitted={submitted}
-                  selected={selected}
-                  onSelect={setSelected}
+                  selected={resolvedFocus}
+                  onSelect={(node) => {
+                    setSelected(node);
+                    navigateStructure('cortex', node);
+                  }}
                 />
               )}
             </div>
           </div>
-        )
+          )}
+        </div>
       }
       inspector={
-        selected ? (
-          <InspectorPanel title="Symbol" onClose={() => setSelected(null)}>
+        resolvedFocus ? (
+          <InspectorPanel
+            title="Symbol"
+            onClose={() => {
+              setSelected(null);
+              setSearchParams(
+                writeStructureLocation(searchParams, {
+                  lens: 'cortex',
+                  focusId: null,
+                }),
+                { replace: true },
+              );
+            }}
+          >
             <div className="flex flex-col gap-3">
               {/* The way into TRACE for anything reached by search, and the
                * keyboard path for everything else. The hub cards below open it
@@ -285,84 +382,30 @@ export function CodePage() {
                * rather than ranked. */}
               <button
                 type="button"
-                onClick={() => setTraced(selected)}
-                disabled={traced?.id === selected.id}
+                onClick={() => navigateStructure('trace', resolvedFocus)}
+                disabled={structure.lens === 'trace'}
                 className="flex items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 px-2 py-1 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary disabled:cursor-default disabled:text-text-muted"
               >
                 <Waypoints aria-hidden size={12} />
-                {traced?.id === selected.id ? 'Tracing this symbol' : 'Trace call topography'}
+                {structure.lens === 'trace' ? 'Tracing this symbol' : 'Trace call topography'}
               </button>
-              {selected.signature ? (
+              {resolvedFocus.signature ? (
                 <pre className="overflow-x-auto rounded-[var(--radius-standard)] bg-surface-2 p-2 font-mono text-2xs leading-relaxed">
-                  {selected.signature}
+                  {resolvedFocus.signature}
                 </pre>
               ) : null}
-              {selected.file_path ? (
+              {resolvedFocus.file_path ? (
                 <p className="font-mono text-2xs text-text-muted">
-                  {selected.file_path}
-                  {selected.start_line != null ? `:${selected.start_line}` : ''}
+                  {resolvedFocus.file_path}
+                  {resolvedFocus.start_line != null ? `:${resolvedFocus.start_line}` : ''}
                 </p>
               ) : null}
-              <KeyValueTree value={selected} />
+              <KeyValueTree value={resolvedFocus} />
             </div>
           </InspectorPanel>
         ) : undefined
       }
     />
-  );
-}
-
-/**
- * What stands in the list slot while the trace chunk is being fetched.
- *
- * The geometry is `TraceView`'s own opening row — same 32px header, same rule,
- * same padding, same back control in the same place — so the surface does not
- * shift when the chunk arrives and a keyboard reader is never stranded in a
- * pane with no way out of it.
- *
- * What it must NOT do is look like a trace. At this point no neighbour request
- * has been issued at all, so there is no field, no count and no symbol list to
- * stand in for; a skeleton of the readout plate or a `0` under `Callers` would
- * be a fabricated reading of a query that has not been asked. It reports the
- * one thing that is true — the module is still loading — and says plainly that
- * this is not an empty neighbourhood. The focus name is the symbol the reader
- * just chose, which is already in hand and not a guess.
- */
-function TraceChunkFallback({
-  focus,
-  onClose,
-}: {
-  focus: TraceFocus;
-  onClose: () => void;
-}) {
-  return (
-    <div className="flex h-full min-h-0 flex-col" data-testid="trace-chunk-fallback">
-      <header className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
-        <button
-          type="button"
-          onClick={onClose}
-          className="flex shrink-0 items-center gap-1 text-2xs text-text-muted hover:text-text-primary focus-visible:text-text-primary"
-        >
-          <ArrowLeft aria-hidden size={12} />
-          Back to spine
-        </button>
-        <span aria-hidden className="td-rule" />
-        <h2 className="td-title min-w-0 truncate">
-          <span className="text-text-muted">trace · </span>
-          {displayName(focus)}
-        </h2>
-      </header>
-      <div className="min-h-0 flex-1 overflow-auto">
-        <p
-          role="status"
-          className="px-2.5 py-2 text-2xs leading-relaxed text-state-loading"
-        >
-          loading the trace view — the code for this surface is still arriving. No
-          call edge has been requested yet, so nothing here is an empty
-          neighbourhood, a zero or a settled field.
-        </p>
-      </div>
-    </div>
   );
 }
 

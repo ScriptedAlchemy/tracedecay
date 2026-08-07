@@ -22,6 +22,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router';
 
 import { CodePage } from './CodePage.tsx';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
@@ -84,7 +85,9 @@ function renderCode() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <CodePage />
+      <MemoryRouter>
+        <CodePage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -115,6 +118,11 @@ describe('Code page trace chunk', () => {
 
     // The spine is up: hub cards are drawn from the overview payload.
     expect(await screen.findByRole('button', { name: HUB })).toBeTruthy();
+    expect(
+      screen
+        .getByRole('button', { name: /CORTEX.*repository/i })
+        .getAttribute('aria-current'),
+    ).toBe('step');
     // And the page takes input while the trace module is still unfetched.
     const search = screen.getByRole<HTMLInputElement>('searchbox', {
       name: /symbol search/i,
@@ -138,6 +146,9 @@ describe('Code page trace chunk', () => {
     await user.click(await screen.findByRole('button', { name: HUB }));
     const fallback = await screen.findByTestId('trace-chunk-fallback');
     expect(chunk.requests).toBe(1);
+    expect(
+      screen.getByRole('button', { name: /TRACE.*symbol/i }).getAttribute('aria-current'),
+    ).toBe('step');
 
     // Says loading, and says outright that this is not an empty neighbourhood.
     const status = within(fallback).getByRole('status');

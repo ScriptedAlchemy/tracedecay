@@ -69,6 +69,7 @@ export interface TraceFocus {
   qualified_name?: string | null;
   file_path?: string | null;
   start_line?: number | null;
+  end_line?: number | null;
   signature?: string | null;
   degree?: number | null;
 }

@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { MemoryRouter } from 'react-router';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -38,7 +39,9 @@ function renderCode() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <CodePage />
+      <MemoryRouter initialEntries={['/code']}>
+        <CodePage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
