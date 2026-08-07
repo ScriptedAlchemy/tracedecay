@@ -139,7 +139,7 @@ pub(super) fn install_writer_fence(
 ) -> rusqlite::Result<()> {
     install
         .validate()
-        .map_err(|error| invalid(&error.to_string()))?;
+        .map_err(|error| invalid(error.to_string()))?;
     let expected_json = encode(&install.expected)?;
     let replacement_json = encode(&install.replacement)?;
     let changed = savepoint.execute(

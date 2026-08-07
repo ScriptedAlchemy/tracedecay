@@ -34,8 +34,6 @@ use tracedecay_domain::repository_path_matches_scope;
 
 /// Bytes sniffed from the head of each file to classify it as binary.
 const BINARY_SNIFF_BYTES: usize = 8_192;
-/// Skip files larger than this; structural search of a multi-MB generated blob
-/// is never what the caller wants and dominates the scan budget.
 
 /// A tree-sitter language wired into `ast_grep_core`'s pattern engine.
 ///

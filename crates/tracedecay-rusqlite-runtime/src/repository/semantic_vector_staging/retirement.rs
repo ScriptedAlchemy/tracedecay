@@ -515,12 +515,7 @@ fn insert_cleanup(
                 text(request.semantic_generation_id.as_digest().as_str()),
             ],
         )?;
-        if rows
-            .rows
-            .first()
-            .map(|row| text_at(row, 0))
-            .transpose()?
-            .as_deref()
+        if rows.rows.first().map(|row| text_at(row, 0)).transpose()?
             != Some(json(request)?.as_str())
         {
             return Err(corrupt(

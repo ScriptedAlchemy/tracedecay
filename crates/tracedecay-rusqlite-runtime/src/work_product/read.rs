@@ -92,8 +92,7 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
             WorkGraphReadModeV1::AsOf { valid_at } => {
                 let snapshot = entries
                     .into_iter()
-                    .filter(|entry| entry.valid_at() <= *valid_at)
-                    .next_back()
+                    .rfind(|entry| entry.valid_at() <= *valid_at)
                     .ok_or(PortError::NotFoundOrNotAuthorized)?;
                 Ok(WorkGraphReadV1::AsOf {
                     authorized_scope: scope.clone(),

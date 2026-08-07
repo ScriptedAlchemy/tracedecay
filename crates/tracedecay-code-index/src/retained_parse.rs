@@ -300,6 +300,7 @@ impl SharedRetainedParsePool {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn parse_existing(
         &self,
         key: ParseDocumentKey,

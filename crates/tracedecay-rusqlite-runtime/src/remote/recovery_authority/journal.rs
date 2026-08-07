@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) enum BeginOperationV1<T> {
-    Completed(RemoteRecoveryCommittedV1<T>),
+    Completed(Box<RemoteRecoveryCommittedV1<T>>),
     Execute { pre_state_digest: ManifestDigest },
 }
 
@@ -42,7 +42,7 @@ where
             transaction
                 .commit()
                 .map_err(|_| RemoteRecoveryOperationErrorV1::Unavailable)?;
-            return Ok(BeginOperationV1::Completed(committed));
+            return Ok(BeginOperationV1::Completed(Box::new(committed)));
         }
         if matches!(
             existing.state.as_str(),

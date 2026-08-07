@@ -201,6 +201,7 @@ impl CodeGraphEvidenceReader {
         Ok(adjacency)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn traverse_seed(
         &self,
         seed: &SymbolOccurrenceId,

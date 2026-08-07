@@ -62,7 +62,7 @@ impl RepositoryPhysicalAttachmentFactory {
             RepositoryRuntimeReadExecutor::default(),
             None,
         )
-        .map_err(|error| RepositoryAttachmentStartError::Reader(error))?;
+        .map_err(RepositoryAttachmentStartError::Reader)?;
         let expected_identity = opened_database.identity();
         if readers.opened_file_identity() != Some(expected_identity) {
             drop(readers);

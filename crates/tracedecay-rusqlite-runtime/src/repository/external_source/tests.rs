@@ -419,16 +419,13 @@ fn source_commits_enqueue_and_restart_drain_exact_predecessor_chain() {
     let mut connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch(EXTERNAL_SOURCE_SCHEMA_V1).unwrap();
     let (first, binding) = fixture();
-    for (sequence, commit) in [(1, first)] {
-        let mut transaction = connection.transaction().unwrap();
-        let savepoint = transaction.savepoint().unwrap();
-        ExternalSourceExecutor
-            .execute_write(&savepoint, &commit)
-            .unwrap();
-        savepoint.commit().unwrap();
-        transaction.commit().unwrap();
-        assert_eq!(sequence, 1);
-    }
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    ExternalSourceExecutor
+        .execute_write(&savepoint, &first)
+        .unwrap();
+    savepoint.commit().unwrap();
+    transaction.commit().unwrap();
     for (sequence, seed) in [(2, '7'), (3, '9')] {
         let prior = load_state(&connection, &binding).unwrap().unwrap();
         let commit = empty_successor(&prior, sequence, seed);

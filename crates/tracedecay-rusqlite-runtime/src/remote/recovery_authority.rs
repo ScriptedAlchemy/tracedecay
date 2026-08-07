@@ -94,6 +94,7 @@ pub trait RemoteRecoveryPhysicalEffectsV1: Send + Sync {
         RemoteRecoveryPhysicalEffectErrorV1,
     >;
 
+    #[allow(clippy::too_many_arguments)]
     fn promote(
         &self,
         operation_id: &str,
@@ -142,15 +143,14 @@ impl RemoteRecoverySqliteAuthorityV1 {
             .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
         let key = authority_key_for_writer(&authority.fence)?;
         let transaction = self.handle.begin_immediate()?;
-        if let Some((current, current_frontier)) = load_authority_in(&transaction, &key)? {
-            if current.fence.authority_epoch > authority.fence.authority_epoch
+        if let Some((current, current_frontier)) = load_authority_in(&transaction, &key)?
+            && (current.fence.authority_epoch > authority.fence.authority_epoch
                 || (current.fence.authority_epoch == authority.fence.authority_epoch
                     && current != *authority)
-                || (current.fence == authority.fence && frontier_sequence < current_frontier)
-            {
-                transaction.rollback()?;
-                return Err(RemoteSqliteStorageErrorV1::Conflict);
-            }
+                || (current.fence == authority.fence && frontier_sequence < current_frontier))
+        {
+            transaction.rollback()?;
+            return Err(RemoteSqliteStorageErrorV1::Conflict);
         }
         transaction.execute(ExactSqlStatement::new(
             "INSERT INTO remote_recovery_authorities (
@@ -268,6 +268,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_operation<Request, Output>(
         &self,
         kind: &'static str,
@@ -310,7 +311,7 @@ impl RemoteRecoverySqliteAuthorityV1 {
             None,
             started_at,
         )? {
-            BeginOperationV1::Completed(committed) => return Ok(committed),
+            BeginOperationV1::Completed(committed) => Ok(*committed),
             BeginOperationV1::Execute { pre_state_digest } => {
                 if let Some(interruption) = control.interruption(&request.request_id) {
                     record_interruption(
@@ -542,7 +543,7 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
             Some(&replacement),
             request.sent_at,
         )? {
-            BeginOperationV1::Completed(committed) => Ok(committed),
+            BeginOperationV1::Completed(committed) => Ok(*committed),
             BeginOperationV1::Execute { pre_state_digest } => {
                 if let Some(interruption) = control.interruption(&request.request_id) {
                     record_interruption(

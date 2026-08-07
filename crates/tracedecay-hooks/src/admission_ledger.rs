@@ -442,6 +442,7 @@ fn acquire_writer_lock(root: &Path) -> Result<fs::File, HookAdmissionLedgerError
     shared_validate_regular(&path).map_err(|_| HookAdmissionLedgerError::UnsafePath)?;
     let file = fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)

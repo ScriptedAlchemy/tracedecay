@@ -293,13 +293,13 @@ fn measure_cold(repetition: usize, source: &str) -> Result<Sample, Box<dyn Error
         &extractor,
     )?;
     let wall = started.elapsed();
-    Ok(sample(
+    sample(
         repetition,
         wall.as_nanos() as u64,
         &report,
         extraction,
         &pool,
-    )?)
+    )
 }
 
 fn measure_incremental(
@@ -323,13 +323,13 @@ fn measure_incremental(
         &extractor,
     )?;
     let wall = started.elapsed();
-    Ok(sample(
+    sample(
         repetition,
         wall.as_nanos() as u64,
         &report,
         extraction,
         &pool,
-    )?)
+    )
 }
 
 fn sample(
