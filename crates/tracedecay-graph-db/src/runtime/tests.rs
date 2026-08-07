@@ -315,8 +315,7 @@ fn apply_vector_batch_with_check(
         database,
         &mut state,
         batch,
-        digest,
-        None,
+        mutation::CommitMetadata::for_digest(digest),
         &mutation::RelationEndpointNamespaces::new(),
         check,
     )

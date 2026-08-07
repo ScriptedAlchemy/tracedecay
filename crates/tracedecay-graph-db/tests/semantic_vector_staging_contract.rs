@@ -105,7 +105,7 @@ fn finalize_retention_step(
                 authority,
                 context,
                 writer_fence,
-                reservation,
+                *reservation,
             )?;
             Ok(census)
         }
@@ -1092,7 +1092,7 @@ fn dropped_reservation_releases_its_fence_after_caller_cancellation() {
     fixture
         .graph
         .registry
-        .release_semantic_vector_retirement(reservation)
+        .release_semantic_vector_retirement(*reservation)
         .expect("explicit release must not consult a cancelled request");
     drop(second_commit);
 }

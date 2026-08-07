@@ -75,41 +75,6 @@ impl GraphGenerationManifest {
         )
     }
 
-    pub(crate) fn relational_metadata_replay_with_recovered_digest(
-        &self,
-        shard_id: StoreShardIdV1,
-        idempotency_key: GraphIdempotencyKey,
-        input_digest: GraphPublicationInputDigestV1,
-        expected_prior_head: Option<GraphVerifiedHeadV1>,
-        expected_recovered_digest: tracedecay_store::GraphRecoveredGenerationDigestV1,
-        check: &dyn Fn() -> Result<(), GraphDbError>,
-    ) -> Result<GraphPublicationReplayV1, GraphDbError> {
-        self.validate_checked(check)?;
-        let payload = self.replay_source_payload(
-            GraphGenerationReplaySource::MetadataOnlyManifest(GraphGenerationReplayMetadata {
-                projection: self.projection.clone(),
-                generation: self.generation.clone(),
-                source_generation: self.source_generation.clone(),
-                watermark: self.watermark.clone(),
-                dependencies: self.dependencies.clone(),
-            }),
-            check,
-        )?;
-        let mut replay = self.relational_replay_with_payload(
-            shard_id,
-            idempotency_key,
-            input_digest,
-            expected_prior_head,
-            payload,
-            check,
-        )?;
-        replay.expected_recovered_digest = expected_recovered_digest;
-        replay
-            .validate()
-            .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        Ok(replay)
-    }
-
     pub(crate) fn relational_semantic_vector_replay_with_recovered_digest(
         &self,
         plan: &tracedecay_store::SemanticVectorStagePlan,

@@ -54,7 +54,7 @@ pub struct SemanticVectorRetirementReservation {
 
 enum SemanticVectorRetirementReservationKind {
     Cancelled,
-    Published(GraphPublicationReplayRetirementV1),
+    Published(Box<GraphPublicationReplayRetirementV1>),
 }
 
 impl SemanticVectorRetirementReservation {
@@ -99,7 +99,7 @@ pub enum SemanticVectorRetentionStep {
     Census(SemanticVectorRetentionCensus),
     Reserved {
         census: SemanticVectorRetentionCensus,
-        reservation: SemanticVectorRetirementReservation,
+        reservation: Box<SemanticVectorRetirementReservation>,
     },
 }
 
@@ -151,7 +151,7 @@ impl GraphDbRegistry {
             census = summarize_through_action(&page, &census_record.cursor)?;
             return Ok(SemanticVectorRetentionStep::Reserved {
                 census,
-                reservation,
+                reservation: Box::new(reservation),
             });
         }
 
@@ -181,7 +181,7 @@ impl GraphDbRegistry {
             return match reservation {
                 Ok(reservation) => Ok(SemanticVectorRetentionStep::Reserved {
                     census,
-                    reservation,
+                    reservation: Box::new(reservation),
                 }),
                 Err(action) => {
                     census.action = action;
@@ -408,7 +408,7 @@ fn reserve_published(
     Ok(Ok(SemanticVectorRetirementReservation {
         record: record.clone(),
         revision,
-        kind: SemanticVectorRetirementReservationKind::Published(retirement),
+        kind: SemanticVectorRetirementReservationKind::Published(Box::new(retirement)),
         locator,
         database: Arc::clone(database),
         armed: true,
@@ -493,7 +493,7 @@ fn finish_reserved_published(
         reservation.release()?;
         return Err(GraphDbError::Conflict);
     };
-    let replay = replay.clone();
+    let replay = (**replay).clone();
     let locator = reservation.locator.clone();
     {
         let state = database.inner.verified_generations.write().map_err(|_| {

@@ -168,7 +168,7 @@ pub(crate) async fn retire_one_project_vector_generation(
         tracedecay_graph_db::SemanticVectorRetentionStep::Reserved {
             census,
             reservation,
-        } => (census, Some(reservation)),
+        } => (census, Some(*reservation)),
     };
     let configuration_receipt = match complete_configuration_inventory(configuration).await {
         Ok(receipt) => receipt,

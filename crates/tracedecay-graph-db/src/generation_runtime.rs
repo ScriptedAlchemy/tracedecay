@@ -149,13 +149,15 @@ impl GraphDb {
             verified.collected.remove(&locator);
         }
         let mut state = self.state_write_guard()?;
-        let commit = self.apply_locked_with_generation_metadata(
+        let commit = self.apply_locked(
             database,
             &mut state,
             batch,
-            digest,
-            Some(manifest.dependency_closure_digest(check)?),
-            None,
+            mutation::CommitMetadata {
+                digest,
+                generation_dependency_digest: Some(manifest.dependency_closure_digest(check)?),
+                publication_record: None,
+            },
             &endpoint_namespaces,
             check,
         )?;
@@ -468,8 +470,7 @@ impl GraphDb {
             database,
             &mut state,
             batch,
-            digest,
-            None,
+            mutation::CommitMetadata::for_digest(digest),
             &mutation::RelationEndpointNamespaces::new(),
             check,
         )

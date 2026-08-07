@@ -72,10 +72,6 @@ pub(crate) use publication::{
     GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest, GraphPublicationReceipt,
 };
 pub use recovery::VerifiedGraphCommit;
-#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
-pub use recovery::{RecoveredProjectionDigest, RecoveredProjectionManifest};
-#[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
-pub(crate) use recovery::{RecoveredProjectionDigest, RecoveredProjectionManifest};
 pub use registry::{
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRegistryStatus,
     SemanticVectorRetentionAction, SemanticVectorRetentionCensus, SemanticVectorRetentionStep,

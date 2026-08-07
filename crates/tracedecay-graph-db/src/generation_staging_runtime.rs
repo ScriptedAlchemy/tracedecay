@@ -136,12 +136,15 @@ impl GraphDb {
             database,
             &mut state,
             batch,
-            batch_digest.clone(),
-            Some((
-                idempotency_key,
-                batch_digest,
-                receipt.receipt_digest.as_str().to_owned(),
-            )),
+            mutation::CommitMetadata {
+                digest: batch_digest.clone(),
+                generation_dependency_digest: None,
+                publication_record: Some((
+                    idempotency_key,
+                    batch_digest,
+                    receipt.receipt_digest.as_str().to_owned(),
+                )),
+            },
             &mutation::RelationEndpointNamespaces::new(),
             check,
         )?;
@@ -235,17 +238,19 @@ impl GraphDb {
             }
         } else {
             let mut state = self.state_write_guard()?;
-            self.apply_locked_with_generation_metadata(
+            self.apply_locked(
                 database,
                 &mut state,
                 batch,
-                digest.clone(),
-                Some(dependency_digest.clone()),
-                Some((
-                    idempotency_key.clone(),
-                    digest,
-                    input_digest.as_str().to_owned(),
-                )),
+                mutation::CommitMetadata {
+                    digest: digest.clone(),
+                    generation_dependency_digest: Some(dependency_digest.clone()),
+                    publication_record: Some((
+                        idempotency_key.clone(),
+                        digest,
+                        input_digest.as_str().to_owned(),
+                    )),
+                },
                 &mutation::RelationEndpointNamespaces::new(),
                 check,
             )?;

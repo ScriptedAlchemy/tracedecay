@@ -296,16 +296,7 @@ impl GraphGenerationManifest {
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<GraphRecoveredGenerationDigestV1, GraphDbError> {
-        let digest = recovered_generation_digest(
-            &self.projection,
-            &self.generation,
-            &self.source_generation,
-            &self.watermark,
-            &self.dependencies,
-            &self.entities,
-            &self.relations,
-            check,
-        )?;
+        let digest = recovered_generation_digest(self, check)?;
         GraphRecoveredGenerationDigestV1::new(format!("sha256:{digest}"))
             .map_err(|error| GraphDbError::invalid(error.to_string()))
     }
@@ -410,10 +401,6 @@ impl GraphGenerationManifest {
             .collect()
     }
 
-    pub(crate) fn validate(&self) -> Result<(), GraphDbError> {
-        self.validate_checked(&|| Ok(()))
-    }
-
     pub(crate) fn validate_checked(
         &self,
         check: &dyn Fn() -> Result<(), GraphDbError>,
@@ -484,7 +471,6 @@ impl GraphGenerationManifest {
         Ok(())
     }
 
-    #[must_use]
     pub(crate) fn physical_namespace(&self) -> Result<GraphNamespace, GraphDbError> {
         physical_namespace(
             &self.projection.namespace,
@@ -701,15 +687,18 @@ fn recovered_entity_ref(
 }
 
 fn recovered_generation_digest(
-    projection: &GraphProjectionIdentity,
-    generation: &GraphGenerationId,
-    source_generation: &SourceGeneration,
-    watermark: &GraphWatermark,
-    dependencies: &[GraphGenerationDependency],
-    entities: &[GraphEntity],
-    relations: &[GraphGenerationRelation],
+    manifest: &GraphGenerationManifest,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<String, GraphDbError> {
+    let GraphGenerationManifest {
+        projection,
+        generation,
+        source_generation,
+        watermark,
+        dependencies,
+        entities,
+        relations,
+    } = manifest;
     let mut digest = Sha256::new();
     let mut writer = CheckedDigestWriter::new(&mut digest, check);
     for (tag, value) in [

@@ -33,20 +33,41 @@ type ResolvedRelationEndpoints = BTreeMap<
     ),
 >;
 
+/// Durable identity carried by one applied write batch: the canonical batch
+/// digest, the dependency-closure digest for verified generations, and the
+/// publication receipt (idempotency key, digest, input digest).
+pub(crate) struct CommitMetadata {
+    pub(crate) digest: String,
+    pub(crate) generation_dependency_digest:
+        Option<tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1>,
+    pub(crate) publication_record: Option<(GraphIdempotencyKey, String, String)>,
+}
+
+impl CommitMetadata {
+    pub(crate) fn for_digest(digest: String) -> Self {
+        Self {
+            digest,
+            generation_dependency_digest: None,
+            publication_record: None,
+        }
+    }
+}
+
 pub(crate) fn apply(
     database: &GrafeoDB,
     state: &mut FormatState,
     batch: GraphWriteBatch,
-    digest: String,
-    generation_dependency_digest: Option<
-        tracedecay_store::runtime::GraphDependencyGenerationClosureDigestV1,
-    >,
-    publication_record: Option<(GraphIdempotencyKey, String, String)>,
+    metadata: CommitMetadata,
     endpoint_namespaces: &RelationEndpointNamespaces,
     poisoned: &AtomicBool,
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphCommit, GraphDbError> {
     check()?;
+    let CommitMetadata {
+        digest,
+        generation_dependency_digest,
+        publication_record,
+    } = metadata;
     let existing = ExistingBatchState::load(database, &batch)?;
     let external_endpoints =
         validate_references(database, &batch, &existing, endpoint_namespaces, check)?;

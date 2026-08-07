@@ -181,7 +181,7 @@ struct Eviction {
 enum CloseReservation {
     Absent,
     Removed,
-    Closing(Eviction),
+    Closing(Box<Eviction>),
 }
 
 impl GraphDbRegistry {
@@ -467,12 +467,12 @@ impl GraphDbRegistry {
             if let Err(error) =
                 check_request(registration.cancellation.as_ref(), registration.deadline)
             {
-                self.restore_ready(reservation)?;
+                self.restore_ready(*reservation)?;
                 return Err(error);
             }
             let close_result = reservation.owner.close();
             let physically_closed = reservation.owner.is_closed();
-            self.complete_close(reservation, close_result.clone())?;
+            self.complete_close(*reservation, close_result.clone())?;
             if let Err(error) = close_result {
                 if !physically_closed {
                     return Err(error);
@@ -516,11 +516,11 @@ impl GraphDbRegistry {
         };
         if let Err(error) = check_request(registration.cancellation.as_ref(), registration.deadline)
         {
-            self.restore_ready(reservation)?;
+            self.restore_ready(*reservation)?;
             return Err(error);
         }
         let close_result = reservation.owner.close();
-        self.complete_close(reservation, close_result.clone())?;
+        self.complete_close(*reservation, close_result.clone())?;
         close_result?;
         check_deadline(registration.deadline)?;
         Ok(true)
@@ -727,7 +727,7 @@ impl GraphDbRegistry {
                 owner: Arc::clone(&reservation.owner),
             },
         );
-        Ok(CloseReservation::Closing(reservation))
+        Ok(CloseReservation::Closing(Box::new(reservation)))
     }
 
     fn finish_eviction(&self, eviction: Eviction) -> Result<(), GraphDbError> {

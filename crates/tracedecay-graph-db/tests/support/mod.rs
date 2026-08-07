@@ -1,3 +1,5 @@
+#![allow(dead_code)] // shared test support: each contract target uses a subset
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
