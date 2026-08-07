@@ -287,7 +287,12 @@ pub(crate) async fn handle_session_refresh(
     Ok(render_outcome(&args, action, scope, outcome))
 }
 
-fn parse_request(args: Value) -> std::result::Result<SessionRefreshRequest, String> {
+fn parse_request(mut args: Value) -> std::result::Result<SessionRefreshRequest, String> {
+    if let Some(map) = args.as_object_mut() {
+        // The MCP transport injects its protocol request id for cooperative
+        // cancellation; the typed refresh request never consumes it.
+        map.remove("__mcp_request_id");
+    }
     let request: SessionRefreshRequest = serde_json::from_value(args)
         .map_err(|error| format!("invalid session refresh request: {error}"))?;
     if request

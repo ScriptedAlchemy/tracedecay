@@ -242,6 +242,32 @@ async fn start_join_resume_and_begin_share_begin_or_join_authority() {
 }
 
 #[tokio::test]
+async fn transport_injected_request_id_is_stripped_before_typed_parsing() {
+    let profile = RecordingService::new(SessionRefreshServiceOutcome::Started {
+        operation_id: "refresh-operation".to_string(),
+        handle: "refresh-handle".to_string(),
+        accepted_at: 123,
+    });
+    let mut args = refresh_args("profile", "start");
+    args.as_object_mut().unwrap().insert(
+        "__mcp_request_id".to_string(),
+        json!("request.mcp.fixture"),
+    );
+
+    let result = handle_session_refresh(
+        args,
+        SessionRefreshServices::new(None, Some(&profile)),
+    )
+    .await
+    .unwrap();
+    let payload: Value = serde_json::from_str(response_text(&result.value)).unwrap();
+
+    assert_eq!(payload["outcome"], "started");
+    assert_eq!(profile.calls.load(Ordering::Acquire), 1);
+    assert_eq!(result.semantic_error(), Some(false));
+}
+
+#[tokio::test]
 async fn missing_daemon_authority_returns_unavailable_without_fallback() {
     let result = handle_session_refresh(
         refresh_args("profile", "status"),
