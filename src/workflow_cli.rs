@@ -12,9 +12,11 @@ use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationResult, CancellationSignal, Deadline, LegalAction, ResultContractRef,
     RetryDirective, SafeDiagnostic, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionValidateRequest, workflow_executable_binding_registry,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
+    workflow_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::OperationId;
@@ -59,6 +61,12 @@ fn decode_workflow_invocation(
     match operation {
         WorkflowOperation::RegisterDefinition => decode::<WorkflowDefinitionRegisterRequest>(body)
             .map(WorkflowApplicationInvocation::RegisterDefinition),
+        WorkflowOperation::ActivateDefinition => decode::<WorkflowDefinitionActivateRequest>(body)
+            .map(WorkflowApplicationInvocation::ActivateDefinition),
+        WorkflowOperation::RetireDefinition => decode::<WorkflowDefinitionRetireRequest>(body)
+            .map(WorkflowApplicationInvocation::RetireDefinition),
+        WorkflowOperation::RejectDefinition => decode::<WorkflowDefinitionRejectRequest>(body)
+            .map(WorkflowApplicationInvocation::RejectDefinition),
         WorkflowOperation::ValidateDefinition => decode::<WorkflowDefinitionValidateRequest>(body)
             .map(WorkflowApplicationInvocation::ValidateDefinition),
         WorkflowOperation::GetDefinition => decode::<WorkflowDefinitionGetRequest>(body)
@@ -86,6 +94,15 @@ fn workflow_outcome_matches(
         (
             WorkflowOperation::RegisterDefinition,
             WorkflowApplicationOutcome::RegisterDefinition(_)
+        ) | (
+            WorkflowOperation::ActivateDefinition,
+            WorkflowApplicationOutcome::ActivateDefinition(_)
+        ) | (
+            WorkflowOperation::RetireDefinition,
+            WorkflowApplicationOutcome::RetireDefinition(_)
+        ) | (
+            WorkflowOperation::RejectDefinition,
+            WorkflowApplicationOutcome::RejectDefinition(_)
         ) | (
             WorkflowOperation::ValidateDefinition,
             WorkflowApplicationOutcome::ValidateDefinition(_)
