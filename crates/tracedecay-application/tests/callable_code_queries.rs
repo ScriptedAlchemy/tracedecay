@@ -465,7 +465,7 @@ fn callable_code_service_preserves_unavailable_when_unpinned_has_no_generation()
     };
     assert_eq!(
         packet.execution.termination,
-        tracedecay_application::OperationTermination::Failed
+        tracedecay_application::OperationTermination::Unavailable
     );
     assert!(packet.temporal.source_generation.is_none());
     assert!(packet.payload.is_none());
