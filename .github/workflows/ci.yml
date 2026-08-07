@@ -380,18 +380,6 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      DASHBOARD_DIST_FILES: >-
-        shell/dist/shell.js
-        shell/dist/shell.css
-        holographic/dist/index.js
-        holographic/dist/style.css
-        lcm/dist/index.js
-        lcm/dist/style.css
-        graph/dist/index.js
-        graph/dist/style.css
-        savings/dist/index.js
-        savings/dist/style.css
     steps:
       - uses: actions/checkout@v7
 
@@ -413,20 +401,18 @@ jobs:
         working-directory: dashboard
         run: npm test
 
+      # The dashboard is one rsbuild app emitting `app-dist/` (the legacy
+      # shell/holographic/lcm/graph/savings bundle split no longer exists), so
+      # the bundle validator is the artifact authority and the determinism
+      # check hashes whatever the build actually produced.
       - name: Verify embedded dist artifacts
         working-directory: dashboard
         run: |
           set -euo pipefail
-          for f in $DASHBOARD_DIST_FILES; do
-            if [ ! -s "$f" ]; then
-              echo "missing or empty dist artifact: $f" >&2
-              exit 1
-            fi
-          done
-          # shellcheck disable=SC2086
-          sha256sum $DASHBOARD_DIST_FILES > /tmp/dashboard-dist.sha
+          python3 ../scripts/check-dashboard-bundle.py app-dist
+          (cd app-dist && find . -type f | sort | xargs sha256sum) > /tmp/dashboard-dist.sha
           npm run build
-          sha256sum -c /tmp/dashboard-dist.sha
+          (cd app-dist && find . -type f | sort | xargs sha256sum) | diff /tmp/dashboard-dist.sha -
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -449,6 +435,43 @@ jobs:
       - name: Run dashboard integration tests
         run: cargo nextest run --test dashboard_api_test --no-fail-fast --locked
 
+  # WCAG 2.2 AA is an acceptance criterion, so the accessibility scans run in
+  # CI rather than only on a developer's machine. Both harnesses exit nonzero
+  # on an axe violation, an uncaught page error, or a failed state assertion —
+  # a clean scan of a falsified reading is not a pass.
+  #
+  # Non-blocking by owner decision 2026-07-31: axe findings stay visible in
+  # the run summary but no longer gate the branch. Zero-axe remains a release
+  # acceptance criterion checked before release, not per push.
+  # NOTHING may declare `needs: dashboard-accessibility`.
+  dashboard-accessibility:
+    name: Dashboard accessibility
+    # `needs:` keeps this job from reporting a second red when the real fault
+    # is that the dashboard bundle never built or its unit tests failed.
+    needs: dashboard
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    # Locally axe:audit takes ~3.3 min and axe:explorer ~1.3 min, and each one
+    # runs its OWN full `rsbuild build` (see dashboard/e2e/axe-harness.ts). At
+    # ~3x for a 2-core runner rendering 2 themes x 3 widths that is ~14 min,
+    # plus ~3 min for the Chromium and system-dependency install and ~1 min
+    # for npm ci. 30 leaves headroom for a slow runner while still cutting off
+    # a hung browser or wedged static server.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
       - name: Cache Playwright browsers
         uses: actions/cache@v6
         with:
@@ -461,39 +484,13 @@ jobs:
         working-directory: dashboard
         run: npx playwright install --with-deps chromium
 
-      - name: Prebuild dashboard binary for smoke
-        run: cargo build --bin tracedecay --locked
-
-      - name: Run dashboard smoke (empty LCM)
+      - name: Accessibility scan (workspaces)
         working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-empty.db
-        run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          attempts=0
-          max_attempts=3
-          until [ "$attempts" -ge "$max_attempts" ]; do
-            attempts=$((attempts + 1))
-            echo "Smoke attempt ${attempts}/${max_attempts}..."
-            if npm run smoke -- --expect-lcm=empty; then
-              exit 0
-            fi
-            if [ "$attempts" -lt "$max_attempts" ]; then
-              sleep 10
-            fi
-          done
-          echo "Dashboard smoke failed after ${max_attempts} attempts" >&2
-          exit 1
+        run: npm run axe:audit
 
-      - name: Run dashboard mobile smoke
+      - name: Accessibility scan (Explorer)
         working-directory: dashboard
-        env:
-          TRACEDECAY_GLOBAL_DB: ${{ runner.temp }}/tracedecay-dashboard-smoke-mobile.db
-        run: |
-          set -euo pipefail
-          rm -f "$TRACEDECAY_GLOBAL_DB"
-          npm run smoke:mobile -- --expect-lcm=empty
+        run: npm run axe:explorer
 
   hermes-integration:
     name: Hermes integration (stock)
