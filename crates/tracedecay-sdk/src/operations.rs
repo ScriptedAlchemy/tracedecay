@@ -6226,69 +6226,6 @@ pub mod application_configuration_batch {
                 self.0.fmt(f)
             }
         }
-        /**A reference-only selector. It is convenience input, never collection
-        authority or membership evidence.*/
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "A reference-only selector. It is convenience input, never collection\nauthority or membership evidence.",
-        ///  "oneOf": [
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/QueryCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "query"
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/WorkspaceCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "workspace"
-        ///        }
-        ///      }
-        ///    }
-        ///  ]
-        ///}
-        /// ```
-        /// </details>
-        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-        #[serde(tag = "kind", content = "id")]
-        pub enum CollectionSelectorV1 {
-            #[serde(rename = "query")]
-            Query(QueryCollectionId),
-            #[serde(rename = "workspace")]
-            Workspace(WorkspaceCollectionId),
-        }
-        impl ::std::convert::From<QueryCollectionId> for CollectionSelectorV1 {
-            fn from(value: QueryCollectionId) -> Self {
-                Self::Query(value)
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for CollectionSelectorV1 {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                Self::Workspace(value)
-            }
-        }
         ///`ConfigurationBatchRequestV1`
         ///
         /// <details><summary>JSON schema</summary>
@@ -6746,29 +6683,6 @@ pub mod application_configuration_batch {
         ///      "properties": {
         ///        "kind": {
         ///          "type": "string",
-        ///          "const": "default_collection"
-        ///        },
-        ///        "value": {
-        ///          "anyOf": [
-        ///            {
-        ///              "$ref": "#/definitions/CollectionSelectorV1"
-        ///            },
-        ///            {
-        ///              "type": "null"
-        ///            }
-        ///          ]
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "kind",
-        ///        "value"
-        ///      ],
-        ///      "properties": {
-        ///        "kind": {
-        ///          "type": "string",
         ///          "const": "analyzer_settings"
         ///        },
         ///        "value": {
@@ -6862,8 +6776,6 @@ pub mod application_configuration_batch {
             SourceBindings(::std::vec::Vec<ScopeSourceBinding>),
             #[serde(rename = "access_rules")]
             AccessRules(::std::vec::Vec<ScopeAccessRule>),
-            #[serde(rename = "default_collection")]
-            DefaultCollection(::std::option::Option<CollectionSelectorV1>),
             #[serde(rename = "analyzer_settings")]
             AnalyzerSettings(AnalyzerSettingsV1),
             #[serde(rename = "work_topology_policy")]
@@ -6898,11 +6810,6 @@ pub mod application_configuration_batch {
         impl ::std::convert::From<::std::vec::Vec<ScopeAccessRule>> for ConfigurationValueV1 {
             fn from(value: ::std::vec::Vec<ScopeAccessRule>) -> Self {
                 Self::AccessRules(value)
-            }
-        }
-        impl ::std::convert::From<::std::option::Option<CollectionSelectorV1>> for ConfigurationValueV1 {
-            fn from(value: ::std::option::Option<CollectionSelectorV1>) -> Self {
-                Self::DefaultCollection(value)
             }
         }
         impl ::std::convert::From<AnalyzerSettingsV1> for ConfigurationValueV1 {
@@ -8709,7 +8616,6 @@ pub mod application_configuration_batch {
         ///    "source_unbind",
         ///    "access_rule_upsert",
         ///    "access_rule_remove",
-        ///    "set_default_collection",
         ///    "replace_topology_policy",
         ///    "rollback"
         ///  ]
@@ -8741,8 +8647,6 @@ pub mod application_configuration_batch {
             AccessRuleUpsert,
             #[serde(rename = "access_rule_remove")]
             AccessRuleRemove,
-            #[serde(rename = "set_default_collection")]
-            SetDefaultCollection,
             #[serde(rename = "replace_topology_policy")]
             ReplaceTopologyPolicy,
             #[serde(rename = "rollback")]
@@ -8757,7 +8661,6 @@ pub mod application_configuration_batch {
                     Self::SourceUnbind => f.write_str("source_unbind"),
                     Self::AccessRuleUpsert => f.write_str("access_rule_upsert"),
                     Self::AccessRuleRemove => f.write_str("access_rule_remove"),
-                    Self::SetDefaultCollection => f.write_str("set_default_collection"),
                     Self::ReplaceTopologyPolicy => f.write_str("replace_topology_policy"),
                     Self::Rollback => f.write_str("rollback"),
                 }
@@ -8773,7 +8676,6 @@ pub mod application_configuration_batch {
                     "source_unbind" => Ok(Self::SourceUnbind),
                     "access_rule_upsert" => Ok(Self::AccessRuleUpsert),
                     "access_rule_remove" => Ok(Self::AccessRuleRemove),
-                    "set_default_collection" => Ok(Self::SetDefaultCollection),
                     "replace_topology_policy" => Ok(Self::ReplaceTopologyPolicy),
                     "rollback" => Ok(Self::Rollback),
                     _ => Err("invalid value".into()),
@@ -9686,57 +9588,6 @@ pub mod application_configuration_batch {
             pub review_topology: ReviewTopologyPolicyV1,
             pub roots: ::std::vec::Vec<WorktreeRootPolicyV1>,
             pub schema_version: u16,
-        }
-        ///Strongly typed canonical identity: `WorkspaceCollectionId`.
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "Strongly typed canonical identity: `WorkspaceCollectionId`.",
-        ///  "type": "string"
-        ///}
-        /// ```
-        /// </details>
-        #[derive(
-            ::serde::Deserialize,
-            ::serde::Serialize,
-            Clone,
-            Debug,
-            Eq,
-            Hash,
-            Ord,
-            PartialEq,
-            PartialOrd,
-        )]
-        #[serde(transparent)]
-        pub struct WorkspaceCollectionId(pub ::std::string::String);
-        impl ::std::ops::Deref for WorkspaceCollectionId {
-            type Target = ::std::string::String;
-            fn deref(&self) -> &::std::string::String {
-                &self.0
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for ::std::string::String {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                value.0
-            }
-        }
-        impl ::std::convert::From<::std::string::String> for WorkspaceCollectionId {
-            fn from(value: ::std::string::String) -> Self {
-                Self(value)
-            }
-        }
-        impl ::std::str::FromStr for WorkspaceCollectionId {
-            type Err = ::std::convert::Infallible;
-            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
-                Ok(Self(value.to_string()))
-            }
-        }
-        impl ::std::fmt::Display for WorkspaceCollectionId {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                self.0.fmt(f)
-            }
         }
         ///`WorktreeCleanlinessRequirementV1`
         ///
@@ -12137,69 +11988,6 @@ pub mod application_configuration_explain {
                 self.0.fmt(f)
             }
         }
-        /**A reference-only selector. It is convenience input, never collection
-        authority or membership evidence.*/
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "A reference-only selector. It is convenience input, never collection\nauthority or membership evidence.",
-        ///  "oneOf": [
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/QueryCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "query"
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/WorkspaceCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "workspace"
-        ///        }
-        ///      }
-        ///    }
-        ///  ]
-        ///}
-        /// ```
-        /// </details>
-        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-        #[serde(tag = "kind", content = "id")]
-        pub enum CollectionSelectorV1 {
-            #[serde(rename = "query")]
-            Query(QueryCollectionId),
-            #[serde(rename = "workspace")]
-            Workspace(WorkspaceCollectionId),
-        }
-        impl ::std::convert::From<QueryCollectionId> for CollectionSelectorV1 {
-            fn from(value: QueryCollectionId) -> Self {
-                Self::Query(value)
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for CollectionSelectorV1 {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                Self::Workspace(value)
-            }
-        }
         /**Resolution provenance is intentionally distinct from behavior. Moving the
         same winner between layers can change this material without changing the
         effective behavior digest.*/
@@ -12594,29 +12382,6 @@ pub mod application_configuration_explain {
         ///      "properties": {
         ///        "kind": {
         ///          "type": "string",
-        ///          "const": "default_collection"
-        ///        },
-        ///        "value": {
-        ///          "anyOf": [
-        ///            {
-        ///              "$ref": "#/definitions/CollectionSelectorV1"
-        ///            },
-        ///            {
-        ///              "type": "null"
-        ///            }
-        ///          ]
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "kind",
-        ///        "value"
-        ///      ],
-        ///      "properties": {
-        ///        "kind": {
-        ///          "type": "string",
         ///          "const": "analyzer_settings"
         ///        },
         ///        "value": {
@@ -12710,8 +12475,6 @@ pub mod application_configuration_explain {
             SourceBindings(::std::vec::Vec<ScopeSourceBinding>),
             #[serde(rename = "access_rules")]
             AccessRules(::std::vec::Vec<ScopeAccessRule>),
-            #[serde(rename = "default_collection")]
-            DefaultCollection(::std::option::Option<CollectionSelectorV1>),
             #[serde(rename = "analyzer_settings")]
             AnalyzerSettings(AnalyzerSettingsV1),
             #[serde(rename = "work_topology_policy")]
@@ -12746,11 +12509,6 @@ pub mod application_configuration_explain {
         impl ::std::convert::From<::std::vec::Vec<ScopeAccessRule>> for ConfigurationValueV1 {
             fn from(value: ::std::vec::Vec<ScopeAccessRule>) -> Self {
                 Self::AccessRules(value)
-            }
-        }
-        impl ::std::convert::From<::std::option::Option<CollectionSelectorV1>> for ConfigurationValueV1 {
-            fn from(value: ::std::option::Option<CollectionSelectorV1>) -> Self {
-                Self::DefaultCollection(value)
             }
         }
         impl ::std::convert::From<AnalyzerSettingsV1> for ConfigurationValueV1 {
@@ -14608,7 +14366,6 @@ pub mod application_configuration_explain {
         ///    "source_unbind",
         ///    "access_rule_upsert",
         ///    "access_rule_remove",
-        ///    "set_default_collection",
         ///    "replace_topology_policy",
         ///    "rollback"
         ///  ]
@@ -14640,8 +14397,6 @@ pub mod application_configuration_explain {
             AccessRuleUpsert,
             #[serde(rename = "access_rule_remove")]
             AccessRuleRemove,
-            #[serde(rename = "set_default_collection")]
-            SetDefaultCollection,
             #[serde(rename = "replace_topology_policy")]
             ReplaceTopologyPolicy,
             #[serde(rename = "rollback")]
@@ -14656,7 +14411,6 @@ pub mod application_configuration_explain {
                     Self::SourceUnbind => f.write_str("source_unbind"),
                     Self::AccessRuleUpsert => f.write_str("access_rule_upsert"),
                     Self::AccessRuleRemove => f.write_str("access_rule_remove"),
-                    Self::SetDefaultCollection => f.write_str("set_default_collection"),
                     Self::ReplaceTopologyPolicy => f.write_str("replace_topology_policy"),
                     Self::Rollback => f.write_str("rollback"),
                 }
@@ -14672,7 +14426,6 @@ pub mod application_configuration_explain {
                     "source_unbind" => Ok(Self::SourceUnbind),
                     "access_rule_upsert" => Ok(Self::AccessRuleUpsert),
                     "access_rule_remove" => Ok(Self::AccessRuleRemove),
-                    "set_default_collection" => Ok(Self::SetDefaultCollection),
                     "replace_topology_policy" => Ok(Self::ReplaceTopologyPolicy),
                     "rollback" => Ok(Self::Rollback),
                     _ => Err("invalid value".into()),
@@ -15585,57 +15338,6 @@ pub mod application_configuration_explain {
             pub review_topology: ReviewTopologyPolicyV1,
             pub roots: ::std::vec::Vec<WorktreeRootPolicyV1>,
             pub schema_version: u16,
-        }
-        ///Strongly typed canonical identity: `WorkspaceCollectionId`.
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "Strongly typed canonical identity: `WorkspaceCollectionId`.",
-        ///  "type": "string"
-        ///}
-        /// ```
-        /// </details>
-        #[derive(
-            ::serde::Deserialize,
-            ::serde::Serialize,
-            Clone,
-            Debug,
-            Eq,
-            Hash,
-            Ord,
-            PartialEq,
-            PartialOrd,
-        )]
-        #[serde(transparent)]
-        pub struct WorkspaceCollectionId(pub ::std::string::String);
-        impl ::std::ops::Deref for WorkspaceCollectionId {
-            type Target = ::std::string::String;
-            fn deref(&self) -> &::std::string::String {
-                &self.0
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for ::std::string::String {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                value.0
-            }
-        }
-        impl ::std::convert::From<::std::string::String> for WorkspaceCollectionId {
-            fn from(value: ::std::string::String) -> Self {
-                Self(value)
-            }
-        }
-        impl ::std::str::FromStr for WorkspaceCollectionId {
-            type Err = ::std::convert::Infallible;
-            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
-                Ok(Self(value.to_string()))
-            }
-        }
-        impl ::std::fmt::Display for WorkspaceCollectionId {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                self.0.fmt(f)
-            }
         }
         ///`WorktreeCleanlinessRequirementV1`
         ///
@@ -17607,69 +17309,6 @@ pub mod application_configuration_get {
                 self.0.fmt(f)
             }
         }
-        /**A reference-only selector. It is convenience input, never collection
-        authority or membership evidence.*/
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "A reference-only selector. It is convenience input, never collection\nauthority or membership evidence.",
-        ///  "oneOf": [
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/QueryCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "query"
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/WorkspaceCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "workspace"
-        ///        }
-        ///      }
-        ///    }
-        ///  ]
-        ///}
-        /// ```
-        /// </details>
-        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-        #[serde(tag = "kind", content = "id")]
-        pub enum CollectionSelectorV1 {
-            #[serde(rename = "query")]
-            Query(QueryCollectionId),
-            #[serde(rename = "workspace")]
-            Workspace(WorkspaceCollectionId),
-        }
-        impl ::std::convert::From<QueryCollectionId> for CollectionSelectorV1 {
-            fn from(value: QueryCollectionId) -> Self {
-                Self::Query(value)
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for CollectionSelectorV1 {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                Self::Workspace(value)
-            }
-        }
         /**Resolution provenance is intentionally distinct from behavior. Moving the
         same winner between layers can change this material without changing the
         effective behavior digest.*/
@@ -18064,29 +17703,6 @@ pub mod application_configuration_get {
         ///      "properties": {
         ///        "kind": {
         ///          "type": "string",
-        ///          "const": "default_collection"
-        ///        },
-        ///        "value": {
-        ///          "anyOf": [
-        ///            {
-        ///              "$ref": "#/definitions/CollectionSelectorV1"
-        ///            },
-        ///            {
-        ///              "type": "null"
-        ///            }
-        ///          ]
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "kind",
-        ///        "value"
-        ///      ],
-        ///      "properties": {
-        ///        "kind": {
-        ///          "type": "string",
         ///          "const": "analyzer_settings"
         ///        },
         ///        "value": {
@@ -18180,8 +17796,6 @@ pub mod application_configuration_get {
             SourceBindings(::std::vec::Vec<ScopeSourceBinding>),
             #[serde(rename = "access_rules")]
             AccessRules(::std::vec::Vec<ScopeAccessRule>),
-            #[serde(rename = "default_collection")]
-            DefaultCollection(::std::option::Option<CollectionSelectorV1>),
             #[serde(rename = "analyzer_settings")]
             AnalyzerSettings(AnalyzerSettingsV1),
             #[serde(rename = "work_topology_policy")]
@@ -18216,11 +17830,6 @@ pub mod application_configuration_get {
         impl ::std::convert::From<::std::vec::Vec<ScopeAccessRule>> for ConfigurationValueV1 {
             fn from(value: ::std::vec::Vec<ScopeAccessRule>) -> Self {
                 Self::AccessRules(value)
-            }
-        }
-        impl ::std::convert::From<::std::option::Option<CollectionSelectorV1>> for ConfigurationValueV1 {
-            fn from(value: ::std::option::Option<CollectionSelectorV1>) -> Self {
-                Self::DefaultCollection(value)
             }
         }
         impl ::std::convert::From<AnalyzerSettingsV1> for ConfigurationValueV1 {
@@ -20078,7 +19687,6 @@ pub mod application_configuration_get {
         ///    "source_unbind",
         ///    "access_rule_upsert",
         ///    "access_rule_remove",
-        ///    "set_default_collection",
         ///    "replace_topology_policy",
         ///    "rollback"
         ///  ]
@@ -20110,8 +19718,6 @@ pub mod application_configuration_get {
             AccessRuleUpsert,
             #[serde(rename = "access_rule_remove")]
             AccessRuleRemove,
-            #[serde(rename = "set_default_collection")]
-            SetDefaultCollection,
             #[serde(rename = "replace_topology_policy")]
             ReplaceTopologyPolicy,
             #[serde(rename = "rollback")]
@@ -20126,7 +19732,6 @@ pub mod application_configuration_get {
                     Self::SourceUnbind => f.write_str("source_unbind"),
                     Self::AccessRuleUpsert => f.write_str("access_rule_upsert"),
                     Self::AccessRuleRemove => f.write_str("access_rule_remove"),
-                    Self::SetDefaultCollection => f.write_str("set_default_collection"),
                     Self::ReplaceTopologyPolicy => f.write_str("replace_topology_policy"),
                     Self::Rollback => f.write_str("rollback"),
                 }
@@ -20142,7 +19747,6 @@ pub mod application_configuration_get {
                     "source_unbind" => Ok(Self::SourceUnbind),
                     "access_rule_upsert" => Ok(Self::AccessRuleUpsert),
                     "access_rule_remove" => Ok(Self::AccessRuleRemove),
-                    "set_default_collection" => Ok(Self::SetDefaultCollection),
                     "replace_topology_policy" => Ok(Self::ReplaceTopologyPolicy),
                     "rollback" => Ok(Self::Rollback),
                     _ => Err("invalid value".into()),
@@ -21055,57 +20659,6 @@ pub mod application_configuration_get {
             pub review_topology: ReviewTopologyPolicyV1,
             pub roots: ::std::vec::Vec<WorktreeRootPolicyV1>,
             pub schema_version: u16,
-        }
-        ///Strongly typed canonical identity: `WorkspaceCollectionId`.
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "Strongly typed canonical identity: `WorkspaceCollectionId`.",
-        ///  "type": "string"
-        ///}
-        /// ```
-        /// </details>
-        #[derive(
-            ::serde::Deserialize,
-            ::serde::Serialize,
-            Clone,
-            Debug,
-            Eq,
-            Hash,
-            Ord,
-            PartialEq,
-            PartialOrd,
-        )]
-        #[serde(transparent)]
-        pub struct WorkspaceCollectionId(pub ::std::string::String);
-        impl ::std::ops::Deref for WorkspaceCollectionId {
-            type Target = ::std::string::String;
-            fn deref(&self) -> &::std::string::String {
-                &self.0
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for ::std::string::String {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                value.0
-            }
-        }
-        impl ::std::convert::From<::std::string::String> for WorkspaceCollectionId {
-            fn from(value: ::std::string::String) -> Self {
-                Self(value)
-            }
-        }
-        impl ::std::str::FromStr for WorkspaceCollectionId {
-            type Err = ::std::convert::Infallible;
-            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
-                Ok(Self(value.to_string()))
-            }
-        }
-        impl ::std::fmt::Display for WorkspaceCollectionId {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                self.0.fmt(f)
-            }
         }
         ///`WorktreeCleanlinessRequirementV1`
         ///
@@ -25085,7 +24638,6 @@ pub mod application_configuration_protected_preview {
         ///    "source_unbind",
         ///    "access_rule_upsert",
         ///    "access_rule_remove",
-        ///    "set_default_collection",
         ///    "replace_topology_policy",
         ///    "rollback"
         ///  ]
@@ -25117,8 +24669,6 @@ pub mod application_configuration_protected_preview {
             AccessRuleUpsert,
             #[serde(rename = "access_rule_remove")]
             AccessRuleRemove,
-            #[serde(rename = "set_default_collection")]
-            SetDefaultCollection,
             #[serde(rename = "replace_topology_policy")]
             ReplaceTopologyPolicy,
             #[serde(rename = "rollback")]
@@ -25133,7 +24683,6 @@ pub mod application_configuration_protected_preview {
                     Self::SourceUnbind => f.write_str("source_unbind"),
                     Self::AccessRuleUpsert => f.write_str("access_rule_upsert"),
                     Self::AccessRuleRemove => f.write_str("access_rule_remove"),
-                    Self::SetDefaultCollection => f.write_str("set_default_collection"),
                     Self::ReplaceTopologyPolicy => f.write_str("replace_topology_policy"),
                     Self::Rollback => f.write_str("rollback"),
                 }
@@ -25149,7 +24698,6 @@ pub mod application_configuration_protected_preview {
                     "source_unbind" => Ok(Self::SourceUnbind),
                     "access_rule_upsert" => Ok(Self::AccessRuleUpsert),
                     "access_rule_remove" => Ok(Self::AccessRuleRemove),
-                    "set_default_collection" => Ok(Self::SetDefaultCollection),
                     "replace_topology_policy" => Ok(Self::ReplaceTopologyPolicy),
                     "rollback" => Ok(Self::Rollback),
                     _ => Err("invalid value".into()),
@@ -26551,7 +26099,6 @@ pub mod application_configuration_protected_preview {
         ///    "source_unbind",
         ///    "access_rule_upsert",
         ///    "access_rule_remove",
-        ///    "set_default_collection",
         ///    "replace_topology_policy",
         ///    "rollback"
         ///  ]
@@ -26583,8 +26130,6 @@ pub mod application_configuration_protected_preview {
             AccessRuleUpsert,
             #[serde(rename = "access_rule_remove")]
             AccessRuleRemove,
-            #[serde(rename = "set_default_collection")]
-            SetDefaultCollection,
             #[serde(rename = "replace_topology_policy")]
             ReplaceTopologyPolicy,
             #[serde(rename = "rollback")]
@@ -26599,7 +26144,6 @@ pub mod application_configuration_protected_preview {
                     Self::SourceUnbind => f.write_str("source_unbind"),
                     Self::AccessRuleUpsert => f.write_str("access_rule_upsert"),
                     Self::AccessRuleRemove => f.write_str("access_rule_remove"),
-                    Self::SetDefaultCollection => f.write_str("set_default_collection"),
                     Self::ReplaceTopologyPolicy => f.write_str("replace_topology_policy"),
                     Self::Rollback => f.write_str("rollback"),
                 }
@@ -26615,7 +26159,6 @@ pub mod application_configuration_protected_preview {
                     "source_unbind" => Ok(Self::SourceUnbind),
                     "access_rule_upsert" => Ok(Self::AccessRuleUpsert),
                     "access_rule_remove" => Ok(Self::AccessRuleRemove),
-                    "set_default_collection" => Ok(Self::SetDefaultCollection),
                     "replace_topology_policy" => Ok(Self::ReplaceTopologyPolicy),
                     "rollback" => Ok(Self::Rollback),
                     _ => Err("invalid value".into()),
@@ -28141,7 +27684,6 @@ pub mod application_configuration_rollback_preview {
         ///    "source_unbind",
         ///    "access_rule_upsert",
         ///    "access_rule_remove",
-        ///    "set_default_collection",
         ///    "replace_topology_policy",
         ///    "rollback"
         ///  ]
@@ -28173,8 +27715,6 @@ pub mod application_configuration_rollback_preview {
             AccessRuleUpsert,
             #[serde(rename = "access_rule_remove")]
             AccessRuleRemove,
-            #[serde(rename = "set_default_collection")]
-            SetDefaultCollection,
             #[serde(rename = "replace_topology_policy")]
             ReplaceTopologyPolicy,
             #[serde(rename = "rollback")]
@@ -28189,7 +27729,6 @@ pub mod application_configuration_rollback_preview {
                     Self::SourceUnbind => f.write_str("source_unbind"),
                     Self::AccessRuleUpsert => f.write_str("access_rule_upsert"),
                     Self::AccessRuleRemove => f.write_str("access_rule_remove"),
-                    Self::SetDefaultCollection => f.write_str("set_default_collection"),
                     Self::ReplaceTopologyPolicy => f.write_str("replace_topology_policy"),
                     Self::Rollback => f.write_str("rollback"),
                 }
@@ -28205,7 +27744,6 @@ pub mod application_configuration_rollback_preview {
                     "source_unbind" => Ok(Self::SourceUnbind),
                     "access_rule_upsert" => Ok(Self::AccessRuleUpsert),
                     "access_rule_remove" => Ok(Self::AccessRuleRemove),
-                    "set_default_collection" => Ok(Self::SetDefaultCollection),
                     "replace_topology_policy" => Ok(Self::ReplaceTopologyPolicy),
                     "rollback" => Ok(Self::Rollback),
                     _ => Err("invalid value".into()),
@@ -29870,69 +29408,6 @@ pub mod application_configuration_set {
                 self.0.fmt(f)
             }
         }
-        /**A reference-only selector. It is convenience input, never collection
-        authority or membership evidence.*/
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "A reference-only selector. It is convenience input, never collection\nauthority or membership evidence.",
-        ///  "oneOf": [
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/QueryCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "query"
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "id",
-        ///        "kind"
-        ///      ],
-        ///      "properties": {
-        ///        "id": {
-        ///          "$ref": "#/definitions/WorkspaceCollectionId"
-        ///        },
-        ///        "kind": {
-        ///          "type": "string",
-        ///          "const": "workspace"
-        ///        }
-        ///      }
-        ///    }
-        ///  ]
-        ///}
-        /// ```
-        /// </details>
-        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-        #[serde(tag = "kind", content = "id")]
-        pub enum CollectionSelectorV1 {
-            #[serde(rename = "query")]
-            Query(QueryCollectionId),
-            #[serde(rename = "workspace")]
-            Workspace(WorkspaceCollectionId),
-        }
-        impl ::std::convert::From<QueryCollectionId> for CollectionSelectorV1 {
-            fn from(value: QueryCollectionId) -> Self {
-                Self::Query(value)
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for CollectionSelectorV1 {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                Self::Workspace(value)
-            }
-        }
         ///Strongly typed canonical identity: `ConfigurationIdempotencyKey`.
         ///
         /// <details><summary>JSON schema</summary>
@@ -30329,29 +29804,6 @@ pub mod application_configuration_set {
         ///      "properties": {
         ///        "kind": {
         ///          "type": "string",
-        ///          "const": "default_collection"
-        ///        },
-        ///        "value": {
-        ///          "anyOf": [
-        ///            {
-        ///              "$ref": "#/definitions/CollectionSelectorV1"
-        ///            },
-        ///            {
-        ///              "type": "null"
-        ///            }
-        ///          ]
-        ///        }
-        ///      }
-        ///    },
-        ///    {
-        ///      "type": "object",
-        ///      "required": [
-        ///        "kind",
-        ///        "value"
-        ///      ],
-        ///      "properties": {
-        ///        "kind": {
-        ///          "type": "string",
         ///          "const": "analyzer_settings"
         ///        },
         ///        "value": {
@@ -30445,8 +29897,6 @@ pub mod application_configuration_set {
             SourceBindings(::std::vec::Vec<ScopeSourceBinding>),
             #[serde(rename = "access_rules")]
             AccessRules(::std::vec::Vec<ScopeAccessRule>),
-            #[serde(rename = "default_collection")]
-            DefaultCollection(::std::option::Option<CollectionSelectorV1>),
             #[serde(rename = "analyzer_settings")]
             AnalyzerSettings(AnalyzerSettingsV1),
             #[serde(rename = "work_topology_policy")]
@@ -30481,11 +29931,6 @@ pub mod application_configuration_set {
         impl ::std::convert::From<::std::vec::Vec<ScopeAccessRule>> for ConfigurationValueV1 {
             fn from(value: ::std::vec::Vec<ScopeAccessRule>) -> Self {
                 Self::AccessRules(value)
-            }
-        }
-        impl ::std::convert::From<::std::option::Option<CollectionSelectorV1>> for ConfigurationValueV1 {
-            fn from(value: ::std::option::Option<CollectionSelectorV1>) -> Self {
-                Self::DefaultCollection(value)
             }
         }
         impl ::std::convert::From<AnalyzerSettingsV1> for ConfigurationValueV1 {
@@ -32292,7 +31737,6 @@ pub mod application_configuration_set {
         ///    "source_unbind",
         ///    "access_rule_upsert",
         ///    "access_rule_remove",
-        ///    "set_default_collection",
         ///    "replace_topology_policy",
         ///    "rollback"
         ///  ]
@@ -32324,8 +31768,6 @@ pub mod application_configuration_set {
             AccessRuleUpsert,
             #[serde(rename = "access_rule_remove")]
             AccessRuleRemove,
-            #[serde(rename = "set_default_collection")]
-            SetDefaultCollection,
             #[serde(rename = "replace_topology_policy")]
             ReplaceTopologyPolicy,
             #[serde(rename = "rollback")]
@@ -32340,7 +31782,6 @@ pub mod application_configuration_set {
                     Self::SourceUnbind => f.write_str("source_unbind"),
                     Self::AccessRuleUpsert => f.write_str("access_rule_upsert"),
                     Self::AccessRuleRemove => f.write_str("access_rule_remove"),
-                    Self::SetDefaultCollection => f.write_str("set_default_collection"),
                     Self::ReplaceTopologyPolicy => f.write_str("replace_topology_policy"),
                     Self::Rollback => f.write_str("rollback"),
                 }
@@ -32356,7 +31797,6 @@ pub mod application_configuration_set {
                     "source_unbind" => Ok(Self::SourceUnbind),
                     "access_rule_upsert" => Ok(Self::AccessRuleUpsert),
                     "access_rule_remove" => Ok(Self::AccessRuleRemove),
-                    "set_default_collection" => Ok(Self::SetDefaultCollection),
                     "replace_topology_policy" => Ok(Self::ReplaceTopologyPolicy),
                     "rollback" => Ok(Self::Rollback),
                     _ => Err("invalid value".into()),
@@ -33269,57 +32709,6 @@ pub mod application_configuration_set {
             pub review_topology: ReviewTopologyPolicyV1,
             pub roots: ::std::vec::Vec<WorktreeRootPolicyV1>,
             pub schema_version: u16,
-        }
-        ///Strongly typed canonical identity: `WorkspaceCollectionId`.
-        ///
-        /// <details><summary>JSON schema</summary>
-        ///
-        /// ```json
-        ///{
-        ///  "description": "Strongly typed canonical identity: `WorkspaceCollectionId`.",
-        ///  "type": "string"
-        ///}
-        /// ```
-        /// </details>
-        #[derive(
-            ::serde::Deserialize,
-            ::serde::Serialize,
-            Clone,
-            Debug,
-            Eq,
-            Hash,
-            Ord,
-            PartialEq,
-            PartialOrd,
-        )]
-        #[serde(transparent)]
-        pub struct WorkspaceCollectionId(pub ::std::string::String);
-        impl ::std::ops::Deref for WorkspaceCollectionId {
-            type Target = ::std::string::String;
-            fn deref(&self) -> &::std::string::String {
-                &self.0
-            }
-        }
-        impl ::std::convert::From<WorkspaceCollectionId> for ::std::string::String {
-            fn from(value: WorkspaceCollectionId) -> Self {
-                value.0
-            }
-        }
-        impl ::std::convert::From<::std::string::String> for WorkspaceCollectionId {
-            fn from(value: ::std::string::String) -> Self {
-                Self(value)
-            }
-        }
-        impl ::std::str::FromStr for WorkspaceCollectionId {
-            type Err = ::std::convert::Infallible;
-            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
-                Ok(Self(value.to_string()))
-            }
-        }
-        impl ::std::fmt::Display for WorkspaceCollectionId {
-            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                self.0.fmt(f)
-            }
         }
         ///`WorktreeCleanlinessRequirementV1`
         ///
