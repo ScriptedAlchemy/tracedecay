@@ -990,3 +990,79 @@ fn cancellation_before_relational_cas_keeps_the_prior_head_current() {
         &GraphGenerationId::new("g1").unwrap()
     );
 }
+
+/// Work-topology publications carry labeled entities with byte-record
+/// properties; the verified head must advance for that manifest shape exactly
+/// as it does for the plain string-property manifests above.
+#[test]
+fn labeled_byte_record_entities_reach_a_verified_head() {
+    let temp = TempDir::new().unwrap();
+    let registered = RegisteredGraph::new(temp.path()).unwrap();
+    let (control, probe) = control_and_probe();
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    let mut authority = RelationalAuthority::default();
+    let identity = projection(
+        &format!("work-topology:sha256:{}", "2b".repeat(32)),
+        "work-topology",
+    );
+    let task_record = serde_json::json!({
+        "task_id": "task.repro",
+        "title": "repro",
+        "dependencies": [],
+    });
+    let task = GraphEntity::new(
+        GraphEntityId::new(format!("task:{}", "03".repeat(32))).unwrap(),
+        BTreeSet::from([tracedecay_graph_db::GraphLabel::new("WorkTask").unwrap()]),
+        BTreeMap::from([
+            (
+                GraphPropertyName::new("task-id").unwrap(),
+                GraphProperty::String("task.repro".to_owned()),
+            ),
+            (
+                GraphPropertyName::new("task-record").unwrap(),
+                GraphProperty::Bytes(serde_json::to_vec(&task_record).unwrap()),
+            ),
+        ]),
+    )
+    .unwrap();
+    let generation = format!("work-topology:sha256:{}", "c4".repeat(32));
+    let manifest = GraphGenerationManifest::new(
+        identity.clone(),
+        GraphGenerationId::new(&generation).unwrap(),
+        SourceGeneration::new(format!("sha256:{}", "f6".repeat(32))).unwrap(),
+        GraphWatermark::new(format!("sha256:{}", "f6".repeat(32))).unwrap(),
+        vec![],
+        vec![task],
+        vec![],
+    )
+    .unwrap();
+    let record = stage_manifest(
+        &mut authority,
+        &registered.binding,
+        &manifest,
+        &format!("publish:{generation}"),
+        None,
+        'a',
+    );
+    let commit = registered
+        .registry
+        .publish_verified(
+            registration(registered.binding.clone(), temp.path()),
+            &mut authority,
+            &context,
+            &record.publication.key,
+        )
+        .unwrap();
+    assert_eq!(commit.head.key, record.publication.key);
+    let snapshot = registered
+        .registry
+        .verified_snapshot(
+            registration(registered.binding.clone(), temp.path()),
+            &identity,
+        )
+        .unwrap();
+    assert_eq!(
+        snapshot.generation(),
+        &GraphGenerationId::new(&generation).unwrap()
+    );
+}
