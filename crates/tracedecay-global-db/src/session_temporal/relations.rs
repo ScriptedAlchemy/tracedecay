@@ -897,6 +897,9 @@ fn map_graph_error(error: GraphDbError) -> SessionRelationError {
         GraphDbError::ResetRequired { .. } => SessionRelationError::ResetRequired,
         GraphDbError::DurabilityUncertain { .. } => SessionRelationError::DurabilityUncertain,
         GraphDbError::Corrupt { .. } => SessionRelationError::Corrupt,
+        GraphDbError::ProjectionMismatch { .. } | GraphDbError::GenerationMismatch { .. } => {
+            SessionRelationError::Conflict
+        }
         GraphDbError::Unavailable { .. } | GraphDbError::Closed => {
             SessionRelationError::Unavailable
         }

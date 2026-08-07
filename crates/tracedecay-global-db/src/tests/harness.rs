@@ -844,7 +844,7 @@ fn bind_test_session_relation_graph(
         })?,
     );
     let graph = registry
-        .resolve(GraphDbRegistration {
+        .resolve_raw_for_harness(GraphDbRegistration {
             authority_lease: Arc::new(TestSessionGraphLease {
                 binding: binding.clone(),
                 verified_locator,
