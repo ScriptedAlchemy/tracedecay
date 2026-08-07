@@ -1,4 +1,4 @@
-//! Reproducible PR5 observation-pipeline baseline.
+//! Reproducible claude-observation pipeline baseline.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -13,20 +13,24 @@ mod tests;
 
 const RESULT_SCHEMA_VERSION: u32 = 2;
 const WORKLOAD_SCHEMA_VERSION: u32 = 3;
-const WORKLOAD_ID: &str = "pr5-observation-pipeline-v1";
+const WORKLOAD_ID: &str = "claude-observation-pipeline-v1";
+/// Workload id recorded by archival artifacts sealed before the capability
+/// rename; accepted only for historical and retired evidence provenance.
+const RETIRED_WORKLOAD_ID: &str = "pr5-observation-pipeline-v1";
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
 const RECORDS_PER_REPETITION: usize = 64;
 const CONCURRENCY: usize = 1;
 const BENCHMARK_COMMAND: &str = "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1";
-const EVIDENCE_RUNNER: &str = "scripts/run-pr5-observation-benchmark.sh";
+const EVIDENCE_RUNNER: &str = "scripts/run-claude-observation-benchmark.sh";
 const WORKLOAD_IMPLEMENTATION: &str = "src/sessions/claude_observation_benchmark.rs";
-const WORKLOAD_MANIFEST_PATH: &str = "benchmarks/pr5-observation/workload-v1.json";
+const WORKLOAD_MANIFEST_PATH: &str = "benchmarks/claude-observation/workload-v1.json";
 const BENCHMARK_SECRET_PREFIX: &str = "sk-test-";
 const REDACTION_MARKER: &str = "[TraceDecay redacted:";
 const PROVIDER_PIPELINE_SCOPE: &str =
     "production_parse_normalize_sanitize_commit_project_and_replay";
-const WORKLOAD_MANIFEST: &str = include_str!("../../benchmarks/pr5-observation/workload-v1.json");
+const WORKLOAD_MANIFEST: &str =
+    include_str!("../../benchmarks/claude-observation/workload-v1.json");
 const NATIVE_PROVIDER_FIXTURES: &[(&str, &str)] = &[
     (
         "tests/fixtures/provider_normalization/claude/assistant_tool_use.input.json",
@@ -120,7 +124,7 @@ const BUILD_CARGO_CONFIG_IDENTITY: Option<&str> =
     option_env!("TRACEDECAY_BENCHMARK_BUILD_CARGO_CONFIG_IDENTITY");
 
 #[tokio::test]
-#[ignore = "release-mode PR5 performance baseline; run the documented exact command"]
+#[ignore = "release-mode claude-observation performance baseline; run the documented exact command"]
 async fn production_observation_pipeline_baseline() {
     runner::run().await;
 }

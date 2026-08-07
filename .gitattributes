@@ -13,11 +13,11 @@ src/agents/claude_agents/** text eol=lf
 # the binary via include_str! and the generated-plugin snapshot test asserts
 # their exact bytes.
 src/agents/hermes/templates/** text eol=lf
-# PR5 benchmark evidence attests the embedded harness and manifest byte-for-byte.
+# Claude-observation benchmark evidence attests the embedded harness and manifest byte-for-byte.
 # Keep those bytes identical when Git checks the repository out on Windows.
 src/sessions/claude_observation_benchmark.rs text eol=lf
 src/sessions/claude_observation_benchmark/** text eol=lf
-benchmarks/pr5-observation/** text eol=lf
+benchmarks/claude-observation/** text eol=lf
 # PR7 workload/evidence JSON stays LF for portable checkout digests.
 benchmarks/pr7-memory/** text eol=lf
 # Vendored, patched tree-sitter grammars: generated parser sources are

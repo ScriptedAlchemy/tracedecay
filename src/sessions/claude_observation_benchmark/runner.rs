@@ -1387,7 +1387,7 @@ pub(super) async fn run() {
         hook_telemetry_readiness: Some(baseline::hook_telemetry_readiness()),
     };
     println!(
-        "TRACEDECAY_PR5_BENCHMARK_RESULT={} ",
+        "TRACEDECAY_CLAUDE_OBSERVATION_BENCHMARK_RESULT={} ",
         serde_json::to_string(&result).expect("serialize benchmark result")
     );
     println!(

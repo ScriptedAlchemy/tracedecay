@@ -45,7 +45,7 @@ fn workload_manifest_matches_executable_contract() {
 
 #[test]
 fn checked_in_evidence_preserves_providerless_historical_results() {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/pr5-observation");
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/claude-observation");
     let acceptance = validate_evidence_directory(&directory, false).unwrap();
     let index: serde_json::Value = serde_json::from_slice(
         &fs::read(directory.join("evidence-index.json")).expect("read evidence index"),

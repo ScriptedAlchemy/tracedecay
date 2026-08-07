@@ -35,7 +35,7 @@ pub(super) struct WorkloadManifest {
 
 pub(super) fn validate() {
     let manifest = serde_json::from_str::<WorkloadManifest>(WORKLOAD_MANIFEST)
-        .expect("deserialize PR5 benchmark workload manifest");
+        .expect("deserialize claude-observation benchmark workload manifest");
     assert_eq!(manifest, expected());
     super::baseline::validate(&manifest.provider_baselines);
 }

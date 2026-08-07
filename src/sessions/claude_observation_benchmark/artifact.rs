@@ -21,8 +21,9 @@ use super::{
     BUILD_PROFILE, BUILD_RUSTC_VERSION, BUILD_RUSTC_WORKSPACE_WRAPPER, BUILD_RUSTC_WRAPPER,
     BUILD_RUSTFLAGS, BUILD_SOURCE_MANIFEST_SHA256, BUILD_SOURCE_MODE, BUILD_TARGET_TRIPLE,
     BUILD_TREE, HARNESS_SOURCES, MEASURED_REPETITIONS, NATIVE_PROVIDER_FIXTURES,
-    PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, WARMUP_REPETITIONS,
-    WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH, WORKLOAD_SCHEMA_VERSION,
+    PROVIDER_PIPELINE_SCOPE, RECORDS_PER_REPETITION, RESULT_SCHEMA_VERSION, RETIRED_WORKLOAD_ID,
+    WARMUP_REPETITIONS, WORKLOAD_ID, WORKLOAD_MANIFEST, WORKLOAD_MANIFEST_PATH,
+    WORKLOAD_SCHEMA_VERSION,
 };
 
 pub(super) struct AttestedBuild {
@@ -51,7 +52,7 @@ pub(super) fn assert_repository_evidence() {
     let strict = std::env::var_os("TRACEDECAY_BENCHMARK_REQUIRE_ACCEPTANCE")
         .is_some_and(|value| value == "1");
     let directory = std::env::var_os("TRACEDECAY_BENCHMARK_EVIDENCE_DIR").map_or_else(
-        || repository_root().join("benchmarks/pr5-observation"),
+        || repository_root().join("benchmarks/claude-observation"),
         PathBuf::from,
     );
     validate_evidence_directory(&directory, strict).expect("benchmark evidence directory contract");
@@ -151,12 +152,18 @@ pub(super) fn validate_evidence_directory(
     }
 }
 
+/// Historical and retired artifacts keep the workload id they were sealed
+/// under; only live acceptance evidence must carry the current id.
+fn is_recognized_workload_id(workload_id: &str) -> bool {
+    workload_id == WORKLOAD_ID || workload_id == RETIRED_WORKLOAD_ID
+}
+
 fn validate_historical_result(result: &ArtifactEnvelope) -> Result<(), String> {
     if result.schema_version == RESULT_SCHEMA_VERSION {
         return validate_retired_acceptance_result(result);
     }
     if result.schema_version != 1
-        || result.workload_id != WORKLOAD_ID
+        || !is_recognized_workload_id(&result.workload_id)
         || string(&result.rest, "stale_reason")?.is_empty()
         || unsigned(&result.rest, "superseded_by_result_schema_version")?
             != u64::from(RESULT_SCHEMA_VERSION)
@@ -200,7 +207,7 @@ fn validate_retired_acceptance_result(result: &ArtifactEnvelope) -> Result<(), S
         .get("git_before")
         .and_then(Value::as_object)
         .ok_or_else(|| "retired acceptance result lacks git_before".to_string())?;
-    if result.workload_id != WORKLOAD_ID
+    if !is_recognized_workload_id(&result.workload_id)
         || string(&result.rest, "stale_reason")?.is_empty()
         || unsigned(&result.rest, "superseded_by_workload_schema_version")?
             != u64::from(WORKLOAD_SCHEMA_VERSION)

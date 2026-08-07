@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "current_acceptance": null,
+  "historical_stale": [
+    "result-2026-07-15-0c289212.json",
+    "result-2026-07-15-b05b4cd5.json",
+    "result-2026-07-16-00d3d73a.json",
+    "result-2026-07-16-8d53b4a9.json",
+    "result-2026-07-26-dc17dd73.json"
+  ]
+}

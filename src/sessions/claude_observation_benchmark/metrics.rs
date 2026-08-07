@@ -202,7 +202,7 @@ pub(super) fn preflight_platform() -> u64 {
     assert_eq!(
         std::env::consts::OS,
         "linux",
-        "PR5 benchmark contract requires Linux"
+        "claude-observation benchmark contract requires Linux"
     );
     for path in [
         "/proc/self/stat",
@@ -212,14 +212,14 @@ pub(super) fn preflight_platform() -> u64 {
         "/proc/cpuinfo",
     ] {
         fs::File::open(path).unwrap_or_else(|error| {
-            panic!("PR5 benchmark contract requires readable {path}: {error}")
+            panic!("claude-observation benchmark contract requires readable {path}: {error}")
         });
     }
     write_clear_refs().unwrap_or_else(|error| {
         panic!(
-            "PR5 benchmark contract requires writable /proc/self/clear_refs with value 5: {error}"
+            "claude-observation benchmark contract requires writable /proc/self/clear_refs with value 5: {error}"
         )
     });
     parse_clock_ticks_per_second(&command_output("getconf", &["CLK_TCK"]))
-        .expect("PR5 benchmark contract requires nonzero getconf CLK_TCK")
+        .expect("claude-observation benchmark contract requires nonzero getconf CLK_TCK")
 }

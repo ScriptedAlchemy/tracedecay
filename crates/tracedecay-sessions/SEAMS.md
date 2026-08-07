@@ -162,10 +162,10 @@ These name `src/sessions/…` as data or prose and were deliberately left alone;
 the benchmark manifests additionally pin SHA-256 digests over the harness files,
 so they need a re-seal rather than a path edit.
 
-- `benchmarks/pr5-observation/workload-v1.json` and
-  `benchmarks/pr5-observation/result-2026-07-26-dc17dd73.json`
-- `benchmarks/pr8-temporal/workload-v1.json` and
-  `benchmarks/pr8-temporal/result-provisional.json`
+- `benchmarks/claude-observation/workload-v1.json` and
+  `benchmarks/claude-observation/result-2026-07-26-dc17dd73.json`
+- `benchmarks/session-temporal/workload-v1.json` and
+  `benchmarks/session-temporal/result-provisional.json`
 - `tests/fixtures/transcript_golden/cline_like/manifest.json` and
   `tests/fixtures/transcript_golden/cline_like/expected/parser_provenance.json`
 - `tests/fixtures/provider_normalization/codex/README.md`

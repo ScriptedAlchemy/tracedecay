@@ -6,9 +6,10 @@
 > snapshots, receipts, attestations, PR packets, and gate fields below are not
 > rebuild instructions. Validate current provider behavior directly.
 
-The directory keeps its PR5 name for artifact provenance. Workload schema 3 is
-the historical PR6 multi-provider Linux benchmark; the checked-in results are
-descriptive measurements, not PR acceptance authority.
+Archival result artifacts keep the workload id they were sealed under for
+provenance. Workload schema 3 is the historical multi-provider Linux
+benchmark; the checked-in results are descriptive measurements, not PR
+acceptance authority.
 
 The versioned [workload](workload-v1.json) runs production scan/parse,
 normalization, sanitizer, authoritative commit, projection/V1 fold, bounded
@@ -123,5 +124,5 @@ commit `b05b4cd570ab8e3385604c0fef31902fdc3f1e8b`.
 > Retain it only for provenance.
 
 ```console
-scripts/run-pr5-observation-benchmark.sh
+scripts/run-claude-observation-benchmark.sh
 ```

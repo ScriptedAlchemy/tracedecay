@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "workload_id": "pr5-observation-pipeline-v1",
+  "workload_id": "claude-observation-pipeline-v1",
   "implementation": "src/sessions/claude_observation_benchmark.rs",
   "platform": {
     "operating_system": "linux",
@@ -653,5 +653,5 @@
     }
   },
   "command": "cargo test --quiet --release --lib sessions::claude_observation_benchmark::production_observation_pipeline_baseline -- --ignored --exact --nocapture --test-threads=1",
-  "evidence_runner": "scripts/run-pr5-observation-benchmark.sh"
+  "evidence_runner": "scripts/run-claude-observation-benchmark.sh"
 }
