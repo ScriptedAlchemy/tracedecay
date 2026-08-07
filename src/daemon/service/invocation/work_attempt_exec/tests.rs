@@ -198,7 +198,7 @@ struct AttemptRows {
 }
 
 /// In-memory attempt rows with the same fenced compare-and-swap semantics as
-/// the registered SQLite store.
+/// the registered `SQLite` store.
 #[derive(Clone, Default)]
 struct AttemptStore {
     inner: Arc<Mutex<AttemptRows>>,
@@ -310,8 +310,7 @@ impl WorkAttemptStoragePort for AttemptStore {
             .filter(|attempt| {
                 attempt
                     .as_ref()
-                    .map(|attempt| !attempt.is_terminal())
-                    .unwrap_or(true)
+                    .map_or(true, |attempt| !attempt.is_terminal())
             })
             .collect()
     }

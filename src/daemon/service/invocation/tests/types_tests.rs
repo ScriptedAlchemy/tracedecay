@@ -194,7 +194,7 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         let ran_synchronously = Arc::clone(&work_ran_synchronously);
         async move {
             ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
-            ran.notify_one()
+            ran.notify_one();
         }
     })
     .unwrap();

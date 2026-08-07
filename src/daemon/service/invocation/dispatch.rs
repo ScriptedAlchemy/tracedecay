@@ -618,7 +618,7 @@ impl DaemonInvocationService {
                     )
                     .await
                 }
-                Err(response) => response,
+                Err(response) => *response,
             },
             DaemonInvocationPayload::LspFrame {
                 session,
@@ -630,7 +630,7 @@ impl DaemonInvocationService {
                     self.send_lsp_frame(lsp_registry, request_id, session, frame, now_ms)
                         .await
                 }
-                Err(response) => response,
+                Err(response) => *response,
             },
             DaemonInvocationPayload::LspPoll {
                 session,
@@ -641,7 +641,7 @@ impl DaemonInvocationService {
                     self.poll_lsp_frame(lsp_registry, request_id, session, now_ms)
                         .await
                 }
-                Err(response) => response,
+                Err(response) => *response,
             },
             DaemonInvocationPayload::LspAcknowledge {
                 session,
@@ -652,7 +652,7 @@ impl DaemonInvocationService {
                     self.acknowledge_lsp_frame(lsp_registry, request_id, session, now_ms)
                         .await
                 }
-                Err(response) => response,
+                Err(response) => *response,
             },
             DaemonInvocationPayload::LspReconnect {
                 session,
@@ -663,7 +663,7 @@ impl DaemonInvocationService {
                     self.reconnect_lsp_session(lsp_registry, request_id, session, now_ms)
                         .await
                 }
-                Err(response) => response,
+                Err(response) => *response,
             },
             DaemonInvocationPayload::LspDetach {
                 session,
@@ -674,7 +674,7 @@ impl DaemonInvocationService {
                     self.detach_lsp_session(lsp_registry, request_id, session, now_ms)
                         .await
                 }
-                Err(response) => response,
+                Err(response) => *response,
             },
         };
         if is_observable_operation(operation) {

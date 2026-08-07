@@ -974,12 +974,12 @@ impl LspLeaseTaskRegistry {
             );
             (previous, start, generation)
         };
-        if let Some(previous) = previous {
-            if previous.stop().await.is_err() {
-                self.stop_generation(&current_session_id, Some(generation))
-                    .await?;
-                return Err(DaemonInvocationProblem::Unavailable);
-            }
+        if let Some(previous) = previous
+            && previous.stop().await.is_err()
+        {
+            self.stop_generation(&current_session_id, Some(generation))
+                .await?;
+            return Err(DaemonInvocationProblem::Unavailable);
         }
         if start.send(()).is_err() {
             self.stop_generation(&current_session_id, Some(generation))
@@ -1086,6 +1086,7 @@ pub(super) struct AuthorizedDaemonLspWorkspace {
 }
 
 impl DaemonLspInvocationOwner {
+    #[cfg(test)]
     pub(crate) fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {
         Self {
             factory,

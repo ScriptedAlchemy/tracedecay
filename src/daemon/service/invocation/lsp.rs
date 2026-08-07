@@ -11,18 +11,18 @@ pub(super) fn admit_lsp_control(
     request_id: String,
     deadline: &Deadline,
     cancellation: &CancellationContext,
-) -> Result<(), DaemonInvocationResponse> {
+) -> Result<(), Box<DaemonInvocationResponse>> {
     if cancellation.is_cancelled() {
-        return Err(DaemonInvocationResponse::application_problem(
+        return Err(Box::new(DaemonInvocationResponse::application_problem(
             request_id,
             ApplicationProblem::cancelled_before_admission(),
-        ));
+        )));
     }
     if deadline.is_elapsed_at(current_micros()) {
-        return Err(DaemonInvocationResponse::application_problem(
+        return Err(Box::new(DaemonInvocationResponse::application_problem(
             request_id,
             ApplicationProblem::timed_out_before_admission(),
-        ));
+        )));
     }
     Ok(())
 }
