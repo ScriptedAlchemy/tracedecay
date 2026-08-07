@@ -1,5 +1,5 @@
 {
-  "schema": "pr8-fixture-sanitization-receipt-v1",
+  "schema": "session-temporal-fixture-sanitization-receipt-v1",
   "provider": "codex",
   "independently_sourced": true,
   "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
@@ -7,9 +7,9 @@
   "format": "checked_in_native_bounded_copy_v1",
   "documentation": "tests/fixtures/provider_normalization/codex/README.md",
   "production_acceptance_reuse": {
-    "workload": "benchmarks/pr5-observation/workload-v1.json",
+    "workload": "benchmarks/claude-observation/workload-v1.json",
     "harness_path": "codex_production_observation_pipeline_v1",
-    "notes": "session_meta and agent_message inputs are the same provider-native captures already exercised by the PR5/PR6 production observation pipeline baseline"
+    "notes": "session_meta and agent_message inputs are the same provider-native captures already exercised by the claude-observation production pipeline baseline"
   },
   "files": [
     {
@@ -25,7 +25,7 @@
     {
       "path": "tests/fixtures/provider_normalization/codex/README.md",
       "role": "provenance_documentation",
-      "sha256": "3c161c364acdc482b46e7c3c1de14a8981bc7169d4d10e8501b644e93306f213"
+      "sha256": "848cc877145a60c95a093cac1d19f51fc54ba68ce00bdcca60c3649699446b80"
     }
   ]
 }

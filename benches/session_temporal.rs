@@ -40,7 +40,7 @@ fn main() {
         ),
     };
     if let Err(error) = result {
-        eprintln!("PR8 temporal benchmark: {error}");
+        eprintln!("session-temporal benchmark: {error}");
         std::process::exit(1);
     }
 }

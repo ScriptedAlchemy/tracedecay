@@ -1,4 +1,4 @@
-//! PR8 session-temporal benchmark harness.
+//! Session-temporal benchmark harness.
 //!
 //! Drives production Codex admission, `CanonicalSessionTemporalProjector`
 //! materialization through the registered session database,
@@ -61,21 +61,21 @@ use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTo
 use tracedecay_temporal_query::ranking::DiversityLimits;
 
 const SCHEMA_VERSION: u64 = 2;
-const WORKLOAD_ID: &str = "pr8-session-temporal-v1";
-const WORKLOAD_PATH: &str = "benchmarks/pr8-temporal/workload-v1.json";
-const EVIDENCE_INDEX_PATH: &str = "benchmarks/pr8-temporal/evidence-index.json";
-const RESULT_PATH: &str = "benchmarks/pr8-temporal/result-provisional.json";
-const RUNNER_PATH: &str = "scripts/run-pr8-temporal-benchmark.sh";
+const WORKLOAD_ID: &str = "session-temporal-v1";
+const WORKLOAD_PATH: &str = "benchmarks/session-temporal/workload-v1.json";
+const EVIDENCE_INDEX_PATH: &str = "benchmarks/session-temporal/evidence-index.json";
+const RESULT_PATH: &str = "benchmarks/session-temporal/result-provisional.json";
+const RUNNER_PATH: &str = "scripts/run-session-temporal-benchmark.sh";
 const HARNESS_PATH: &str = "src/sessions/session_temporal_benchmark.rs";
 const SANITIZATION_RECEIPT_PATH: &str =
-    "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json";
+    "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json";
 const P95_LABEL: &str = "descriptive nearest-rank sample p95";
 const P99_LABEL: &str = "descriptive nearest-rank sample p99 (sample maximum when n=30)";
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
 const PROJECTOR_VERSION: &str = "session-temporal-projector.v1";
 const CONFIG_VERSION: &str = "session-refresh-config.v1";
-const BENCHMARK_PROJECT_ID: &str = "proj_pr8_temporal_benchmark";
+const BENCHMARK_PROJECT_ID: &str = "proj_session_temporal_benchmark";
 const DIGEST: [u8; 32] = [0x8b; 32];
 
 const NATIVE_CODEX_FIXTURES: &[(&str, &str)] = &[
@@ -478,7 +478,7 @@ fn validate_refresh_inputs(root: &Path, workload: &Value) -> BenchResult<()> {
 pub async fn run_measurement() -> BenchResult<Value> {
     if !cfg!(target_os = "linux") {
         return Err(
-            "PR8 temporal --run measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS".into(),
+            "Session-temporal --run measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS".into(),
         );
     }
     validate_contract()?;
@@ -500,7 +500,7 @@ pub async fn run_measurement() -> BenchResult<Value> {
 /// derived after the run and published as one consistency-checked pair.
 pub async fn refresh_contract() -> BenchResult<Value> {
     if !cfg!(target_os = "linux") {
-        return Err("PR8 temporal contract refresh is Linux-hosted".to_owned());
+        return Err("Session-temporal contract refresh is Linux-hosted".to_owned());
     }
     validate_bench_profile_enforced()?;
     let root = repository_root();
@@ -632,7 +632,7 @@ fn measurement_result(
 }
 
 async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition> {
-    let env = IsolatedBenchmarkEnv::enter("pr8-temporal-")?;
+    let env = IsolatedBenchmarkEnv::enter("session-temporal-")?;
     let project = env.path().join("project");
     fs::create_dir_all(&project).map_err(|error| format!("create project: {error}"))?;
     let project_id = enroll_benchmark_project(&project)?;
@@ -645,7 +645,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let _daemon_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
         &profile,
         u64::try_from(repetition).unwrap() + 1,
-        &format!("pr8-bench-{repetition}"),
+        &format!("session-temporal-bench-{repetition}"),
     )
     .map_err(|error| format!("enter daemon scope: {error}"))?;
     let session_registry = DaemonSessionRuntimeRegistryV1::open(profile_identity)
@@ -944,17 +944,17 @@ fn request_context(
     request: &str,
     project_id: &ProjectId,
 ) -> (RequestContext, SessionRequestBinding) {
-    let actor = ActorId::new("actor.pr8.benchmark").unwrap();
+    let actor = ActorId::new("actor.session-temporal.benchmark").unwrap();
     let request_id = RequestId::new(request).unwrap();
     let identity = ResolvedSessionIdentity::for_project(
         ProfileId::new("profile.session-temporal-benchmark").unwrap(),
         project_id.clone(),
         SessionStoreId::new(format!("store.{}", project_id.as_str())).unwrap(),
-        SessionRootId::new("root.pr8.benchmark").unwrap(),
+        SessionRootId::new("root.session-temporal.benchmark").unwrap(),
         ResolvedGitRoute::new(
-            RepositoryId::new("repository.pr8.benchmark").unwrap(),
-            WorktreeId::new("worktree.pr8.benchmark").unwrap(),
-            BranchId::new("branch.pr8.benchmark").unwrap(),
+            RepositoryId::new("repository.session-temporal.benchmark").unwrap(),
+            WorktreeId::new("worktree.session-temporal.benchmark").unwrap(),
+            BranchId::new("branch.session-temporal.benchmark").unwrap(),
         ),
     );
     let scope = identity.application_scope().unwrap();
@@ -975,7 +975,7 @@ fn request_context(
         expires_at,
         scope.clone(),
         BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").unwrap()]),
-        BTreeSet::from([UseCaseId::new("use-case.pr8.session-benchmark").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.session-temporal.benchmark").unwrap()]),
         DisclosureClass::Evidence,
     )
     .unwrap();
@@ -1328,7 +1328,7 @@ mod tests {
 
     #[test]
     fn contract_matches_checked_in_artifacts() {
-        validate_contract().expect("PR8 temporal contract");
+        validate_contract().expect("session-temporal contract");
     }
 
     #[test]
@@ -1477,7 +1477,7 @@ mod tests {
 
     #[tokio::test]
     async fn isolated_env_sets_and_restores_home_and_data_dir() {
-        let isolated = IsolatedBenchmarkEnv::enter("pr8-env-").unwrap();
+        let isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-").unwrap();
         let prior_home = isolated.previous_home.clone();
         let prior_data = isolated.previous_data_dir.clone();
         assert_eq!(

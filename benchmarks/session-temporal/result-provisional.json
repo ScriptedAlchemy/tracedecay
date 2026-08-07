@@ -198,7 +198,7 @@
     "binary": "/fast/projects/tracedecay/.worktrees/pr8-contract-HIK/target/release/deps/session_temporal-ec178df33da1d57c",
     "commit": "1a03fcdff61ac76e94e8cbbc0d49f51b023876e9",
     "harness": "src/sessions/session_temporal_benchmark.rs",
-    "harness_sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72",
+    "harness_sha256": "15847bc65f4abec41a65961e053657c33ad017b4cab565a3cb3c0a1fa7060c10",
     "native_fixtures": [
       {
         "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
@@ -217,14 +217,14 @@
       "opt_level": 3,
       "overflow_checks": false
     },
-    "runner": "scripts/run-pr8-temporal-benchmark.sh",
-    "runner_sha256": "d1d321db6c3e4d372017a50245da8bd69df0b108f755696539bce21fe0a80306",
-    "sanitization_receipt": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
-    "sanitization_receipt_sha256": "ff2d0c421a136c80ca8a9ab30932a1f2e0becda5534433cc7132b29471bd13b0",
-    "workload_manifest": "benchmarks/pr8-temporal/workload-v1.json",
-    "workload_manifest_sha256": "38e664d2cac55e57ffea300fdbc66feca1caaec2c5fa2cf2ce8c564d0769eb2a"
+    "runner": "scripts/run-session-temporal-benchmark.sh",
+    "runner_sha256": "1f66c6dd38610c8980c0837cf32044bad111714b8bec60a03893d4d93191335c",
+    "sanitization_receipt": "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json",
+    "sanitization_receipt_sha256": "f85558c318a9e8162a2ca15857b10e27f91bf71f055f7c4782b78da04ea8fbd6",
+    "workload_manifest": "benchmarks/session-temporal/workload-v1.json",
+    "workload_manifest_sha256": "4c1b16e1bf9a3b88b7a659e5005f6a38e8203681e61a08d154dc99e852a9cfcc"
   },
-  "workload_id": "pr8-session-temporal-v1",
-  "workload_manifest": "benchmarks/pr8-temporal/workload-v1.json",
-  "workload_manifest_sha256": "38e664d2cac55e57ffea300fdbc66feca1caaec2c5fa2cf2ce8c564d0769eb2a"
+  "workload_id": "session-temporal-v1",
+  "workload_manifest": "benchmarks/session-temporal/workload-v1.json",
+  "workload_manifest_sha256": "4c1b16e1bf9a3b88b7a659e5005f6a38e8203681e61a08d154dc99e852a9cfcc"
 }

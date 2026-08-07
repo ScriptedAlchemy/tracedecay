@@ -1,29 +1,21 @@
 {
-  "command": "scripts/run-pr8-temporal-benchmark.sh --run",
+  "command": "scripts/run-session-temporal-benchmark.sh --run",
   "file_inventory": [
     {
       "path": "benches/session_temporal.rs",
-      "sha256": "8a8b087ba2038a8db180b81a3f2d2172d2c56fe27027006957646712e43f60a8"
+      "sha256": "6242a97490f9e5b2b975afe7e191a22667eea160b23520a6201c8140dc636f3b"
     },
     {
       "path": "src/sessions/session_temporal_benchmark.rs",
-      "sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72"
+      "sha256": "15847bc65f4abec41a65961e053657c33ad017b4cab565a3cb3c0a1fa7060c10"
     },
     {
-      "path": "scripts/run-pr8-temporal-benchmark.sh",
-      "sha256": "d1d321db6c3e4d372017a50245da8bd69df0b108f755696539bce21fe0a80306"
+      "path": "scripts/run-session-temporal-benchmark.sh",
+      "sha256": "1f66c6dd38610c8980c0837cf32044bad111714b8bec60a03893d4d93191335c"
     },
     {
-      "path": "Cargo.toml",
-      "sha256": "c1d1febf3dbf95c8b382d58a83da035fc71c1a19e5d0c40416c81fbed00f8e63"
-    },
-    {
-      "path": ".github/workflows/ci.yml",
-      "sha256": "70c09b1e2e6350d471c1a659faf68c345118007501d8915e416711cfdcac4f3f"
-    },
-    {
-      "path": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
-      "sha256": "ff2d0c421a136c80ca8a9ab30932a1f2e0becda5534433cc7132b29471bd13b0"
+      "path": "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json",
+      "sha256": "f85558c318a9e8162a2ca15857b10e27f91bf71f055f7c4782b78da04ea8fbd6"
     },
     {
       "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
@@ -35,11 +27,11 @@
     },
     {
       "path": "tests/fixtures/provider_normalization/codex/README.md",
-      "sha256": "3c161c364acdc482b46e7c3c1de14a8981bc7169d4d10e8501b644e93306f213"
+      "sha256": "848cc877145a60c95a093cac1d19f51fc54ba68ce00bdcca60c3649699446b80"
     },
     {
-      "path": "benchmarks/pr8-temporal/README.md",
-      "sha256": "63fbf56ccbcbcee268606e532be5c25ae2d6e6a61cadbd0494569f3dee6b423a"
+      "path": "benchmarks/session-temporal/README.md",
+      "sha256": "9a2eea9e5208dd1295c6bfc7c18b324ae6d380a7fa05e4353107b699a86fcb0e"
     }
   ],
   "fixture_evidence": {
@@ -57,12 +49,12 @@
     "independently_sourced": true,
     "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
     "provider": "codex",
-    "sanitization_receipt": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
+    "sanitization_receipt": "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json",
     "status": "accepted_for_harness"
   },
   "implementation": {
     "path": "src/sessions/session_temporal_benchmark.rs",
-    "sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72"
+    "sha256": "15847bc65f4abec41a65961e053657c33ad017b4cab565a3cb3c0a1fa7060c10"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -116,8 +108,8 @@
     "warmup_repetitions": 3
   },
   "runner": {
-    "path": "scripts/run-pr8-temporal-benchmark.sh",
-    "sha256": "d1d321db6c3e4d372017a50245da8bd69df0b108f755696539bce21fe0a80306"
+    "path": "scripts/run-session-temporal-benchmark.sh",
+    "sha256": "1f66c6dd38610c8980c0837cf32044bad111714b8bec60a03893d4d93191335c"
   },
   "schema_version": 2,
   "statistics": {
@@ -135,5 +127,5 @@
     "required_ownership": "benchmark-owned temporary storage with RAII cleanup",
     "status": "enforced_by_harness_and_runner"
   },
-  "workload_id": "pr8-session-temporal-v1"
+  "workload_id": "session-temporal-v1"
 }

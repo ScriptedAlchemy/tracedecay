@@ -1,4 +1,4 @@
-# PR8 session-temporal benchmark
+# Session-temporal benchmark
 
 > **Historical evidence only.** Preserve the authentic provider fixtures,
 > sanitization provenance, and measurements in this directory. Current
@@ -6,7 +6,7 @@
 > commands, test names/counts, snapshots, receipts, attestations, PR packets,
 > and gates below are not rebuild instructions. Validate current behavior directly.
 
-Linux measurement harness for PR8 temporal retrieval latency phases.
+Linux measurement harness for session-temporal retrieval latency phases.
 This directory records descriptive sample quantiles and directly executed
 behavioral test outcomes only. It is not an acceptance snapshot, receipt,
 manifest, or gate.
@@ -33,9 +33,9 @@ Runtime sanitizer provenance for those fixtures is in
 ## Commands
 
 ```bash
-scripts/run-pr8-temporal-benchmark.sh --dry-run
-scripts/run-pr8-temporal-benchmark.sh --run   # Linux only; exit 64 elsewhere
-scripts/run-pr8-temporal-benchmark.sh --refresh-contract
+scripts/run-session-temporal-benchmark.sh --dry-run
+scripts/run-session-temporal-benchmark.sh --run   # Linux only; exit 64 elsewhere
+scripts/run-session-temporal-benchmark.sh --refresh-contract
 cargo bench --bench session_temporal --all-features -- --run
 ```
 

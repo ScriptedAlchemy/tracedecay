@@ -9,7 +9,7 @@ fn concurrent_benchmark_environments_do_not_overlap() {
     let (first_entered_tx, first_entered_rx) = mpsc::channel();
     let (first_release_tx, first_release_rx) = mpsc::channel();
     let first = thread::spawn(move || {
-        let _isolated = IsolatedBenchmarkEnv::enter("pr8-env-first-").unwrap();
+        let _isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-first-").unwrap();
         first_entered_tx.send(()).unwrap();
         first_release_rx.recv().unwrap();
     });
@@ -18,7 +18,7 @@ fn concurrent_benchmark_environments_do_not_overlap() {
     let (second_entered_tx, second_entered_rx) = mpsc::channel();
     let (second_release_tx, second_release_rx) = mpsc::channel();
     let second = thread::spawn(move || {
-        let _isolated = IsolatedBenchmarkEnv::enter("pr8-env-second-").unwrap();
+        let _isolated = IsolatedBenchmarkEnv::enter("session-temporal-env-second-").unwrap();
         second_entered_tx.send(()).unwrap();
         second_release_rx.recv().unwrap();
     });
