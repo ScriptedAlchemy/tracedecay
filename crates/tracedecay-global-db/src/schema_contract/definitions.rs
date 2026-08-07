@@ -1786,6 +1786,10 @@ pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
     "store_instances",
     "graph_scopes",
     "store_artifacts",
+    // Deletion tombstones gate replay, restore, and project-open admission, so
+    // the public registry contract must prove their shape too — not only the
+    // fail-closed admission check in `ensure_registered_schema_for_admission`.
+    "remote_deletion_tombstones",
 ];
 
 pub(super) const OBSERVATIONS_TABLE_NAME: &str = "observations";

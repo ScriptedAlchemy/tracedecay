@@ -847,25 +847,14 @@ impl StoreAdministration {
                             error,
                         )
                     })?;
-                if let Err(error) = self.prove_no_external_branch_store_holders(&database_paths) {
-                    reservation
-                        .abort_preserved()
-                        .map_err(destructive_reservation_error)
-                        .map_err(|reservation_error| {
-                            cleanup_error(
-                                RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
-                                RemoteDeletionPhase::CancelRuntimeOwners,
-                                true,
-                                reservation_error,
-                            )
-                        })?;
-                    return Err(cleanup_error(
-                        RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
-                        RemoteDeletionPhase::CancelRuntimeOwners,
-                        true,
-                        error,
-                    ));
-                }
+                // Upstream followed the reservation with a separate
+                // `prove_no_external_branch_store_holders` sweep. That API no
+                // longer exists at this tip: `begin_destructive_code_maintenance`
+                // *is* the holder proof — it fails closed unless every physical
+                // runtime for these paths is closed, and it retires each closed
+                // shard's code authority so no stale handle can reopen the store.
+                // A second textual sweep would only restate what the reservation
+                // already proved.
                 if let Err(error) = std::fs::remove_dir_all(&data_root) {
                     reservation
                         .abort_preserved()

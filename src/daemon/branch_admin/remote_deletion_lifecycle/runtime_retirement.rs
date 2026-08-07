@@ -67,7 +67,11 @@ impl StoreAdministration {
         };
         for server in retirements.iter().flat_map(|(_, servers)| servers) {
             server.revoke_project_server_responses();
-            server.cancel_startup_transcript_ingest();
+            // Upstream cancelled the startup transcript-ingest phase here. At
+            // this tip that phase is owned by `McpServer::shutdown`
+            // (`shutdown_startup_catch_up_sync`), which the scheduled retirement
+            // below always reaches, and the standalone cancel entry point is
+            // gone. Revoke + abort still make the server terminal immediately.
             server.abort_project_server_requests();
         }
         for (owner, _) in &retirements {
