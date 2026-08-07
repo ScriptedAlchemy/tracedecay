@@ -63,7 +63,6 @@ pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
 pub mod config;
-pub mod cross_reference_graph;
 pub mod db;
 pub mod durability;
 pub mod errors;

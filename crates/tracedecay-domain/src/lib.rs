@@ -6,7 +6,6 @@
 pub mod canonical_text;
 pub mod code_intelligence;
 pub mod configuration;
-pub mod cross_reference;
 pub mod diagnostics;
 pub mod external_source;
 pub mod feedback;
@@ -36,7 +35,6 @@ pub mod workflow_run;
 
 pub use code_intelligence::*;
 pub use configuration::*;
-pub use cross_reference::*;
 pub use diagnostics::*;
 pub use external_source::*;
 pub use feedback::*;
