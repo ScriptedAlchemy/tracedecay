@@ -210,7 +210,7 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
     let git_dir = repository.git_dir();
     let common_dir = repository.common_dir();
-    let identity = git_dir.strip_prefix(&common_dir).unwrap_or(&git_dir);
+    let identity = git_dir.strip_prefix(common_dir).unwrap_or(git_dir);
     let mut hasher = Sha256::new();
     hasher.update(crate::os_str_bytes::native_os_str_bytes(
         identity.as_os_str(),

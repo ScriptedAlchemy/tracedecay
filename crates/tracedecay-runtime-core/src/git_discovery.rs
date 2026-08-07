@@ -128,10 +128,7 @@ fn repository_control_may_exist(directory: &Path) -> bool {
 }
 
 fn git_control_exists_or_unknown(candidate: &Path) -> bool {
-    match candidate.join(".git").try_exists() {
-        Ok(exists) => exists,
-        Err(_) => true,
-    }
+    candidate.join(".git").try_exists().unwrap_or(true)
 }
 
 fn repository_identity_command(directory: &Path) -> Command {

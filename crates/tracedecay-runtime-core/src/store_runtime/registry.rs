@@ -6,6 +6,9 @@
 //!
 //! Dead-code allowance lives on the parent `store_runtime` module until every
 //! live open routes through this registry.
+// The typed failure stays by-value at this boundary; `resolver.rs` documents
+// the boxed alternative if the variant set grows further.
+#![allow(clippy::result_large_err)]
 
 #![allow(unused_imports)] // Re-exports remain the registry's crate-visible API surface.
 
@@ -903,10 +906,7 @@ impl StoreRuntimeRegistry {
                     RegistryEntry::Evicting(evicting) => Some(evicting.handle.clone()),
                 })
                 .collect::<Vec<_>>();
-            let opening_shards = match u32::try_from(opening_shards) {
-                Ok(count) => count,
-                Err(_) => u32::MAX,
-            };
+            let opening_shards = u32::try_from(opening_shards).unwrap_or(u32::MAX);
             (opening_shards, handles)
         };
         let entries = handles

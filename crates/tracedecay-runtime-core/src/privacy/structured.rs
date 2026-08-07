@@ -99,7 +99,7 @@ pub fn sanitize_provider_metadata_json(text: &str, max_bytes: u64) -> Option<Val
     let sanitized = sanitize_structured_payload(text.as_bytes(), limits).ok()?;
     sanitized
         .was_structurally_parsed()
-        .then(|| sanitized.payload)
+        .then_some(sanitized.payload)
         .filter(Value::is_object)
 }
 

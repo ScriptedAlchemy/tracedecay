@@ -197,7 +197,11 @@ where
             operation: "get_nodes_by_files_page".to_owned(),
         })?
     {
-        if !entries.is_empty() && entries.len() % CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS == 0 {
+        if !entries.is_empty()
+            && entries
+                .len()
+                .is_multiple_of(CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS)
+        {
             checkpoint()?;
         }
         let node = row_to_node(&row).map_err(|error| TraceDecayError::Database {

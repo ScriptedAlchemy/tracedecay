@@ -764,7 +764,7 @@ impl GraphDbRegistry {
             let relational_head = authority
                 .verified_head(&key.projection, context)
                 .map_err(map_publication_error)?
-                .ok_or_else(|| GraphDbError::Conflict)?;
+                .ok_or(GraphDbError::Conflict)?;
             if relational_head.sequence < replay.sequence {
                 return Err(GraphDbError::Conflict);
             }
