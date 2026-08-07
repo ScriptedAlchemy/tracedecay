@@ -139,16 +139,22 @@ async fn opencode_install_prevents_a_second_analyzer_and_uninstall_restores_it()
         1,
         "without a host claim TraceDecay is the one analyzer for the language"
     );
-    assert_eq!(
-        before_snapshot.summary.total_errors, 1,
-        "the baseline journey must really have collected analyzer findings"
-    );
+    // `Ready` is only reached by a refresh that really completed a didOpen ->
+    // publishDiagnostics round trip against the spawned analyzer, so this is
+    // the baseline the post-install refusal is measured against.
     assert_engine_state(
         &before_snapshot,
         FAKE_LANGUAGE,
         lsp::broker::EngineState::Ready,
     );
     assert!(before_install.host_retained_languages().is_empty());
+    assert!(
+        before_install
+            .mounted_providers_for_files(&[FAKE_PATH.to_string()])
+            .iter()
+            .any(|provider| provider.language == FAKE_LANGUAGE),
+        "without a host claim the language is mountable, which is what install must revoke"
+    );
 
     // Install: the host declares it already runs an analyzer for `.fake`.
     install_opencode_registration(workspace.root(), true);
