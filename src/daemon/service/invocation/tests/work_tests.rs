@@ -80,6 +80,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest"),
             ManifestDigest::new(format!("sha256:{}", "f".repeat(64)))
                 .expect("configuration digest"),
+            tracedecay_domain::configuration::safe_work_topology_policy_v1(),
         )
         .await
         .expect("registered Work runtime");
@@ -382,6 +383,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
             ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest"),
             ManifestDigest::new(format!("sha256:{}", "f".repeat(64)))
                 .expect("configuration digest"),
+            tracedecay_domain::configuration::safe_work_topology_policy_v1(),
         )
         .await
         .expect("registered Work runtime");

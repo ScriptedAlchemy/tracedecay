@@ -77,6 +77,7 @@ pub use project_registry::{
 };
 pub use registered::{
     ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
+    RegisteredWorkflowApplicationServicesV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use remote_deletion::{

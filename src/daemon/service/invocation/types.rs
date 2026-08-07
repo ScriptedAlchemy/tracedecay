@@ -805,6 +805,9 @@ pub(in crate::daemon::service) struct RegisteredWorkRuntime {
     pub(super) authority_digest: ManifestDigest,
     pub(super) policy_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,
+    /// The complete resolved work topology policy pinned at registration;
+    /// workflow run admission and placement evaluate against this policy.
+    pub(super) work_topology_policy: tracedecay_domain::configuration::WorkTopologyPolicyV1,
 }
 
 pub(in crate::daemon::service) struct RegisteredFeedbackRuntime {

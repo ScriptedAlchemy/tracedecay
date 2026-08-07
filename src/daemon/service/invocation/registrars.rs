@@ -718,6 +718,7 @@ impl DaemonWorkRuntimeRegistrar {
         grant: CapabilityGrantSnapshot,
         policy_digest: ManifestDigest,
         configuration_digest: ManifestDigest,
+        work_topology_policy: tracedecay_domain::configuration::WorkTopologyPolicyV1,
     ) -> Result<(), TraceDecayError> {
         if authority.project_id() != &grant.scope.project_id
             || authority.repository_id() != &grant.scope.repository_id
@@ -763,6 +764,7 @@ impl DaemonWorkRuntimeRegistrar {
                         authority_digest: authority_digest.clone(),
                         policy_digest: policy_digest.clone(),
                         configuration_digest: configuration_digest.clone(),
+                        work_topology_policy: work_topology_policy.clone(),
                     })
                 },
             )

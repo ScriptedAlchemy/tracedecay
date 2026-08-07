@@ -215,6 +215,7 @@ impl WorkflowStepExecutionPort for MalformedExecutor {
             )
             .unwrap(),
             artifact_payloads: Vec::new(),
+            synthesis: None,
         })
     }
 }
@@ -244,6 +245,7 @@ impl WorkflowStepExecutionPort for PayloadWithholdingExecutor {
             .unwrap(),
             outputs,
             artifact_payloads: Vec::new(),
+            synthesis: None,
         })
     }
 }
@@ -296,6 +298,7 @@ impl WorkflowStepExecutionPort for RecordingExecutor {
             .unwrap(),
             outputs,
             artifact_payloads: vec![payload],
+            synthesis: None,
         })
     }
 }
@@ -646,6 +649,227 @@ fn failed_step_journals_successful_artifact_evidence() {
         outputs
     );
     assert_eq!(failed.status(), WorkflowRunStatus::Failed);
+}
+
+fn fan_out_definition() -> WorkflowDefinition {
+    WorkflowDefinition::new(
+        id::<WorkflowDefinitionId>("workflow.definition.fanout"),
+        1,
+        id::<ProjectId>("project.workflow.fanout"),
+        vec![WorkflowStep {
+            step_id: id::<WorkflowStepId>("explore"),
+            operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: vec![id::<WorkflowOutputName>("candidates")],
+            fan_out: Some(tracedecay_domain::WorkflowFanOut { max_width: 3 }),
+        }],
+        digest('a'),
+        digest('b'),
+        work_executable_catalog_digest().unwrap(),
+    )
+    .unwrap()
+}
+
+fn fan_out_attempt(run_id: &RunId, ordinal: usize) -> WorkAttemptIdentityV1 {
+    WorkAttemptIdentityV1::new(
+        id::<TaskId>("task.workflow.fanout"),
+        run_id.clone(),
+        id::<AttemptId>(&format!("attempt.workflow.fanout.{ordinal}")),
+    )
+    .unwrap()
+}
+
+/// Runs a three-way fan-out where the third attempt claims to synthesize the
+/// first two, citing whichever source digests the test chooses.
+struct SynthesizingExecutor {
+    sources: Vec<WorkflowArtifactPayload>,
+    synthesis: WorkflowArtifactPayload,
+    cited: BTreeSet<ManifestDigest>,
+    claim: bool,
+}
+
+impl WorkflowStepExecutionPort for SynthesizingExecutor {
+    fn execute(
+        &self,
+        request: &WorkflowStepExecutionRequest,
+        _hydrated: &[WorkflowHydratedInput],
+    ) -> Result<WorkflowStepExecutionResult, WorkflowStepExecutionError> {
+        let mut artifacts = self
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(ordinal, payload)| {
+                WorkflowOutputArtifact::new(
+                    fan_out_attempt(&request.run_id, ordinal),
+                    payload.artifact().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let synthesis_attempt = fan_out_attempt(&request.run_id, self.sources.len());
+        artifacts.push(WorkflowOutputArtifact::new(
+            synthesis_attempt.clone(),
+            self.synthesis.artifact().clone(),
+        ));
+        let outputs = vec![
+            WorkflowStepOutput::new(id::<WorkflowOutputName>("candidates"), artifacts).unwrap(),
+        ];
+        let mut artifact_payloads = self.sources.clone();
+        artifact_payloads.push(self.synthesis.clone());
+        Ok(WorkflowStepExecutionResult {
+            effect_receipt: WorkflowStepEffectReceipt::new(
+                request.run_id.clone(),
+                request.step_id.clone(),
+                request.placement.placement_digest().clone(),
+                WorkflowStepEffectOutcome::Completed,
+                digest('9'),
+                &outputs,
+            )
+            .unwrap(),
+            outputs,
+            artifact_payloads,
+            synthesis: self.claim.then(|| {
+                tracedecay_application::WorkflowSynthesisDraft {
+                    output_name: id::<WorkflowOutputName>("candidates"),
+                    synthesis_attempt,
+                    cited_source_digests: self.cited.clone(),
+                }
+            }),
+        })
+    }
+}
+
+fn run_fan_out(
+    run_marker: &str,
+    executor: SynthesizingExecutor,
+) -> (MemoryRunStorage, RunId, WorkflowStepExecutionOutcome) {
+    let storage = MemoryRunStorage::default();
+    let run_id = id::<RunId>(&format!("run.workflow.fanout.{run_marker}"));
+    let admitted = WorkflowRunService::new(storage.clone())
+        .admit(
+            run_id.clone(),
+            fan_out_definition(),
+            WorkflowAdmissionSnapshot {
+                policy_digest: digest('a'),
+                configuration_digest: digest('b'),
+                catalog_digest: work_executable_catalog_digest().unwrap(),
+                topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
+            },
+            context("command.workflow.fanout.admit", '1', 1),
+        )
+        .unwrap();
+    let outcome = WorkflowStepExecutionService::new(
+        storage.clone(),
+        executor,
+        MemoryArtifactStore::default(),
+    )
+    .execute_ready_step(
+        &run_id,
+        admitted.sequence(),
+        &id::<WorkflowStepId>("explore"),
+        placement(&run_id, "explore"),
+        WorkflowStepEventContexts {
+            started: context("command.workflow.fanout.start", '2', 2),
+            completed: context("command.workflow.fanout.complete", '3', 3),
+            failed: context("command.workflow.fanout.fail", '4', 3),
+        },
+    )
+    .unwrap();
+    (storage, run_id, outcome)
+}
+
+fn fan_out_payloads() -> (Vec<WorkflowArtifactPayload>, WorkflowArtifactPayload) {
+    (
+        vec![
+            content_artifact("artifact.workflow.fanout.a", b"candidate a"),
+            content_artifact("artifact.workflow.fanout.b", b"candidate b"),
+        ],
+        content_artifact("artifact.workflow.fanout.synthesis", b"synthesis of a+b"),
+    )
+}
+
+#[test]
+fn synthesis_citing_every_source_completes_with_evidence_preserved() {
+    let (sources, synthesis) = fan_out_payloads();
+    let cited = sources
+        .iter()
+        .map(|payload| payload.artifact().digest().clone())
+        .collect::<BTreeSet<_>>();
+    let (_, _, outcome) = run_fan_out(
+        "cited",
+        SynthesizingExecutor {
+            sources: sources.clone(),
+            synthesis: synthesis.clone(),
+            cited,
+            claim: true,
+        },
+    );
+    let WorkflowStepExecutionOutcome::Succeeded(projection) = outcome else {
+        panic!("fully cited synthesis must complete the fan-out step");
+    };
+    assert_eq!(projection.status(), WorkflowRunStatus::Completed);
+    // Every source artifact remains journaled alongside the synthesis: the
+    // settlement admitted another artifact, it did not rewrite evidence.
+    let journaled = projection
+        .step(&id::<WorkflowStepId>("explore"))
+        .unwrap()
+        .outputs()
+        .values()
+        .flat_map(WorkflowStepOutput::artifacts)
+        .map(|artifact| artifact.artifact().digest().clone())
+        .collect::<BTreeSet<_>>();
+    for payload in sources.iter().chain(std::iter::once(&synthesis)) {
+        assert!(journaled.contains(payload.artifact().digest()));
+    }
+}
+
+#[test]
+fn synthesis_with_incomplete_citations_fails_the_step_typed() {
+    let (sources, synthesis) = fan_out_payloads();
+    // Cite only the first source: minority evidence would be erased silently
+    // if this completed.
+    let cited = BTreeSet::from([sources[0].artifact().digest().clone()]);
+    let (storage, run_id, outcome) = run_fan_out(
+        "uncited",
+        SynthesizingExecutor {
+            sources,
+            synthesis,
+            cited,
+            claim: true,
+        },
+    );
+    assert!(matches!(outcome, WorkflowStepExecutionOutcome::Failed(_)));
+    let projection = WorkflowRunStoragePort::projection(&storage, &run_id).unwrap();
+    assert_eq!(projection.status(), WorkflowRunStatus::Failed);
+}
+
+#[test]
+fn declined_synthesis_returns_the_unsynthesized_evidence_set() {
+    let (sources, synthesis) = fan_out_payloads();
+    let (_, _, outcome) = run_fan_out(
+        "declined",
+        SynthesizingExecutor {
+            sources: sources.clone(),
+            synthesis,
+            cited: BTreeSet::new(),
+            claim: false,
+        },
+    );
+    let WorkflowStepExecutionOutcome::Succeeded(projection) = outcome else {
+        panic!("declined synthesis must still return the evidence set");
+    };
+    let journaled = projection
+        .step(&id::<WorkflowStepId>("explore"))
+        .unwrap()
+        .outputs()
+        .values()
+        .flat_map(WorkflowStepOutput::artifacts)
+        .map(|artifact| artifact.artifact().digest().clone())
+        .collect::<BTreeSet<_>>();
+    for payload in &sources {
+        assert!(journaled.contains(payload.artifact().digest()));
+    }
 }
 
 #[test]

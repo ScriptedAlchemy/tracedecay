@@ -14,6 +14,9 @@ use tracedecay_domain::{
 };
 
 use crate::workflow_provider::WorkflowProviderRegistration;
+use crate::workflow_synthesis::{
+    WorkflowSynthesisDraft, WorkflowSynthesisRefusal, verify_workflow_synthesis_draft,
+};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowRunStorageError {
@@ -299,6 +302,10 @@ pub struct WorkflowStepExecutionResult {
     /// Payload bytes for every artifact the outputs declare, persisted by the
     /// runtime before the completion event is journaled.
     pub artifact_payloads: Vec<WorkflowArtifactPayload>,
+    /// An optional claim that one fan-out output artifact synthesizes its
+    /// sibling sources. Absence is the unsynthesized evidence set; a claim
+    /// that fails citation settlement is a typed protocol violation.
+    pub synthesis: Option<WorkflowSynthesisDraft>,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -473,7 +480,7 @@ where
             definition_id: started.definition().definition_id().clone(),
             definition_version: started.definition().definition_version(),
             step_id: step_id.clone(),
-            operation: definition_step.operation,
+            operation: definition_step.operation.clone(),
             inputs,
             placement,
         };
@@ -489,6 +496,22 @@ where
                 );
             }
         };
+        // Synthesis settles before anything durable happens for this result:
+        // a claimed synthesis that does not cite every sibling source is a
+        // protocol violation, and the step fails with the evidence set intact
+        // rather than completing a rewritten one.
+        if let Some(draft) = &result.synthesis
+            && let Err(refusal) =
+                verify_workflow_synthesis_draft(&definition_step, &result.outputs, draft)
+        {
+            return self.fail_started_step(
+                &started,
+                step_id,
+                Vec::new(),
+                synthesis_refusal_receipt(&started, step_id, &result.effect_receipt, &refusal)?,
+                contexts.failed,
+            );
+        }
         // Payloads persist before the completion event: a crash between the
         // two leaves only idempotent digest-addressed rows behind, never a
         // journaled completion whose artifacts cannot hydrate.
@@ -585,6 +608,34 @@ where
                 .into_projection(),
         ))
     }
+}
+
+fn synthesis_refusal_receipt(
+    started: &WorkflowRunProjection,
+    step_id: &WorkflowStepId,
+    observed_receipt: &WorkflowStepEffectReceipt,
+    refusal: &WorkflowSynthesisRefusal,
+) -> Result<WorkflowStepEffectReceipt, WorkflowStepExecutionServiceError> {
+    let placement_digest = started
+        .step(step_id)
+        .and_then(|step| step.placement_receipt())
+        .map(|placement| placement.placement_digest().clone())
+        .ok_or(WorkflowRunStateError::InvalidPlacementReceipt)?;
+    let effect_digest = canonical_sha256(&(
+        "tracedecay.application.workflow-synthesis-refusal.v1",
+        observed_receipt,
+        refusal.as_str(),
+    ))
+    .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt)?;
+    WorkflowStepEffectReceipt::new(
+        started.run_id().clone(),
+        step_id.clone(),
+        placement_digest,
+        tracedecay_domain::WorkflowStepEffectOutcome::Failed,
+        effect_digest,
+        &[],
+    )
+    .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt.into())
 }
 
 fn protocol_failure_receipt(

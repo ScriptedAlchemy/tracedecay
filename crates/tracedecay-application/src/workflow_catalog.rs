@@ -17,12 +17,14 @@ use crate::{
     WorkflowDefinitionDisposition, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
     WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
     WorkflowDefinitionRejectRequest, WorkflowDefinitionRetireRequest,
-    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation,
+    WorkflowDefinitionValidateRequest, WorkflowDefinitionValidation, WorkflowRunCancelRequest,
+    WorkflowRunGetRequest, WorkflowRunPauseRequest, WorkflowRunResumeRequest,
+    WorkflowRunStartRequest,
 };
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
-pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 11] = [
+pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 16] = [
     (
         "register_definition",
         "capability.workflow.register_definition",
@@ -77,6 +79,31 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 11] = [
         "handoff_redeem",
         "capability.workflow.handoff_redeem",
         "use-case.workflow.handoff_redeem",
+    ),
+    (
+        "start_run",
+        "capability.workflow.start_run",
+        "use-case.workflow.start_run",
+    ),
+    (
+        "pause_run",
+        "capability.workflow.pause_run",
+        "use-case.workflow.pause_run",
+    ),
+    (
+        "resume_run",
+        "capability.workflow.resume_run",
+        "use-case.workflow.resume_run",
+    ),
+    (
+        "cancel_run",
+        "capability.workflow.cancel_run",
+        "use-case.workflow.cancel_run",
+    ),
+    (
+        "get_run",
+        "capability.workflow.get_run",
+        "use-case.workflow.get_run",
     ),
 ];
 
@@ -138,6 +165,26 @@ fn workflow_binding(
             operation,
             "/application/workflow/handoff-redeem",
         ),
+        "start_run" => available::<WorkflowRunStartRequest, tracedecay_domain::WorkflowRunProjection>(
+            operation,
+            "/application/workflow/start-run",
+        ),
+        "pause_run" => available::<WorkflowRunPauseRequest, tracedecay_domain::WorkflowRunProjection>(
+            operation,
+            "/application/workflow/pause-run",
+        ),
+        "resume_run" => available::<
+            WorkflowRunResumeRequest,
+            tracedecay_domain::WorkflowRunProjection,
+        >(operation, "/application/workflow/resume-run"),
+        "cancel_run" => available::<
+            WorkflowRunCancelRequest,
+            tracedecay_domain::WorkflowRunProjection,
+        >(operation, "/application/workflow/cancel-run"),
+        "get_run" => available::<WorkflowRunGetRequest, tracedecay_domain::WorkflowRunProjection>(
+            operation,
+            "/application/workflow/get-run",
+        ),
         _ => Err(invalid_catalog_value(
             "workflow operation",
             "operation has no executable binding",
@@ -185,6 +232,7 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
             | "list_definitions"
             | "definition_history"
             | "diff_definition"
+            | "get_run"
     );
     let binding_id = BindingId::new(format!("binding.http.workflow.{operation}"))
         .map_err(|_| invalid_catalog_value("workflow binding ID", "ID is invalid"))?;
@@ -318,12 +366,12 @@ mod tests {
     #[test]
     fn workflow_registry_advertises_every_mounted_application_route() {
         let registry = workflow_executable_binding_registry().unwrap();
-        assert_eq!(registry.iter().count(), 11);
+        assert_eq!(registry.iter().count(), 16);
         let advertised = registry
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert_eq!(advertised.len(), 11);
+        assert_eq!(advertised.len(), 16);
         for binding in advertised {
             let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
                 binding.exposure()
@@ -343,6 +391,10 @@ mod tests {
             "reject_definition",
             "handoff_issue",
             "handoff_redeem",
+            "start_run",
+            "pause_run",
+            "resume_run",
+            "cancel_run",
         ] {
             let manifest = workflow_manifest(operation).unwrap();
             assert_eq!(manifest.effect(), EffectClass::Administrative);
@@ -379,6 +431,7 @@ mod tests {
             "list_definitions",
             "definition_history",
             "diff_definition",
+            "get_run",
         ] {
             let manifest = workflow_manifest(operation).unwrap();
             assert_eq!(manifest.effect(), EffectClass::Read);

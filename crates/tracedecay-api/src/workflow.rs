@@ -19,9 +19,10 @@ use tracedecay_application::{
     WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
     WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
     WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation,
+    WorkflowDefinitionValidation, WorkflowRunCancelRequest, WorkflowRunGetRequest,
+    WorkflowRunPauseRequest, WorkflowRunResumeRequest, WorkflowRunStartRequest,
 };
-use tracedecay_domain::WorkflowDefinition;
+use tracedecay_domain::{WorkflowDefinition, WorkflowRunProjection};
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
@@ -45,10 +46,15 @@ pub enum WorkflowOperation {
     DiffDefinition,
     HandoffIssue,
     HandoffRedeem,
+    StartRun,
+    PauseRun,
+    ResumeRun,
+    CancelRun,
+    GetRun,
 }
 
 impl WorkflowOperation {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 16] = [
         Self::RegisterDefinition,
         Self::ActivateDefinition,
         Self::RetireDefinition,
@@ -60,6 +66,11 @@ impl WorkflowOperation {
         Self::DiffDefinition,
         Self::HandoffIssue,
         Self::HandoffRedeem,
+        Self::StartRun,
+        Self::PauseRun,
+        Self::ResumeRun,
+        Self::CancelRun,
+        Self::GetRun,
     ];
 
     pub const fn operation_id_str(self) -> &'static str {
@@ -75,6 +86,11 @@ impl WorkflowOperation {
             Self::DiffDefinition => "operation.workflow.diff_definition",
             Self::HandoffIssue => "operation.workflow.handoff_issue",
             Self::HandoffRedeem => "operation.workflow.handoff_redeem",
+            Self::StartRun => "operation.workflow.start_run",
+            Self::PauseRun => "operation.workflow.pause_run",
+            Self::ResumeRun => "operation.workflow.resume_run",
+            Self::CancelRun => "operation.workflow.cancel_run",
+            Self::GetRun => "operation.workflow.get_run",
         }
     }
 
@@ -91,6 +107,11 @@ impl WorkflowOperation {
             Self::DiffDefinition => "diff_definition",
             Self::HandoffIssue => "handoff_issue",
             Self::HandoffRedeem => "handoff_redeem",
+            Self::StartRun => "start_run",
+            Self::PauseRun => "pause_run",
+            Self::ResumeRun => "resume_run",
+            Self::CancelRun => "cancel_run",
+            Self::GetRun => "get_run",
         }
     }
 
@@ -120,6 +141,11 @@ impl WorkflowOperation {
             Self::DiffDefinition => "diff-definition",
             Self::HandoffIssue => "handoff-issue",
             Self::HandoffRedeem => "handoff-redeem",
+            Self::StartRun => "start-run",
+            Self::PauseRun => "pause-run",
+            Self::ResumeRun => "resume-run",
+            Self::CancelRun => "cancel-run",
+            Self::GetRun => "get-run",
         }
     }
 
@@ -136,6 +162,11 @@ impl WorkflowOperation {
             Self::DiffDefinition => "/workflow/diff-definition",
             Self::HandoffIssue => "/workflow/handoff-issue",
             Self::HandoffRedeem => "/workflow/handoff-redeem",
+            Self::StartRun => "/workflow/start-run",
+            Self::PauseRun => "/workflow/pause-run",
+            Self::ResumeRun => "/workflow/resume-run",
+            Self::CancelRun => "/workflow/cancel-run",
+            Self::GetRun => "/workflow/get-run",
         }
     }
 
@@ -152,6 +183,11 @@ impl WorkflowOperation {
             Self::DiffDefinition => "/application/workflow/diff-definition",
             Self::HandoffIssue => "/application/workflow/handoff-issue",
             Self::HandoffRedeem => "/application/workflow/handoff-redeem",
+            Self::StartRun => "/application/workflow/start-run",
+            Self::PauseRun => "/application/workflow/pause-run",
+            Self::ResumeRun => "/application/workflow/resume-run",
+            Self::CancelRun => "/application/workflow/cancel-run",
+            Self::GetRun => "/application/workflow/get-run",
         }
     }
 
@@ -168,6 +204,11 @@ impl WorkflowOperation {
             Self::DiffDefinition => schema_name::<WorkflowDefinitionDiffRequest>(),
             Self::HandoffIssue => schema_name::<TaskHandoffIssueRequest>(),
             Self::HandoffRedeem => schema_name::<TaskHandoffRedeemRequest>(),
+            Self::StartRun => schema_name::<WorkflowRunStartRequest>(),
+            Self::PauseRun => schema_name::<WorkflowRunPauseRequest>(),
+            Self::ResumeRun => schema_name::<WorkflowRunResumeRequest>(),
+            Self::CancelRun => schema_name::<WorkflowRunCancelRequest>(),
+            Self::GetRun => schema_name::<WorkflowRunGetRequest>(),
         }
     }
 
@@ -185,6 +226,11 @@ impl WorkflowOperation {
             Self::DiffDefinition => schema_name::<WorkflowDefinitionDiff>(),
             Self::HandoffIssue => schema_name::<TaskHandoffGrant>(),
             Self::HandoffRedeem => schema_name::<TaskHandoffRedeemed>(),
+            Self::StartRun
+            | Self::PauseRun
+            | Self::ResumeRun
+            | Self::CancelRun
+            | Self::GetRun => schema_name::<WorkflowRunProjection>(),
         }
     }
 
