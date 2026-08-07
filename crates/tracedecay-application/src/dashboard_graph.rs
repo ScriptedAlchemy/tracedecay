@@ -181,75 +181,6 @@ pub struct DashboardGraphPathV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DashboardGraphCallChainStepV1 {
-    pub node: DashboardGraphNodeV1,
-    pub incoming_edge: Option<DashboardGraphEdgeV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DashboardGraphCallChainV1 {
-    pub from_node_id: String,
-    pub to_node_id: String,
-    pub max_depth: usize,
-    pub found: bool,
-    pub steps: Vec<DashboardGraphCallChainStepV1>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DashboardGraphStrataFileV1 {
-    pub path: String,
-    pub depth: usize,
-    pub scc_size: usize,
-    pub chain: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DashboardGraphStrataClusterV1 {
-    pub order: usize,
-    pub directory: String,
-    pub file_count: usize,
-    pub internal_edges: usize,
-    pub outgoing_edges: usize,
-    pub incoming_edges: usize,
-    pub boundary_edges: usize,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DashboardGraphStrataV1 {
-    pub max_depth: usize,
-    pub ideal_depth: usize,
-    pub files: Vec<DashboardGraphStrataFileV1>,
-    pub clusters: Vec<DashboardGraphStrataClusterV1>,
-    pub files_examined: usize,
-    pub dependency_edges_examined: usize,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DashboardGraphTestV1 {
-    pub id: String,
-    pub name: String,
-    pub file_path: String,
-    pub start_line: u32,
-    pub qualification: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct DashboardGraphTestMapV1 {
-    pub node: DashboardGraphNodeV1,
-    pub applicable: bool,
-    pub reason: Option<String>,
-    pub tests: Vec<DashboardGraphTestV1>,
-    pub test_files: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum DashboardGraphReadPayloadV1 {
     Overview(DashboardGraphOverviewV1),
@@ -258,9 +189,6 @@ pub enum DashboardGraphReadPayloadV1 {
     Neighbors(Option<DashboardGraphNeighborsV1>),
     Subgraph(DashboardGraphSubgraphV1),
     Path(DashboardGraphPathV1),
-    CallChain(DashboardGraphCallChainV1),
-    Strata(DashboardGraphStrataV1),
-    TestMap(Option<DashboardGraphTestMapV1>),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -289,19 +217,6 @@ pub enum DashboardGraphReadOperationV1 {
         from: String,
         to: String,
         max_depth: i64,
-    },
-    CallChain {
-        from: String,
-        to: String,
-        max_depth: usize,
-    },
-    Strata {
-        max_files: usize,
-        max_dependency_edges: usize,
-    },
-    TestMap {
-        node_id: String,
-        caller_depth: usize,
     },
 }
 

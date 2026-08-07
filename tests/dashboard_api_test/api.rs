@@ -639,7 +639,7 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["payload"]["engine"], "fts");
+        assert_eq!(search["payload"]["engine"], "canonical_temporal");
         let search_messages = search["payload"]["matches"]["messages"]
             .as_array()
             .unwrap_or_else(|| panic!("expected search.matches.messages array"));
@@ -648,11 +648,11 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             .unwrap_or_else(|| panic!("expected search.matches.summary_nodes array"));
         assert!(
             !search_messages.is_empty(),
-            "FTS search should match seeded messages"
+            "canonical search should match seeded messages"
         );
         assert!(
             !search_nodes.is_empty(),
-            "FTS search should match seeded summary nodes"
+            "canonical search should match seeded summary nodes"
         );
 
         let (status, like_search) = get_json(
@@ -663,7 +663,11 @@ fn lcm_endpoints_cover_seeded_fts_and_like_fallback() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(like_search["payload"]["engine"], "like");
+        assert_eq!(like_search["payload"]["engine"], "canonical_temporal");
+        assert!(
+            like_search["payload"]["matches"]["messages"].is_array(),
+            "a non-tokenizable query must stay a valid empty search, not an error: {like_search}"
+        );
     });
 }
 
@@ -707,7 +711,7 @@ fn lcm_endpoints_return_empty_state_when_no_rows_exist() {
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(search["payload"]["engine"], "fts");
+        assert_eq!(search["payload"]["engine"], "canonical_temporal");
         assert_eq!(
             search["payload"]["matches"]["messages"],
             Value::Array(Vec::new()),

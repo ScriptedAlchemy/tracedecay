@@ -1,15 +1,20 @@
-use serde_json::Value;
+//! Canonical code-graph topology reads backing the dashboard graph read port.
+//!
+//! These are the exact bounded SQL projections the pre-cutover dashboard
+//! graph service ran; the daemon adapter owns them now so HTTP adapters only
+//! ever receive complete typed read models. Every failure is preserved as a
+//! failed read — never an empty result.
+
+use serde_json::{Map, Number, Value};
 
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{
-    QueryExecutor, Value as DbValue, params, params_from_iter,
+    IntoParams, QueryExecutor, Rows, Value as DbValue, params, params_from_iter,
 };
 
-use super::util::{like_pattern, query_i64_result, query_rows};
+pub(super) type GraphReadResult<T> = std::result::Result<T, String>;
 
-pub type GraphReadResult<T> = std::result::Result<T, String>;
-
-pub const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path,
+pub(super) const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path,
        start_line, end_line, start_column, end_column, attrs_start_line,
        docstring AS doc, signature, visibility, is_async,
        branches, loops, returns, max_nesting, unsafe_blocks,
@@ -18,7 +23,7 @@ pub const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path,
 /// `NODE_COLUMNS` qualified with the `n.` alias for joined queries
 /// (`edges e JOIN nodes n ...`), where bare `id`/`kind` would be ambiguous
 /// between the two tables.
-pub const NODE_COLUMNS_N: &str = "n.id, n.kind, n.name, n.qualified_name, n.file_path,
+pub(super) const NODE_COLUMNS_N: &str = "n.id, n.kind, n.name, n.qualified_name, n.file_path,
        n.start_line, n.end_line, n.start_column, n.end_column, n.attrs_start_line,
        n.docstring AS doc, n.signature, n.visibility, n.is_async,
        n.branches, n.loops, n.returns, n.max_nesting, n.unsafe_blocks,
@@ -36,19 +41,88 @@ fn filtered_degree_union_sql(placeholders: &str) -> String {
     )
 }
 
-pub async fn total_nodes(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+fn db_value_to_json(value: DbValue) -> Value {
+    match value {
+        DbValue::Null | DbValue::Blob(_) => Value::Null,
+        DbValue::Integer(i) => Value::Number(i.into()),
+        DbValue::Real(f) => Number::from_f64(f).map_or(Value::Null, Value::Number),
+        DbValue::Text(s) => Value::String(s),
+    }
+}
+
+async fn collect_rows(
+    mut rows: Rows,
+) -> std::result::Result<Vec<Value>, tracedecay_runtime_core::db::engine::Error> {
+    let mut out = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let mut object = Map::new();
+        for idx in 0..rows.column_count() {
+            let name = rows
+                .column_name(idx)
+                .map_or_else(|| format!("col{idx}"), ToOwned::to_owned);
+            let value = row.get::<DbValue>(idx).unwrap_or(DbValue::Null);
+            object.insert(name, db_value_to_json(value));
+        }
+        out.push(Value::Object(object));
+    }
+    Ok(out)
+}
+
+async fn query_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+    sql: &str,
+    params: impl IntoParams,
+) -> GraphReadResult<Vec<Value>> {
+    let rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
+    collect_rows(rows).await.map_err(|e| e.to_string())
+}
+
+/// Runs a scalar integer query while preserving SQL, row-iteration, empty-row,
+/// and conversion failures for read models where zero carries domain meaning.
+async fn query_i64_result(
+    conn: &(impl QueryExecutor + ?Sized),
+    sql: &str,
+    params: impl IntoParams,
+) -> GraphReadResult<i64> {
+    let mut rows = conn.query(sql, params).await.map_err(|e| e.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "scalar query returned no rows".to_string())?;
+    row.get::<i64>(0).map_err(|e| e.to_string())
+}
+
+/// Escapes `%`/`_`/`\` for a `LIKE ? ESCAPE '\'` pattern.
+fn like_pattern(query: &str) -> String {
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+pub(super) async fn total_nodes(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
     query_i64_result(conn, "SELECT COUNT(*) FROM nodes", ()).await
 }
 
-pub async fn total_edges(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+pub(super) async fn total_edges(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
     query_i64_result(conn, "SELECT COUNT(*) FROM edges", ()).await
 }
 
-pub async fn max_edge_id(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+pub(super) async fn max_edge_id(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
     query_i64_result(conn, "SELECT COALESCE(MAX(id), 0) FROM edges", ()).await
 }
 
-pub async fn first_node_for_query(
+pub(super) async fn total_files(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+    query_i64_result(conn, "SELECT COUNT(*) FROM files", ()).await
+}
+
+pub(super) async fn last_node_update(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+    query_i64_result(conn, "SELECT COALESCE(MAX(updated_at), 0) FROM nodes", ()).await
+}
+
+pub(super) async fn first_node_for_query(
     conn: &(impl QueryExecutor + ?Sized),
     query: &str,
 ) -> GraphReadResult<Option<String>> {
@@ -74,7 +148,7 @@ pub async fn first_node_for_query(
         .map(ToOwned::to_owned))
 }
 
-pub async fn search_total(
+pub(super) async fn search_total(
     conn: &(impl QueryExecutor + ?Sized),
     query: &str,
 ) -> GraphReadResult<i64> {
@@ -96,7 +170,7 @@ pub async fn search_total(
     }
 }
 
-pub async fn search_rows(
+pub(super) async fn search_rows(
     conn: &(impl QueryExecutor + ?Sized),
     query: &str,
     limit: i64,
@@ -141,7 +215,7 @@ pub async fn search_rows(
     }
 }
 
-pub async fn node_rows_by_ids(
+pub(super) async fn node_rows_by_ids(
     conn: &(impl QueryExecutor + ?Sized),
     ids: &[String],
 ) -> GraphReadResult<Vec<Value>> {
@@ -158,7 +232,7 @@ pub async fn node_rows_by_ids(
     query_rows(conn, &sql, params_from_iter(params)).await
 }
 
-pub async fn edge_rows_for_ids(
+pub(super) async fn edge_rows_for_ids(
     conn: &(impl QueryExecutor + ?Sized),
     ids: &[String],
     limit: i64,
@@ -184,7 +258,7 @@ pub async fn edge_rows_for_ids(
     query_rows(conn, &sql, params_from_iter(params)).await
 }
 
-pub async fn degree_rows_for_ids(
+pub(super) async fn degree_rows_for_ids(
     conn: &(impl QueryExecutor + ?Sized),
     ids: &[String],
 ) -> GraphReadResult<Vec<Value>> {
@@ -203,7 +277,7 @@ pub async fn degree_rows_for_ids(
     query_rows(conn, &sql, params_from_iter(params)).await
 }
 
-pub async fn degree_pool_rows(
+pub(super) async fn degree_pool_rows(
     conn: &(impl QueryExecutor + ?Sized),
     limit: i64,
 ) -> GraphReadResult<Vec<Value>> {
@@ -225,13 +299,13 @@ pub async fn degree_pool_rows(
     .await
 }
 
-pub async fn top_connected_rows(
+pub(super) async fn top_connected_rows(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         &format!(
-            "SELECT n.id, n.name, n.kind, n.file_path, d.degree
+            "SELECT {NODE_COLUMNS_N}, d.degree
              FROM (
                  SELECT node_id, COUNT(*) AS degree
                  FROM ({ALL_DEGREE_UNION_SQL})
@@ -247,7 +321,7 @@ pub async fn top_connected_rows(
     .await
 }
 
-pub async fn node_row(
+pub(super) async fn node_row(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
 ) -> GraphReadResult<Option<Value>> {
@@ -261,20 +335,7 @@ pub async fn node_row(
     .next())
 }
 
-pub async fn node_exists(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> GraphReadResult<bool> {
-    Ok(query_i64_result(
-        conn,
-        "SELECT COUNT(*) FROM nodes WHERE id = ?1",
-        params![node_id],
-    )
-    .await?
-        > 0)
-}
-
-pub async fn caller_rows(
+pub(super) async fn caller_rows(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
     limit: i64,
@@ -294,7 +355,7 @@ pub async fn caller_rows(
     .await
 }
 
-pub async fn callee_rows(
+pub(super) async fn callee_rows(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
     limit: i64,
@@ -314,7 +375,7 @@ pub async fn callee_rows(
     .await
 }
 
-pub async fn neighborhood_edge_rows(
+pub(super) async fn neighborhood_edge_rows(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
     limit: i64,
@@ -335,7 +396,7 @@ pub async fn neighborhood_edge_rows(
     .await
 }
 
-pub async fn neighborhood_edge_counts(
+pub(super) async fn neighborhood_edge_counts(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
 ) -> GraphReadResult<Vec<Value>> {
@@ -351,7 +412,7 @@ pub async fn neighborhood_edge_counts(
     .await
 }
 
-pub async fn subgraph_candidate_rows(
+pub(super) async fn subgraph_candidate_rows(
     conn: &(impl QueryExecutor + ?Sized),
     seed_id: &str,
 ) -> GraphReadResult<Vec<Value>> {
@@ -370,7 +431,7 @@ pub async fn subgraph_candidate_rows(
     .await
 }
 
-pub async fn frontier_edge_rows(
+pub(super) async fn frontier_edge_rows(
     conn: &(impl QueryExecutor + ?Sized),
     frontier: &[String],
 ) -> GraphReadResult<Vec<Value>> {
@@ -391,6 +452,11 @@ pub async fn frontier_edge_rows(
 mod tests {
     use super::*;
 
+    #[test]
+    fn like_pattern_escapes_wildcards() {
+        assert_eq!(like_pattern("a%b_c"), "%a\\%b\\_c%");
+    }
+
     #[allow(clippy::unwrap_used)]
     fn test_conn() -> (
         tempfile::TempDir,
@@ -398,7 +464,7 @@ mod tests {
     ) {
         let directory = tempfile::tempdir().unwrap();
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
-            &directory.path().join("graph-queries.db"),
+            &directory.path().join("dashboard-graph-queries.db"),
         );
         (directory, connection)
     }

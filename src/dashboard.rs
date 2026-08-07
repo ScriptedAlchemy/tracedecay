@@ -238,6 +238,25 @@ pub async fn dashboard_lcm_read_authority_for_test(
     ))
 }
 
+/// Composes the daemon-owned verified graph read authority over the fixture's
+/// retained project graph and registered project-sessions store — the same
+/// `DashboardGraphReadAdapter` the MCP dashboard composition mounts in
+/// production. Without it every `/api/plugins/graph/*` and explorer code
+/// read answers its typed unavailable envelope.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub fn dashboard_graph_read_authority_for_test(
+    cg: &crate::tracedecay::TraceDecay,
+    project_database: &crate::global_db::RegisteredGlobalDb,
+) -> Option<std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>> {
+    crate::mcp::tools::handlers::DashboardGraphReadAdapter::for_project(cg, project_database).map(
+        |adapter| {
+            std::sync::Arc::new(adapter)
+                as std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>
+        },
+    )
+}
+
 /// Composes the daemon-owned git-correlation read authority over the
 /// fixture's registered project-sessions store — the same
 /// `DashboardGitCorrelationReadAdapter` the MCP dashboard composition mounts

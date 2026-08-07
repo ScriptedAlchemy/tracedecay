@@ -484,7 +484,11 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
     let session = SessionRecord {
         provider: "cursor".to_string(),
         session_id: "sess-dashboard-1".to_string(),
-        project_key: "tracedecay-fixture".to_string(),
+        // Production registers project sessions under the registered project
+        // identity; the canonical observation projection reconciles its
+        // session row against this one, so a divergent ad-hoc key would be
+        // an output collision, not a merge.
+        project_key: runtime.project_id().as_str().to_string(),
         project_path: project_path.display().to_string(),
         title: Some("Dashboard fixture session".to_string()),
         started_at: Some(1_700_001_000),
@@ -553,23 +557,47 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
     ];
 
     for message in messages {
-        if !runtime
-            .upsert_session_message_for_test(HostAdmissionScope::Project, &message)
+        // Production ingest persists every message as a canonical durable
+        // observation (which projects the session_messages row itself) plus
+        // the raw LCM payload row; the session-temporal refresh discovers
+        // sessions ONLY from the observation effects, so the fixture walks
+        // the same two writes instead of raw session_messages upserts the
+        // temporal projection would never see.
+        runtime
+            .lcm_ingest_raw_message_for_test(HostAdmissionScope::Project, &message)
             .await
             .unwrap_or_else(|error| {
                 panic!(
-                    "failed to upsert LCM message fixture {}: {error}",
+                    "failed to ingest raw LCM fixture message {}: {error}",
                     message.message_id
                 )
-            })
-        {
-            panic!(
-                "failed to upsert LCM message fixture {}",
-                message.message_id
-            );
-        }
+            });
+        runtime
+            .seed_session_message_observation_for_test(
+                tracedecay::dashboard::observation_seed::DashboardSessionMessageSeedV1 {
+                    project_id: runtime.project_id().as_str(),
+                    provider: &message.provider,
+                    session_id: &message.session_id,
+                    message_id: &message.message_id,
+                    role: &message.role,
+                    content: &message.text,
+                    model: message.model.as_deref(),
+                    timestamp: message
+                        .timestamp
+                        .unwrap_or_else(|| panic!("fixture message {} has no timestamp", message.message_id)),
+                    ordinal: u64::try_from(message.ordinal).unwrap_or_else(|_| {
+                        panic!("fixture message {} has a negative ordinal", message.message_id)
+                    }),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "failed to seed canonical observation for {}: {error}",
+                    message.message_id
+                )
+            });
     }
-
     let msg_1 = match runtime
         .lcm_raw_store_id_for_test(HostAdmissionScope::Project, "cursor", "msg-1")
         .await
@@ -613,6 +641,15 @@ pub(crate) async fn seed_lcm_fixture(runtime: &DashboardTestRuntimeV1, project_p
     {
         panic!("failed to insert summary node fixture: {err}");
     }
+    // Materialize AFTER every seeded write (messages and the summary node):
+    // the frozen temporal generation serves reads, so anything published
+    // after materialization would be invisible to generation-bound reads.
+    runtime
+        .materialize_session_temporal_refresh_for_test("sess-dashboard-1")
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to materialize LCM fixture session refresh: {error}")
+        });
 }
 
 pub(crate) fn post_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {

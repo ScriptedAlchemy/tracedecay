@@ -22,6 +22,12 @@ mod dashboard_git_correlation;
 // so the default production build does not carry it as an unused re-export.
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_git_correlation::DashboardGitCorrelationReadAdapter;
+mod dashboard_graph;
+// Only reached by the test-transport dashboard graph fixture
+// (`dashboard::dashboard_graph_read_authority_for_test`); gate it so the
+// default production build does not carry it as an unused re-export.
+#[cfg(feature = "test-transport")]
+pub(crate) use dashboard_graph::DashboardGraphReadAdapter;
 mod dashboard_lcm;
 pub(crate) use dashboard_lcm::DashboardLcmReadAdapter;
 mod dependency_hints;

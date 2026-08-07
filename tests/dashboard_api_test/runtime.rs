@@ -111,9 +111,9 @@ impl DashboardTestRuntimeV1 {
         ))
     }
 
-    /// The dashboard authority plus the daemon-owned LCM read port —
-    /// the composition production mounts for `hermes-lcm` and explorer
-    /// session reads.
+    /// The dashboard authority plus the daemon-owned LCM and verified graph
+    /// read ports — the composition production mounts for `hermes-lcm`,
+    /// explorer, and `/api/plugins/graph/*` reads.
     pub(crate) async fn dashboard_test_authority_with_session_reads(
         self: &Arc<Self>,
         cg: &TraceDecay,
@@ -128,7 +128,52 @@ impl DashboardTestRuntimeV1 {
         .ok_or_else(|| TraceDecayError::Config {
             message: "dashboard fixture could not compose the LCM read authority".to_owned(),
         })?;
-        Ok(authority.with_lcm_read_authority(lcm_read_authority))
+        let graph_read_authority =
+            dashboard::dashboard_graph_read_authority_for_test(cg, self.project_database.as_ref())
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "dashboard fixture could not compose the graph read authority"
+                        .to_owned(),
+                })?;
+        let git_correlation_read_authority =
+            dashboard::dashboard_git_correlation_read_authority_for_test(Arc::clone(
+                &self.project_database,
+            ));
+        Ok(authority
+            .with_lcm_read_authority(lcm_read_authority)
+            .with_graph_read_authority(graph_read_authority)
+            .with_git_correlation_read_authority(git_correlation_read_authority))
+    }
+
+    /// The registered project identity this fixture runtime was opened for.
+    pub(crate) fn project_id(&self) -> &ProjectId {
+        &self.project_id
+    }
+
+    /// Seeds one canonical message observation through the production
+    /// observation-capture route; the temporal projection discovers sessions
+    /// only from these effects, never from raw session-message upserts.
+    pub(crate) async fn seed_session_message_observation_for_test(
+        &self,
+        seed: dashboard::observation_seed::DashboardSessionMessageSeedV1<'_>,
+    ) -> Result<()> {
+        dashboard::observation_seed::seed_session_message_observation_for_test(
+            self.project_database.as_ref(),
+            seed,
+        )
+        .await
+    }
+
+    /// Materializes the pending session-temporal refresh for one seeded
+    /// session so daemon LCM/explorer reads serve it.
+    pub(crate) async fn materialize_session_temporal_refresh_for_test(
+        &self,
+        session_id: &str,
+    ) -> Result<()> {
+        dashboard::observation_seed::materialize_session_temporal_refresh_for_test(
+            self.project_database.as_ref(),
+            session_id,
+        )
+        .await
     }
 
     fn database(&self, scope: HostAdmissionScope) -> Result<&RegisteredGlobalDb> {
