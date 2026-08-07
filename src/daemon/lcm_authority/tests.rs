@@ -227,6 +227,16 @@ fn hermes_ingest(messages: Vec<serde_json::Value>) -> LcmTranscriptIngestCommand
     }
 }
 
+#[test]
+fn pressure_compression_uses_the_daemon_summarizer_route() {
+    let request = pressure_compression_request(preflight("cursor"));
+    assert_eq!(request.summarizer, LcmSummarizerMode::HermesAuxiliary);
+    assert!(
+        request.messages.is_empty(),
+        "daemon compaction must compress already-ingested canonical content only"
+    );
+}
+
 fn preflight(provider: &str) -> LcmPreflightRequest {
     LcmPreflightRequest {
         provider: provider.to_owned(),
@@ -246,7 +256,6 @@ fn preflight(provider: &str) -> LcmPreflightRequest {
         reserve_tokens_floor: None,
         ignore_session_patterns: Vec::new(),
         stateless_session_patterns: Vec::new(),
-        ignore_message_patterns: Vec::new(),
     }
 }
 

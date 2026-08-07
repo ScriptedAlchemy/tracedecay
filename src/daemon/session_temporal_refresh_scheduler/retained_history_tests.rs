@@ -16,7 +16,7 @@ use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRu
 use crate::application::session::{
     SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
 };
-use crate::daemon::SessionTemporalRefreshTestAuthority;
+use super::SessionTemporalRefreshTestAuthority;
 
 struct ScriptedHistoricalIngestor {
     outcomes: std::sync::Mutex<VecDeque<SessionHistoricalIngestOutcome>>,

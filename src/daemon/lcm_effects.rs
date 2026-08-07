@@ -193,6 +193,7 @@ mod tests {
     use crate::sessions::{SessionMessageRecord, SessionRecord};
     use serde_json::Value;
     use tracedecay_domain::SessionId;
+    use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {
         SessionRecord {
@@ -339,13 +340,24 @@ mod tests {
                 LcmSourceRef::SummaryNode { .. } => None,
             })
             .unwrap();
-        let raw = db
-            .lcm_load_raw_message("cursor", "message-1")
+        let store_id = db
+            .lcm_raw_message_store_id("cursor", "message-1")
+            .await
+            .unwrap()
+            .expect("durable raw message");
+        assert_eq!(store_id, source_store_id);
+        let snapshot = db.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query(
+                "SELECT content FROM lcm_raw_messages WHERE store_id = ?1",
+                params![store_id],
+            )
             .await
             .unwrap();
-        assert_eq!(raw.store_id, source_store_id);
+        let row = rows.next().await.unwrap().expect("durable raw message row");
+        let content: String = row.get(0).unwrap();
         assert_eq!(
-            raw.content,
+            content,
             "canonical historical message 1 with durable context"
         );
         assert!(!summary.summary_text.is_empty());
@@ -424,6 +436,7 @@ mod tests {
             .lcm_preflight(crate::sessions::lcm::LcmPreflightRequest {
                 provider: "cursor".to_string(),
                 session_id: "missing-session".to_string(),
+                messages: Vec::new(),
                 current_tokens: Some(1_000),
                 threshold_tokens: None,
                 max_assembly_tokens: None,

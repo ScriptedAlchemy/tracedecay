@@ -18,21 +18,34 @@ fn cursor_compaction_response_matches_hook_contract() {
 }
 
 #[test]
-fn codex_and_cursor_compaction_requests_delegate_summarization_to_the_daemon() {
-    for provider in ["codex", "cursor"] {
-        let request = host_lcm_request(
-            provider,
+fn codex_and_cursor_compaction_requests_never_carry_host_payload() {
+    let event_digest = tracedecay_domain::canonical_sha256(&"compaction-event").unwrap();
+    for protocol in [
+        LcmHostProtocol::CodexContextCompacted {
+            protocol_revision: "codex.context-compacted.v1".to_owned(),
+            event_digest: event_digest.clone(),
+        },
+        LcmHostProtocol::CursorPreCompact {
+            protocol_revision: "cursor.precompact.v1".to_owned(),
+            event_digest: event_digest.clone(),
+        },
+    ] {
+        let provider = protocol.provider().to_owned();
+        let LcmAuthorityRequest::Compact(command) = pressure_only_command(
+            &provider,
             "session-1",
             Some(1_000),
             Some(200_000),
             None,
             None,
-            "compaction",
-            None,
-        );
-        assert_eq!(
-            request.summarizer,
-            crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary
+            protocol,
+        ) else {
+            panic!("pressure-only evidence must dispatch as a compaction command");
+        };
+        assert_eq!(command.preflight.provider, provider);
+        assert!(
+            command.preflight.messages.is_empty(),
+            "compaction pressure evidence must never carry host transcript payload"
         );
     }
 }
