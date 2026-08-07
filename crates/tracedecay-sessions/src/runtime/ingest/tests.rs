@@ -226,6 +226,43 @@ fn transcript_privacy_and_non_durable_failures_are_bounded_and_permanent() {
 }
 
 #[test]
+fn still_mounting_admission_failures_keep_the_admission_retryability() {
+    let error = crate::runtime::snapshot_observation::host_admission_error(
+        "codex",
+        crate::admission::HostAdmissionOutcome {
+            status: crate::admission::HostAdmissionStatus::Unavailable,
+            retryable: true,
+            reason_code: Some("authority_write_failed"),
+        },
+    );
+
+    let failure = classify_transcript_ingest_failure("codex", "observation", &error);
+
+    assert_eq!(failure.reason_code, "authority_write_failed");
+    assert!(
+        failure.retryable,
+        "a still-mounting write authority is a transient race, not a terminal block"
+    );
+}
+
+#[test]
+fn permanent_admission_failures_still_classify_permanent() {
+    let error = crate::runtime::snapshot_observation::host_admission_error(
+        "codex",
+        crate::admission::HostAdmissionOutcome {
+            status: crate::admission::HostAdmissionStatus::Degraded,
+            retryable: false,
+            reason_code: Some("invalid_observation_contract"),
+        },
+    );
+
+    let failure = classify_transcript_ingest_failure("codex", "observation", &error);
+
+    assert_eq!(failure.reason_code, "invalid_observation_contract");
+    assert!(!failure.retryable);
+}
+
+#[test]
 fn transcript_source_contract_failures_are_bounded_and_permanent() {
     let errors = [
         source::TranscriptIngestError::Domain(tracedecay_domain::SessionId::new("").unwrap_err()),

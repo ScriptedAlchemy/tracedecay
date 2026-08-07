@@ -224,10 +224,10 @@ async fn projection_error_racing_cancellation_remains_visible() {
 
     assert!(matches!(
         error,
-        TranscriptIngestError::NonDurableRecord {
+        TranscriptIngestError::HostAdmission {
             provider: "cursor",
             reason: "registered_authority_unavailable",
-            ..
+            retryable: true,
         }
     ));
 }

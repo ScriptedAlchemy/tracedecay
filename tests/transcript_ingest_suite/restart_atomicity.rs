@@ -1202,6 +1202,7 @@ async fn cursor_commit_before_projection_ack_retries_without_duplicate() {
             TranscriptIngestError::Store(_)
                 | TranscriptIngestError::InvalidFrameState { .. }
                 | TranscriptIngestError::NonDurableRecord { .. }
+                | TranscriptIngestError::HostAdmission { .. }
         ),
         "unexpected Cursor projection failure: {failed:?}"
     );

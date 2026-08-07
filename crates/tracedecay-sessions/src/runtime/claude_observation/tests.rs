@@ -140,7 +140,7 @@ async fn capture_frame_routes_through_observation_capture_port() {
     );
     match result {
         Err(ClaudeObservationIngestError::Transcript(
-            crate::runtime::source::TranscriptIngestError::NonDurableRecord { reason, .. },
+            crate::runtime::source::TranscriptIngestError::HostAdmission { reason, .. },
         )) => assert_eq!(reason, "capture_port_spy"),
         Ok(_) => panic!("spy must reject capture through the admission port"),
         Err(other) => panic!("capture_frame must surface the capture-port rejection: {other}"),
@@ -192,7 +192,7 @@ async fn drain_projection_queue_routes_through_observation_capture_port() {
     );
     match result {
         Err(ClaudeObservationIngestError::Transcript(
-            crate::runtime::source::TranscriptIngestError::NonDurableRecord { reason, .. },
+            crate::runtime::source::TranscriptIngestError::HostAdmission { reason, .. },
         )) => assert_eq!(reason, "projection_drain_spy"),
         Ok(_) => panic!("spy must reject projection drain through the admission port"),
         Err(other) => {

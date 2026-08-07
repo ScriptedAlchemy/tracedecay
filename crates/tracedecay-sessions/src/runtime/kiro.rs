@@ -1340,11 +1340,10 @@ mod observation_tests {
         );
         assert!(matches!(
             error,
-            TranscriptIngestError::NonDurableRecord {
+            TranscriptIngestError::HostAdmission {
                 provider: PROVIDER,
-                offset: 0,
-                end_offset: 0,
                 reason: "authority_unavailable",
+                retryable: true,
             }
         ));
     }

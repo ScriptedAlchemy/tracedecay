@@ -128,6 +128,17 @@ pub enum TranscriptIngestError {
         end_offset: u64,
         reason: &'static str,
     },
+    /// Host admission refused or failed the observation write. Unlike
+    /// [`Self::NonDurableRecord`] this says nothing about the record itself,
+    /// so the admission authority's own retryability verdict must survive to
+    /// classification: a still-mounting write authority is a transient race,
+    /// not a permanently blocked projection.
+    #[error("{provider} observation admission failed: {reason}")]
+    HostAdmission {
+        provider: &'static str,
+        reason: &'static str,
+        retryable: bool,
+    },
     #[error("{provider} frame state is invalid")]
     InvalidFrameState { provider: &'static str },
     #[error("{provider} blocking source scan did not join successfully")]

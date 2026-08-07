@@ -287,6 +287,12 @@ pub fn classify_transcript_ingest_failure(
     }
 
     let (reason_code, retryable) = match error {
+        // Admission-origin failures carry the admission authority's own
+        // retryability verdict; hard-coding either answer here launders a
+        // transient still-mounting authority into a terminal Blocked state.
+        source::TranscriptIngestError::HostAdmission {
+            reason, retryable, ..
+        } => (*reason, *retryable),
         source::TranscriptIngestError::Cancelled { .. } => ("ingest_pass_cancelled", true),
         source::TranscriptIngestError::Store(TranscriptStoreError::Conflict { .. }) => {
             ("transcript_cursor_conflict", true)

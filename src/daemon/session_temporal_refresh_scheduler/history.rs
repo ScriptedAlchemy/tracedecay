@@ -185,3 +185,65 @@ fn classify_transcript_ingest_outcome(
     }
     SessionHistoricalIngestOutcome::Complete
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionHistoricalIngestOutcome, classify_transcript_ingest_outcome};
+    use crate::application::observation::ObservationCancellation;
+    use crate::sessions::{IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestOutcome};
+
+    fn ingest_outcome_with_failure(
+        reason_code: &'static str,
+        retryable: bool,
+    ) -> TranscriptIngestOutcome {
+        TranscriptIngestOutcome {
+            stats: crate::sessions::shared::TranscriptIngestStats::default(),
+            failures: vec![TranscriptCatchUpFailure {
+                provider: "codex",
+                source: "observation",
+                reason_code,
+                retryable,
+                source_locator: None,
+            }],
+            coverage: IngestPassCoverage::Complete,
+            scheduling_state_written: false,
+        }
+    }
+
+    /// A still-mounting write authority during the open window reports a
+    /// retryable admission failure; the catch-up must schedule another pass
+    /// (`retrying_history_is_typed_stale` proves the worker re-passes on
+    /// Retryable) instead of marking the projection historically blocked.
+    #[test]
+    fn retryable_admission_failures_schedule_another_catch_up_pass() {
+        let outcome = classify_transcript_ingest_outcome(
+            ingest_outcome_with_failure("authority_write_failed", true),
+            &ObservationCancellation::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            SessionHistoricalIngestOutcome::Retryable {
+                reason_code: "authority_write_failed",
+                made_progress: false,
+            }
+        );
+        assert!(outcome.needs_another_pass());
+    }
+
+    #[test]
+    fn permanent_failures_still_block_the_catch_up() {
+        let outcome = classify_transcript_ingest_outcome(
+            ingest_outcome_with_failure("invalid_observation_contract", false),
+            &ObservationCancellation::default(),
+        );
+
+        assert_eq!(
+            outcome,
+            SessionHistoricalIngestOutcome::Blocked {
+                reason_code: "invalid_observation_contract",
+            }
+        );
+        assert!(!outcome.needs_another_pass());
+    }
+}

@@ -145,10 +145,10 @@ async fn projection_authority_error_racing_cancellation_stays_visible_for_claude
         .expect_err("projection authority error must remain visible");
     assert!(matches!(
         error,
-        ClaudeObservationIngestError::Transcript(TranscriptIngestError::NonDurableRecord {
+        ClaudeObservationIngestError::Transcript(TranscriptIngestError::HostAdmission {
             provider: "claude",
             reason: "registered_authority_unavailable",
-            ..
+            retryable: true,
         })
     ));
 }
@@ -239,10 +239,10 @@ async fn final_projection_authority_error_carries_durable_claude_progress() {
             assert!(stats.source_bytes_scanned > 0);
             assert!(matches!(
                 *error,
-                ClaudeObservationIngestError::Transcript(TranscriptIngestError::NonDurableRecord {
+                ClaudeObservationIngestError::Transcript(TranscriptIngestError::HostAdmission {
                     provider: "claude",
                     reason: "registered_authority_unavailable",
-                    ..
+                    retryable: true,
                 })
             ));
         }

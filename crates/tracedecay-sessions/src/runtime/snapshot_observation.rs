@@ -152,11 +152,10 @@ pub fn host_admission_error(
         | HostAdmissionStatus::Committed
         | HostAdmissionStatus::ExactDuplicate => "observation_admission_incomplete",
     });
-    TranscriptIngestError::NonDurableRecord {
+    TranscriptIngestError::HostAdmission {
         provider,
-        offset: 0,
-        end_offset: 0,
         reason,
+        retryable: outcome.retryable,
     }
 }
 

@@ -466,7 +466,7 @@ async fn second_drain_failure_preserves_committed_projection_stats() {
 
     assert!(matches!(
         failure.error,
-        TranscriptIngestError::NonDurableRecord {
+        TranscriptIngestError::HostAdmission {
             provider: "cursor",
             reason: "projection_authority_unavailable",
             ..
