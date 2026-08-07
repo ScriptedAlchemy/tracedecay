@@ -278,10 +278,10 @@ fn feedback_executable_schemas(
     let mut schemas = Vec::new();
     macro_rules! add {
         ($capability:expr, $result:ty) => {
-            schemas.push(feedback_executable_schema::<FeedbackHandleRequestV1, $result>(
-                contribution,
-                $capability,
-            )?)
+            schemas.push(feedback_executable_schema::<
+                FeedbackHandleRequestV1,
+                $result,
+            >(contribution, $capability)?)
         };
     }
     add!(
