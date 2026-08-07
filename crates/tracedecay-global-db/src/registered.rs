@@ -150,6 +150,48 @@ pub struct RegisteredWorkApplicationServicesV1 {
     >,
 }
 
+/// The Work product graph authority: its verified reads and its journaled
+/// mutations, both over the same registered store.
+///
+/// This is a second Work authority, not a view of the first. The task services
+/// above are scoped by `WorkAuthority`; this one is scoped by the registered
+/// profile owner, which is also where its owner identity comes from — the
+/// store's own binding, never a value a request supplied.
+pub struct RegisteredWorkProductServicesV1 {
+    reads: tracedecay_application::WorkProductReadServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+    mutations: tracedecay_application::WorkProductMutationServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    >,
+}
+
+impl RegisteredWorkProductServicesV1 {
+    pub const fn reads(
+        &self,
+    ) -> &tracedecay_application::WorkProductReadServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.reads
+    }
+
+    pub const fn mutations(
+        &self,
+    ) -> &tracedecay_application::WorkProductMutationServiceV1<
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    > {
+        &self.mutations
+    }
+}
+
 impl RegisteredWorkApplicationServicesV1 {
     pub fn commands(
         &self,
@@ -603,6 +645,38 @@ impl RegisteredGlobalDb {
                 source: storage,
                 runtime,
             },
+        })
+    }
+
+    /// Attaches the Work product graph authority over the registered exact-SQL
+    /// handle.
+    ///
+    /// The catalog binding is supplied by the caller rather than minted here,
+    /// because a service composed against a capability the catalog does not
+    /// advertise could never authorize a request: it would look wired and
+    /// answer nothing. Whichever adapter mounts a Work product operation
+    /// passes that operation's own capability and use-case ids.
+    ///
+    /// The owner identity is NOT a parameter. It is resolved from the store's
+    /// own registered binding, so no caller can ask for another profile's Work
+    /// product by naming it.
+    pub fn work_product_services(
+        &self,
+        binding: tracedecay_application::WorkProductBindingV1,
+    ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkProductServicesV1> {
+        let storage = self.work_storage()?;
+        Ok(RegisteredWorkProductServicesV1 {
+            reads: tracedecay_application::WorkProductReadServiceV1::new(
+                storage.clone(),
+                storage.clone(),
+                binding,
+            ),
+            mutations: tracedecay_application::WorkProductMutationServiceV1::new(
+                storage.clone(),
+                storage.clone(),
+                storage.clone(),
+                storage,
+            ),
         })
     }
 
