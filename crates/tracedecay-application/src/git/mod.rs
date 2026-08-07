@@ -1,7 +1,6 @@
 //! Git index transaction application boundary.
 
 mod catalog;
-mod health_projection;
 #[cfg(feature = "native-git")]
 mod historical_blob;
 mod native_integration;
@@ -11,13 +10,6 @@ mod surface_catalog;
 mod transactions;
 
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
-pub use health_projection::{
-    GIT_HEALTH_CHURN_PAGE_LIMIT, GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1,
-    GitHealthProjectionChurnEntryV1, GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
-    GitHealthProjectionPartialReasonV1, GitHealthProjectionReadPortV1,
-    GitHealthProjectionReadServiceV1, GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1,
-    GitHealthProjectionUnavailableReasonV1,
-};
 #[cfg(feature = "native-git")]
 pub use historical_blob::NativeHistoricalBlobReaderV1;
 pub use native_integration::{

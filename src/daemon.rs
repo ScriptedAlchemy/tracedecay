@@ -137,6 +137,7 @@ use bootstrap_route::{
 };
 mod branch_add;
 mod branch_admin;
+mod branch_query;
 mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
@@ -194,7 +195,6 @@ pub use core_hooks::*;
 pub(crate) use core_lifecycle::*;
 pub use core_logging::*;
 pub use core_proxy::*;
-mod git_health_projection;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;
@@ -266,6 +266,7 @@ mod project_composition;
 use project_composition::daemon_transcript_source_home;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
+mod project_open_advisory;
 #[cfg(test)]
 use project_open_admission::project_open_retry_backoff;
 #[cfg(unix)]

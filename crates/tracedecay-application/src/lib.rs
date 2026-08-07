@@ -7,6 +7,7 @@
 
 pub mod advisory;
 pub mod authorization;
+pub mod branch_query;
 pub mod clock;
 pub mod configuration;
 pub mod context;
@@ -67,6 +68,15 @@ pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
     SourceAuthorizationSnapshot,
+};
+pub use branch_query::{
+    BRANCH_DIFF_CAPABILITY_ID_V1, BRANCH_QUERY_DEFAULT_LIMIT_V1, BRANCH_QUERY_MAX_LIMIT_V1,
+    BRANCH_SEARCH_CAPABILITY_ID_V1, BranchAuthorizationEpochV1, BranchChangedSymbolV1,
+    BranchDiffRequestV1, BranchDiffResultV1, BranchDiffSummaryV1, BranchDiffSymbolV1,
+    BranchGraphGenerationV1, BranchQueryControlsV1, BranchQueryFuture, BranchQueryOutcomeV1,
+    BranchQueryPartialReasonV1, BranchQueryPort, BranchQueryRequestV1, BranchQueryResultV1,
+    BranchQueryStaleReasonV1, BranchQueryUnavailableReasonV1, BranchSearchMatchV1,
+    BranchSearchRequestV1, BranchSearchResultV1, BranchSnapshotIdentityV1,
 };
 pub use clock::now_micros;
 pub use configuration::{
@@ -145,25 +155,20 @@ pub use feedback::{
 #[cfg(feature = "native-git")]
 pub use git::NativeHistoricalBlobReaderV1;
 pub use git::{
-    GIT_HEALTH_CHURN_PAGE_LIMIT, GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT,
-    GitBlameRequest, GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1,
-    GitHealthProjectionChurnEntryV1, GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
-    GitHealthProjectionPartialReasonV1, GitHealthProjectionReadPortV1,
-    GitHealthProjectionReadServiceV1, GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1,
-    GitHealthProjectionUnavailableReasonV1, GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1,
-    GitHistoricalBlobV1, GitHistoryRequest, GitIndexApplyPortResultV1, GitIndexApplyRequestV1,
-    GitIndexEffectProofV1, GitIndexOperationBindingV1, GitIndexPreviewPortResultV1,
-    GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError,
-    GitIndexTransactionPort, GitIndexTransactionPortError, GitIndexTransactionService,
-    GitIntelligenceError, GitReadPort, NativeIntegrationApplyRequestV1,
-    NativeIntegrationCancelDispositionV1, NativeIntegrationCancelRequestV1,
-    NativeIntegrationContractError, NativeIntegrationEvidenceRevisionsV1, NativeIntegrationPort,
-    NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
-    NativeIntegrationPreflightRequestV1, NativeIntegrationRecoveryRequestV1,
-    NativeIntegrationSelectionBindingV1, NativeIntegrationService,
-    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
-    NativeIntegrationStackResolutionRequestV1, NativeIntegrationStatusRequestV1,
-    git_index_catalog_contribution, git_index_effect_class,
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
+    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
+    GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
+    GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
+    GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
+    GitIndexTransactionPortError, GitIndexTransactionService, GitIntelligenceError, GitReadPort,
+    NativeIntegrationApplyRequestV1, NativeIntegrationCancelDispositionV1,
+    NativeIntegrationCancelRequestV1, NativeIntegrationContractError,
+    NativeIntegrationEvidenceRevisionsV1, NativeIntegrationPort, NativeIntegrationPortError,
+    NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
+    NativeIntegrationRecoveryRequestV1, NativeIntegrationSelectionBindingV1,
+    NativeIntegrationService, NativeIntegrationStackResolutionOutcomeV1,
+    NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
+    NativeIntegrationStatusRequestV1, git_index_catalog_contribution, git_index_effect_class,
     git_index_handler_descriptors, git_surface_catalog_contribution,
     git_surface_handler_descriptors, is_canonical_repository_relative_path,
 };

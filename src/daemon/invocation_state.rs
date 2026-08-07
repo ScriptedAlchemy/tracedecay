@@ -30,7 +30,6 @@ pub(super) struct DaemonInvocationState {
     pub(super) github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
-    pub(super) git_health_projections: git_health_projection::GitHealthProjectionRegistryV1,
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
     semantic_projection_scheduler:
         crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
@@ -71,10 +70,6 @@ impl Default for DaemonInvocationState {
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
-            git_health_projections:
-                git_health_projection::GitHealthProjectionRegistryV1::new(
-                    MAX_CACHED_PROJECT_SERVERS,
-                ),
             query_authority_provider:
                 query_authority_provider::DaemonQueryAuthorityProviderV1::default(),
             semantic_projection_scheduler:
@@ -696,7 +691,6 @@ impl DaemonInvocationState {
     pub(super) async fn shutdown(&self) {
         self.service.begin_shutdown().await;
         self.github_credential_lifecycle.shutdown();
-        self.git_health_projections.shutdown().await;
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         self.service.expire_all().await;

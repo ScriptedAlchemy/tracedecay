@@ -625,18 +625,11 @@ async fn test_dead_code_custom_kinds() {
     }
 }
 
-/// Regression: `branch_diff` previously errored with `MCP error -32603: base
-/// and head are the same branch` when base == head. `pr_context` handles the
-/// same case gracefully (empty arrays); branch_diff must match that shape so
-/// callers can rely on consistent behaviour.
+/// Direct MCP construction has no daemon-owned branch graph authority and must
+/// report that state instead of opening a branch database in the handler.
 #[tokio::test]
-async fn branch_diff_returns_empty_when_base_equals_head() {
+async fn direct_branch_diff_reports_missing_daemon_authority() {
     let (cg, _env, _dir) = setup_empty_project().await;
-
-    // branch_diff requires branch tracking metadata to be present.
-    let tracedecay_dir = project_data_dir(&cg);
-    let meta = tracedecay::branch_meta::BranchMeta::new("master");
-    tracedecay::branch_meta::save_branch_meta(&tracedecay_dir, &meta).unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -646,16 +639,13 @@ async fn branch_diff_returns_empty_when_base_equals_head() {
         None,
     )
     .await
-    .expect("branch_diff must not error when base == head");
+    .expect("branch_diff must return a typed unavailable result");
 
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).expect("response must be valid JSON");
-    assert_eq!(output["summary"]["added"].as_u64(), Some(0));
-    assert_eq!(output["summary"]["removed"].as_u64(), Some(0));
-    assert_eq!(output["summary"]["changed"].as_u64(), Some(0));
-    assert_eq!(output["added"].as_array().map(Vec::len), Some(0));
-    assert_eq!(output["removed"].as_array().map(Vec::len), Some(0));
-    assert_eq!(output["changed"].as_array().map(Vec::len), Some(0));
+    assert_eq!(output["outcome"], "unavailable");
+    assert_eq!(output["reason"], "graph_authority_unavailable");
+    assert_eq!(result.semantic_error(), Some(true));
     close_test_graph(cg).await;
 }
 
@@ -1126,22 +1116,6 @@ async fn test_test_risk() {
         "summary should label the calibrated coverage signal honestly"
     );
     assert!(parsed.get("risks").is_some(), "risks array should exist");
-    assert_eq!(
-        parsed["git_history"]["status"].as_str(),
-        Some("unavailable"),
-        "a direct MCP server must report the absent daemon projection"
-    );
-    assert_eq!(
-        parsed["git_history"]["reason"].as_str(),
-        Some("not_mounted"),
-        "missing projection authority must remain typed"
-    );
-    assert!(
-        parsed["risks"]
-            .as_array()
-            .is_some_and(|risks| risks.iter().all(|risk| risk["churn"].is_null())),
-        "unavailable Git history must not become fabricated zero churn"
-    );
 }
 
 #[tokio::test]

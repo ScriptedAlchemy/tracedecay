@@ -211,6 +211,9 @@ pub struct ToolCallRegistryOptions<'a> {
     /// Daemon-owned project-registry reads. `None` is the typed
     /// missing-registry state, not an empty registry.
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
+    /// Daemon-owned exact branch snapshot query authority. Direct MCP servers
+    /// leave this absent and receive a typed unavailable result.
+    pub(crate) branch_query_port: Option<&'a dyn tracedecay_application::BranchQueryPort>,
     /// Daemon-owned workflow-index reads. `None` is an unavailable retained
     /// project-session authority, not a successful empty index.
     pub workflow_index_reads: Option<&'a dyn WorkflowIndexReadPort>,
@@ -225,8 +228,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    pub(crate) git_health_projection_reader:
-        Option<tracedecay_application::GitHealthProjectionReadServiceV1>,
     pub feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
@@ -266,6 +267,7 @@ impl Default for ToolCallRegistryOptions<'_> {
         Self {
             global_db: None,
             project_registry_reads: None,
+            branch_query_port: None,
             workflow_index_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
@@ -277,7 +279,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             code_index_freshness_reader: None,
-            git_health_projection_reader: None,
             feedback_status_reader: None,
             diagnostics_cache: None,
             diagnostics_lsp: None,

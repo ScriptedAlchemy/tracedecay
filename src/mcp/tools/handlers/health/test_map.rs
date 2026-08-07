@@ -7,7 +7,6 @@ pub(crate) async fn handle_test_risk(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
-    git_health: Option<&tracedecay_application::GitHealthProjectionReadServiceV1>,
 ) -> Result<ToolResult> {
     let limit = args
         .get("limit")
@@ -19,14 +18,9 @@ pub(crate) async fn handle_test_risk(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    let report = crate::graph::health::test_risk::analyze_test_risk(
-        cg,
-        path_prefix,
-        include_tested,
-        limit,
-        git_health,
-    )
-    .await?;
+    let report =
+        crate::graph::health::test_risk::analyze_test_risk(cg, path_prefix, include_tested, limit)
+            .await?;
     let output = serde_json::to_value(report).map_err(|err| TraceDecayError::Config {
         message: format!("failed to serialize test risk report: {err}"),
     })?;

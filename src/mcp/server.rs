@@ -329,7 +329,6 @@ pub struct McpServer {
     doctor_report_published: AtomicBool,
     dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    git_health_projection_reader: Option<tracedecay_application::GitHealthProjectionReadServiceV1>,
     dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
@@ -353,6 +352,7 @@ pub struct McpServer {
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
     retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
+    branch_query_port: Option<Arc<dyn tracedecay_application::BranchQueryPort>>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -719,7 +719,6 @@ impl McpServer {
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             dashboard_code_index_freshness_reader,
-            git_health_projection_reader,
             dashboard_feedback_status_reader,
             diagnostics_lsp,
             hook_branch_writer,
@@ -730,6 +729,7 @@ impl McpServer {
             code_index_branch_diff_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
+            branch_query_port,
             project_routes,
             application_invocation_executor,
             project_server_live,
@@ -950,7 +950,6 @@ impl McpServer {
             dashboard_doctor_report_reader,
             doctor_report_published: AtomicBool::new(false),
             dashboard_code_index_freshness_reader,
-            git_health_projection_reader,
             dashboard_feedback_status_reader,
             hook_branch_writer,
             background_refresh_writer,
@@ -963,6 +962,7 @@ impl McpServer {
             source_edit_rollback_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
+            branch_query_port,
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),

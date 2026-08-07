@@ -58,8 +58,6 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
-    pub(crate) git_health_projection_reader:
-        Option<tracedecay_application::GitHealthProjectionReadServiceV1>,
     pub(crate) dashboard_feedback_status_reader:
         Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
@@ -72,6 +70,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) branch_query_port: Option<Arc<dyn tracedecay_application::BranchQueryPort>>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
@@ -163,7 +162,6 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
-            git_health_projection_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: direct_hook_branch_writer(),
@@ -174,6 +172,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            branch_query_port: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             project_server_live: None,
@@ -243,7 +242,6 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
-            git_health_projection_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
@@ -254,6 +252,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            branch_query_port: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -301,7 +300,6 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_code_index_freshness_reader: None,
-            git_health_projection_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
@@ -312,6 +310,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            branch_query_port: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -382,6 +381,14 @@ impl McpServerConstructionContext {
         self
     }
 
+    pub(crate) fn with_branch_query_port(
+        mut self,
+        port: Arc<dyn tracedecay_application::BranchQueryPort>,
+    ) -> Self {
+        self.branch_query_port = Some(port);
+        self
+    }
+
     pub(crate) fn with_automation_scheduler_reconciler(
         mut self,
         reconciler: crate::dashboard::AutomationSchedulerReconciler,
@@ -408,14 +415,6 @@ impl McpServerConstructionContext {
         reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
-        self
-    }
-
-    pub(crate) fn with_git_health_projection_reader(
-        mut self,
-        reader: tracedecay_application::GitHealthProjectionReadServiceV1,
-    ) -> Self {
-        self.git_health_projection_reader = Some(reader);
         self
     }
 
