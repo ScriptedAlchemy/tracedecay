@@ -1,6 +1,4 @@
-use tracedecay_domain::{
-    ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId,
-};
+use tracedecay_domain::{ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId};
 
 use super::super::queries::MAX_CURRENT_LIMIT;
 use super::super::{

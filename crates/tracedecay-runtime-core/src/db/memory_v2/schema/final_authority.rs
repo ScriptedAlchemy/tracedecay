@@ -220,10 +220,7 @@ pub(super) async fn install_final_memory_support(
     install_final_memory_banks(conn, operation).await
 }
 
-async fn install_final_memory_banks(
-    conn: &impl MemoryV2Executor,
-    operation: &str,
-) -> Result<()> {
+async fn install_final_memory_banks(conn: &impl MemoryV2Executor, operation: &str) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_v2_banks (
             owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),

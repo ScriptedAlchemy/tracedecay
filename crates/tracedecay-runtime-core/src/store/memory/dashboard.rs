@@ -546,7 +546,6 @@ async fn dashboard_compatibility_memory_banks_tx(
     owner: &FactOwnerV1,
 ) -> FactCompatibilityResult<Vec<tracedecay_store::ProjectMemoryDashboardMemoryBankV1>> {
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
             "SELECT banks.bank_name, banks.hrr_dim, banks.updated_at,

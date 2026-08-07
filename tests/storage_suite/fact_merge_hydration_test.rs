@@ -24,9 +24,8 @@ use tracedecay_domain::{
     PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId,
     ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
     RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
-    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, ShardDispositionV1, ShardId,
-    UtcMicros, VectorWatermark,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    ScopeResolutionId, SensitivityV1, ShardDispositionV1, ShardId, UtcMicros, VectorWatermark,
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
@@ -1377,7 +1376,6 @@ async fn unknown_denominators_report_unknown_not_fabricated() {
     assert_eq!(current_response.coverage().hidden(), 0);
     assert_eq!(current_response.coverage().unknown(), 1);
     assert_eq!(current_response.coverage().redacted(), 0);
-
 }
 
 #[tokio::test]
