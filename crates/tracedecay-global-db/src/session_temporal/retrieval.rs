@@ -639,103 +639,68 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         let provider = snapshot
             .provider_scope()
             .map_or(Value::Null, |value| Value::Text(value.to_string()));
-        // The root browse unions the frozen generations' occurrences with the
-        // participants' published summary nodes (the same union the
-        // direct-anchor query serves), each behind the anchor-owner authority
-        // predicate, so an empty-query listing is never summary-blind.
         self.read
             .query(
-                "SELECT stable_id, anchor_id, knowledge_at, logical_message, turn_id,
-                        session_id, evidence_role, provider
-                 FROM (
-                     SELECT occurrence.occurrence_id AS stable_id,
-                            occurrence.retrieval_anchor_id AS anchor_id,
-                            occurrence.knowledge_at AS knowledge_at,
-                            occurrence.message_id AS logical_message,
-                            occurrence.turn_id AS turn_id,
-                            occurrence.session_id AS session_id,
-                            occurrence.role AS evidence_role,
-                            authority_session.provider AS provider
-                     FROM session_temporal_generations frozen
-                     JOIN session_occurrences occurrence
-                       ON occurrence.session_id = frozen.session_id
-                      AND occurrence.generation = frozen.generation
-                     JOIN observations provider_observation
-                       ON provider_observation.observation_id = occurrence.source_observation_id
-                     JOIN retrieval_anchors authority_anchor
-                       ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
-                     JOIN sessions authority_session
-                       ON authority_session.session_id = occurrence.session_id
-                      AND authority_session.provider = COALESCE(json_extract(
-                          provider_observation.observation_json,
-                          '$.identity.source.provider'
-                      ), 'claude')
-                      AND authority_session.project_key = ?1
-                     WHERE frozen.state = 'active'
-                       AND (?2 IS NULL OR authority_session.provider = ?2)
-                       AND (
-                           (authority_session.project_key = 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                           OR
-                           (authority_session.project_key <> 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                            AND json_extract(authority_anchor.owner_json, '$.project_id')
-                                = authority_session.project_key)
-                       )
-                     UNION ALL
-                     SELECT summary.summary_id, summary.summary_anchor_id,
-                            summary.created_at, NULL, NULL, summary.session_id,
-                            'summary', authority_session.provider
-                     FROM session_temporal_generations frozen
-                     JOIN session_summary_nodes summary
-                       ON summary.session_id = frozen.session_id
-                     JOIN retrieval_anchors authority_anchor
-                       ON authority_anchor.anchor_id = summary.summary_anchor_id
-                     JOIN sessions authority_session
-                       ON authority_session.session_id = summary.session_id
-                      AND authority_session.provider = json_extract(
-                          summary.publication_json, '$.provider'
-                      )
-                      AND authority_session.project_key = ?1
-                     WHERE frozen.state = 'active'
-                       AND (?2 IS NULL OR authority_session.provider = ?2)
-                       AND (
-                           (authority_session.project_key = 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
-                           OR
-                           (authority_session.project_key <> 'user'
-                            AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
-                            AND json_extract(authority_anchor.owner_json, '$.project_id')
-                                = authority_session.project_key)
-                       )
-                 )
-                 WHERE (
-                       knowledge_at < ?3
+                "SELECT occurrence.occurrence_id, occurrence.retrieval_anchor_id,
+                        occurrence.knowledge_at, occurrence.message_id, occurrence.turn_id,
+                        occurrence.session_id, occurrence.role, authority_session.provider
+                 FROM session_temporal_generations frozen
+                 JOIN session_occurrences occurrence
+                   ON occurrence.session_id = frozen.session_id
+                  AND occurrence.generation = frozen.generation
+                 JOIN observations provider_observation
+                   ON provider_observation.observation_id = occurrence.source_observation_id
+                 JOIN retrieval_anchors authority_anchor
+                   ON authority_anchor.anchor_id = occurrence.retrieval_anchor_id
+                 JOIN sessions authority_session
+                   ON authority_session.session_id = occurrence.session_id
+                  AND authority_session.provider = COALESCE(json_extract(
+                      provider_observation.observation_json,
+                      '$.identity.source.provider'
+                  ), 'claude')
+                  AND authority_session.project_key = ?1
+                 WHERE frozen.state = 'active'
+                   AND (?2 IS NULL OR authority_session.provider = ?2)
+                   AND (
+                       (authority_session.project_key = 'user'
+                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'profile')
+                       OR
+                       (authority_session.project_key <> 'user'
+                        AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
+                        AND json_extract(authority_anchor.owner_json, '$.project_id')
+                            = authority_session.project_key)
+                   )
+                   AND (
+                       occurrence.knowledge_at < ?3
                        OR (
-                           knowledge_at = ?3
+                           occurrence.knowledge_at = ?3
                            AND (
-                               session_id > ?4
-                               OR (session_id = ?4 AND stable_id > ?5)
+                               occurrence.session_id > ?4
+                               OR (
+                                   occurrence.session_id = ?4
+                                   AND occurrence.occurrence_id > ?5
+                               )
                            )
                        )
                    )
-                   AND length(CAST(stable_id AS BLOB)) <= ?6
-                   AND length(CAST(anchor_id AS BLOB)) <= ?7
-                   AND length(CAST(COALESCE(logical_message, '') AS BLOB)) <= ?8
-                   AND length(CAST(COALESCE(turn_id, '') AS BLOB)) <= ?8
-                   AND length(CAST(session_id AS BLOB)) <= ?8
-                   AND length(CAST(evidence_role AS BLOB)) <= ?8
-                   AND length(CAST(provider AS BLOB)) <= ?8
-                   AND length(CAST(stable_id AS BLOB))
-                       + length(CAST(anchor_id AS BLOB))
-                       + length(CAST(COALESCE(logical_message, '') AS BLOB))
-                       + length(CAST(COALESCE(turn_id, '') AS BLOB))
-                       + length(CAST(session_id AS BLOB))
-                       + length(CAST(evidence_role AS BLOB))
-                       + length(CAST(provider AS BLOB)) <= ?9
-                   AND length(CAST(stable_id AS BLOB))
-                       + length(CAST(session_id AS BLOB)) + 9 <= ?10
-                 ORDER BY knowledge_at DESC, session_id, stable_id
+                   AND length(CAST(occurrence.occurrence_id AS BLOB)) <= ?6
+                   AND length(CAST(occurrence.retrieval_anchor_id AS BLOB)) <= ?7
+                   AND length(CAST(COALESCE(occurrence.message_id, '') AS BLOB)) <= ?8
+                   AND length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB)) <= ?8
+                   AND length(CAST(occurrence.session_id AS BLOB)) <= ?8
+                   AND length(CAST(occurrence.role AS BLOB)) <= ?8
+                   AND length(CAST(authority_session.provider AS BLOB)) <= ?8
+                   AND length(CAST(occurrence.occurrence_id AS BLOB))
+                       + length(CAST(occurrence.retrieval_anchor_id AS BLOB))
+                       + length(CAST(COALESCE(occurrence.message_id, '') AS BLOB))
+                       + length(CAST(COALESCE(occurrence.turn_id, '') AS BLOB))
+                       + length(CAST(occurrence.session_id AS BLOB))
+                       + length(CAST(occurrence.role AS BLOB))
+                       + length(CAST(authority_session.provider AS BLOB)) <= ?9
+                   AND length(CAST(occurrence.occurrence_id AS BLOB))
+                       + length(CAST(occurrence.session_id AS BLOB)) + 9 <= ?10
+                 ORDER BY occurrence.knowledge_at DESC, occurrence.session_id,
+                          occurrence.occurrence_id
                  LIMIT ?11",
                 vec![
                     Value::Text(project_key.to_string()),

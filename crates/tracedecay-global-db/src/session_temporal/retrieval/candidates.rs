@@ -136,6 +136,14 @@ impl RootAuthorityChannel {
                             AND json_extract(authority_anchor.owner_json, '$.kind') = 'project'
                             AND json_extract(authority_anchor.owner_json, '$.project_id')
                                 = authority_session.project_key)
+                           OR
+                           (json_extract(authority_anchor.owner_json, '$.kind') = 'session'
+                            AND json_extract(authority_anchor.owner_json, '$.project_key')
+                                = authority_session.project_key
+                            AND json_extract(authority_anchor.owner_json, '$.session_id')
+                                = summary.session_id
+                            AND json_extract(authority_anchor.owner_json, '$.provider')
+                                = authority_session.provider)
                        )
                      LIMIT 1
                  )"
@@ -507,6 +515,30 @@ pub(super) async fn query_candidate_clause(
                 ],
             )
         }
+        // An empty Summary clause is the scope-browse summary LISTING; a
+        // non-empty one is the full-text match.
+        (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Summary)
+            if clause.value.trim().is_empty() =>
+        {
+            (
+                ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY,
+                vec![
+                    root_project_key.ok_or_else(|| {
+                        read_message(CANDIDATE_OPERATION, "authorized root is missing")
+                    })?,
+                    provider.clone(),
+                    SqlValue::Integer(cursor.knowledge_at),
+                    SqlValue::Text(cursor.session_id.clone()),
+                    SqlValue::Text(cursor.stable_id.clone()),
+                    SqlValue::Integer(source_stable_cap),
+                    SqlValue::Integer(anchor_cap),
+                    SqlValue::Integer(metadata_cap),
+                    SqlValue::Integer(item_cap),
+                    SqlValue::Integer(stable_cap),
+                    SqlValue::Integer(limit),
+                ],
+            )
+        }
         (TemporalRetrievalScope::AllSessionsInAuthorizedRoot, CandidateChannel::Summary) => (
             ROOT_SUMMARY_CANDIDATE_QUERY,
             vec![
@@ -620,6 +652,27 @@ pub(super) async fn query_candidate_clause(
                     provider,
                     SqlValue::Integer(start),
                     SqlValue::Integer(end),
+                    SqlValue::Integer(cursor.knowledge_at),
+                    SqlValue::Text(cursor.stable_id.clone()),
+                    SqlValue::Integer(source_stable_cap),
+                    SqlValue::Integer(anchor_cap),
+                    SqlValue::Integer(metadata_cap),
+                    SqlValue::Integer(item_cap),
+                    SqlValue::Integer(limit),
+                ],
+            )
+        }
+        // An empty Summary clause is the scope-browse summary LISTING; a
+        // non-empty one is the full-text match.
+        (TemporalRetrievalScope::Session(session_id), CandidateChannel::Summary)
+            if clause.value.trim().is_empty() =>
+        {
+            (
+                SUMMARY_BROWSE_CANDIDATE_QUERY,
+                vec![
+                    SqlValue::Text(session_id.as_str().to_string()),
+                    SqlValue::Integer(generation),
+                    provider.clone(),
                     SqlValue::Integer(cursor.knowledge_at),
                     SqlValue::Text(cursor.stable_id.clone()),
                     SqlValue::Integer(source_stable_cap),

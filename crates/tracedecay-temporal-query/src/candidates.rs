@@ -49,11 +49,22 @@ impl CandidatePlan {
 
 pub fn plan_scope_candidates() -> CandidatePlan {
     CandidatePlan {
-        clauses: vec![CandidateClause {
-            channel: CandidateChannel::Scope,
-            value: String::new(),
-            exact: false,
-        }],
+        clauses: vec![
+            CandidateClause {
+                channel: CandidateChannel::Scope,
+                value: String::new(),
+                exact: false,
+            },
+            // A scope browse also lists the scope's published summary nodes
+            // (an empty Summary clause is a listing, not a text match);
+            // without it an empty-query page is summary-blind while the
+            // participant's summary frontier says otherwise.
+            CandidateClause {
+                channel: CandidateChannel::Summary,
+                value: String::new(),
+                exact: false,
+            },
+        ],
     }
 }
 
