@@ -16,7 +16,8 @@ use crate::configuration::resolver::resolve_configuration;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CandidateDispositionV1, ConfigurationCandidateV1,
-    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
+    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
+    ConfigurationLayerIdV1,
     ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, DIAGNOSTICS_PREWARM_SETTING_KEY,
     ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
@@ -34,7 +35,13 @@ async fn setup() -> (tempfile::TempDir, TestConnection) {
         .execute_batch("PRAGMA foreign_keys = ON;")
         .await
         .unwrap();
-    ensure_configuration_schema(&*connection).await.unwrap();
+    let fresh = super::super::schema::fresh_configuration_store_evidence(&*connection)
+        .await
+        .unwrap()
+        .expect("test connection is fresh");
+    ensure_configuration_schema(&*connection, Some(&fresh))
+        .await
+        .unwrap();
     (directory, connection)
 }
 
@@ -170,8 +177,12 @@ fn protected_commit(
         base_revision_id: root.revision_id.clone(),
         result_revision_id: next_revision_id.clone(),
         operation_digest: plan.operation_digest.clone(),
+        authorization_policy_epoch: plan.policy_epoch,
+        authorization_policy_digest: plan.authorization_policy_digest.clone(),
+        authority_revalidated_at: UtcMicros(20),
         receipt_digest: digest('9'),
         created_at: UtcMicros(21),
+        effective_deadline_at: UtcMicros(100),
     };
     let audit_event = ConfigurationAuditEvent {
         event_id: id("configuration.audit.fixture"),
@@ -247,6 +258,25 @@ fn control_authority(
     operation: ConfigurationMutationOperationV1,
     expected_revision: &ConfigurationRevisionId,
 ) -> ConfigurationMutationAuthority {
+    let idempotency_key = matches!(
+        operation,
+        ConfigurationMutationOperationV1::DirectMutation
+            | ConfigurationMutationOperationV1::CredentialWrite
+    )
+    .then(|| {
+        id(&format!(
+            "configuration.idempotency.{}",
+            format!("{operation:?}").to_lowercase()
+        ))
+    });
+    control_authority_with_key(operation, expected_revision, idempotency_key)
+}
+
+fn control_authority_with_key(
+    operation: ConfigurationMutationOperationV1,
+    expected_revision: &ConfigurationRevisionId,
+    idempotency_key: Option<ConfigurationIdempotencyKey>,
+) -> ConfigurationMutationAuthority {
     let (sink, effect) = match operation {
         ConfigurationMutationOperationV1::CredentialWrite => (
             ConfigurationMutationSinkV1::CredentialStore,
@@ -287,6 +317,7 @@ fn control_authority(
             policy_digest('b'),
             sink,
             effect,
+            idempotency_key,
             UtcMicros(10),
             UtcMicros(1_000),
         )

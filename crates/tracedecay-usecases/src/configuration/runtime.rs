@@ -4,21 +4,18 @@
 //! authorization, mutation, audit, and credential semantics remain in the
 //! existing application operations and Plan20 store.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, ConfigurationValueV1,
+    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
     CredentialReferenceMetadataV1, ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan,
     SettingKey,
 };
-use tracedecay_domain::{AccessPolicyDigest, ActorId, UtcMicros, canonical_sha256};
 
 use crate::config::{
-    ConfigurationDaemonClient, OpenedRuntimeConfiguration, PinnedRuntimeConfiguration,
-    RuntimeConfigurationFuture, RuntimeConfigurationTarget,
+    OpenedRuntimeConfiguration, PinnedRuntimeConfiguration, RuntimeConfigurationTarget,
 };
 use crate::semantic_runtime::{
     ProductionSemanticActivationCoordinatorV1, SemanticConfigurationSnapshotSourceV1,
@@ -27,8 +24,6 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 
-use super::authorization::PolicyBackedConfigurationMutationAuthorization;
-use super::ephemeral_grants::EphemeralConfigurationGrantAuthority;
 use super::operations::{ConfigurationControlPlane, ConfigurationControlPlaneOperations};
 use super::ports::{
     ConfigurationClock, ConfigurationMutationAuthorizationPort, ConfigurationOperationFuture,
@@ -65,6 +60,7 @@ impl ProjectConfigurationRuntime {
             registered_database,
         } = opened;
         let target = configuration.target.clone();
+        let profile_id = registered_database.binding().shard_id.profile_id.clone();
         let registry = crate::config::registry::ConfigurationRegistry::core().map_err(|error| {
             TraceDecayError::Config {
                 message: format!("configuration registry unavailable: {error}"),
@@ -74,36 +70,7 @@ impl ProjectConfigurationRuntime {
         let store = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
             Arc::clone(&registered_database),
         );
-        let local_policy_digest = AccessPolicyDigest::new(
-            canonical_sha256(&(
-                "tracedecay.local-runtime.configuration-policy.v1",
-                &target.project_id,
-            ))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("local configuration policy authority is invalid: {error}"),
-            })?
-            .as_str()
-            .to_owned(),
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("local configuration policy digest is invalid: {error}"),
-        })?;
-        let local_grants = EphemeralConfigurationGrantAuthority::new(
-            ActorId::new(format!(
-                "actor.local-configuration.{}",
-                target.project_id.as_str()
-            ))
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("local configuration actor is invalid: {error}"),
-            })?,
-            local_policy_digest,
-            UtcMicros(i64::MAX),
-        );
-        let local_authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync> =
-            Arc::new(PolicyBackedConfigurationMutationAuthorization::new(
-                local_grants.clone(),
-            ));
-        let authorities = Arc::new(ConfigurationAuthoritySlots::new(local_authorization));
+        let authorities = Arc::new(ConfigurationAuthoritySlots::new());
         let control_plane: SharedConfigurationControlPlane =
             Arc::new(RetainedConfigurationControlPlane {
                 registry,
@@ -116,9 +83,11 @@ impl ProjectConfigurationRuntime {
             target: configuration.target.clone(),
             store,
             control_plane: Arc::clone(&control_plane),
-            local_grants,
-            local_grant_sequence: AtomicU64::new(0),
         });
+        let user_settings = Arc::new(ProductionUserSettingsDaemonClient::new(
+            Arc::clone(&client),
+            profile_id,
+        ));
         Ok((
             Self {
                 target,
@@ -126,7 +95,7 @@ impl ProjectConfigurationRuntime {
                 authorities,
                 client,
                 semantic_runtime: OnceLock::new(),
-                user_settings: Arc::new(ProductionUserSettingsDaemonClient),
+                user_settings,
             },
             configuration,
         ))
@@ -161,10 +130,6 @@ impl ProjectConfigurationRuntime {
         Arc::clone(&self.user_settings) as Arc<dyn UserSettingsDaemonClient>
     }
 
-    pub(crate) fn dyn_client(&self) -> Arc<dyn crate::config::ConfigurationDaemonClient> {
-        Arc::clone(&self.client) as Arc<dyn crate::config::ConfigurationDaemonClient>
-    }
-
     pub fn configuration_store(&self) -> OwnedGlobalDbConfigurationControlStore {
         self.client.store.clone()
     }
@@ -189,6 +154,14 @@ impl ProjectConfigurationRuntime {
     ) -> Result<()> {
         let _ = self.semantic_runtime.set(runtime);
         Ok(())
+    }
+
+    pub fn semantic_configuration_inventory_authority(
+        &self,
+    ) -> Option<crate::semantic_runtime::ProductionSemanticRetrievalConfigurationStoreV1> {
+        self.semantic_runtime
+            .get()
+            .map(|runtime| runtime.configuration_inventory_authority())
     }
 
     pub(crate) fn semantic_activation_coordinator(
@@ -344,30 +317,14 @@ impl ProjectConfigurationRuntime {
     }
 }
 
-// Release this runtime's process-global daemon-client registration when the
-// last handle drops. The uninstall is `Arc::ptr_eq`-guarded, so a newer client
-// installed by a live handle for the same project is never removed.
-impl Drop for ProjectConfigurationRuntime {
-    fn drop(&mut self) {
-        crate::config::uninstall_configuration_daemon_client_for_project(
-            &self.target,
-            &self.dyn_client(),
-        );
-    }
-}
-
 /// Production daemon client for the retained project configuration runtime.
 ///
-/// Reads, daemon-authorized mutations, and trusted process-local mutations all
-/// share the same retained application operations and transactional store. The
-/// local path issues a short-lived receipt from an exact-project authority and
-/// is rechecked by the same policy evaluator as daemon grants.
+/// Reads and daemon-authorized mutations share the same retained application
+/// operations and transactional store.
 pub struct ProductionConfigurationDaemonClient {
     target: RuntimeConfigurationTarget,
     store: OwnedGlobalDbConfigurationControlStore,
     control_plane: SharedConfigurationControlPlane,
-    local_grants: EphemeralConfigurationGrantAuthority,
-    local_grant_sequence: AtomicU64,
 }
 
 impl ProductionConfigurationDaemonClient {
@@ -514,90 +471,6 @@ impl ProductionConfigurationDaemonClient {
             PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)
                 .map_err(|_| ConfigurationError::Unavailable)
         })
-    }
-}
-
-impl ConfigurationDaemonClient for ProductionConfigurationDaemonClient {
-    fn mutate_direct(
-        &self,
-        target: RuntimeConfigurationTarget,
-        mutation: DirectConfigurationMutation,
-        expected_revision: ConfigurationRevisionId,
-    ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration> {
-        let expected_project = self.target.project_id.clone();
-        let control_plane = Arc::clone(&self.control_plane);
-        let store = self.store.clone();
-        let local_grants = self.local_grants.clone();
-        let nonce = self.local_grant_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        Box::pin(async move {
-            if target.project_id != expected_project
-                || !mutation_targets_project(&mutation, &expected_project)
-            {
-                return Err(TraceDecayError::Config {
-                    message: "configuration daemon target does not match the retained project"
-                        .to_owned(),
-                });
-            }
-            let mutation_scope_digest = mutation
-                .target_scope_digest()
-                .map_err(runtime_configuration_error)?;
-            let issued_at = SystemConfigurationClock.now();
-            let authority = local_grants
-                .issue(
-                    nonce,
-                    ConfigurationMutationOperationV1::DirectMutation,
-                    mutation_scope_digest,
-                    expected_revision.clone(),
-                    ConfigurationMutationSinkV1::ConfigurationStore,
-                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
-                    issued_at,
-                )
-                .map_err(runtime_configuration_error)?;
-            control_plane
-                .mutate_direct(authority, mutation, expected_revision)
-                .await
-                .map_err(runtime_configuration_error)?;
-            let current = super::ports::ConfigurationControlStore::current(&store)
-                .await
-                .map_err(runtime_configuration_error)?;
-            let current =
-                PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
-            crate::config::install_pinned_runtime_configuration(current.clone())?;
-            store
-                .record_component_activation(
-                    RUNTIME_CONFIGURATION_COMPONENT.to_owned(),
-                    Some(current.revision_id.clone()),
-                    None,
-                    SystemConfigurationClock.now(),
-                )
-                .await
-                .map_err(runtime_configuration_error)?;
-            Ok(current)
-        })
-    }
-}
-
-fn runtime_configuration_error(error: ConfigurationError) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: format!("configuration control-plane mutation failed: {error}"),
-    }
-}
-
-fn mutation_targets_project(
-    mutation: &DirectConfigurationMutation,
-    project_id: &tracedecay_domain::ProjectId,
-) -> bool {
-    match mutation {
-        DirectConfigurationMutation::Set { layer, .. }
-        | DirectConfigurationMutation::Unset { layer, .. } => {
-            layer
-                == &(ConfigurationLayerIdV1::Project {
-                    project_id: project_id.clone(),
-                })
-        }
-        DirectConfigurationMutation::Batch { mutations } => mutations
-            .iter()
-            .all(|mutation| mutation_targets_project(mutation, project_id)),
     }
 }
 
@@ -836,16 +709,12 @@ struct InstalledConfigurationAuthorities {
 }
 
 struct ConfigurationAuthoritySlots {
-    local_authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
     installed: OnceLock<InstalledConfigurationAuthorities>,
 }
 
 impl ConfigurationAuthoritySlots {
-    fn new(
-        local_authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync>,
-    ) -> Self {
+    fn new() -> Self {
         Self {
-            local_authorization,
             installed: OnceLock::new(),
         }
     }
@@ -926,17 +795,8 @@ impl ConfigurationMutationAuthorizationPort for SharedMutationAuthorization {
         now: UtcMicros,
     ) -> ConfigurationOperationFuture<'a, super::ports::CurrentConfigurationMutationAuthorizationV1>
     {
-        let authorization = if receipt
-            .grant_id
-            .as_str()
-            .starts_with("configuration.grant.local-runtime-")
-        {
-            &self.0.local_authorization
-        } else {
-            let Ok(authorization) = self.0.installed_mutation_authorization() else {
-                return Box::pin(async { Err(ConfigurationError::Unavailable) });
-            };
-            authorization
+        let Ok(authorization) = self.0.installed_mutation_authorization() else {
+            return Box::pin(async { Err(ConfigurationError::Unavailable) });
         };
         authorization.recheck(receipt, operation, expected_revision, sink, effect, now)
     }
@@ -961,8 +821,8 @@ mod tests {
     use super::*;
     use crate::semantic_runtime::SemanticConfigurationSnapshotSourceV1;
     use tracedecay_domain::configuration::{
-        ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationLayerIdV1,
-        ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+        ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationIdempotencyKey,
+        ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
         ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationValueKindV1,
         DIAGNOSTICS_PREWARM_SETTING_KEY,
     };
@@ -1012,7 +872,7 @@ mod tests {
 
     #[test]
     fn configuration_authorities_fail_closed_until_installed() {
-        let authorities = ConfigurationAuthoritySlots::new(Arc::new(TestMutationAuthorization));
+        let authorities = ConfigurationAuthoritySlots::new();
 
         assert!(matches!(
             authorities.scope_resolution(),
@@ -1026,7 +886,7 @@ mod tests {
 
     #[test]
     fn configuration_authorities_bind_atomically_once() {
-        let authorities = ConfigurationAuthoritySlots::new(Arc::new(TestMutationAuthorization));
+        let authorities = ConfigurationAuthoritySlots::new();
         let scopes: Arc<dyn ScopeResolutionPort + Send + Sync> = Arc::new(TestScopeResolution);
         let authorization: Arc<dyn ConfigurationMutationAuthorizationPort + Send + Sync> =
             Arc::new(TestMutationAuthorization);
@@ -1049,13 +909,6 @@ mod tests {
             .install(scopes, authorization)
             .expect_err("second authority installation must fail");
         assert!(matches!(error, TraceDecayError::Config { .. }));
-    }
-
-    #[test]
-    fn client_exposes_typed_direct_mutation_operations() {
-        let _ = ProductionConfigurationDaemonClient::set;
-        let _ = ProductionConfigurationDaemonClient::unset;
-        let _ = ProductionConfigurationDaemonClient::batch;
     }
 
     #[test]
@@ -1134,6 +987,10 @@ mod tests {
                 AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
                 ConfigurationMutationSinkV1::ConfigurationStore,
                 ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                Some(
+                    ConfigurationIdempotencyKey::new("configuration.idempotency.runtime-drift")
+                        .unwrap(),
+                ),
                 UtcMicros(1),
                 UtcMicros(100),
             )
@@ -1155,103 +1012,5 @@ mod tests {
         assert!(!startup.config.diagnostics_prewarm);
         assert!(current.config.diagnostics_prewarm);
         assert_eq!(runtime.configuration_target(), &current.target);
-    }
-
-    #[tokio::test]
-    async fn shipped_runtime_client_persists_direct_mutations() {
-        let directory = tempfile::tempdir().unwrap();
-        let profile_root = directory.path().join("profile");
-        let project_root = directory.path().join("project");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let project_id = ProjectId::new("project.configuration-runtime-client").unwrap();
-        tracedecay_runtime_core::storage::write_enrollment_marker(
-            &project_root,
-            &tracedecay_runtime_core::storage::EnrollmentMarker {
-                project_id: project_id.as_str().to_owned(),
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
-        let layout =
-            tracedecay_runtime_core::storage::resolve_layout_for_current_profile(&project_root)
-                .unwrap();
-        std::fs::create_dir_all(&layout.data_root).unwrap();
-        let host_runtime = RegisteredGlobalDbTestRuntime::project(
-            &profile_root,
-            &project_root,
-            project_id.clone(),
-        )
-        .await
-        .unwrap();
-        let opened = crate::config::open_runtime_configuration_for_registered_database(
-            &project_root,
-            &layout,
-            host_runtime.project_database_arc().unwrap(),
-        )
-        .await
-        .unwrap();
-        let (runtime, startup) = ProjectConfigurationRuntime::open(opened).unwrap();
-        let mutation = DirectConfigurationMutation::Set {
-            layer: ConfigurationLayerIdV1::Project {
-                project_id: project_id.clone(),
-            },
-            key: SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap(),
-            value: ConfigurationValueV1::Boolean(true),
-        };
-
-        let updated = crate::config::ConfigurationDaemonClient::mutate_direct(
-            runtime.client().as_ref(),
-            startup.target.clone(),
-            mutation,
-            startup.revision_id.clone(),
-        )
-        .await
-        .expect("the shipped runtime client must persist an authorized direct mutation");
-
-        assert_ne!(updated.revision_id, startup.revision_id);
-        assert!(updated.config.diagnostics_prewarm);
-        let persisted = runtime.client().current().await.unwrap();
-        assert_eq!(persisted.revision_id, updated.revision_id);
-        assert!(persisted.config.diagnostics_prewarm);
-
-        let actor = AuthorizedActor {
-            actor_id: ActorId::new("actor.configuration-drift-test").unwrap(),
-        };
-        let clean = runtime
-            .client()
-            .observed_state(actor.clone())
-            .await
-            .unwrap();
-        assert_eq!(clean.len(), 1, "the runtime component must be observable");
-        assert_eq!(clean[0].component, RUNTIME_CONFIGURATION_COMPONENT);
-        assert!(!clean[0].restart_required);
-
-        runtime
-            .record_runtime_activation(
-                Some(updated.revision_id.clone()),
-                Some("test-activation-failed".to_owned()),
-                UtcMicros(20),
-            )
-            .await
-            .unwrap();
-        let drifted = runtime
-            .client()
-            .observed_state(actor.clone())
-            .await
-            .unwrap();
-        assert!(drifted[0].restart_required);
-        assert_eq!(
-            drifted[0].activation_error_code.as_deref(),
-            Some("test-activation-failed")
-        );
-
-        runtime
-            .record_runtime_activation(Some(updated.revision_id.clone()), None, UtcMicros(21))
-            .await
-            .unwrap();
-        let recovered = runtime.client().observed_state(actor).await.unwrap();
-        assert!(!recovered[0].restart_required);
-        assert_eq!(recovered[0].observed_revision_id, Some(updated.revision_id));
-        assert_eq!(recovered[0].activation_error_code, None);
     }
 }

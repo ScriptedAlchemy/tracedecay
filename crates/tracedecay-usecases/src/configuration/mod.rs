@@ -1,7 +1,6 @@
 //! Transport-neutral configuration control plane.
 
 pub mod authorization;
-mod ephemeral_grants;
 pub mod operations;
 pub mod ports;
 pub mod runtime;
@@ -23,10 +22,12 @@ pub use types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationPlanContext,
-    ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
-    ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation, configuration_layer_scope_digest,
+    ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1, CredentialWriteHandleV1,
+    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
+    configuration_layer_scope_digest,
 };
 pub use user_settings::{
     ProductionUserSettingsDaemonClient, UserSettingsAuthorityError, UserSettingsDaemonClient,
-    UserSettingsMutationReceiptV1, UserSettingsMutationV1, UserSettingsSnapshotV1,
+    UserSettingsMutationPlanV1, UserSettingsMutationV1, UserSettingsSnapshotV1,
+    parse_duration_millis, plan_user_settings_mutation,
 };

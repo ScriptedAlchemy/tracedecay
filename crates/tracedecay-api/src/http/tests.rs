@@ -3,6 +3,10 @@ use super::{
     parse_callable_code_operation, parse_configuration_operation, parse_context_scout_operation,
     parse_feedback_read_operation, parse_git_read_operation,
 };
+use tracedecay_application::{
+    configuration::CONFIGURATION_SURFACE_OPERATION_NAMES, configuration_executable_binding_registry,
+};
+use tracedecay_tool_catalog::{OperationId, RouteExposureV1};
 
 #[test]
 fn omitted_http_page_query_uses_the_canonical_default() {
@@ -197,6 +201,10 @@ fn configuration_operation_parser_is_exact_and_closed() {
         assert_eq!(parse_configuration_operation(name), Some(operation));
         assert_eq!(operation.as_str(), name);
         assert_eq!(
+            operation.application_route_path(),
+            format!("/application/configuration/{name}")
+        );
+        assert_eq!(
             operation.owner_kind(),
             super::HttpApplicationOwnerKind::Configuration
         );
@@ -210,6 +218,26 @@ fn configuration_operation_parser_is_exact_and_closed() {
         "configuration_unknown",
     ] {
         assert_eq!(parse_configuration_operation(rejected), None);
+    }
+}
+
+#[test]
+fn configuration_http_routes_match_the_executable_sdk_catalog() {
+    let registry = configuration_executable_binding_registry().expect("configuration registry");
+
+    for name in CONFIGURATION_SURFACE_OPERATION_NAMES {
+        let operation = HttpApplicationOperation::from_catalog_name(name).expect("HTTP operation");
+        let operation_id =
+            OperationId::new(format!("operation.application.{name}")).expect("operation ID");
+        let binding = registry
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .expect("executable configuration binding");
+        assert!(matches!(
+            binding.exposure(),
+            RouteExposureV1::Public { route_path, .. }
+                if route_path == &operation.application_route_path()
+        ));
     }
 }
 
@@ -243,7 +271,7 @@ fn context_scout_operation_parser_is_exact_and_backend_only() {
 
 #[test]
 fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
-    assert_eq!(HttpApplicationOperation::ALL.len(), 67);
+    assert_eq!(HttpApplicationOperation::ALL.len(), 66);
     for operation in HttpApplicationOperation::ALL {
         assert_eq!(
             HttpApplicationOperation::from_tool_name(&format!("tracedecay_{}", operation.as_str())),
@@ -258,7 +286,6 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
     );
     assert!(!HttpApplicationOperation::GitPreview.is_http_exposed());
     assert!(!HttpApplicationOperation::GitApply.is_http_exposed());
-    assert!(!HttpApplicationOperation::ConfigurationReset.is_http_exposed());
     assert_eq!(
         HttpApplicationOperation::GitPreview.owner_kind(),
         HttpApplicationOwnerKind::Git

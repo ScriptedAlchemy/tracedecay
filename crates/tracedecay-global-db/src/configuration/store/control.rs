@@ -15,7 +15,7 @@ use super::{
     ComponentConfigurationState, ConfigurationAuditEventKindV1, ConfigurationAuditPage,
     ConfigurationAuditQuery, ConfigurationCommitDraft, ConfigurationControlStore,
     ConfigurationCurrentStateV1, ConfigurationError, ConfigurationMutationAuthority,
-    ConfigurationMutationReceipt, ConfigurationOperationFuture, ConfigurationProtectedOperationV1,
+    ConfigurationMutationReceipt, ConfigurationSettlementAuthorityV1, ConfigurationOperationFuture, ConfigurationProtectedOperationV1,
     ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId, ConfigurationRollbackRequest,
     DirectConfigurationMutation, GlobalDbConfigurationControlStore, ProtectedChange,
     ProtectedChangePlan, RollbackModeV1, ScopeRevalidationEvidenceV1,
@@ -99,6 +99,42 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
         })
     }
 
+    fn replay_apply(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        request: &tracedecay_domain::configuration::ProtectedApplyRequest,
+        operation: tracedecay_domain::configuration::ConfigurationMutationOperationV1,
+    ) -> ConfigurationOperationFuture<'_, Option<ConfigurationMutationReceipt>> {
+        let authority = authority.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            authority.validate_integrity()?;
+            validate_apply_request(&request)?;
+            if authority.receipt.operation != operation
+                || authority.receipt.actor_id != request.actor_id
+                || authority.receipt.expected_configuration_revision
+                    != request.expected_base_revision_id
+                || authority.idempotency_key()? != &request.idempotency_key
+            {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            let read = self
+                .db
+                .read_snapshot()
+                .await
+                .map_err(|_| ConfigurationError::Unavailable)?;
+            replay_control_receipt(
+                &read,
+                &request.actor_id,
+                &request.idempotency_key,
+                &request.expected_base_revision_id,
+                &request.operation_digest,
+                Some(&request.plan_id),
+            )
+            .await
+        })
+    }
+
     fn commit_direct(
         &self,
         authority: &ConfigurationMutationAuthority,
@@ -149,7 +185,11 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
             plan.validate().map_err(ConfigurationError::validation)?;
             validate_plan_evidence(&plan, &evidence)?;
             if request.actor_id != authority.receipt.actor_id
-                || request.expected_base_revision_id != plan.base_revision_id
+                || authority.idempotency_key()? != &request.idempotency_key
+            {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            if request.expected_base_revision_id != plan.base_revision_id
                 || request.operation_digest != plan.operation_digest
             {
                 return Err(ConfigurationError::PlanStale);
@@ -215,9 +255,13 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                         operation_kind: "protected_apply",
                         operation_digest: request.operation_digest.clone(),
                         idempotency_key: request.idempotency_key.clone(),
+                        authorization_policy_epoch: authority.receipt.policy_epoch,
+                        authorization_policy_digest: authority.receipt.policy_digest.clone(),
+                        authority_revalidated_at: authority.receipt.issued_at,
                         change_plan: Some(plan.clone()),
                         event_kind: ConfigurationAuditEventKindV1::Applied,
                         created_at: authority.receipt.issued_at,
+                        effective_deadline_at: authority.receipt.expires_at,
                         target: &sealed_target,
                     },
                 )
@@ -236,7 +280,13 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                     result_revision_id: receipt.result_revision_id,
                     snapshot_id: commit.next_revision.snapshot.snapshot_id,
                     operation_digest: receipt.operation_digest,
+                    settlement_authority: ConfigurationSettlementAuthorityV1 {
+                        policy_epoch: receipt.authorization_policy_epoch,
+                        policy_digest: receipt.authorization_policy_digest,
+                        revalidated_at: receipt.authority_revalidated_at,
+                    },
                     created_at: receipt.created_at,
+                    effective_deadline_at: receipt.effective_deadline_at,
                 })
             }
             .await;
@@ -373,7 +423,11 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
             plan.validate().map_err(ConfigurationError::validation)?;
             validate_plan_evidence(&plan, &evidence)?;
             if request.actor_id != authority.receipt.actor_id
-                || request.expected_base_revision_id != plan.base_revision_id
+                || authority.idempotency_key()? != &request.idempotency_key
+            {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            if request.expected_base_revision_id != plan.base_revision_id
                 || request.operation_digest != plan.operation_digest
             {
                 return Err(ConfigurationError::PlanStale);
@@ -446,9 +500,13 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                         operation_kind: "rollback_apply",
                         operation_digest: request.operation_digest.clone(),
                         idempotency_key: request.idempotency_key.clone(),
+                        authorization_policy_epoch: authority.receipt.policy_epoch,
+                        authorization_policy_digest: authority.receipt.policy_digest.clone(),
+                        authority_revalidated_at: authority.receipt.issued_at,
                         change_plan: Some(plan.clone()),
                         event_kind: ConfigurationAuditEventKindV1::RollbackApplied,
                         created_at: authority.receipt.issued_at,
+                        effective_deadline_at: authority.receipt.expires_at,
                         target: &sealed_target,
                     },
                 )
@@ -467,7 +525,13 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                     result_revision_id: receipt.result_revision_id,
                     snapshot_id: commit.next_revision.snapshot.snapshot_id,
                     operation_digest: receipt.operation_digest,
+                    settlement_authority: ConfigurationSettlementAuthorityV1 {
+                        policy_epoch: receipt.authorization_policy_epoch,
+                        policy_digest: receipt.authorization_policy_digest,
+                        revalidated_at: receipt.authority_revalidated_at,
+                    },
                     created_at: receipt.created_at,
+                    effective_deadline_at: receipt.effective_deadline_at,
                 })
             }
             .await;

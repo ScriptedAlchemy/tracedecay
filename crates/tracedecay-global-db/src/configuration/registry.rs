@@ -20,8 +20,10 @@ use tracedecay_domain::configuration::{
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
-    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
-    WORK_TOPOLOGY_POLICY_SETTING_KEY, safe_work_topology_policy_v1,
+    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+    USER_UPLOAD_ENABLED_SETTING_KEY, USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 
@@ -33,7 +35,7 @@ pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 2;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 3;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -107,6 +109,7 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::None,
             deprecation: DeprecationStateV1::Active,
         })?;
+        register_user_profile_settings(&mut registry)?;
         registry.register(SettingDefinitionV1 {
             key: setting_key(ANALYZER_SETTINGS_SETTING_KEY)?,
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
@@ -261,6 +264,26 @@ impl ConfigurationRegistry {
                 });
             }
         }
+        if matches!(
+            key.as_str(),
+            USER_WATCHER_DEBOUNCE_MS_SETTING_KEY | USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY
+        ) {
+            let ConfigurationValueV1::Unsigned(actual) = value else {
+                return Err(ConfigurationRegistryError::ValueKindMismatch {
+                    key: key.clone(),
+                    expected: ConfigurationValueKindV1::Unsigned,
+                    actual: value.kind(),
+                });
+            };
+            if *actual == 0 {
+                return Err(ConfigurationRegistryError::UnsignedValueOutOfRange {
+                    key: key.clone(),
+                    minimum: 1,
+                    maximum: u64::MAX,
+                    actual: *actual,
+                });
+            }
+        }
         Ok(())
     }
 
@@ -298,6 +321,40 @@ impl ConfigurationRegistry {
 ///
 /// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
+
+fn register_user_profile_settings(
+    registry: &mut ConfigurationRegistry,
+) -> Result<(), ConfigurationRegistryError> {
+    for (key, default_value, restart_requirement) in [
+        (
+            USER_UPLOAD_ENABLED_SETTING_KEY,
+            ConfigurationValueV1::Boolean(false),
+            RestartRequirementV1::None,
+        ),
+        (
+            USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(2_000),
+            RestartRequirementV1::DaemonRestart,
+        ),
+        (
+            USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+            ConfigurationValueV1::Unsigned(60),
+            RestartRequirementV1::DaemonRestart,
+        ),
+    ] {
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(key)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: default_value.kind(),
+            default_value,
+            sensitivity: SettingSensitivityV1::Public,
+            scope: SettingScopeV1::UserProfile,
+            restart_requirement,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+    }
+    Ok(())
+}
 
 /// Canonical defaults for the project-scoped runtime settings.
 struct ProjectDefaults {
@@ -593,6 +650,48 @@ mod proximity_threshold_tests {
                 &ConfigurationValueV1::Unsigned(MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1 + 1),
             ),
             Err(ConfigurationRegistryError::UnsignedValueOutOfRange { .. })
+        ));
+    }
+}
+
+#[cfg(test)]
+mod user_profile_settings_tests {
+    use super::*;
+
+    #[test]
+    fn editable_profile_settings_are_registered_with_exact_scope_and_restart_semantics() {
+        let registry = ConfigurationRegistry::core().expect("registry");
+        for (raw_key, kind, restart) in [
+            (
+                USER_UPLOAD_ENABLED_SETTING_KEY,
+                ConfigurationValueKindV1::Boolean,
+                RestartRequirementV1::None,
+            ),
+            (
+                USER_WATCHER_DEBOUNCE_MS_SETTING_KEY,
+                ConfigurationValueKindV1::Unsigned,
+                RestartRequirementV1::DaemonRestart,
+            ),
+            (
+                USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY,
+                ConfigurationValueKindV1::Unsigned,
+                RestartRequirementV1::DaemonRestart,
+            ),
+        ] {
+            let definition = registry
+                .definition(&SettingKey::new(raw_key).expect("key"))
+                .expect("definition");
+            assert_eq!(definition.scope, SettingScopeV1::UserProfile);
+            assert_eq!(definition.value_kind, kind);
+            assert_eq!(definition.sensitivity, SettingSensitivityV1::Public);
+            assert_eq!(definition.restart_requirement, restart);
+        }
+        assert!(matches!(
+            registry.validate_value(
+                &SettingKey::new(USER_EXTRACTION_TIMEOUT_SECS_SETTING_KEY).unwrap(),
+                &ConfigurationValueV1::Unsigned(0),
+            ),
+            Err(ConfigurationRegistryError::UnsignedValueOutOfRange { minimum: 1, .. })
         ));
     }
 }

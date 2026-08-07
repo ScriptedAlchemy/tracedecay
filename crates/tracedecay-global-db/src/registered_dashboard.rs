@@ -1,15 +1,18 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use tracedecay_domain::canonical_sha256;
 use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,
-    ProjectStoreContext, RegisteredGlobalDb, StoreArtifactRecord, StoreInstanceRecord,
+    ProjectStoreContext, RegisteredGlobalDb, RegisteredProjectRootInventoryV1, StoreArtifactRecord,
+    StoreInstanceRecord,
 };
 
 type Result<T> = std::result::Result<T, TraceDecayError>;
+pub const MAX_REGISTERED_PROJECT_ROOTS_PER_INVENTORY: usize = 256;
 
 fn profile_store_path_is_contained(
     profile_root: &Path,
@@ -176,6 +179,110 @@ impl RegisteredGlobalDb {
             .ok_or_else(|| dashboard_decode_error("decode project registry row"))?;
         let mut contexts = contexts_for_projects(&snapshot, std::slice::from_ref(&project)).await?;
         Ok(contexts.pop())
+    }
+
+    /// Read every registered checkout spelling for one project from a single
+    /// database snapshot. The `LIMIT + 1` row is a fail-closed overflow
+    /// sentinel: callers never receive a truncated live-root set.
+    pub async fn registered_project_root_inventory(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<RegisteredProjectRootInventoryV1>> {
+        let snapshot = self
+            .dashboard_snapshot("read registered project root inventory")
+            .await?;
+        let mut project_rows = snapshot
+            .query(
+                "SELECT project_id, canonical_root, display_root, git_common_dir,
+                        git_remote_url, default_branch, created_at, last_seen_at
+                 FROM code_projects
+                 WHERE project_id = ?1",
+                tracedecay_runtime_core::db::engine::params![project_id],
+            )
+            .await
+            .map_err(|error| dashboard_error("read registered project root", error))?;
+        let Some(project_row) = project_rows
+            .next()
+            .await
+            .map_err(|error| dashboard_error("read registered project root row", error))?
+        else {
+            return Ok(None);
+        };
+        let project = decode_code_project(&project_row)
+            .ok_or_else(|| dashboard_decode_error("decode registered project root row"))?;
+        let alias_limit = i64::try_from(MAX_REGISTERED_PROJECT_ROOTS_PER_INVENTORY)
+            .unwrap_or(i64::MAX)
+            .saturating_add(1);
+        let mut alias_rows = snapshot
+            .query(
+                "SELECT alias_path, project_id, last_seen_at
+                 FROM project_aliases
+                 WHERE project_id = ?1
+                 ORDER BY alias_path
+                 LIMIT ?2",
+                tracedecay_runtime_core::db::engine::params![project_id, alias_limit],
+            )
+            .await
+            .map_err(|error| dashboard_error("read registered project root aliases", error))?;
+        let mut aliases = Vec::new();
+        while let Some(row) = alias_rows
+            .next()
+            .await
+            .map_err(|error| dashboard_error("read registered project root alias", error))?
+        {
+            aliases.push(
+                decode_project_alias(&row)
+                    .ok_or_else(|| dashboard_decode_error("decode registered project alias"))?,
+            );
+        }
+        if aliases.len() >= MAX_REGISTERED_PROJECT_ROOTS_PER_INVENTORY {
+            return Err(dashboard_message(
+                "read registered project root inventory",
+                "registered project root inventory exceeds its bounded authority",
+            ));
+        }
+
+        let mut roots =
+            BTreeSet::from([project.canonical_root.clone(), project.display_root.clone()]);
+        for alias in &aliases {
+            if let Some(path) = super::project_registry::alias_key_path(&alias.alias_path) {
+                roots.insert(path.to_string_lossy().into_owned());
+            }
+        }
+        if roots.is_empty() || roots.len() > MAX_REGISTERED_PROJECT_ROOTS_PER_INVENTORY {
+            return Err(dashboard_message(
+                "read registered project root inventory",
+                "registered project root inventory is empty or exceeds its bounded authority",
+            ));
+        }
+        let terminal_root_count = u64::try_from(roots.len()).map_err(|_| {
+            dashboard_message(
+                "read registered project root inventory",
+                "registered project root count exceeds u64",
+            )
+        })?;
+        let alias_paths = aliases
+            .iter()
+            .map(|alias| alias.alias_path.as_str())
+            .collect::<Vec<_>>();
+        let inventory_digest = canonical_sha256(&(
+            "tracedecay.registered-project-root-inventory.v1",
+            project.project_id.as_str(),
+            project.canonical_root.as_str(),
+            project.display_root.as_str(),
+            alias_paths,
+            &roots,
+            terminal_root_count,
+        ))
+        .map_err(|error| {
+            dashboard_message("read registered project root inventory", error.to_string())
+        })?;
+        Ok(Some(RegisteredProjectRootInventoryV1 {
+            project_id: project.project_id,
+            roots,
+            terminal_root_count,
+            inventory_digest,
+        }))
     }
 
     pub async fn project_registry_contexts_for_projects(

@@ -7,10 +7,13 @@ pub mod schema;
 pub mod semantic;
 pub mod store;
 
+#[cfg(test)]
+mod schema_admission_tests;
+
 pub use schema::{
-    CONFIGURATION_FORMAT_REVISION, ConfigurationResetConfirmation,
-    ConfigurationResetConfirmationError, ConfigurationSchemaError, TOPOLOGY_POLICY_SCHEMA_VERSION,
-    configuration_reset_confirmation, ensure_configuration_schema, reset_configuration_schema,
+    CONFIGURATION_FORMAT_REVISION, ConfigurationSchemaError, FreshConfigurationStoreEvidence,
+    TOPOLOGY_POLICY_SCHEMA_VERSION, admit_configuration_schema, ensure_configuration_schema,
+    fresh_configuration_store_evidence,
 };
 pub use store::{
     ConfigurationStorageError, GlobalDbConfigurationControlStore,

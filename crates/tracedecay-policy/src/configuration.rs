@@ -209,6 +209,12 @@ mod tests {
             snapshot.policy_digest.clone(),
             sink,
             effect,
+            Some(
+                tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
+                    "configuration.idempotency.policy-fixture",
+                )
+                .unwrap(),
+            ),
             snapshot.issued_at,
             snapshot.expires_at,
         )
@@ -279,5 +285,29 @@ mod tests {
             ConfigurationMutationPolicyEvaluatorV1.evaluate(&snapshot, input),
             ConfigurationMutationRecheckDispositionV1::Deny
         );
+    }
+
+    #[test]
+    fn direct_grant_recheck_denies_a_swapped_idempotency_key() {
+        let (snapshot, mut receipt) = fixture();
+        receipt.idempotency_key = Some(
+            tracedecay_domain::configuration::ConfigurationIdempotencyKey::new(
+                "configuration.idempotency.swapped",
+            )
+            .unwrap(),
+        );
+        let disposition = ConfigurationMutationPolicyEvaluatorV1.evaluate(
+            &snapshot,
+            ConfigurationMutationRecheckInputV1 {
+                operation: receipt.operation,
+                expected_revision: &receipt.expected_configuration_revision,
+                sink: receipt.sink,
+                effect: receipt.effect,
+                receipt: &receipt,
+                evaluated_at: UtcMicros(19),
+            },
+        );
+
+        assert_eq!(disposition, ConfigurationMutationRecheckDispositionV1::Deny);
     }
 }

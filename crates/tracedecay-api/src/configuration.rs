@@ -17,8 +17,6 @@ use crate::http::HttpApplicationOperation;
 /// Application operation behind the project settings write.
 pub const PROJECT_SETTINGS_APPLY_OPERATION: &str =
     HttpApplicationOperation::ConfigurationBatch.as_str();
-/// Application operation advertised for the user-profile settings authority.
-pub const USER_SETTINGS_APPLY_OPERATION: &str = "user_settings_mutate";
 /// Application operation used to refresh configuration state.
 pub const SETTINGS_REFRESH_OPERATION: &str = HttpApplicationOperation::ConfigurationList.as_str();
 
@@ -27,6 +25,7 @@ pub const SETTINGS_REFRESH_OPERATION: &str = HttpApplicationOperation::Configura
 #[serde(deny_unknown_fields)]
 pub struct ProjectSettingsPatch {
     pub expected_revision_id: String,
+    pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +67,7 @@ pub struct TelemetrySettingsPatch {
 #[serde(deny_unknown_fields)]
 pub struct UserSettingsPatch {
     pub expected_revision_id: String,
+    pub idempotency_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,20 +218,28 @@ mod tests {
     fn settings_patches_omit_absent_edits_when_serialized() {
         let project = ProjectSettingsPatch {
             expected_revision_id: "project-revision".to_owned(),
+            idempotency_key: "configuration.idempotency.dashboard-settings".to_owned(),
             ..ProjectSettingsPatch::default()
         };
         assert_eq!(
             serde_json::to_value(project).expect("serialize project settings patch"),
-            json!({ "expected_revision_id": "project-revision" })
+            json!({
+                "expected_revision_id": "project-revision",
+                "idempotency_key": "configuration.idempotency.dashboard-settings"
+            })
         );
 
         let user = UserSettingsPatch {
             expected_revision_id: "user-revision".to_owned(),
+            idempotency_key: "configuration.idempotency.dashboard-user-settings".to_owned(),
             ..UserSettingsPatch::default()
         };
         assert_eq!(
             serde_json::to_value(user).expect("serialize user settings patch"),
-            json!({ "expected_revision_id": "user-revision" })
+            json!({
+                "expected_revision_id": "user-revision",
+                "idempotency_key": "configuration.idempotency.dashboard-user-settings"
+            })
         );
     }
 }

@@ -22,7 +22,8 @@ use super::types::{
     AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationAuditQuery, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationRollbackRequest,
-    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
+    ConfigurationSettlementAuthorityV1, DirectConfigurationMutation, ResolvedSetting,
+    SettingSummary, WriteOnlyCredentialMutation,
 };
 
 /// One transport-neutral control-plane contract. CLI, MCP, HTTP, dashboard,
@@ -245,10 +246,8 @@ where
             expected_revision
                 .validate()
                 .map_err(ConfigurationError::validation)?;
-            let current = self.store.current().await?;
-            if current.revision_id != expected_revision {
-                return Err(ConfigurationError::RevisionConflict);
-            }
+            // The credential store checks exact replay before its revision
+            // CAS, matching direct configuration mutation semantics.
             self.authorize_mutation(
                 &authority,
                 ConfigurationMutationOperationV1::CredentialWrite,
@@ -342,6 +341,28 @@ where
         request: ProtectedApplyRequest,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
         Box::pin(async move {
+            self.authorize_mutation(
+                &authority,
+                ConfigurationMutationOperationV1::ProtectedApply,
+                &request.expected_base_revision_id,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            )
+            .await?;
+            if request.actor_id != authority.receipt.actor_id {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            if let Some(receipt) = self
+                .store
+                .replay_apply(
+                    &authority,
+                    &request,
+                    ConfigurationMutationOperationV1::ProtectedApply,
+                )
+                .await?
+            {
+                return Ok(receipt);
+            }
             let plan = self
                 .store
                 .load_plan(&request.plan_id)
@@ -389,6 +410,28 @@ where
         request: ProtectedApplyRequest,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
         Box::pin(async move {
+            self.authorize_mutation(
+                &authority,
+                ConfigurationMutationOperationV1::RollbackApply,
+                &request.expected_base_revision_id,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            )
+            .await?;
+            if request.actor_id != authority.receipt.actor_id {
+                return Err(ConfigurationError::MutationAuthorityRejected);
+            }
+            if let Some(receipt) = self
+                .store
+                .replay_apply(
+                    &authority,
+                    &request,
+                    ConfigurationMutationOperationV1::RollbackApply,
+                )
+                .await?
+            {
+                return Ok(receipt);
+            }
             let plan = self
                 .store
                 .load_plan(&request.plan_id)
@@ -432,15 +475,6 @@ where
         rollback: bool,
     ) -> ConfigurationOperationFuture<'_, ConfigurationMutationReceipt> {
         Box::pin(async move {
-            let now = self.clock.now();
-            if plan.is_expired_at(now) {
-                return Err(ConfigurationError::PlanExpired);
-            }
-            validate_apply_binding(&plan, &request, now)
-                .map_err(|_| ConfigurationError::PlanStale)?;
-            // Do not reject against an ambient current revision before the
-            // store can return an exact idempotent replay. The store performs
-            // replay-first CAS in the same write transaction.
             let operation = if rollback {
                 ConfigurationMutationOperationV1::RollbackApply
             } else {
@@ -450,7 +484,7 @@ where
                 .authorize_mutation(
                     &authority,
                     operation,
-                    &plan.base_revision_id,
+                    &request.expected_base_revision_id,
                     ConfigurationMutationSinkV1::ConfigurationStore,
                     ConfigurationMutationEffectV1::CommitConfigurationRevision,
                 )
@@ -459,6 +493,22 @@ where
             if request.actor_id != actor.actor_id {
                 return Err(ConfigurationError::MutationAuthorityRejected);
             }
+            if let Some(receipt) = self
+                .store
+                .replay_apply(&authority, &request, operation)
+                .await?
+            {
+                return Ok(receipt);
+            }
+            let now = self.clock.now();
+            if plan.is_expired_at(now) {
+                return Err(ConfigurationError::PlanExpired);
+            }
+            validate_apply_binding(&plan, &request, now)
+                .map_err(|_| ConfigurationError::PlanStale)?;
+            // Do not reject against an ambient current revision before the
+            // store can return an exact idempotent replay. The store performs
+            // replay-first CAS in the same write transaction.
             let evidence = self.scopes.revalidate_plan(&actor, &plan).await?;
             validate_frozen_evidence(&plan, &evidence)?;
             validate_authorization_evidence(&current_authorization, &evidence)?;
@@ -658,6 +708,13 @@ mod tests {
     struct Store {
         current: ConfigurationCurrentStateV1,
         saved: Mutex<Option<(ProtectedChangePlan, ProtectedChange)>>,
+        replay: Mutex<
+            Option<(
+                ProtectedApplyRequest,
+                ConfigurationMutationOperationV1,
+                ConfigurationMutationReceipt,
+            )>,
+        >,
     }
 
     impl ConfigurationControlStore for Store {
@@ -681,9 +738,41 @@ mod tests {
 
         fn load_plan(
             &self,
-            _plan_id: &ChangePlanId,
+            plan_id: &ChangePlanId,
         ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
-            Box::pin(async { Ok(None) })
+            let plan = self
+                .saved
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|(plan, _)| plan.clone())
+                .filter(|plan| &plan.plan_id == plan_id);
+            Box::pin(async move { Ok(plan) })
+        }
+
+        fn replay_apply(
+            &self,
+            authority: &ConfigurationMutationAuthority,
+            request: &ProtectedApplyRequest,
+            operation: ConfigurationMutationOperationV1,
+        ) -> ConfigurationOperationFuture<'_, Option<ConfigurationMutationReceipt>> {
+            let replay = self.replay.lock().unwrap().clone();
+            let actor_id = authority.receipt.actor_id.clone();
+            let request = request.clone();
+            Box::pin(async move {
+                let Some((original_request, original_operation, receipt)) = replay else {
+                    return Ok(None);
+                };
+                if original_request.actor_id != actor_id
+                    || original_request.idempotency_key != request.idempotency_key
+                {
+                    return Ok(None);
+                }
+                if original_request != request || original_operation != operation {
+                    return Err(ConfigurationError::IdempotencyConflict);
+                }
+                Ok(Some(receipt))
+            })
         }
 
         fn commit_direct(
@@ -807,6 +896,14 @@ mod tests {
         }
     }
 
+    struct AdvancedClock(UtcMicros);
+
+    impl ConfigurationClock for AdvancedClock {
+        fn now(&self) -> UtcMicros {
+            self.0
+        }
+    }
+
     #[test]
     fn direct_mutation_rejects_protected_control_settings() {
         let registry = ConfigurationRegistry::core().unwrap();
@@ -884,6 +981,7 @@ mod tests {
                     .unwrap(),
             },
             saved: Mutex::new(None),
+            replay: Mutex::new(None),
         };
         let authorization = Authorization {
             current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
@@ -906,6 +1004,7 @@ mod tests {
                 policy_digest,
                 ConfigurationMutationSinkV1::ConfigurationStore,
                 ConfigurationMutationEffectV1::CreateProtectedChangePlan,
+                None,
                 UtcMicros(1),
                 UtcMicros(100),
             )
@@ -943,6 +1042,134 @@ mod tests {
         assert_eq!(
             saved_plan.operation_digest,
             saved_operation.compute_digest().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_apply_restart_replays_original_receipt_after_plan_expiry() {
+        let actor_id: ActorId = id("actor.configuration.replay");
+        let revision_id: ConfigurationRevisionId = id("configuration.revision.replay.base");
+        let result_revision_id: ConfigurationRevisionId =
+            id("configuration.revision.replay.result");
+        let idempotency_key: tracedecay_domain::configuration::ConfigurationIdempotencyKey =
+            id("configuration.idempotency.replay.protected");
+        let scope_digest = digest('a');
+        let policy_digest = policy_digest('b');
+        let evidence = ScopeRevalidationEvidenceV1 {
+            resolved_scope_digest: scope_digest.clone(),
+            membership_digest: None,
+            authorization_policy_digest: policy_digest.clone(),
+            policy_epoch: 7,
+        };
+        let snapshot =
+            ConfigurationSnapshotV1::new(BTreeMap::default(), BTreeMap::default()).unwrap();
+        let change = ProtectedChange::BindSource(
+            ScopeSourceBinding::new(
+                id::<SourceBindingId>("binding.configuration.replay"),
+                SourceKindV1::Cursor,
+                LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
+                AuthorityRef::Project(id::<ProjectId>("project.configuration.replay")),
+            )
+            .unwrap(),
+        );
+        let operation_digest = change.compute_digest().unwrap();
+        let plan = plan_protected_change(
+            ProtectedChangePlanDraftV1 {
+                plan_id: id("configuration.plan.replay.protected"),
+                actor_id: actor_id.clone(),
+                base_revision_id: revision_id.clone(),
+                resolved_scope_digest: scope_digest.clone(),
+                membership_digest: None,
+                authorization_policy_digest: policy_digest.clone(),
+                policy_epoch: 7,
+                created_at: UtcMicros(1),
+                expires_at: UtcMicros(5),
+                before_digest: Some(digest('d')),
+                after_digest: Some(operation_digest.clone()),
+            },
+            change.clone(),
+        )
+        .unwrap();
+        let request = ProtectedApplyRequest {
+            plan_id: plan.plan_id.clone(),
+            actor_id: actor_id.clone(),
+            expected_base_revision_id: revision_id.clone(),
+            operation_digest: operation_digest.clone(),
+            idempotency_key: idempotency_key.clone(),
+        };
+        let receipt = ConfigurationMutationReceipt {
+            receipt_id: id("configuration.receipt.replay.protected"),
+            base_revision_id: revision_id.clone(),
+            result_revision_id,
+            snapshot_id: snapshot.snapshot_id.clone(),
+            operation_digest,
+            settlement_authority: ConfigurationSettlementAuthorityV1 {
+                policy_epoch: 7,
+                policy_digest: policy_digest.clone(),
+                revalidated_at: UtcMicros(2),
+            },
+            created_at: UtcMicros(2),
+            effective_deadline_at: UtcMicros(100),
+        };
+        let store = Store {
+            current: ConfigurationCurrentStateV1 {
+                revision_id: revision_id.clone(),
+                snapshot,
+            },
+            saved: Mutex::new(Some((plan, change))),
+            replay: Mutex::new(Some((
+                request.clone(),
+                ConfigurationMutationOperationV1::ProtectedApply,
+                receipt.clone(),
+            ))),
+        };
+        let authorization = Authorization {
+            current: super::super::ports::CurrentConfigurationMutationAuthorizationV1 {
+                grant_revision: 2,
+                grant_digest: digest('e'),
+                scope_digest: scope_digest.clone(),
+                policy_epoch: 7,
+                policy_digest: policy_digest.clone(),
+            },
+        };
+        let authority = ConfigurationMutationAuthority {
+            receipt: ConfigurationMutationGrantReceiptV1::issue(
+                id::<ConfigurationGrantReceiptId>("configuration.grant-receipt.replay"),
+                id::<ConfigurationGrantId>("configuration.grant.replay"),
+                actor_id,
+                ConfigurationMutationOperationV1::ProtectedApply,
+                scope_digest,
+                revision_id,
+                7,
+                policy_digest,
+                ConfigurationMutationSinkV1::ConfigurationStore,
+                ConfigurationMutationEffectV1::CommitConfigurationRevision,
+                Some(idempotency_key),
+                UtcMicros(9),
+                UtcMicros(100),
+            )
+            .unwrap(),
+        };
+        let registry = ConfigurationRegistry::core().unwrap();
+        let scope = Scope { evidence };
+        let credentials = Credentials;
+        let clock = AdvancedClock(UtcMicros(10));
+
+        let restarted = ConfigurationControlPlaneOperations::new(
+            &registry,
+            &store,
+            &scope,
+            &credentials,
+            &authorization,
+            &clock,
+        );
+
+        assert_eq!(
+            restarted
+                .apply_protected_change(authority, request)
+                .await
+                .unwrap(),
+            receipt
         );
     }
 }

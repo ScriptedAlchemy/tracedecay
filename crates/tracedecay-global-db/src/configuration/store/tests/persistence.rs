@@ -14,6 +14,7 @@ use super::{
 use crate::configuration::contracts::DirectConfigurationMutation;
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
+use tracedecay_domain::canonical_sha256;
 use tracedecay_domain::configuration::{
     ConfigurationMutationOperationV1, CredentialKindV1, SettingKey,
 };
@@ -89,35 +90,105 @@ async fn credential_references_are_opaque_and_activation_failure_preserves_last_
         &root.revision_id,
     );
     let handle = "opaque-credential-write-handle";
+    let write = WriteOnlyCredentialMutation {
+        expected_reference_id: None,
+        kind: CredentialKindV1::ApiToken,
+        write_handle: crate::configuration::contracts::CredentialWriteHandleV1::new(handle)
+            .unwrap(),
+    };
+    let expected_operation_digest = canonical_sha256(&(
+        "tracedecay.configuration.credential-write.v1",
+        &credential_authority.receipt.actor_id,
+        credential_authority.idempotency_key().unwrap(),
+        &root.revision_id,
+        &write.kind,
+        write.write_handle.as_str(),
+        &write.expected_reference_id,
+    ))
+    .unwrap();
     let metadata = store
-        .write_reference(
-            &credential_authority,
-            &WriteOnlyCredentialMutation {
-                expected_reference_id: None,
-                kind: CredentialKindV1::ApiToken,
-                write_handle: crate::configuration::contracts::CredentialWriteHandleV1::new(handle)
+        .write_reference(&credential_authority, &write, &root.revision_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        metadata.rotation, 0,
+        "an absent prior reference starts the canonical rotation sequence"
+    );
+    assert_eq!(metadata.operation_digest, expected_operation_digest);
+    assert_ne!(
+        metadata.operation_digest, metadata.reference_digest,
+        "effect input identity must not alias opaque reference metadata"
+    );
+    assert_eq!(
+        metadata.effective_deadline_at,
+        credential_authority.receipt.expires_at
+    );
+    assert_eq!(
+        store
+            .write_reference(&credential_authority, &write, &root.revision_id)
+            .await
+            .unwrap(),
+        metadata,
+        "an exact credential retry must replay its accepted digest and deadline"
+    );
+    assert_eq!(
+        store
+            .write_reference(
+                &credential_authority,
+                &WriteOnlyCredentialMutation {
+                    expected_reference_id: None,
+                    kind: CredentialKindV1::ApiToken,
+                    write_handle: crate::configuration::contracts::CredentialWriteHandleV1::new(
+                        "different-opaque-credential-write-handle",
+                    )
                     .unwrap(),
-            },
-            &root.revision_id,
+                },
+                &root.revision_id,
+            )
+            .await,
+        Err(ConfigurationError::IdempotencyConflict),
+        "same-key replay must bind the original opaque handle through its operation digest"
+    );
+    let read = db.read_snapshot().await.unwrap();
+    let mut count_rows = read
+        .query(
+            "SELECT COUNT(*) FROM configuration_credential_references",
+            (),
         )
         .await
         .unwrap();
-    let read = db.read_snapshot().await.unwrap();
-    let mut rows = read
-            .query(
-                "SELECT reference_digest FROM configuration_credential_references WHERE reference_id = ?1",
-                params![metadata.reference_id.as_str()],
-            )
+    assert_eq!(
+        count_rows
+            .next()
             .await
-            .unwrap();
-    let digest = rows
-        .next()
+            .unwrap()
+            .unwrap()
+            .get::<i64>(0)
+            .unwrap(),
+        1,
+        "an absent prior reference must not manufacture a credential row"
+    );
+    drop(count_rows);
+    let mut rows = read
+        .query(
+            "SELECT reference_digest, operation_digest, effective_deadline_at
+             FROM configuration_credential_references
+             WHERE reference_id = ?1",
+            params![metadata.reference_id.as_str()],
+        )
         .await
-        .unwrap()
-        .unwrap()
-        .get::<String>(0)
         .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    let digest = row.get::<String>(0).unwrap();
     assert!(!digest.contains(handle));
+    assert_eq!(
+        row.get::<String>(1).unwrap(),
+        expected_operation_digest.as_str()
+    );
+    assert_eq!(
+        row.get::<i64>(2).unwrap(),
+        credential_authority.receipt.expires_at.0
+    );
     drop(rows);
     let mut rows = read
         .query(

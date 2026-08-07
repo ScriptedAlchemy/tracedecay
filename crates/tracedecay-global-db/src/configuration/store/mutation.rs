@@ -11,8 +11,8 @@ use super::audit::{
     terminal_plan_event_kind,
 };
 use super::codec::{
-    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, CONFIGURATION_AUTHORIZATION_NOT_RECORDED,
-    StoredMutationReceipt, decode_id, redacted_direct_audit_target,
+    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, StoredMutationReceipt, decode_id,
+    redacted_direct_audit_target,
 };
 use super::read::{
     current_revision_id_from_executor, read_change_plan_from_executor, read_revision_from_executor,
@@ -20,11 +20,11 @@ use super::read::{
 };
 use super::revision::insert_revision;
 use super::{
-    ACCESS_RULES_SETTING_KEY, ActorId, CandidateDispositionV1, ChangePlanId,
+    ACCESS_RULES_SETTING_KEY, AccessPolicyDigest, ActorId, CandidateDispositionV1, ChangePlanId,
     ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationCandidateV1,
     ConfigurationCommitV1, ConfigurationCurrentStateV1, ConfigurationError,
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationMutationAuthority,
-    ConfigurationMutationReceipt, ConfigurationMutationReceiptV1, ConfigurationReceiptId,
+    ConfigurationMutationReceipt, ConfigurationSettlementAuthorityV1, ConfigurationMutationReceiptV1, ConfigurationReceiptId,
     ConfigurationRegistry, ConfigurationRevisionId, ConfigurationRevisionRecordV1,
     ConfigurationSnapshotV1, ConfigurationStoreError, ConfigurationStoreResult,
     ConfigurationValueV1, DirectConfigurationMutation, Executor, ManifestDigest,
@@ -86,23 +86,42 @@ pub(super) fn decode_stored_mutation_receipt(
         ))
     })?)
     .map_err(ConfigurationStoreError::from)?;
-    let authorization_policy_digest = row.get::<String>(7).map_err(|error| {
+    let authorization_policy_epoch = row.get::<i64>(7).map_err(|error| {
         invalid_store_data(format!(
-            "read configuration receipt authorization digest: {error}"
+            "read configuration receipt authorization epoch: {error}"
         ))
     })?;
-    let activation_status = row.get::<String>(8).map_err(|error| {
+    let authorization_policy_epoch = u64::try_from(authorization_policy_epoch)
+        .map_err(|_| invalid_store_data("configuration receipt authorization epoch is negative"))?;
+    let authorization_policy_digest =
+        AccessPolicyDigest::new(row.get::<String>(8).map_err(|error| {
+            invalid_store_data(format!(
+                "read configuration receipt authorization digest: {error}"
+            ))
+        })?)
+        .map_err(ConfigurationStoreError::from)?;
+    let authority_revalidated_at = row.get::<i64>(9).map_err(|error| {
+        invalid_store_data(format!(
+            "read configuration receipt authority revalidation time: {error}"
+        ))
+    })?;
+    let activation_status = row.get::<String>(10).map_err(|error| {
         invalid_store_data(format!(
             "read configuration receipt activation status: {error}"
         ))
     })?;
-    let receipt_digest = ManifestDigest::new(row.get::<String>(9).map_err(|error| {
+    let receipt_digest = ManifestDigest::new(row.get::<String>(11).map_err(|error| {
         invalid_store_data(format!("read configuration receipt digest: {error}"))
     })?)
     .map_err(ConfigurationStoreError::from)?;
     let created_at = row
-        .get::<i64>(10)
+        .get::<i64>(12)
         .map_err(|error| invalid_store_data(format!("read configuration receipt time: {error}")))?;
+    let effective_deadline_at = row.get::<i64>(13).map_err(|error| {
+        invalid_store_data(format!(
+            "read configuration receipt effective deadline: {error}"
+        ))
+    })?;
     let receipt = ConfigurationMutationReceiptV1 {
         receipt_id,
         actor_id,
@@ -110,14 +129,17 @@ pub(super) fn decode_stored_mutation_receipt(
         base_revision_id,
         result_revision_id,
         operation_digest,
+        authorization_policy_epoch,
+        authorization_policy_digest,
+        authority_revalidated_at: UtcMicros(authority_revalidated_at),
         receipt_digest,
         created_at: UtcMicros(created_at),
+        effective_deadline_at: UtcMicros(effective_deadline_at),
     };
     receipt.validate().map_err(ConfigurationStoreError::from)?;
     Ok(StoredMutationReceipt {
         receipt,
         plan_id,
-        authorization_policy_digest,
         activation_status,
     })
 }
@@ -131,7 +153,9 @@ pub(super) async fn receipt_for_idempotency_from_transaction(
         .query(
             "SELECT receipt_id, plan_id, actor_id, idempotency_key,
                     base_revision_id, result_revision_id, operation_digest,
-                    authorization_policy_digest, activation_status, receipt_digest, created_at
+                    authorization_policy_epoch, authorization_policy_digest,
+                    authority_revalidated_at, activation_status, receipt_digest, created_at,
+                    effective_deadline_at
              FROM configuration_mutation_receipts
              WHERE actor_id = ?1 AND idempotency_key = ?2",
             params![actor_id.as_str(), idempotency_key.as_str()],
@@ -148,13 +172,6 @@ pub(super) async fn receipt_for_idempotency_from_transaction(
         ));
     }
     Ok(Some(receipt))
-}
-
-pub(super) fn authorization_policy_digest_for_commit(commit: &ConfigurationCommitV1) -> String {
-    commit.change_plan.as_ref().map_or_else(
-        || CONFIGURATION_AUTHORIZATION_NOT_RECORDED.to_owned(),
-        |plan| plan.authorization_policy_digest.as_str().to_owned(),
-    )
 }
 
 pub(super) async fn insert_mutation_receipt(
@@ -174,8 +191,10 @@ pub(super) async fn insert_mutation_receipt(
             "INSERT INTO configuration_mutation_receipts (
                 receipt_id, plan_id, actor_id, idempotency_key,
                 base_revision_id, result_revision_id, operation_digest,
-                authorization_policy_digest, activation_status, receipt_digest, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                authorization_policy_epoch, authorization_policy_digest,
+                authority_revalidated_at, activation_status, receipt_digest, created_at,
+                effective_deadline_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 commit.receipt.receipt_id.as_str(),
                 plan_id,
@@ -184,10 +203,14 @@ pub(super) async fn insert_mutation_receipt(
                 commit.receipt.base_revision_id.as_str(),
                 commit.receipt.result_revision_id.as_str(),
                 commit.receipt.operation_digest.as_str(),
-                authorization_policy_digest_for_commit(commit),
+                i64::try_from(commit.receipt.authorization_policy_epoch)
+                    .map_err(|_| invalid_store_data("configuration policy epoch exceeds i64"))?,
+                commit.receipt.authorization_policy_digest.as_str(),
+                commit.receipt.authority_revalidated_at.0,
                 CONFIGURATION_ACTIVATION_DESIRED_RECORDED,
                 commit.receipt.receipt_digest.as_str(),
                 commit.receipt.created_at.0,
+                commit.receipt.effective_deadline_at.0,
             ],
         )
         .await
@@ -240,7 +263,6 @@ pub(super) async fn replay_matches_commit(
     commit: &ConfigurationCommitV1,
 ) -> ConfigurationStoreResult<bool> {
     if stored.receipt != commit.receipt
-        || stored.authorization_policy_digest != authorization_policy_digest_for_commit(commit)
         || stored.activation_status != CONFIGURATION_ACTIVATION_DESIRED_RECORDED
     {
         return Ok(false);
@@ -374,23 +396,6 @@ pub(super) fn direct_operation_digest(
 ) -> Result<ManifestDigest, ConfigurationError> {
     canonical_sha256(&("tracedecay.configuration.direct-mutation.v1", mutation))
         .map_err(ConfigurationError::validation)
-}
-
-pub(super) fn direct_idempotency_key(
-    authority: &ConfigurationMutationAuthority,
-    operation_digest: &ManifestDigest,
-) -> Result<ConfigurationIdempotencyKey, ConfigurationError> {
-    let digest = canonical_sha256(&(
-        "tracedecay.configuration.direct-idempotency.v1",
-        &authority.receipt.receipt_id,
-        operation_digest,
-    ))
-    .map_err(ConfigurationError::validation)?;
-    derived_identifier(
-        "configuration.idempotency.direct.v1",
-        &digest,
-        "direct idempotency key",
-    )
 }
 
 pub(super) fn result_revision_id(
@@ -561,9 +566,13 @@ pub(super) struct ConfigurationCommitDraft<'a, T> {
     pub(super) operation_kind: &'static str,
     pub(super) operation_digest: ManifestDigest,
     pub(super) idempotency_key: ConfigurationIdempotencyKey,
+    pub(super) authorization_policy_epoch: u64,
+    pub(super) authorization_policy_digest: AccessPolicyDigest,
+    pub(super) authority_revalidated_at: UtcMicros,
     pub(super) change_plan: Option<ProtectedChangePlan>,
     pub(super) event_kind: ConfigurationAuditEventKindV1,
     pub(super) created_at: UtcMicros,
+    pub(super) effective_deadline_at: UtcMicros,
     pub(super) target: &'a T,
 }
 
@@ -579,9 +588,13 @@ pub(super) async fn build_configuration_commit<T: Serialize>(
         operation_kind,
         operation_digest,
         idempotency_key,
+        authorization_policy_epoch,
+        authorization_policy_digest,
+        authority_revalidated_at,
         change_plan,
         event_kind,
         created_at,
+        effective_deadline_at,
         target,
     } = draft;
     let receipt_id: ConfigurationReceiptId = derived_identifier(
@@ -605,7 +618,11 @@ pub(super) async fn build_configuration_commit<T: Serialize>(
         expected_base_revision_id,
         &next_revision_id,
         &operation_digest,
+        authorization_policy_epoch,
+        &authorization_policy_digest,
+        authority_revalidated_at,
         created_at,
+        effective_deadline_at,
     ))
     .map_err(ConfigurationError::validation)?;
     let receipt = ConfigurationMutationReceiptV1 {
@@ -615,8 +632,12 @@ pub(super) async fn build_configuration_commit<T: Serialize>(
         base_revision_id: expected_base_revision_id.clone(),
         result_revision_id: next_revision_id.clone(),
         operation_digest: operation_digest.clone(),
+        authorization_policy_epoch,
+        authorization_policy_digest,
+        authority_revalidated_at,
         receipt_digest,
         created_at,
+        effective_deadline_at,
     };
     let event_id = derived_identifier(
         "configuration.audit.v1",
@@ -792,7 +813,13 @@ pub(super) async fn replay_control_receipt(
         result_revision_id: stored.receipt.result_revision_id,
         snapshot_id: revision.snapshot.snapshot_id,
         operation_digest: stored.receipt.operation_digest,
+        settlement_authority: ConfigurationSettlementAuthorityV1 {
+            policy_epoch: stored.receipt.authorization_policy_epoch,
+            policy_digest: stored.receipt.authorization_policy_digest,
+            revalidated_at: stored.receipt.authority_revalidated_at,
+        },
         created_at: stored.receipt.created_at,
+        effective_deadline_at: stored.receipt.effective_deadline_at,
     }))
 }
 
@@ -819,7 +846,7 @@ where
         return Err(ConfigurationError::MutationAuthorityRejected);
     }
     let operation_digest = direct_operation_digest(mutation)?;
-    let idempotency_key = direct_idempotency_key(authority, &operation_digest)?;
+    let idempotency_key = authority.direct_idempotency_key()?.clone();
     let next_revision_id =
         result_revision_id(expected_revision, &idempotency_key, &operation_digest)?;
     if let Some(receipt) = replay_control_receipt(
@@ -856,9 +883,13 @@ where
             operation_kind: "direct_mutation",
             operation_digest,
             idempotency_key,
+            authorization_policy_epoch: authority.receipt.policy_epoch,
+            authorization_policy_digest: authority.receipt.policy_digest.clone(),
+            authority_revalidated_at: authority.receipt.issued_at,
             change_plan: None,
             event_kind: ConfigurationAuditEventKindV1::Applied,
             created_at: authority.receipt.issued_at,
+            effective_deadline_at: authority.receipt.expires_at,
             target: &audit_target,
         },
     )
@@ -877,7 +908,13 @@ where
         result_revision_id: receipt.result_revision_id,
         snapshot_id: commit.next_revision.snapshot.snapshot_id,
         operation_digest: receipt.operation_digest,
+        settlement_authority: ConfigurationSettlementAuthorityV1 {
+            policy_epoch: receipt.authorization_policy_epoch,
+            policy_digest: receipt.authorization_policy_digest,
+            revalidated_at: receipt.authority_revalidated_at,
+        },
         created_at: receipt.created_at,
+        effective_deadline_at: receipt.effective_deadline_at,
     };
     let current = current_state_from_transaction(transaction).await?;
     Ok(ConfigurationDirectCommitOutcomeV1 { receipt, current })

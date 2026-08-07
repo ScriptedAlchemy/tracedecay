@@ -151,7 +151,6 @@ pub enum HttpApplicationOperation {
     ConfigurationRollbackPreview,
     ConfigurationRollbackApply,
     ConfigurationAudit,
-    ConfigurationReset,
     ContextScoutStatus,
     ContextScoutRecent,
     ContextScoutExplain,
@@ -177,7 +176,7 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 67] = [
+    pub const ALL: [Self; 66] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -233,7 +232,6 @@ impl HttpApplicationOperation {
         Self::ConfigurationRollbackPreview,
         Self::ConfigurationRollbackApply,
         Self::ConfigurationAudit,
-        Self::ConfigurationReset,
         Self::ContextScoutStatus,
         Self::ContextScoutRecent,
         Self::ContextScoutExplain,
@@ -318,7 +316,6 @@ impl HttpApplicationOperation {
             Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
             Self::ConfigurationRollbackApply => "configuration_rollback_apply",
             Self::ConfigurationAudit => "configuration_audit",
-            Self::ConfigurationReset => "configuration_reset",
             Self::ContextScoutStatus => "context_scout_status",
             Self::ContextScoutRecent => "context_scout_recent",
             Self::ContextScoutExplain => "context_scout_explain",
@@ -389,8 +386,7 @@ impl HttpApplicationOperation {
             | Self::ConfigurationProtectedApply
             | Self::ConfigurationRollbackPreview
             | Self::ConfigurationRollbackApply
-            | Self::ConfigurationAudit
-            | Self::ConfigurationReset => HttpApplicationOwnerKind::Configuration,
+            | Self::ConfigurationAudit => HttpApplicationOwnerKind::Configuration,
             Self::ContextScoutStatus
             | Self::ContextScoutRecent
             | Self::ContextScoutExplain
@@ -435,13 +431,8 @@ impl HttpApplicationOperation {
     ///
     /// Git preview/apply remain in the shared operation family but are
     /// intentionally exposed through CLI/MCP mutation bindings only.
-    /// Configuration reset is a destructive confirmation-gated journey bound
-    /// exclusively to the CLI surface by its catalog contribution.
     pub const fn is_http_exposed(self) -> bool {
-        !matches!(
-            self,
-            Self::GitPreview | Self::GitApply | Self::ConfigurationReset
-        )
+        !matches!(self, Self::GitPreview | Self::GitApply)
     }
 
     pub fn route_path(self) -> String {
@@ -477,6 +468,15 @@ impl HttpApplicationOperation {
             }
             operation => format!("/context-scout/{}", operation.as_str()),
         }
+    }
+
+    /// Public route mounted beneath the per-project application prefix.
+    ///
+    /// [`route_path`](Self::route_path) remains the relative Axum route used
+    /// by [`application_router`]. SDK and discovery contracts need the full
+    /// path accepted by the daemon HTTP service.
+    pub fn application_route_path(self) -> String {
+        format!("/application{}", self.route_path())
     }
 }
 
@@ -525,7 +525,7 @@ pub fn http_route_documents(
         }
         documents.push(HttpRouteDocumentV1 {
             method: "POST",
-            path: operation.route_path(),
+            path: operation.application_route_path(),
             operation: operation.as_str().to_owned(),
             capability_id: capability.capability_id().as_str().to_owned(),
             binding_id: binding.binding_id().as_str().to_owned(),

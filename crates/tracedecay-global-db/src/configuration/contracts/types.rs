@@ -1,20 +1,24 @@
-//! Transport-neutral configuration control-plane DTOs.
+//! Store-only configuration control-plane types plus application DTO imports.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationCandidateV1,
-    ConfigurationLayerIdV1, ConfigurationMutationGrantReceiptV1, ConfigurationReceiptId,
-    ConfigurationRevisionId, ConfigurationSnapshotId, ConfigurationValueV1, CredentialKindV1,
-    CredentialReferenceId, ProtectedChange, RedactedConfigurationChangeV1, RestartRequirementV1,
-    RollbackModeV1, SettingKey, SettingSensitivityV1,
+    ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationMutationGrantReceiptV1, ConfigurationRevisionId, ConfigurationValueV1,
+    CredentialKindV1, CredentialReferenceId, ProtectedChange, RedactedConfigurationChangeV1,
+    RollbackModeV1, SettingKey,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{ActorId, ManifestDigest, canonical_sha256};
 use zeroize::Zeroizing;
+
+pub use tracedecay_application::configuration::{
+    ActivationDriftV1, ComponentConfigurationState, ConfigurationAuditPage,
+    ConfigurationMutationReceipt, ConfigurationSettlementAuthorityV1, ResolvedSetting,
+    SettingSummary,
+};
 
 pub const CONFIGURATION_AUDIT_PAGE_LIMIT: usize = 1_000;
 
@@ -51,23 +55,26 @@ impl ConfigurationMutationAuthority {
             .validate()
             .map_err(|_| ConfigurationError::MutationAuthorityRejected)
     }
-}
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct SettingSummary {
-    pub key: SettingKey,
-    pub sensitivity: SettingSensitivityV1,
-    pub restart_requirement: RestartRequirementV1,
-}
+    pub fn direct_idempotency_key(
+        &self,
+    ) -> Result<&ConfigurationIdempotencyKey, ConfigurationError> {
+        self.validate_integrity()?;
+        if self.receipt.operation
+            != tracedecay_domain::configuration::ConfigurationMutationOperationV1::DirectMutation
+        {
+            return Err(ConfigurationError::MutationAuthorityRejected);
+        }
+        self.idempotency_key()
+    }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ResolvedSetting {
-    pub key: SettingKey,
-    pub effective_value: ConfigurationValueV1,
-    pub snapshot_id: ConfigurationSnapshotId,
-    pub effective_behavior_digest: ManifestDigest,
-    pub resolution_provenance_digest: ManifestDigest,
-    pub candidates: Vec<ConfigurationCandidateV1>,
+    pub fn idempotency_key(&self) -> Result<&ConfigurationIdempotencyKey, ConfigurationError> {
+        self.validate_integrity()?;
+        self.receipt
+            .idempotency_key
+            .as_ref()
+            .ok_or(ConfigurationError::MutationAuthorityRejected)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -190,46 +197,10 @@ pub struct WriteOnlyCredentialMutation {
     pub write_handle: CredentialWriteHandleV1,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ActivationDriftV1 {
-    Current,
-    NeverActivated,
-    PendingRestart,
-    ActivationFailed,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ComponentConfigurationState {
-    pub component: String,
-    pub desired_revision_id: ConfigurationRevisionId,
-    pub observed_revision_id: Option<ConfigurationRevisionId>,
-    pub last_working_revision_id: Option<ConfigurationRevisionId>,
-    pub restart_required: bool,
-    pub activation_error_code: Option<String>,
-    pub drift: ActivationDriftV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ConfigurationMutationReceipt {
-    pub receipt_id: ConfigurationReceiptId,
-    pub base_revision_id: ConfigurationRevisionId,
-    pub result_revision_id: ConfigurationRevisionId,
-    pub snapshot_id: ConfigurationSnapshotId,
-    pub operation_digest: ManifestDigest,
-    pub created_at: UtcMicros,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigurationAuditQuery {
     pub after_event_id: Option<ConfigurationAuditEventId>,
     pub limit: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct ConfigurationAuditPage {
-    pub events: Vec<ConfigurationAuditEvent>,
-    pub next_after_event_id: Option<ConfigurationAuditEventId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

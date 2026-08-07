@@ -1,14 +1,9 @@
-//! Transport-neutral configuration control-plane contract.
+//! Store-facing configuration control-plane contract.
 //!
-//! Moved down from root `src/application/configuration/{types,ports}.rs`. The
-//! only durable implementation of [`ports::ConfigurationControlStore`] is
-//! [`super::store::GlobalDbConfigurationControlStore`], and root
-//! `src/application/` is staying at the top of the stack (see
-//! `tracedecay-application/SEAMS.md`) while already depending on `global_db` —
-//! so the contract had to land beside its implementer or stay a cycle.
-//!
-//! Neither file carried a composition-root dependency: both reach only
-//! `tracedecay-domain`, `serde`, `thiserror`, and `zeroize`.
+//! The concrete mutation/query ports remain beside their sole durable
+//! implementation. Public request/result DTOs are owned by
+//! `tracedecay-application::configuration` and re-exported from `types` only
+//! so the store implementation consumes that same wire authority.
 
 pub mod ports;
 pub mod types;
@@ -22,7 +17,8 @@ pub use types::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    ConfigurationPlanContext, ConfigurationRollbackRequest, CredentialWriteHandleV1,
+    ConfigurationPlanContext, ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1,
+    CredentialWriteHandleV1,
     DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
     configuration_layer_scope_digest,
 };

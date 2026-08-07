@@ -7,8 +7,8 @@ use super::contracts::{
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationControlStore, ConfigurationCurrentStateV1, ConfigurationError,
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationOperationFuture,
-    ConfigurationRollbackRequest, CredentialWritePort, DirectConfigurationMutation,
-    ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
+    ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1, CredentialWritePort,
+    DirectConfigurationMutation, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
 };
 use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
@@ -27,7 +27,7 @@ use tracedecay_domain::configuration::{
     RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeControlOperationV1, SettingKey,
     SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
-use tracedecay_domain::{ActorId, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{AccessPolicyDigest, ActorId, ManifestDigest, UtcMicros, canonical_sha256};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TestConnection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
@@ -635,6 +635,16 @@ impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {
         plan_id: &ChangePlanId,
     ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>> {
         forward_to_registered!(self, [plan_id], |store| store.load_plan(&plan_id))
+    }
+
+    fn replay_apply(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        request: &tracedecay_domain::configuration::ProtectedApplyRequest,
+        operation: tracedecay_domain::configuration::ConfigurationMutationOperationV1,
+    ) -> ConfigurationOperationFuture<'_, Option<ConfigurationMutationReceipt>> {
+        forward_to_registered!(self, [authority, request], |store| store
+            .replay_apply(&authority, &request, operation))
     }
 
     fn commit_direct(

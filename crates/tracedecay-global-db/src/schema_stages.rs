@@ -237,24 +237,79 @@ pub async fn ensure_registered_schema_for_admission(
     conn: &Connection,
 ) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
+    // The LCM authority classifies profile content first: a legacy or
+    // version-skewed session store must surface its own ProfileResetRequired
+    // state instead of being masked by the coarser workflow/configuration
+    // schema resets, which would also flag a store those features were simply
+    // never installed in.
+    tracedecay_sessions::runtime::lcm::schema::require_admissible_lcm_schema(conn)
+        .await
+        .map_err(|error| match error {
+            tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                component: "LCM",
+                found_version,
+                required_version,
+            },
+            error => global_db_operation_error("classify LCM schema admission", error),
+        })?;
     let workflow_admission = inspect_workflow_schema_for_admission(conn).await?;
-    let is_fresh = !table_exists(conn, "sessions").await?
-        && !table_exists(conn, "observations").await?
-        && !table_exists(conn, "code_projects").await?;
-    ensure_authority_audit_checkpoint_schema(conn).await?;
+    let configuration_fresh = configuration::fresh_configuration_store_evidence(conn)
+        .await
+        .map_err(|error| match error {
+            configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    "configuration",
+                    reason,
+                )
+            }
+            configuration::ConfigurationSchemaError::Storage(error) => {
+                global_db_operation_error("inspect configuration schema freshness", error)
+            }
+        })?;
+    configuration::admit_configuration_schema(conn, configuration_fresh.as_ref())
+        .await
+        .map_err(|error| match error {
+            configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    "configuration",
+                    reason,
+                )
+            }
+            configuration::ConfigurationSchemaError::Storage(error) => {
+                global_db_operation_error("admit configuration schema", error)
+            }
+        })?;
+    let is_fresh = configuration_fresh.is_some();
     let force_exhaustive = !authority_invariant_triggers_intact(conn).await?;
-    if force_exhaustive && !is_fresh {
-        // Persist the requirement before the schema transaction repairs the
-        // trigger evidence that armed it. The progress row doubles as the
-        // resumable cursor and is removed only by a completed FK sweep.
-        require_foreign_key_audit(conn).await?;
-    }
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
     let migration = async {
+        configuration::ensure_configuration_schema(&transaction, configuration_fresh.as_ref())
+            .await
+            .map_err(|error| match error {
+                configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                        "configuration",
+                        reason,
+                    )
+                }
+                configuration::ConfigurationSchemaError::Storage(error) => {
+                    global_db_operation_error("initialize configuration schema", error)
+                }
+            })?;
+        ensure_authority_audit_checkpoint_schema(&transaction).await?;
+        if force_exhaustive && !is_fresh {
+            // Persist the requirement before later schema work repairs the
+            // trigger evidence that armed it. The progress row doubles as the
+            // resumable cursor and is removed only by a completed FK sweep.
+            require_foreign_key_audit(&transaction).await?;
+        }
         transaction
             .execute_batch(REGISTRY_SCHEMA)
             .await
@@ -269,19 +324,6 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| global_db_operation_error("migrate canonical project keys", error))?;
         validate_registry_schema_contract(&transaction).await?;
 
-        configuration::ensure_configuration_schema(&transaction)
-            .await
-            .map_err(|error| match error {
-                configuration::ConfigurationSchemaError::ResetRequired { reason } => {
-                    tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-                        "configuration",
-                        reason,
-                    )
-                }
-                configuration::ConfigurationSchemaError::Storage(error) => {
-                    global_db_operation_error("initialize configuration schema", error)
-                }
-            })?;
         git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
 
         transaction

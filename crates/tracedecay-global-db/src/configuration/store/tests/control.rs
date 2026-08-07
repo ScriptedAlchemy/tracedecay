@@ -8,8 +8,8 @@ use super::super::{
     OwnedGlobalDbConfigurationControlStore, params,
 };
 use super::{
-    HostAdmissionScope, control_authority, digest, direct_project_layer, evidence_for,
-    global_setup, id, protected_plan_for,
+    HostAdmissionScope, control_authority, control_authority_with_key, digest,
+    direct_project_layer, evidence_for, global_setup, id, policy_digest, protected_plan_for,
 };
 use crate::configuration::contracts::{ConfigurationRollbackRequest, DirectConfigurationMutation};
 use crate::configuration::registry::ConfigurationRegistry;
@@ -19,7 +19,8 @@ use std::collections::BTreeSet;
 use tracedecay_domain::configuration::CredentialReferenceMetadataV1;
 use tracedecay_domain::configuration::{
     AccessRuleId, AuthorityRef, ConfigurationLayerIdV1, ConfigurationMutationOperationV1,
-    ConfigurationValueV1, CredentialKindV1, DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest,
+    ConfigurationSettlementAuthorityV1, ConfigurationValueV1, CredentialKindV1,
+    DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest,
     ProtectedChange, RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule,
     ScopeAccessSubjectV1, ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId,
     SourceKindV1,
@@ -168,7 +169,7 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
         store
             .commit_direct(&authority, &conflicting, &root.revision_id)
             .await,
-        Err(ConfigurationError::RevisionConflict)
+        Err(ConfigurationError::IdempotencyConflict)
     );
     assert_eq!(
         store
@@ -188,7 +189,14 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
         id("credential.reference.direct-rejection"),
         CredentialKindV1::ApiToken,
         digest('f'),
+        digest('e'),
+        ConfigurationSettlementAuthorityV1 {
+            policy_epoch: 7,
+            policy_digest: policy_digest('b'),
+            revalidated_at: UtcMicros(1),
+        },
         UtcMicros(1),
+        UtcMicros(2),
         0,
     )
     .unwrap();
@@ -264,7 +272,7 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
                 &root.revision_id,
             )
             .await,
-        Err(ConfigurationError::RevisionConflict)
+        Err(ConfigurationError::IdempotencyConflict)
     );
 }
 
@@ -367,9 +375,10 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
         store.save_plan(&source_plan, &source_change).await.unwrap();
     }
     let store = GlobalDbConfigurationControlStore::new_registered(db);
-    let apply_authority = control_authority(
+    let apply_authority = control_authority_with_key(
         ConfigurationMutationOperationV1::ProtectedApply,
         &root.revision_id,
+        Some(id("configuration.idempotency.restart.source")),
     );
     let source_request = ProtectedApplyRequest {
         plan_id: source_plan.plan_id.clone(),
@@ -387,6 +396,31 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
         )
         .await
         .unwrap();
+    drop(store);
+    let store = GlobalDbConfigurationControlStore::new_registered(db);
+    assert_eq!(
+        store
+            .replay_apply(
+                &apply_authority,
+                &source_request,
+                ConfigurationMutationOperationV1::ProtectedApply,
+            )
+            .await
+            .unwrap(),
+        Some(source_receipt.clone())
+    );
+    let mut conflicting_request = source_request.clone();
+    conflicting_request.operation_digest = digest('f');
+    assert_eq!(
+        store
+            .replay_apply(
+                &apply_authority,
+                &conflicting_request,
+                ConfigurationMutationOperationV1::ProtectedApply,
+            )
+            .await,
+        Err(ConfigurationError::IdempotencyConflict)
+    );
     assert_eq!(
         store
             .commit_protected(
@@ -446,9 +480,10 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
         &access_change,
     );
     store.save_plan(&access_plan, &access_change).await.unwrap();
-    let access_authority = control_authority(
+    let access_authority = control_authority_with_key(
         ConfigurationMutationOperationV1::ProtectedApply,
         &source_receipt.result_revision_id,
+        Some(id("configuration.idempotency.restart.access")),
     );
     let access_request = ProtectedApplyRequest {
         plan_id: access_plan.plan_id.clone(),
@@ -491,9 +526,10 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
         .dry_run_rollback(&rollback_authority, &rollback, UtcMicros(20))
         .await
         .unwrap();
-    let rollback_apply_authority = control_authority(
+    let rollback_apply_authority = control_authority_with_key(
         ConfigurationMutationOperationV1::RollbackApply,
         &access_receipt.result_revision_id,
+        Some(id("configuration.idempotency.restart.rollback")),
     );
     let rollback_request = ProtectedApplyRequest {
         plan_id: rollback_plan.plan_id.clone(),

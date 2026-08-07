@@ -210,6 +210,7 @@ mod tests {
             snapshot.policy_digest.clone(),
             sink,
             effect,
+            Some(id("configuration.idempotency.authorization-fixture")),
             snapshot.issued_at,
             snapshot.expires_at,
         )

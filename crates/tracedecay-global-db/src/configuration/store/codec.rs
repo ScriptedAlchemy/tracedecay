@@ -15,8 +15,6 @@ pub(super) const CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 pub(super) const CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION: u16 = 2;
 pub(super) const CONFIGURATION_AUDIT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 pub(super) const CONFIGURATION_SEALED_AUDIT_TARGET_SCHEMA_VERSION: u16 = 1;
-pub(super) const CONFIGURATION_AUTHORIZATION_NOT_RECORDED: &str =
-    "not_recorded_by_configuration_store_v1";
 pub(super) const CONFIGURATION_ACTIVATION_DESIRED_RECORDED: &str = "desired_recorded_v1";
 
 /// `configuration_entries` remains the per-setting storage table, but its
@@ -113,7 +111,6 @@ pub(super) struct StoredRevisionMetadata {
 pub(super) struct StoredMutationReceipt {
     pub(super) receipt: ConfigurationMutationReceiptV1,
     pub(super) plan_id: Option<ChangePlanId>,
-    pub(super) authorization_policy_digest: String,
     pub(super) activation_status: String,
 }
 

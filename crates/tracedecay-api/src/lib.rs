@@ -414,6 +414,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn configuration_routes_preserve_typed_effect_inputs_and_controls() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let owner_observed = Arc::clone(&observed);
+        let app = application_router(move |request: super::HttpApplicationRequest| {
+            let observed = Arc::clone(&owner_observed);
+            async move {
+                observed
+                    .lock()
+                    .expect("configuration operation observations")
+                    .push((
+                        request.operation,
+                        request.body.clone(),
+                        request.deadline.clone(),
+                        request.cancellation.context(),
+                    ));
+                CanonicalInvocationResult::<serde_json::Value>::new(
+                    BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                        .expect("binding"),
+                    Err(ApplicationProblemEnvelope::new(
+                        ResultContractRef::new(
+                            SchemaId::new("schema.test.result").expect("schema"),
+                            1,
+                        )
+                        .expect("contract"),
+                        request.request_id,
+                        ApplicationProblem::unavailable(
+                            SafeDiagnostic::new("test.unavailable", "Unavailable")
+                                .expect("diagnostic"),
+                        ),
+                    )),
+                )
+            }
+        });
+        let deadline = Deadline::new(UtcMicros(15_000)).expect("deadline");
+        let cancellation =
+            CancellationSignal::active("cancel.http.configuration").expect("cancellation");
+        let controls = HttpApplicationControls {
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        };
+
+        for (index, operation) in HttpApplicationOperation::ALL
+            .into_iter()
+            .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Configuration)
+            .enumerate()
+        {
+            let idempotency_key = format!("configuration.idempotency.http.{index}");
+            let body = serde_json::json!({"idempotency_key": idempotency_key});
+            let mut request = Request::post(operation.route_path())
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("HTTP request");
+            request.extensions_mut().insert(
+                RequestId::new(format!("request.http.configuration.{index}")).expect("request id"),
+            );
+            request.extensions_mut().insert(controls.clone());
+            let response = app.clone().oneshot(request).await.expect("router response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+
+        let observed = observed.lock().expect("configuration observations");
+        assert_eq!(
+            observed.len(),
+            tracedecay_application::configuration::CONFIGURATION_SURFACE_OPERATION_NAMES.len()
+        );
+        for (index, (operation, body, actual_deadline, actual_cancellation)) in
+            observed.iter().enumerate()
+        {
+            assert_eq!(
+                body["idempotency_key"],
+                format!("configuration.idempotency.http.{index}")
+            );
+            assert_eq!(actual_deadline.as_ref(), Some(&deadline));
+            assert_eq!(
+                &actual_cancellation.token_id,
+                &cancellation.context().token_id
+            );
+            assert_eq!(
+                operation.application_route_path(),
+                format!("/application{}", operation.route_path())
+            );
+        }
+    }
+
     #[test]
     fn adapter_rejections_use_the_canonical_problem_envelope() {
         let envelope = invalid_request_problem(

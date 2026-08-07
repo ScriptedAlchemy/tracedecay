@@ -81,9 +81,10 @@ pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert,
     PendingCodexCompactionSummary, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
-    ProjectStoreResolution, SavingsDay, SavingsTotal, SessionActivityRow, SessionIngestHealth,
-    SessionProviderCoverage, SessionProviderCoverageState, StoreArtifactRecord,
-    StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert, TranscriptBatch,
+    ProjectStoreResolution, RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal,
+    SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
+    TranscriptBatch,
 };
 pub use support::{
     AccountingMode, env_flag, env_value_truthy, estimate_tokens, global_accounting_enabled,

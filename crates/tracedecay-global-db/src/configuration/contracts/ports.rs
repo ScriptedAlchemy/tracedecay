@@ -101,6 +101,15 @@ pub trait ConfigurationControlStore: Sync {
         plan_id: &tracedecay_domain::configuration::ChangePlanId,
     ) -> ConfigurationOperationFuture<'_, Option<ProtectedChangePlan>>;
 
+    /// Returns the durable receipt for an exact protected/rollback apply
+    /// replay before any ambient plan or configuration state is consulted.
+    fn replay_apply(
+        &self,
+        authority: &ConfigurationMutationAuthority,
+        request: &ProtectedApplyRequest,
+        operation: ConfigurationMutationOperationV1,
+    ) -> ConfigurationOperationFuture<'_, Option<ConfigurationMutationReceipt>>;
+
     fn commit_direct(
         &self,
         authority: &ConfigurationMutationAuthority,

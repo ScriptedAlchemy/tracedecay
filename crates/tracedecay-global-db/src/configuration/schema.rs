@@ -1,14 +1,18 @@
 //! Exact final `SQLite` schema for the revisioned configuration control plane.
 
-use std::collections::BTreeSet;
-
 use thiserror::Error;
 
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 
+mod inspection;
+
+use inspection::{configuration_definition_digest, registered_store_is_empty};
+
 /// Version of the sealed complete topology value stored by this schema.
 pub const TOPOLOGY_POLICY_SCHEMA_VERSION: u16 = 1;
 pub const CONFIGURATION_FORMAT_REVISION: i64 = 1;
+const FINAL_CONFIGURATION_SCHEMA_DIGEST: &str =
+    "sha256:99b8f5f5cebc584ab564181d8a67ee665031c20bbdf63b479c212d16a1c63746";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigurationSchemaError {
@@ -18,162 +22,22 @@ pub enum ConfigurationSchemaError {
     Storage(#[from] tracedecay_runtime_core::db::engine::Error),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigurationResetConfirmation {
-    reason: String,
+/// Proof captured before any registered-store schema mutation.
+///
+/// Construction is restricted to the read-only empty-store inspection below;
+/// callers cannot infer freshness from a missing configuration namespace.
+#[derive(Clone, Copy, Debug)]
+pub struct FreshConfigurationStoreEvidence {
+    _private: (),
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum ConfigurationResetConfirmationError {
-    #[error("configuration reset confirmation requires a typed configuration reset refusal")]
-    NotConfigurationReset,
+pub async fn fresh_configuration_store_evidence(
+    connection: &impl QueryExecutor,
+) -> Result<Option<FreshConfigurationStoreEvidence>, ConfigurationSchemaError> {
+    Ok(registered_store_is_empty(connection)
+        .await?
+        .then_some(FreshConfigurationStoreEvidence { _private: () }))
 }
-
-impl TryFrom<&tracedecay_runtime_core::errors::TraceDecayError> for ConfigurationResetConfirmation {
-    type Error = ConfigurationResetConfirmationError;
-
-    fn try_from(
-        error: &tracedecay_runtime_core::errors::TraceDecayError,
-    ) -> Result<Self, Self::Error> {
-        let Some((authority, reason)) = error.reset_required_context() else {
-            return Err(ConfigurationResetConfirmationError::NotConfigurationReset);
-        };
-        if authority != "configuration" {
-            return Err(ConfigurationResetConfirmationError::NotConfigurationReset);
-        }
-        Ok(Self {
-            reason: reason.to_owned(),
-        })
-    }
-}
-
-impl ConfigurationResetConfirmation {
-    pub fn from_refusal_reason(reason: impl Into<String>) -> Self {
-        Self {
-            reason: reason.into(),
-        }
-    }
-
-    pub fn refusal_reason(&self) -> &str {
-        &self.reason
-    }
-}
-
-const FINAL_CONFIGURATION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
-    ("index", "configuration_semantic_retrieval_transition_v1"),
-    ("index", "idx_configuration_audit_occurred_at"),
-    ("index", "idx_configuration_component_activation_latest"),
-    ("index", "idx_configuration_entry_key"),
-    ("index", "idx_configuration_revision_parent"),
-    ("index", "idx_configuration_topology_protected_ref"),
-    ("index", "idx_configuration_topology_root_id"),
-    ("index", "idx_configuration_topology_root_locator"),
-    ("table", "configuration_access_rules"),
-    ("table", "configuration_audit_events"),
-    ("table", "configuration_audit_redaction_keys"),
-    ("table", "configuration_change_plan_events"),
-    ("table", "configuration_change_plan_operations"),
-    ("table", "configuration_change_plans"),
-    ("table", "configuration_component_activation_events"),
-    ("table", "configuration_credential_references"),
-    ("table", "configuration_entries"),
-    ("table", "configuration_format"),
-    ("table", "configuration_mutation_receipts"),
-    ("table", "configuration_revisions"),
-    (
-        "table",
-        "configuration_semantic_accepted_profile_receipt_key_v1",
-    ),
-    ("table", "configuration_semantic_accepted_profiles_v1"),
-    ("table", "configuration_semantic_retrieval_pending_v1"),
-    ("table", "configuration_semantic_retrieval_state_v1"),
-    ("table", "configuration_source_bindings"),
-    ("table", "configuration_topology_policies"),
-    ("table", "configuration_topology_protected_refs"),
-    ("table", "configuration_topology_roots"),
-    ("trigger", "configuration_access_rules_immutable_delete"),
-    ("trigger", "configuration_access_rules_immutable_update"),
-    ("trigger", "configuration_audit_events_immutable_delete"),
-    ("trigger", "configuration_audit_events_immutable_update"),
-    (
-        "trigger",
-        "configuration_audit_redaction_keys_immutable_delete",
-    ),
-    (
-        "trigger",
-        "configuration_audit_redaction_keys_immutable_update",
-    ),
-    (
-        "trigger",
-        "configuration_change_plan_events_immutable_delete",
-    ),
-    (
-        "trigger",
-        "configuration_change_plan_events_immutable_update",
-    ),
-    (
-        "trigger",
-        "configuration_change_plan_operations_immutable_delete",
-    ),
-    (
-        "trigger",
-        "configuration_change_plan_operations_immutable_update",
-    ),
-    ("trigger", "configuration_change_plans_immutable_delete"),
-    ("trigger", "configuration_change_plans_immutable_update"),
-    (
-        "trigger",
-        "configuration_component_activation_events_immutable_delete",
-    ),
-    (
-        "trigger",
-        "configuration_component_activation_events_immutable_update",
-    ),
-    (
-        "trigger",
-        "configuration_credential_references_immutable_delete",
-    ),
-    (
-        "trigger",
-        "configuration_credential_references_immutable_update",
-    ),
-    ("trigger", "configuration_entries_immutable_delete"),
-    ("trigger", "configuration_entries_immutable_update"),
-    ("trigger", "configuration_format_immutable_delete"),
-    ("trigger", "configuration_format_immutable_update"),
-    (
-        "trigger",
-        "configuration_mutation_receipts_immutable_delete",
-    ),
-    (
-        "trigger",
-        "configuration_mutation_receipts_immutable_update",
-    ),
-    ("trigger", "configuration_revisions_immutable_delete"),
-    ("trigger", "configuration_revisions_immutable_update"),
-    (
-        "trigger",
-        "configuration_semantic_accepted_profile_receipt_key_no_delete_v1",
-    ),
-    (
-        "trigger",
-        "configuration_semantic_accepted_profile_receipt_key_no_update_v1",
-    ),
-    ("trigger", "configuration_source_bindings_immutable_delete"),
-    ("trigger", "configuration_source_bindings_immutable_update"),
-    ("trigger", "configuration_topology_policy_immutable_delete"),
-    ("trigger", "configuration_topology_policy_immutable_update"),
-    (
-        "trigger",
-        "configuration_topology_protected_refs_immutable_delete",
-    ),
-    (
-        "trigger",
-        "configuration_topology_protected_refs_immutable_update",
-    ),
-    ("trigger", "configuration_topology_roots_immutable_delete"),
-    ("trigger", "configuration_topology_roots_immutable_update"),
-];
 
 /// Canonical schema installed only for a fresh or explicitly reset target.
 const CONFIGURATION_SCHEMA_SQL: &str = r"
@@ -346,10 +210,13 @@ CREATE TABLE IF NOT EXISTS configuration_mutation_receipts (
     base_revision_id TEXT NOT NULL,
     result_revision_id TEXT NOT NULL,
     operation_digest TEXT NOT NULL,
+    authorization_policy_epoch INTEGER NOT NULL,
     authorization_policy_digest TEXT NOT NULL,
+    authority_revalidated_at INTEGER NOT NULL,
     activation_status TEXT NOT NULL,
     receipt_digest TEXT NOT NULL,
     created_at INTEGER NOT NULL,
+    effective_deadline_at INTEGER NOT NULL,
     UNIQUE(actor_id, idempotency_key),
     UNIQUE(plan_id, idempotency_key),
     FOREIGN KEY(plan_id) REFERENCES configuration_change_plans(plan_id)
@@ -391,7 +258,12 @@ CREATE TABLE IF NOT EXISTS configuration_credential_references (
     reference_id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,
     reference_digest TEXT NOT NULL,
+    operation_digest TEXT NOT NULL,
+    authorization_policy_epoch INTEGER NOT NULL,
+    authorization_policy_digest TEXT NOT NULL,
+    authority_revalidated_at INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
+    effective_deadline_at INTEGER NOT NULL,
     rotation INTEGER NOT NULL
 );
 
@@ -419,28 +291,110 @@ CREATE TABLE IF NOT EXISTS configuration_component_activation_events (
 -- latest epoch per scope is current, and pending rows stage transitions until
 -- a central commit lands them.
 CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_state_v1 (
+    project_id TEXT NOT NULL,
     scope_digest TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
     epoch INTEGER NOT NULL CHECK (epoch >= 0),
     configuration_revision TEXT NOT NULL,
     transition_digest TEXT,
     activation_receipt_digest TEXT,
+    active_vector_generation TEXT,
+    rollback_vector_generation TEXT,
     state_json TEXT NOT NULL,
     activation_receipt_json TEXT,
-    PRIMARY KEY (scope_digest, epoch)
+    PRIMARY KEY (project_id, scope_digest, epoch)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS configuration_semantic_retrieval_transition_v1
-    ON configuration_semantic_retrieval_state_v1(scope_digest, transition_digest)
+    ON configuration_semantic_retrieval_state_v1(project_id, scope_digest, transition_digest)
     WHERE transition_digest IS NOT NULL;
+CREATE INDEX IF NOT EXISTS configuration_semantic_retrieval_active_vector_v1
+    ON configuration_semantic_retrieval_state_v1(
+        project_id, active_vector_generation, scope_digest, epoch
+    )
+    WHERE active_vector_generation IS NOT NULL;
+CREATE INDEX IF NOT EXISTS configuration_semantic_retrieval_rollback_vector_v1
+    ON configuration_semantic_retrieval_state_v1(
+        project_id, rollback_vector_generation, scope_digest, epoch
+    )
+    WHERE rollback_vector_generation IS NOT NULL;
 CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_pending_v1 (
+    project_id TEXT NOT NULL,
     scope_digest TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
     transition_digest TEXT NOT NULL,
     base_epoch INTEGER NOT NULL CHECK (base_epoch >= 0),
     base_configuration_revision TEXT NOT NULL,
     transition_json TEXT NOT NULL,
     resulting_state_json TEXT NOT NULL,
     staged_at INTEGER NOT NULL,
-    PRIMARY KEY (scope_digest, transition_digest)
+    PRIMARY KEY (project_id, scope_digest, transition_digest)
 );
+CREATE TRIGGER configuration_semantic_retrieval_state_scope_insert_v1
+BEFORE INSERT ON configuration_semantic_retrieval_state_v1
+WHEN json_valid(NEW.scope_json) != 1
+  OR json_extract(NEW.scope_json, '$.project_id') IS NULL
+  OR json_extract(NEW.scope_json, '$.project_id') != NEW.project_id
+  OR json_extract(NEW.scope_json, '$.scope_digest') IS NULL
+  OR json_extract(NEW.scope_json, '$.scope_digest') != NEW.scope_digest
+BEGIN
+    SELECT RAISE(ABORT, 'semantic retrieval state scope binding is invalid');
+END;
+CREATE TRIGGER configuration_semantic_retrieval_state_scope_update_v1
+BEFORE UPDATE ON configuration_semantic_retrieval_state_v1
+BEGIN
+    SELECT RAISE(ABORT, 'semantic retrieval state is append-only');
+END;
+CREATE TRIGGER configuration_semantic_retrieval_pending_scope_insert_v1
+BEFORE INSERT ON configuration_semantic_retrieval_pending_v1
+WHEN json_valid(NEW.scope_json) != 1
+  OR json_extract(NEW.scope_json, '$.project_id') IS NULL
+  OR json_extract(NEW.scope_json, '$.project_id') != NEW.project_id
+  OR json_extract(NEW.scope_json, '$.scope_digest') IS NULL
+  OR json_extract(NEW.scope_json, '$.scope_digest') != NEW.scope_digest
+BEGIN
+    SELECT RAISE(ABORT, 'semantic retrieval pending scope binding is invalid');
+END;
+CREATE TRIGGER configuration_semantic_retrieval_pending_scope_update_v1
+BEFORE UPDATE ON configuration_semantic_retrieval_pending_v1
+BEGIN
+    SELECT RAISE(ABORT, 'semantic retrieval pending transition is immutable');
+END;
+-- The revision binds bounded project-wide semantic configuration inventory
+-- pages. State and pending-transition changes both advance it so an inventory
+-- can never become complete across a configuration transition it did not
+-- observe.
+CREATE TABLE IF NOT EXISTS configuration_semantic_retrieval_inventory_v1 (
+    project_id TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 0)
+);
+CREATE TRIGGER configuration_semantic_retrieval_state_inventory_insert_v1
+AFTER INSERT ON configuration_semantic_retrieval_state_v1
+BEGIN
+    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
+    VALUES (NEW.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER configuration_semantic_retrieval_state_inventory_delete_v1
+AFTER DELETE ON configuration_semantic_retrieval_state_v1
+BEGIN
+    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER configuration_semantic_retrieval_pending_inventory_insert_v1
+AFTER INSERT ON configuration_semantic_retrieval_pending_v1
+BEGIN
+    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
+    VALUES (NEW.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
+CREATE TRIGGER configuration_semantic_retrieval_pending_inventory_delete_v1
+AFTER DELETE ON configuration_semantic_retrieval_pending_v1
+BEGIN
+    INSERT INTO configuration_semantic_retrieval_inventory_v1(project_id, revision)
+    VALUES (OLD.project_id, 1)
+    ON CONFLICT(project_id) DO UPDATE SET revision = revision + 1;
+END;
 CREATE TABLE IF NOT EXISTS configuration_semantic_accepted_profiles_v1 (
     profile_digest TEXT PRIMARY KEY NOT NULL,
     authority_json TEXT NOT NULL
@@ -577,38 +531,13 @@ BEGIN
 END;
 ";
 
-async fn configuration_schema_objects(
-    connection: &impl QueryExecutor,
-) -> Result<BTreeSet<(String, String)>, ConfigurationSchemaError> {
-    let mut rows = connection
-        .query(
-            "SELECT type, name
-             FROM sqlite_master
-             WHERE name LIKE 'configuration_%'
-                OR name LIKE 'idx_configuration_%'
-             ORDER BY type, name",
-            (),
-        )
-        .await?;
-    let mut objects = BTreeSet::new();
-    while let Some(row) = rows.next().await? {
-        objects.insert((row.get::<String>(0)?, row.get::<String>(1)?));
-    }
-    Ok(objects)
-}
-
 async fn validate_configuration_schema(
     connection: &impl QueryExecutor,
 ) -> Result<bool, ConfigurationSchemaError> {
-    let actual = configuration_schema_objects(connection).await?;
-    if actual.is_empty() {
+    let Some(definition_digest) = configuration_definition_digest(connection).await? else {
         return Ok(false);
-    }
-    let expected = FINAL_CONFIGURATION_SCHEMA_OBJECTS
-        .iter()
-        .map(|(kind, name)| ((*kind).to_owned(), (*name).to_owned()))
-        .collect::<BTreeSet<_>>();
-    if actual != expected {
+    };
+    if definition_digest != FINAL_CONFIGURATION_SCHEMA_DIGEST {
         return Err(ConfigurationSchemaError::ResetRequired {
             reason: "persisted schema is not the exact final configuration shape",
         });
@@ -636,11 +565,35 @@ async fn validate_configuration_schema(
     Ok(true)
 }
 
+pub async fn admit_configuration_schema(
+    connection: &impl QueryExecutor,
+    fresh_store: Option<&FreshConfigurationStoreEvidence>,
+) -> Result<(), ConfigurationSchemaError> {
+    if validate_configuration_schema(connection).await? || fresh_store.is_some() {
+        Ok(())
+    } else {
+        Err(ConfigurationSchemaError::ResetRequired {
+            reason: "configuration schema is missing from a non-fresh registered store",
+        })
+    }
+}
+
 pub async fn ensure_configuration_schema(
     connection: &impl Executor,
+    fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> Result<(), ConfigurationSchemaError> {
     if validate_configuration_schema(connection).await? {
         return Ok(());
+    }
+    if fresh_store.is_none() {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            reason: "configuration schema is missing from a non-fresh registered store",
+        });
+    }
+    if !registered_store_is_empty(connection).await? {
+        return Err(ConfigurationSchemaError::ResetRequired {
+            reason: "fresh configuration-store evidence is stale",
+        });
     }
     connection.execute_batch(CONFIGURATION_SCHEMA_SQL).await?;
     if validate_configuration_schema(connection).await? {
@@ -650,64 +603,6 @@ pub async fn ensure_configuration_schema(
             reason: "fresh configuration schema publication was incomplete",
         })
     }
-}
-
-/// Inspects the configuration namespace without creating or changing schema
-/// objects. Confirmation exists only for a typed incompatible-shape refusal.
-pub async fn configuration_reset_confirmation(
-    connection: &impl QueryExecutor,
-) -> Result<Option<ConfigurationResetConfirmation>, ConfigurationSchemaError> {
-    match validate_configuration_schema(connection).await {
-        Err(ConfigurationSchemaError::ResetRequired { reason }) => Ok(Some(
-            ConfigurationResetConfirmation::from_refusal_reason(reason),
-        )),
-        Err(error) => Err(error),
-        Ok(_) => Ok(None),
-    }
-}
-
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
-
-/// Explicitly wipes only the refused configuration target.
-///
-/// This operates on the already fenced raw database connection so callers do
-/// not need to construct a configuration store over incompatible bytes.
-pub async fn reset_configuration_schema(
-    connection: &impl Executor,
-    confirmation: &ConfigurationResetConfirmation,
-) -> Result<(), ConfigurationSchemaError> {
-    match validate_configuration_schema(connection).await {
-        Err(ConfigurationSchemaError::ResetRequired { reason })
-            if reason == confirmation.reason => {}
-        Err(ConfigurationSchemaError::ResetRequired { .. }) => {
-            return Err(ConfigurationSchemaError::ResetRequired {
-                reason: "configuration reset confirmation is stale",
-            });
-        }
-        Err(error) => return Err(error),
-        Ok(_) => {
-            return Err(ConfigurationSchemaError::ResetRequired {
-                reason: "configuration store is already at the final shape",
-            });
-        }
-    }
-    let objects = configuration_schema_objects(connection).await?;
-    for kind in ["trigger", "index", "view", "table"] {
-        for (object_kind, name) in objects
-            .iter()
-            .filter(|(object_kind, _)| object_kind == kind)
-        {
-            let statement = format!(
-                "DROP {} IF EXISTS {}",
-                object_kind.to_ascii_uppercase(),
-                quote_identifier(name)
-            );
-            connection.execute_batch(&statement).await?;
-        }
-    }
-    ensure_configuration_schema(connection).await
 }
 
 #[cfg(test)]
@@ -726,7 +621,13 @@ mod tests {
             .execute_batch("PRAGMA foreign_keys = ON;")
             .await
             .unwrap();
-        ensure_configuration_schema(&*connection).await.unwrap();
+        let fresh = fresh_configuration_store_evidence(&*connection)
+            .await
+            .unwrap()
+            .expect("test connection is fresh");
+        ensure_configuration_schema(&*connection, Some(&fresh))
+            .await
+            .unwrap();
         (directory, connection)
     }
 
@@ -775,18 +676,25 @@ mod tests {
                  INSERT INTO configuration_mutation_receipts VALUES
                     ('receipt.1', 'plan.1', 'actor.1', 'idempotency.1', 'revision.1', 'revision.1',
                      'sha256:3333333333333333333333333333333333333333333333333333333333333333',
+                     1,
                      'sha256:5555555555555555555555555555555555555555555555555555555555555555',
+                     1,
                      'active',
-                     'sha256:6666666666666666666666666666666666666666666666666666666666666666', 1);
+                     'sha256:6666666666666666666666666666666666666666666666666666666666666666', 1, 2);
                  INSERT INTO configuration_audit_events VALUES
                     ('audit.1', 'actor.1', NULL, 'canonical_initialization', 'revision.1', 'revision.1', NULL,
                      'sha256:7777777777777777777777777777777777777777777777777777777777777777',
                       NULL, NULL, NULL, 1);
                   INSERT INTO configuration_audit_redaction_keys VALUES
                      (1, zeroblob(32), 1);
-                 INSERT INTO configuration_credential_references VALUES
+                INSERT INTO configuration_credential_references VALUES
                     ('credential.1', 'api_token',
-                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac', 1, 0);
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac',
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad',
+                     1,
+                     'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaae',
+                     1,
+                     1, 2, 0);
                  INSERT INTO configuration_component_activation_events (
                     component, desired_revision_id, observed_revision_id,
                     last_working_revision_id, restart_required, activation_error_code, occurred_at
@@ -807,6 +715,7 @@ mod tests {
                  WHERE type = 'table' AND name LIKE 'configuration_%'
                    AND name NOT IN (
                         'configuration_semantic_accepted_profiles_v1',
+                        'configuration_semantic_retrieval_inventory_v1',
                         'configuration_semantic_retrieval_pending_v1',
                         'configuration_semantic_retrieval_state_v1'
                    )
@@ -857,7 +766,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            ensure_configuration_schema(&*connection).await,
+            ensure_configuration_schema(&*connection, None).await,
             Err(ConfigurationSchemaError::ResetRequired { .. })
         ));
 
@@ -888,7 +797,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            ensure_configuration_schema(&*connection).await,
+            ensure_configuration_schema(&*connection, None).await,
             Err(ConfigurationSchemaError::ResetRequired { .. })
         ));
 
@@ -924,131 +833,8 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            ensure_configuration_schema(&*connection).await,
+            ensure_configuration_schema(&*connection, None).await,
             Err(ConfigurationSchemaError::ResetRequired { .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn scoped_reset_rejects_then_wipes_only_configuration_and_reopens_cleanly() {
-        let directory = tempfile::tempdir().unwrap();
-        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
-            &directory.path().join("configuration.db"),
-        );
-        connection
-            .execute_batch(
-                "CREATE TABLE unrelated_authority (value TEXT NOT NULL);
-                 INSERT INTO unrelated_authority VALUES ('preserve-me');
-                 CREATE TABLE configuration_legacy_flags (value TEXT NOT NULL);
-                 INSERT INTO configuration_legacy_flags VALUES ('shadow-enabled');",
-            )
-            .await
-            .unwrap();
-        let error = ensure_configuration_schema(&*connection)
-            .await
-            .expect_err("legacy configuration shape must be refused");
-        let ConfigurationSchemaError::ResetRequired { reason } = error else {
-            panic!("legacy shape returned an unrelated error");
-        };
-        let reset_error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-            "configuration",
-            reason,
-        );
-        let confirmation = ConfigurationResetConfirmation::try_from(&reset_error)
-            .expect("typed reset failure produces an exact confirmation");
-        let stale_error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-            "configuration",
-            "a different refused shape",
-        );
-        let stale_confirmation = ConfigurationResetConfirmation::try_from(&stale_error)
-            .expect("typed reset failure produces an exact confirmation");
-        assert!(matches!(
-            reset_configuration_schema(&*connection, &stale_confirmation).await,
-            Err(ConfigurationSchemaError::ResetRequired {
-                reason: "configuration reset confirmation is stale"
-            })
-        ));
-
-        reset_configuration_schema(&*connection, &confirmation)
-            .await
-            .unwrap();
-        ensure_configuration_schema(&*connection).await.unwrap();
-
-        let mut unrelated = connection
-            .query("SELECT value FROM unrelated_authority", ())
-            .await
-            .unwrap();
-        assert_eq!(
-            unrelated
-                .next()
-                .await
-                .unwrap()
-                .unwrap()
-                .get::<String>(0)
-                .unwrap(),
-            "preserve-me"
-        );
-        let mut legacy = connection
-            .query(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE name = 'configuration_legacy_flags'",
-                (),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            legacy.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn reset_confirmation_inspection_does_not_change_the_refused_store() {
-        let directory = tempfile::tempdir().unwrap();
-        let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
-            &directory.path().join("configuration.db"),
-        );
-        connection
-            .execute_batch(
-                "CREATE TABLE configuration_legacy_flags (value TEXT NOT NULL);
-                 INSERT INTO configuration_legacy_flags VALUES ('preserve-until-confirmed');",
-            )
-            .await
-            .unwrap();
-
-        let confirmation = configuration_reset_confirmation(&*connection)
-            .await
-            .unwrap()
-            .expect("legacy configuration requires confirmation");
-        assert_eq!(
-            confirmation.refusal_reason(),
-            "persisted schema is not the exact final configuration shape"
-        );
-        let mut rows = connection
-            .query("SELECT value FROM configuration_legacy_flags", ())
-            .await
-            .unwrap();
-        assert_eq!(
-            rows.next()
-                .await
-                .unwrap()
-                .unwrap()
-                .get::<String>(0)
-                .unwrap(),
-            "preserve-until-confirmed"
-        );
-    }
-
-    #[test]
-    fn reset_confirmation_rejects_an_unrelated_authority() {
-        let error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
-            "workflow",
-            "workflow store is incompatible",
-        );
-
-        assert_eq!(
-            ConfigurationResetConfirmation::try_from(&error),
-            Err(ConfigurationResetConfirmationError::NotConfigurationReset)
-        );
     }
 }

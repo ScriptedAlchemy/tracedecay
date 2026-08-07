@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
@@ -294,6 +295,7 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
 struct RuntimeObservationProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
+    commit_started: AtomicBool,
 }
 
 impl RuntimeObservationProbe {
@@ -301,6 +303,7 @@ impl RuntimeObservationProbe {
         Self {
             cancellation: control.cancellation.clone(),
             deadline: control.deadline.clone(),
+            commit_started: AtomicBool::new(false),
         }
     }
 }
@@ -316,6 +319,14 @@ impl RuntimeRequestProbeV1 for RuntimeObservationProbe {
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
         None
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        // Observation submits are never externally cancelled (interruption is
+        // always None), so commit arbitration is only the at-most-once gate.
+        self.commit_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 
@@ -560,6 +571,7 @@ async fn submit_runtime_write(
             Arc::new(RuntimeObservationProbe {
                 cancellation,
                 deadline,
+                commit_started: AtomicBool::new(false),
             }),
             authority.clone(),
         )

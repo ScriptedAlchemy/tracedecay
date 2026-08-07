@@ -114,6 +114,44 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
         .unwrap();
     assert_eq!(context.project.project_id, "proj_primary");
     assert_eq!(context.stores.len(), 1);
+    let inventory = harness
+        .registered
+        .registered_project_root_inventory("proj_primary")
+        .await
+        .unwrap()
+        .expect("registered root inventory");
+    assert!(
+        inventory
+            .roots
+            .contains(&primary.to_string_lossy().into_owned())
+    );
+    assert!(
+        inventory
+            .roots
+            .contains(&linked.to_string_lossy().into_owned())
+    );
+    assert_eq!(inventory.terminal_root_count, inventory.roots.len() as u64);
+    harness
+        .registered
+        .upsert_code_project(
+            "proj_primary",
+            &primary,
+            Some(&common_dir),
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    let refreshed = harness
+        .registered
+        .registered_project_root_inventory("proj_primary")
+        .await
+        .unwrap()
+        .expect("refreshed registered root inventory");
+    assert_eq!(
+        refreshed.inventory_digest, inventory.inventory_digest,
+        "last-seen bookkeeping must not change the root-liveness revision"
+    );
 
     #[cfg(unix)]
     {
