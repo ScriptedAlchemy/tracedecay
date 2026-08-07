@@ -34,7 +34,7 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{BindingSurface, ProfileId, SchemaId, SurfaceOperationName};
 
 const PARITY_FIXTURE: &str =
-    include_str!("../benchmarks/pr12-transport-boundary/goldens/application-surface-parity.json");
+    include_str!("../benchmarks/transport-boundary/goldens/application-surface-parity.json");
 
 #[tokio::test]
 async fn catalog_advertised_feedback_http_routes_invoke_the_application_owner() {
@@ -463,12 +463,12 @@ fn application_request(
         ApplicationSurfaceOperation::GitApply => git_requests().1,
         ApplicationSurfaceOperation::FeedbackImpact => {
             ApplicationSurfaceRequest::FeedbackImpact(FeedbackImpactSurfaceRequest {
-                request_handle: "rh_missing-pr12-parity".to_owned(),
+                request_handle: "rh_missing-application-parity".to_owned(),
             })
         }
         ApplicationSurfaceOperation::AffectedTests => {
             ApplicationSurfaceRequest::AffectedTests(AffectedTestsSurfaceRequest {
-                request_handle: "rh_missing-pr12-parity".to_owned(),
+                request_handle: "rh_missing-application-parity".to_owned(),
             })
         }
         ApplicationSurfaceOperation::TestResults => {
@@ -500,9 +500,9 @@ fn request_id(operation: ApplicationSurfaceOperation, surface: &str) -> RequestI
 
 fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
     let snapshot = RepositoryStateSnapshotV1::new(
-        id::<ProjectId>("project.pr12-parity"),
-        id::<RepositoryId>("repository.pr12-parity"),
-        Some(id::<WorktreeId>("worktree.pr12-parity")),
+        id::<ProjectId>("project.application-parity"),
+        id::<RepositoryId>("repository.application-parity"),
+        Some(id::<WorktreeId>("worktree.application-parity")),
         1,
         GitObjectFormatV1::Sha1,
         GitHeadStateV1::Attached {
@@ -549,7 +549,7 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
         GitIndexSigningPolicyV1::UnsignedPermitted,
     )
     .expect("commit intent");
-    let preview_id = GitIndexPreviewId::new("preview.pr12-parity").expect("preview id");
+    let preview_id = GitIndexPreviewId::new("preview.application-parity").expect("preview id");
     let snapshot_digest =
         GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
     let preview = GitIndexPreviewV1::new_with_commit_intent(
@@ -576,7 +576,7 @@ fn git_requests() -> (ApplicationSurfaceRequest, ApplicationSurfaceRequest) {
         ApplicationSurfaceRequest::GitApply(GitApplySurfaceRequest {
             preview_id: preview.preview_id,
             preview_digest: preview.preview_digest,
-            idempotency_key: IdempotencyKey::new("idempotency.pr12-parity")
+            idempotency_key: IdempotencyKey::new("idempotency.application-parity")
                 .expect("idempotency key"),
         }),
     )

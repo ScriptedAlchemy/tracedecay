@@ -1,4 +1,4 @@
-# PR12 transport-boundary direct test fixture
+# Transport-boundary direct test fixture
 
 > **Historical evidence only.** Preserve the real fixture and provenance in
 > this directory. Current requirements come only from the
@@ -7,7 +7,7 @@
 > rebuild instructions. Validate current transport behavior directly.
 
 This directory supplies a checked-in real fixture to the direct product test
-for the callable PR12 application boundary. It is not an acceptance packet,
+for the callable application transport boundary. It is not an acceptance packet,
 snapshot, gate manifest, or separate evidence authority. Product acceptance
 comes from direct tests and normal CI, with pending work reported as pending.
 
@@ -27,7 +27,7 @@ pending execution. Static validation does not run Cargo:
 
 ```sh
 python3 benchmarks/pr11-application-boundary/validate_compile_baseline.py \
-  benchmarks/pr12-transport-boundary/compile-baseline.json
+  benchmarks/transport-boundary/compile-baseline.json
 ```
 
 An authorized measurement run may pass `--run`; the runner prints a candidate

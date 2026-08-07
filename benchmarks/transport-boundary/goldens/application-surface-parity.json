@@ -18,7 +18,7 @@
       }
     },
     "feedback_diagnostics": {
-      "request_handle": "rh_missing-pr12-parity",
+      "request_handle": "rh_missing-application-parity",
       "request_schema": "schema.application.feedback.diagnostics.request",
       "result_schema": "schema.application.feedback.diagnostics.result",
       "bindings": {
@@ -28,7 +28,7 @@
       }
     },
     "feedback_get": {
-      "request_handle": "rh_missing-pr12-parity",
+      "request_handle": "rh_missing-application-parity",
       "request_schema": "schema.application.feedback.get.request",
       "result_schema": "schema.application.feedback.get.result",
       "bindings": {
@@ -38,7 +38,7 @@
       }
     },
     "feedback_expand": {
-      "request_handle": "rh_missing-pr12-parity",
+      "request_handle": "rh_missing-application-parity",
       "request_schema": "schema.application.feedback.expand.request",
       "result_schema": "schema.application.feedback.expand.result",
       "bindings": {
@@ -48,7 +48,7 @@
       }
     },
     "feedback_list": {
-      "request_handle": "rh_missing-pr12-parity",
+      "request_handle": "rh_missing-application-parity",
       "request_schema": "schema.application.feedback.list.request",
       "result_schema": "schema.application.feedback.list.result",
       "bindings": {
@@ -59,7 +59,7 @@
     },
     "feedback_impact": {
       "request": {
-        "node_id": "node.pr12.fixture"
+        "node_id": "node.application-parity.fixture"
       },
       "request_schema": "schema.application.feedback.impact.request",
       "result_schema": "schema.application.feedback.impact.result",
@@ -97,7 +97,7 @@
     "result_schema": "schema.application.feedback.list.result",
     "sequence": 7,
     "item": {
-      "finding_id": "feedback-finding.pr12.fixture",
+      "finding_id": "feedback-finding.application-parity.fixture",
       "summary": "Canonical feedback evidence remains transport-neutral"
     }
   },

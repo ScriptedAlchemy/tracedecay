@@ -1,8 +1,20 @@
 {
   "schema_version": 1,
-  "workload_id": "pr12-transport-boundary-compile-v1",
-  "packages": ["tracedecay-api", "tracedecay"],
-  "command": ["cargo", "check", "-p", "tracedecay-api", "-p", "tracedecay", "--lib", "--all-features"],
+  "workload_id": "transport-boundary-compile-v1",
+  "packages": [
+    "tracedecay-api",
+    "tracedecay"
+  ],
+  "command": [
+    "cargo",
+    "check",
+    "-p",
+    "tracedecay-api",
+    "-p",
+    "tracedecay",
+    "--lib",
+    "--all-features"
+  ],
   "measurement": {
     "status": "unavailable",
     "execution_state": "pending_execution",
