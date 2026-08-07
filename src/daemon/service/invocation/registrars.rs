@@ -487,7 +487,7 @@ impl DaemonFeedbackRuntimeRegistrar {
         let provider_admissions = provider_candidates
             .into_iter()
             .map(|(identity, input)| {
-                AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_plan20_snapshot(
+                AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
                     &policy,
                     &policy_context,
                     identity,

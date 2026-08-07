@@ -579,7 +579,7 @@ fn admitted_provider(
         evaluated_at: UtcMicros(2),
     };
     let snapshot = AnalyzerAdmissionEvaluatorV1::default().snapshot(&input);
-    AnalyzerAdmittedDiagnosticProviderV1::from_plan20_plan35_snapshot(
+    AnalyzerAdmittedDiagnosticProviderV1::from_configuration_admission_snapshot(
         provider.clone(),
         input,
         snapshot,

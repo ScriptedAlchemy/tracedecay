@@ -300,7 +300,7 @@ pub struct AnalyzerAdmittedDiagnosticProviderV1 {
 impl AnalyzerAdmittedDiagnosticProviderV1 {
     /// Evaluates the approved analyzer policy directly from the current,
     /// exact Plan-20 application snapshot.
-    pub fn evaluate_current_plan20_snapshot(
+    pub fn evaluate_current_configuration_snapshot(
         composition: &PolicyEvaluatorCompositionV1,
         context: &PolicyEvaluationContextV1,
         identity: DiagnosticProviderIdentity,
@@ -312,7 +312,7 @@ impl AnalyzerAdmittedDiagnosticProviderV1 {
             });
         }
         let evaluation = composition.admit_analyzer(context, &admission_input)?;
-        Self::from_plan20_plan35_snapshot(identity, admission_input, evaluation.decision)
+        Self::from_configuration_admission_snapshot(identity, admission_input, evaluation.decision)
     }
 
     /// Constructs only from the immutable Plan-20 configuration and Plan-35
@@ -320,7 +320,7 @@ impl AnalyzerAdmittedDiagnosticProviderV1 {
     /// This application contract never resolves configuration, selects an
     /// executable, evaluates a fallback, starts an analyzer, or synthesizes a
     /// replacement decision.
-    pub fn from_plan20_plan35_snapshot(
+    pub fn from_configuration_admission_snapshot(
         identity: DiagnosticProviderIdentity,
         admission_input: AnalyzerAdmissionInputV1,
         admission_snapshot: AnalyzerAdmissionSnapshotV1,

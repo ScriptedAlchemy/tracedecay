@@ -309,7 +309,7 @@ fn local_live_disagreement_preserves_both_independent_watermarks() {
 }
 
 #[test]
-fn routing_rejects_a_substituted_plan20_configuration_snapshot() {
+fn routing_rejects_a_substituted_configuration_snapshot() {
     let composition = PolicyEvaluatorCompositionV1::from_application_catalog().unwrap();
     let context = evaluation_context();
     let candidate = composition

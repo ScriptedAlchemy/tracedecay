@@ -674,7 +674,7 @@ mod tests {
     use tracedecay_search_eval::load_direct_evaluated_profile_material;
 
     #[test]
-    fn operation_requires_durable_authority_and_plan20_runtime() {
+    fn operation_requires_durable_authority_and_configuration_runtime() {
         std::hint::black_box(ProductionSemanticConfigurationOperationV1::new);
     }
 

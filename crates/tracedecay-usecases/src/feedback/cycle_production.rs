@@ -1223,7 +1223,7 @@ mod tests {
         .expect("provider");
         assert_eq!(identity.producer.language.as_str(), "python");
 
-        AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_plan20_snapshot(
+        AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
             &PolicyEvaluatorCompositionV1::from_application_catalog().expect("policy"),
             &context,
             identity,
@@ -1630,7 +1630,7 @@ mod tests {
         )
         .expect("policy context");
 
-        let admitted = AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_plan20_snapshot(
+        let admitted = AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
             &PolicyEvaluatorCompositionV1::from_application_catalog().expect("policy"),
             &context,
             identity,
