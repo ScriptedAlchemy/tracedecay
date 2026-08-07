@@ -551,9 +551,6 @@ fn message_type_predicate_sql(
     has_kind_column: bool,
     message_type: SessionMessageType,
 ) -> Option<String> {
-    if matches!(message_type, SessionMessageType::All) {
-        return None;
-    }
     let kind_clause = if has_kind_column {
         format!(" OR lower(COALESCE({alias}.kind, '')) IN ('tool_result', 'tool_output')")
     } else {
@@ -566,13 +563,16 @@ fn message_type_predicate_sql(
                            WHERE json_extract(event.value, '$.type') = 'tool_result') \
               ELSE 0 END)"
     );
-    Some(match message_type {
-        SessionMessageType::All => unreachable!(),
+    // `All` means "no message-type predicate", which the total match states
+    // directly rather than guarding with an early return and then asserting
+    // the variant away with `unreachable!()`.
+    match message_type {
+        SessionMessageType::All => None,
         SessionMessageType::DirectUser => {
-            format!("({alias}.role = 'user' AND NOT {tool_result})")
+            Some(format!("({alias}.role = 'user' AND NOT {tool_result})"))
         }
-        SessionMessageType::ToolResult => tool_result,
-    })
+        SessionMessageType::ToolResult => Some(tool_result),
+    }
 }
 
 fn push_grep_relationship_scope_filter(
@@ -654,7 +654,10 @@ fn raw_hit_candidate_from_row(
     like_terms: &[String],
 ) -> Result<RawGrepCandidate, LcmError> {
     let snippet: String = row.get(4)?;
-    let role: Option<String> = row.get::<Option<String>>(5).unwrap_or(None);
+    // Both columns propagate their read failure. Masking them reported "no
+    // role" and "not a subagent" for rows whose role and origin were never
+    // read, which silently changes which hits survive subagent de-duplication.
+    let role: Option<String> = row.get::<Option<String>>(5)?;
     Ok(RawGrepCandidate {
         hit: LcmGrepHit {
             kind: "raw_message".to_string(),
@@ -667,7 +670,7 @@ fn raw_hit_candidate_from_row(
             snippet: match_centered_snippet(&snippet, like_terms),
         },
         family_session_id: row.get(6)?,
-        is_subagent: row.get::<i64>(7).unwrap_or_default() != 0,
+        is_subagent: row.get::<i64>(7)? != 0,
         content: snippet,
     })
 }

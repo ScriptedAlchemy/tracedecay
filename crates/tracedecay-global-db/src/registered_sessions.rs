@@ -327,12 +327,28 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| format!("failed to read session messages after hint: {error}"))?
         {
+            // Every column is propagated as a typed read failure rather than
+            // masked: `.ok().flatten()` conflates "column is SQL NULL" with
+            // "the column could not be read", and `unwrap_or_default()` on the
+            // ordinal reports position 0 for a row whose position is unknown,
+            // which callers read as the first message of the session.
+            let column = |index: i32, error: &dyn std::fmt::Display| {
+                format!("failed to read session activity column {index}: {error}")
+            };
             out.push(SessionActivityRow {
-                timestamp: row.get::<Option<i64>>(0).ok().flatten(),
-                ordinal: row.get::<i64>(1).unwrap_or_default(),
-                kind: row.get::<Option<String>>(2).ok().flatten(),
-                tool_names: row.get::<Option<String>>(3).ok().flatten(),
-                metadata_json: row.get::<Option<String>>(4).ok().flatten(),
+                timestamp: row
+                    .get::<Option<i64>>(0)
+                    .map_err(|error| column(0, &error))?,
+                ordinal: row.get::<i64>(1).map_err(|error| column(1, &error))?,
+                kind: row
+                    .get::<Option<String>>(2)
+                    .map_err(|error| column(2, &error))?,
+                tool_names: row
+                    .get::<Option<String>>(3)
+                    .map_err(|error| column(3, &error))?,
+                metadata_json: row
+                    .get::<Option<String>>(4)
+                    .map_err(|error| column(4, &error))?,
             });
         }
         Ok(out)

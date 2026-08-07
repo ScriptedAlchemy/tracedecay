@@ -1138,7 +1138,10 @@ fn mcp_tool_call_row(
     insert_str(&mut metadata, "call_id", payload.get("call_id"));
     insert_str(&mut metadata, "plugin_id", payload.get("plugin_id"));
     if let Some(arguments) = invocation.and_then(|inv| inv.get("arguments")) {
-        let serialized = serde_json::to_string(arguments).unwrap_or_default();
+        // `Value`'s `Display` is the same canonical JSON rendering without a
+        // failure mode, so the recorded arguments can no longer collapse to an
+        // empty string that reads as "the tool was called with no arguments".
+        let serialized = arguments.to_string();
         metadata.insert(
             "arguments".to_string(),
             Value::String(preview_truncated(&serialized, ARG_METADATA_BYTES)),

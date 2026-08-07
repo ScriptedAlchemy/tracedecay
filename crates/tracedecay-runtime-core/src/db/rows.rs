@@ -45,6 +45,22 @@ pub(super) const NODE_COLUMNS: i32 = 23;
 pub(super) fn row_to_node(row: &Row) -> std::result::Result<Node, Error> {
     let kind_str = get_string_lossy(row, 1)?;
     let vis_str = get_string_lossy(row, 11)?;
+    // The writer stores `NodeKind::as_str()` / `Visibility::as_str()` and both
+    // parsers round-trip every variant of those, so an unrecognized value is
+    // never a legacy shape — it is a corrupt or version-skewed row. Reporting
+    // it as a typed row error keeps the read honest; silently substituting
+    // `Function` / the default visibility would fabricate graph facts that the
+    // caller cannot tell apart from stored ones.
+    let kind = NodeKind::from_str(&kind_str).ok_or_else(|| {
+        Error::InvalidOperation(format!(
+            "node row column 1 holds unrecognized node kind {kind_str:?}"
+        ))
+    })?;
+    let visibility = Visibility::from_str(&vis_str).ok_or_else(|| {
+        Error::InvalidOperation(format!(
+            "node row column 11 holds unrecognized visibility {vis_str:?}"
+        ))
+    })?;
     let is_async_int = row.get::<i64>(12)?;
     let start_line = row.get::<u32>(5)?;
     // `attrs_start_line` is the first line of an item's leading doc-comment /
@@ -68,7 +84,7 @@ pub(super) fn row_to_node(row: &Row) -> std::result::Result<Node, Error> {
 
     Ok(Node {
         id: get_string_lossy(row, 0)?,
-        kind: NodeKind::from_str(&kind_str).unwrap_or(NodeKind::Function),
+        kind,
         name: get_string_lossy(row, 2)?,
         qualified_name: get_string_lossy(row, 3)?,
         file_path: get_string_lossy(row, 4)?,
@@ -79,7 +95,7 @@ pub(super) fn row_to_node(row: &Row) -> std::result::Result<Node, Error> {
         end_column: row.get::<u32>(8)?,
         signature: get_opt_string_lossy(row, 10)?,
         docstring: get_opt_string_lossy(row, 9)?,
-        visibility: Visibility::from_str(&vis_str).unwrap_or_default(),
+        visibility,
         is_async: is_async_int != 0,
         branches: row.get::<u32>(13)?,
         loops: row.get::<u32>(14)?,
@@ -122,6 +138,19 @@ fn get_opt_string_lossy(row: &Row, idx: i32) -> std::result::Result<Option<Strin
     }
 }
 
+/// Parses a stored edge-kind column. The writer stores `EdgeKind::as_str()`
+/// and the parser round-trips every variant, so an unrecognized value is a
+/// corrupt or version-skewed row, not a legacy shape. Substituting `Uses`
+/// would fabricate a relationship the caller cannot distinguish from a
+/// stored one.
+fn edge_kind_from_column(kind_str: &str, column: i32) -> std::result::Result<EdgeKind, Error> {
+    EdgeKind::from_str(kind_str).ok_or_else(|| {
+        Error::InvalidOperation(format!(
+            "edge row column {column} holds unrecognized edge kind {kind_str:?}"
+        ))
+    })
+}
+
 /// Maps a row from the `edges` table to an `Edge`.
 ///
 /// Expected column order: source(0), target(1), kind(2), line(3).
@@ -132,7 +161,7 @@ pub(super) fn row_to_edge(row: &Row) -> std::result::Result<Edge, Error> {
     Ok(Edge {
         source: row.get::<String>(0)?,
         target: row.get::<String>(1)?,
-        kind: EdgeKind::from_str(&kind_str).unwrap_or(EdgeKind::Uses),
+        kind: edge_kind_from_column(&kind_str, 2)?,
         line,
     })
 }
@@ -162,7 +191,7 @@ pub(super) fn row_to_unresolved_ref(row: &Row) -> std::result::Result<Unresolved
     Ok(UnresolvedRef {
         from_node_id: row.get::<String>(0)?,
         reference_name: row.get::<String>(1)?,
-        reference_kind: EdgeKind::from_str(&kind_str).unwrap_or(EdgeKind::Uses),
+        reference_kind: edge_kind_from_column(&kind_str, 2)?,
         line: row.get::<u32>(3)?,
         column: row.get::<u32>(4)?,
         file_path: row.get::<String>(5)?,
