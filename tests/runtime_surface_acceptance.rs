@@ -61,8 +61,9 @@ use tracedecay_domain::{
 };
 #[cfg(all(unix, feature = "test-transport"))]
 use tracedecay_domain::{
-    GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
-    GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1,
+    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1,
+    GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
 };
 use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
@@ -1064,6 +1065,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
             "value": next_value,
         },
         "expected_revision": initial_revision,
+        "idempotency_key": "configuration.idempotency.mcp-set",
     });
     let applied = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::ConfigurationSet,
@@ -1114,6 +1116,7 @@ async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
             "value": initial_value,
         },
         "expected_revision": initial_revision,
+        "idempotency_key": "configuration.idempotency.mcp-stale",
     });
     let stale = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::ConfigurationSet,
@@ -1422,6 +1425,21 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         serde_json::from_value(cli_preview.payload.expect("CLI immutable preview"))
             .expect("CLI immutable preview");
 
+    // Plan 36: `commit_index` publication is deliberately unavailable
+    // (deferred, 2026-08-05). The files ref backend locks only names already
+    // present in an update-ref transaction, so nothing prevents a new loose
+    // ref appearing between namespace validation and destination publication.
+    // Until that is soundly closed, preflight reports this exact typed
+    // unsupported state and apply proves no mutation. Asserting the
+    // disposition here keeps the deferral visible: without it, the terminal
+    // abort below reads as an unexplained parity failure rather than as the
+    // blocker the daemon actually found.
+    assert_eq!(
+        cli_preview_payload.disposition,
+        GitIndexPreviewDispositionV1::Unsupported(
+            GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
+        )
+    );
     let mcp_preview = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitPreview,
         RequestId::new("request.git-parity.preview.mcp").expect("MCP preview request id"),
@@ -1479,6 +1497,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
             .expect("idempotency key"),
     })
     .expect("apply arguments");
+    let staged_tree_before_apply = git_stdout(&fixture.project, &["write-tree"]);
     let cli_apply = run_application_tool(
         fixture.home(),
         &fixture.project,
@@ -1496,22 +1515,29 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     let ApplicationOutcome::Effect(cli_apply) = cli_apply.outcome else {
         panic!("CLI git_apply must return an effect outcome");
     };
+    // The deferred publication is still a real admitted transaction: it must
+    // terminate in a durable receipt on the transport rather than a transport
+    // exception, and that receipt must report the attempt as failed with no
+    // change rather than as a successful empty commit.
     assert_eq!(
         cli_apply.execution.termination,
-        OperationTermination::Completed
+        OperationTermination::Failed
     );
     let cli_receipt: GitIndexTransactionReceiptV1 =
         serde_json::from_value(cli_apply.payload.clone().expect("CLI durable Git receipt"))
             .expect("typed CLI Git receipt");
-    assert_eq!(cli_receipt.outcome, GitIndexReceiptOutcomeV1::Committed);
-    let committed_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
-    assert_ne!(
-        committed_head, original_head,
-        "CLI apply must commit the previewed native Git index"
+    assert_eq!(
+        cli_receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert!(
+        cli_receipt.created_commit.is_none(),
+        "deferred ref publication must never report a created commit"
     );
     assert_eq!(
-        git_stdout(&fixture.project, &["log", "-1", "--format=%s"]),
-        "test: prove Git transport parity"
+        git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
+        original_head,
+        "deferred ref publication must leave HEAD exactly where the preview found it"
     );
 
     let mcp_apply = resolve_mcp_application_surface(
@@ -1532,7 +1558,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     };
     assert_eq!(
         mcp_apply.execution.termination,
-        OperationTermination::Completed
+        OperationTermination::Failed
     );
     let normalize_replay = |effect: &tracedecay_application::EffectResult<Value>| {
         let mut value = serde_json::to_value(effect).expect("effect wire value");
@@ -1553,10 +1579,14 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     assert_eq!(normalize_replay(&cli_apply), normalize_replay(mcp_apply));
     assert_eq!(
         git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
-        committed_head,
-        "an MCP replay must return the original receipt without a duplicate commit"
+        original_head,
+        "an MCP replay must return the original terminal receipt and create no commit"
     );
-    git(&fixture.project, &["diff", "--cached", "--quiet"]);
+    assert_eq!(
+        git_stdout(&fixture.project, &["write-tree"]),
+        staged_tree_before_apply,
+        "a proven no-mutation apply must leave the caller's staged index intact"
+    );
 
     std::fs::write(
         fixture.project.join("src/main.rs"),
@@ -1595,7 +1625,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_eq!(
         git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
-        committed_head
+        original_head
     );
     assert_eq!(
         git_stdout(&fixture.project, &["write-tree"]),
@@ -1651,7 +1681,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
     );
     assert_eq!(
         git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
-        committed_head,
+        original_head,
         "CAS drift must not create a commit"
     );
     assert_eq!(
@@ -2115,11 +2145,40 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         if let Some(handle) = related["result"]["retrievalHandle"].as_str() {
             related_lsp_handles.push(handle.to_owned());
         } else {
-            assert_eq!(
-                related["result"]["coverage"], "failed",
-                "a handle-less {kind} projection must expose failed coverage: {related}"
+            // A projection with no handle has nothing to expand, so it must
+            // state its own degradation rather than look like a clean empty
+            // answer. `unavailable` (this project has ingested nothing, so no
+            // producer or publication exists for the scope yet) and `failed`
+            // (a read that ran and failed) are separately carried terminal
+            // states and are never collapsed into one another, so both are
+            // legal here — see the diagnostics projection above, which makes
+            // the same distinction for the same first-run condition. What is
+            // never legal is claiming completeness, or carrying items that no
+            // handle can expand.
+            let coverage = related["result"]["coverage"]
+                .as_str()
+                .expect("projection coverage");
+            let producer_state = related["result"]["producerState"]
+                .as_str()
+                .expect("projection producer state");
+            assert!(
+                matches!(coverage, "unavailable" | "failed"),
+                "a handle-less {kind} projection must expose degraded coverage: {related}"
             );
-            assert_eq!(related["result"]["producerState"], "failed");
+            assert!(
+                matches!(
+                    producer_state,
+                    "unavailable" | "failed" | "cancelled" | "timedOut"
+                ),
+                "a handle-less {kind} projection must name its degraded producer \
+                 state: {related}"
+            );
+            assert!(
+                related["result"]["items"]
+                    .as_array()
+                    .is_some_and(|items| items.is_empty()),
+                "a handle-less {kind} projection must carry no unexpandable items: {related}"
+            );
         }
     }
 
@@ -2197,15 +2256,20 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
 
     'feedback_handle_parity: {
         let Some(lsp_handle) = projection["result"]["retrievalHandle"].as_str() else {
-            assert_eq!(projection["result"]["coverage"], "failed");
-            assert_eq!(projection["result"]["producerState"], "failed");
+            // An absent or ineligible advisory producer remains typed
+            // unavailable rather than failed: nothing was attempted and lost,
+            // the authority is simply not there yet. Either way the projection
+            // must state its own degradation instead of reading as a clean
+            // empty document.
+            assert_eq!(projection["result"]["coverage"], "unavailable");
+            assert_eq!(projection["result"]["producerState"], "unavailable");
             assert!(
                 projection["result"]["omissionReasons"]
                     .as_array()
                     .is_some_and(|reasons| reasons
                         .iter()
-                        .any(|reason| reason == "producer-failed")),
-                "a handle-less projection must expose the producer failure: {projection}"
+                        .any(|reason| reason == "producer-unavailable")),
+                "a handle-less projection must expose the producer degradation: {projection}"
             );
             break 'feedback_handle_parity;
         };
@@ -2621,9 +2685,14 @@ async fn feedback_handle_bootstrap_reads() {
     let ApplicationOutcome::Evidence(diagnostics) = diagnostics.outcome else {
         panic!("empty bootstrap diagnostics must preserve evidence");
     };
+    // A bootstrap store holds no publication for the requested head commit, so
+    // the read never attempted and failed: the authority is simply absent and a
+    // later read can succeed. `unavailable` and `failed` are separately carried
+    // terminal states and are never collapsed, so this must not report `failed`
+    // and must not degrade into a complete empty result either.
     assert_eq!(
         diagnostics.execution.termination,
-        OperationTermination::Failed
+        OperationTermination::Unavailable
     );
     assert!(diagnostics.payload.is_none());
     assert_eq!(
