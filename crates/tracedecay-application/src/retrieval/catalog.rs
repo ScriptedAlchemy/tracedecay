@@ -31,8 +31,7 @@ use crate::retrieval::requests::{
 };
 use crate::retrieval::symbol_graph::{
     GraphRelationRequest, ImplementationsRequest, SignatureSearchRequest, SymbolGraphPage,
-    SymbolPrimitiveRecord, SymbolRelationRecord, SymbolSearchSurfaceRequest, TypeHierarchyRecord,
-    TypeHierarchyRequest,
+    SymbolPrimitiveRecord, SymbolRelationRecord, TypeHierarchyRecord, TypeHierarchyRequest,
 };
 
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
@@ -591,30 +590,20 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         ],
         deadline_behavior: DeadlineBehavior::ReturnOperationReceipt,
     })?;
-    let contribution = CatalogContributionV1::new(CatalogContributionInputV1 {
+    // `code_symbol_search` stays `schema_unavailable` for now: this capability
+    // is the one legacy id not rooted at `capability.application.`, and the
+    // SDK MCP service-family projection refuses executable schemas whose
+    // capability cannot form a `service.application.*` id
+    // (`crate::sdk_catalog::mcp_service_id`). Binding it requires the in-place
+    // capability-id migration posted to the decision queue, not a schema-side
+    // workaround.
+    Ok(CatalogContributionV1::new(CatalogContributionInputV1 {
         contribution_id: ContributionId::new("contribution.application.symbol-search")?,
         depends_on: Vec::new(),
         capabilities: vec![capability],
         retrieval_primitives: vec![primitive],
         bindings,
-    })?;
-    // The service request holds a receipt-bound sanitized query view that is
-    // deliberately non-serializable, so the admitted wire form
-    // [`SymbolSearchSurfaceRequest`] carries the raw query text and the daemon
-    // keeps ownership of sanitization; the payload is the same
-    // [`SymbolGraphPage`] the symbol-graph port returns.
-    let manifest =
-        contribution
-            .capabilities()
-            .first()
-            .ok_or(ApplicationContractError::Inconsistent {
-                field: "symbol search schema capability",
-            })?;
-    let schema = ExecutableSchemaAuthority::for_types::<
-        SymbolSearchSurfaceRequest,
-        SymbolGraphPage<SymbolPrimitiveRecord>,
-    >(manifest)?;
-    Ok(contribution.with_executable_schemas(vec![schema])?)
+    })?)
 }
 
 fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {

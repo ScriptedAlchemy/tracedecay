@@ -186,23 +186,6 @@ impl SymbolSearchPrimitiveRequest {
     }
 }
 
-/// Public wire form of [`SymbolSearchPrimitiveRequest`].
-///
-/// [`SymbolSearchPrimitiveRequest::query`] holds a receipt-bound
-/// [`EphemeralSanitizedQueryViewV1`], which is deliberately non-serializable so
-/// a sanitized view can never be reconstructed from a transport payload. The
-/// admitted wire request therefore carries the raw query text and the daemon
-/// sanitizes it; every other field is the same bounded value the port
-/// validates.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SymbolSearchSurfaceRequest {
-    pub query: String,
-    pub scope: SymbolGraphScope,
-    pub lazy_index_ignored_dependencies: bool,
-    pub meta: RetrievalRequestMeta,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactSymbolRequest {

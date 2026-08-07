@@ -63,8 +63,7 @@ pub use symbol_graph::{
     MAX_SYMBOL_GRAPH_QUERY_BYTES, PrimitiveFailure, PrimitiveFailureKind, PrimitiveSupportGap,
     SignatureSearchRequest, SymbolGraphPage, SymbolGraphPortContext, SymbolGraphPortFuture,
     SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolGraphScope, SymbolPrimitiveRecord,
-    SymbolRelationRecord, SymbolSearchPrimitiveRequest, SymbolSearchSurfaceRequest,
-    TypeHierarchyRecord, TypeHierarchyRequest,
+    SymbolRelationRecord, SymbolSearchPrimitiveRequest, TypeHierarchyRecord, TypeHierarchyRequest,
 };
 pub use test_attribution::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, MAX_TEST_FILTER_BYTES,
