@@ -6,7 +6,28 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::ownership::retire_missing_repository_owners;
-use super::{GitWatcher, WatchState, request_freshness_for_repository};
+use super::{GitWatcher, WatchState, log_daemon_event, request_freshness_for_repository};
+
+/// The backstop's per-repository coverage decision.
+///
+/// Returns the log label for the freshness request this tick must make, or
+/// `None` when nothing has drifted a full interval. Interval drift alone drives
+/// coverage: the heartbeat proves only that the watcher task is alive, and a
+/// live watcher reacts to git metadata alone — never to working-tree edits or
+/// missed hook deliveries — so a healthy heartbeat must never veto the request.
+/// Gating coverage on a stale heartbeat left healthy-watcher projects with no
+/// freshness floor at all; live profiles were observed hours stale while every
+/// mechanism reported healthy.
+pub(super) const fn coverage_action(
+    watcher_stale: bool,
+    interval_elapsed: bool,
+) -> Option<&'static str> {
+    match (interval_elapsed, watcher_stale) {
+        (false, _) => None,
+        (true, true) => Some("backstop_watcher_stale"),
+        (true, false) => Some("backstop_interval_elapsed"),
+    }
+}
 
 pub(super) async fn run(watcher: GitWatcher) {
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -63,7 +84,16 @@ async fn tick(watcher: &GitWatcher, due_by_root: &mut HashMap<PathBuf, (Duration
             continue;
         }
         let snapshot = state.health.snapshot();
-        if snapshot.heartbeat_stale() || snapshot.status.is_degraded() {
+        let watcher_stale = snapshot.heartbeat_stale() || snapshot.status.is_degraded();
+        if let Some(action) = coverage_action(watcher_stale, true) {
+            log_daemon_event(
+                "git_watch_backstop_coverage",
+                &[
+                    ("git_common_dir", state.common_dir.display().to_string()),
+                    ("action", action.to_string()),
+                    ("roots", due_roots.len().to_string()),
+                ],
+            );
             request_freshness_for_repository(&watcher.inner, state, Some(due_roots)).await;
         }
     }

@@ -265,6 +265,29 @@ fn heartbeat_staleness() {
     assert!(old.heartbeat_stale_at(now));
 }
 
+/// The backstop is the freshness floor: a repository whose interval has elapsed
+/// must be covered even while the watcher heartbeat is perfectly healthy,
+/// because the watcher reacts to git metadata alone and a live heartbeat says
+/// nothing about working-tree edits or missed hook deliveries. Gating coverage
+/// on a stale heartbeat is exactly the defect that left live profiles hours
+/// stale while every mechanism reported healthy.
+#[test]
+fn backstop_covers_elapsed_intervals_regardless_of_watcher_liveness() {
+    // Healthy watcher + elapsed interval: the vetoing conjunction skipped this.
+    assert_eq!(
+        super::backstop::coverage_action(false, true),
+        Some("backstop_interval_elapsed")
+    );
+    // Stale/degraded watcher + elapsed interval: classic backstop coverage.
+    assert_eq!(
+        super::backstop::coverage_action(true, true),
+        Some("backstop_watcher_stale")
+    );
+    // Nothing has drifted a full interval: never request, whatever health says.
+    assert_eq!(super::backstop::coverage_action(false, false), None);
+    assert_eq!(super::backstop::coverage_action(true, false), None);
+}
+
 // ---- Real `GitWatcher` tests (drive the public API + the real debounce
 // path, not a reimplemented helper). The integration suite cannot reach
 // these crate-private internals because `git_watch` is not re-exported. ----
