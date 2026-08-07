@@ -165,6 +165,16 @@ impl RegisteredGlobalDbHarness {
         }
     }
 
+    pub(super) async fn remount_profile_database_for_test(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<Arc<RegisteredGlobalDb>> {
+        open_registered_test_database(
+            self.registered.db_path(),
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+    }
+
     #[cfg(test)]
     pub(super) fn storage_root(&self) -> &std::path::Path {
         self.registered

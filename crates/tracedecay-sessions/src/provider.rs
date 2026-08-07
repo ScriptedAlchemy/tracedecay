@@ -79,6 +79,11 @@ impl SessionProvider {
     pub const fn scans_all_destinations(self) -> bool {
         matches!(self, Self::Hermes)
     }
+
+    /// Whether the production provider driver persists bounded sweep coverage.
+    pub const fn writes_typed_history_coverage(self) -> bool {
+        matches!(self, Self::Kimi | Self::OpenCode)
+    }
 }
 
 pub const MESSAGE_SEARCH_PROVIDER_IDS: &[&str] = &[
@@ -180,6 +185,12 @@ mod tests {
                 provider.scans_all_destinations(),
                 provider == SessionProvider::Hermes,
                 "{} destination-scan capability",
+                provider.id()
+            );
+            assert_eq!(
+                provider.writes_typed_history_coverage(),
+                matches!(provider, SessionProvider::Kimi | SessionProvider::OpenCode),
+                "{} typed history coverage capability",
                 provider.id()
             );
         }

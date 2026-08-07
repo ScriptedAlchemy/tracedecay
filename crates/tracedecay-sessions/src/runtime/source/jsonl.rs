@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -61,9 +60,7 @@ pub const MAX_JSONL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 /// Default strict-scan budget keeps recovery bounded even without a hook cap.
 pub const STRICT_JSONL_BATCH_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) const MAX_JSONL_FRAMES_PER_BATCH: usize = 4096;
-const JSONL_RESUME_FINGERPRINT_BYTES: usize = 4 * 1024;
-const JSONL_SNAPSHOT_SAMPLE_COUNT: u64 = 8;
-const JSONL_RESUME_HASH_BASE: u64 = 0x9e37_79b1_85eb_ca87;
+const JSONL_HASH_CHUNK_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonlResumeState {
@@ -93,103 +90,87 @@ impl RawJsonlFrame {
     }
 }
 
-struct ResumeTail {
-    bytes: VecDeque<u8>,
-    rolling_hash: u64,
-    oldest_weight: u64,
+#[derive(Clone)]
+struct ResumeDigest {
+    hasher: Sha256,
 }
 
-impl ResumeTail {
+impl ResumeDigest {
     fn new() -> Self {
-        let mut oldest_weight = 1_u64;
-        for _ in 1..JSONL_RESUME_FINGERPRINT_BYTES {
-            oldest_weight = oldest_weight.wrapping_mul(JSONL_RESUME_HASH_BASE);
-        }
-        Self {
-            bytes: VecDeque::with_capacity(JSONL_RESUME_FINGERPRINT_BYTES),
-            rolling_hash: 0,
-            oldest_weight,
-        }
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let mut tail = Self::new();
-        tail.extend(bytes);
-        tail
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay-jsonl-resume-prefix-v2");
+        Self { hasher }
     }
 
     fn extend(&mut self, bytes: &[u8]) {
-        let bytes = if bytes.len() > JSONL_RESUME_FINGERPRINT_BYTES {
-            self.bytes.clear();
-            self.rolling_hash = 0;
-            &bytes[bytes.len() - JSONL_RESUME_FINGERPRINT_BYTES..]
-        } else {
-            bytes
-        };
-        for &byte in bytes {
-            if let Some(oldest) = (self.bytes.len() == JSONL_RESUME_FINGERPRINT_BYTES)
-                .then(|| self.bytes.pop_front())
-                .flatten()
-            {
-                self.rolling_hash = self.rolling_hash.wrapping_sub(
-                    u64::from(oldest)
-                        .wrapping_add(1)
-                        .wrapping_mul(self.oldest_weight),
-                );
-            }
-            self.rolling_hash = self
-                .rolling_hash
-                .wrapping_mul(JSONL_RESUME_HASH_BASE)
-                .wrapping_add(u64::from(byte).wrapping_add(1));
-            self.bytes.push_back(byte);
-        }
+        self.hasher.update(bytes);
     }
 
     fn fingerprint(&self, position: u64) -> u64 {
-        finish_resume_fingerprint(position, self.bytes.len(), self.rolling_hash)
+        let mut hasher = self.hasher.clone();
+        hasher.update(position.to_le_bytes());
+        digest_prefix_u64(hasher.finalize())
     }
 }
 
-fn finish_resume_fingerprint(position: u64, len: usize, rolling_hash: u64) -> u64 {
-    let mut value = rolling_hash
-        ^ position.wrapping_mul(0xd6e8_feb8_6659_fd93)
-        ^ (len as u64).wrapping_mul(0xa076_1d64_78bd_642f);
-    value ^= value >> 32;
-    value = value.wrapping_mul(0xe703_7ed1_a0b4_28db);
-    value ^ (value >> 32)
+fn digest_prefix_u64(digest: sha2::digest::Output<Sha256>) -> u64 {
+    let [
+        first,
+        second,
+        third,
+        fourth,
+        fifth,
+        sixth,
+        seventh,
+        eighth,
+        ..,
+    ] = <[u8; 32]>::from(digest);
+    u64::from_be_bytes([first, second, third, fourth, fifth, sixth, seventh, eighth])
 }
 
-fn resume_tail_fingerprint(position: u64, tail: &[u8]) -> u64 {
-    ResumeTail::from_bytes(tail).fingerprint(position)
-}
-
-fn read_jsonl_resume_tail(file: &mut std::fs::File, position: u64) -> std::io::Result<Vec<u8>> {
-    let start = position.saturating_sub(JSONL_RESUME_FINGERPRINT_BYTES as u64);
-    let len = usize::try_from(position.saturating_sub(start)).unwrap_or(usize::MAX);
-    file.seek(SeekFrom::Start(start))?;
-    let mut tail = vec![0_u8; len];
-    file.read_exact(&mut tail)?;
-    Ok(tail)
+fn jsonl_prefix_digest(file: &mut std::fs::File, extent: u64) -> std::io::Result<ResumeDigest> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut remaining = extent;
+    let mut buffer = vec![0_u8; JSONL_HASH_CHUNK_BYTES];
+    let mut digest = ResumeDigest::new();
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = file.read(&mut buffer[..requested])?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "JSONL prefix ended during generation hashing",
+            ));
+        }
+        digest.extend(&buffer[..read]);
+        remaining = remaining.saturating_sub(read as u64);
+    }
+    Ok(digest)
 }
 
 fn bounded_jsonl_snapshot_fingerprint(
     file: &mut std::fs::File,
     extent: u64,
 ) -> std::io::Result<u64> {
+    file.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay-jsonl-snapshot-v1");
+    hasher.update(b"tracedecay-jsonl-snapshot-v2");
     hasher.update(extent.to_le_bytes());
-    for sample in 1..=JSONL_SNAPSHOT_SAMPLE_COUNT {
-        let position = extent.saturating_mul(sample) / JSONL_SNAPSHOT_SAMPLE_COUNT;
-        let tail = read_jsonl_resume_tail(file, position)?;
-        hasher.update(position.to_le_bytes());
-        hasher.update((tail.len() as u64).to_le_bytes());
-        hasher.update(tail);
+    let mut remaining = extent;
+    let mut buffer = vec![0_u8; JSONL_HASH_CHUNK_BYTES];
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+        let read = file.read(&mut buffer[..requested])?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "JSONL snapshot ended during generation hashing",
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        remaining = remaining.saturating_sub(read as u64);
     }
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    Ok(u64::from_be_bytes(bytes))
+    Ok(digest_prefix_u64(hasher.finalize()))
 }
 
 fn rewritten_jsonl_generation(
@@ -206,10 +187,7 @@ fn rewritten_jsonl_generation(
     hasher.update(snapshot_fingerprint.to_le_bytes());
     hasher.update(file_size.to_le_bytes());
     hasher.update(mtime.to_le_bytes());
-    let digest = hasher.finalize();
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest[..8]);
-    u64::from_be_bytes(bytes).max(1)
+    digest_prefix_u64(hasher.finalize()).max(1)
 }
 
 /// Bounded raw JSONL framing shared by skip and defer policies.
@@ -220,7 +198,7 @@ fn rewritten_jsonl_generation(
 pub struct RawJsonlFrameReader<R> {
     reader: R,
     record: Vec<u8>,
-    resume_tail: ResumeTail,
+    resume_digest: ResumeDigest,
     max_record_bytes: usize,
 }
 
@@ -229,17 +207,17 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
         Self {
             reader,
             record: Vec::new(),
-            resume_tail: ResumeTail::new(),
+            resume_digest: ResumeDigest::new(),
             max_record_bytes,
         }
     }
 
-    fn seed_resume_tail(&mut self, tail: &[u8]) {
-        self.resume_tail = ResumeTail::from_bytes(tail);
+    fn seed_resume_digest(&mut self, digest: ResumeDigest) {
+        self.resume_digest = digest;
     }
 
     fn resume_fingerprint(&self, position: u64) -> u64 {
-        self.resume_tail.fingerprint(position)
+        self.resume_digest.fingerprint(position)
     }
 
     pub fn record(&self) -> &[u8] {
@@ -299,7 +277,7 @@ impl<R: BufRead> RawJsonlFrameReader<R> {
                 self.record.extend_from_slice(&available[..retained]);
                 oversized = retained < consumed;
             }
-            self.resume_tail.extend(&available[..consumed]);
+            self.resume_digest.extend(&available[..consumed]);
             self.reader.consume(consumed);
             byte_len = byte_len.saturating_add(consumed as u64);
 
@@ -611,8 +589,8 @@ impl PreparedJsonlScan {
                 && previous.file_id == resume_state.generation
                 && file_size >= previous.position
                 && file_identity == resume_state.file_identity
-                && read_jsonl_resume_tail(&mut file, previous.position).is_ok_and(|tail| {
-                    resume_tail_fingerprint(previous.position, &tail) == resume_state.fingerprint
+                && jsonl_prefix_digest(&mut file, previous.position).is_ok_and(|digest| {
+                    digest.fingerprint(previous.position) == resume_state.fingerprint
                 });
             if resume_matches {
                 (previous.position, resume_state.generation)
@@ -702,7 +680,7 @@ impl RawJsonlBatchScanner {
     ) -> TranscriptIngestResult<Self> {
         let generation = prepared.generation;
         let mut file = prepared.file;
-        let resume_tail = read_jsonl_resume_tail(&mut file, generation.seek_to)
+        let resume_digest = jsonl_prefix_digest(&mut file, generation.seek_to)
             .map_err(|error| TranscriptIngestError::scan_io("fingerprint", path, error))?;
         let mut reader = BufReader::new(file);
         reader
@@ -716,7 +694,7 @@ impl RawJsonlBatchScanner {
             max_record_bytes
         };
         let mut reader = RawJsonlFrameReader::new(reader, frame_limit);
-        reader.seed_resume_tail(&resume_tail);
+        reader.seed_resume_digest(resume_digest);
         Ok(Self {
             reader,
             generation,

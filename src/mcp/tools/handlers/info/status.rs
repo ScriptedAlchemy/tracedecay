@@ -274,26 +274,43 @@ async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
 }
 
 fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
+    use std::collections::BTreeSet;
+
     const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
     let warming = ingest.max_transcript_pending_bytes > THRESHOLD;
     let observed = &ingest.observed_providers;
-    let expected = crate::sessions::SessionProvider::ALL.map(|provider| provider.id());
-    let unobserved = expected
+    let configured = observed
+        .iter()
+        .map(String::as_str)
+        .chain(
+            ingest
+                .provider_coverage
+                .iter()
+                .map(|coverage| coverage.provider.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    let unobserved = configured
         .iter()
         .copied()
         .filter(|provider| !observed.iter().any(|observed| observed == provider))
         .collect::<Vec<_>>();
-    let all_providers_complete = expected.iter().all(|provider| {
+    let coverage_incomplete =
         ingest.provider_coverage.iter().any(|coverage| {
-            coverage.provider == *provider
-                && coverage.state == crate::global_db::SessionProviderCoverageState::Complete
-        })
-    });
+            coverage.state != crate::global_db::SessionProviderCoverageState::Complete
+        }) || observed.iter().any(|provider| {
+            crate::sessions::SessionProvider::parse(provider).is_some_and(|provider| {
+                provider.writes_typed_history_coverage()
+                    && !ingest.provider_coverage.iter().any(|coverage| {
+                        coverage.provider == provider.id()
+                            && coverage.state
+                                == crate::global_db::SessionProviderCoverageState::Complete
+                    })
+            })
+        });
     let any_provider_available = ingest.provider_coverage.iter().any(|coverage| {
         coverage.state != crate::global_db::SessionProviderCoverageState::Unavailable
     });
     let source_unavailable = observed.is_empty() && !any_provider_available;
-    let coverage_incomplete = !all_providers_complete;
     Some(json!({
         "status": if source_unavailable {
             "unavailable"
@@ -417,6 +434,18 @@ mod tests {
         assert_eq!(state["status"], "warming");
         assert_eq!(state["coverage"], "partial");
         assert_eq!(state["reason"], "historical_provider_coverage_incomplete");
+    }
+
+    #[test]
+    fn historical_status_does_not_wait_for_non_coverage_provider_writers() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["cursor".into()],
+            ..SessionIngestHealth::default()
+        })
+        .expect("legacy provider backlog authority remains visible");
+
+        assert_eq!(state["status"], "current");
+        assert_eq!(state["coverage"], "complete");
     }
 
     #[test]

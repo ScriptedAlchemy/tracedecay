@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -25,6 +26,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::privacy::RecordSanitizerV1;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 
+mod discovery_queue;
 mod disposition;
 mod durability;
 mod projection_drain;
@@ -665,6 +667,55 @@ impl tracedecay_sessions::admission::HostAdmission for HostAdmissionFacade<'_> {
                 .map_err(canonical_admission_outcome)
         })
     }
+
+    fn enqueue_discovery_paths<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        paths: Vec<PathBuf>,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<
+        'a,
+        Option<tracedecay_sessions::admission::HostDiscoveryQueueEntry>,
+    > {
+        Box::pin(async move {
+            HostAdmissionFacade::enqueue_discovery_paths(self, scope, provider, paths)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn discovery_paths_after<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        after_sequence: u64,
+        limit: usize,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<
+        'a,
+        Vec<tracedecay_sessions::admission::HostDiscoveryQueueEntry>,
+    > {
+        Box::pin(async move {
+            HostAdmissionFacade::discovery_paths_after(self, scope, provider, after_sequence, limit)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
+
+    fn discovery_path<'a>(
+        &'a self,
+        scope: &'a ObservationScopeV1,
+        provider: &'a str,
+        sequence: u64,
+    ) -> tracedecay_sessions::admission::AdmissionFuture<
+        'a,
+        Option<tracedecay_sessions::admission::HostDiscoveryQueueEntry>,
+    > {
+        Box::pin(async move {
+            HostAdmissionFacade::discovery_path(self, scope, provider, sequence)
+                .await
+                .map_err(canonical_admission_outcome)
+        })
+    }
 }
 
 const fn canonical_admission_status(
@@ -763,65 +814,6 @@ impl<'a> HostAdmissionFacade<'a> {
             .get_source_cursor(source, scope)
             .await
             .map_err(|error| classify_error(&ObservationApplicationError::Store(error)))
-    }
-
-    pub(crate) async fn get_parse_offset(
-        &self,
-        scope: &ObservationScopeV1,
-        path: &str,
-    ) -> Result<Option<tracedecay_global_db::ParseOffset>, HostAdmissionOutcome> {
-        self.authorities.validate_scope(scope)?;
-        let database = self
-            .authorities
-            .registered_database(host_scope(scope))?
-            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .get_parse_offset_result(path)
-            .await
-            .map_err(|error| {
-                tracing::warn!(?error, "registered host parse-offset read failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
-    }
-
-    pub(crate) async fn advance_parse_offset(
-        &self,
-        scope: &ObservationScopeV1,
-        path: &str,
-        offset: tracedecay_global_db::ParseOffset,
-    ) -> Result<(), HostAdmissionOutcome> {
-        self.authorities.validate_scope(scope)?;
-        let database = self
-            .authorities
-            .registered_database(host_scope(scope))?
-            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .advance_parse_offset_result(path, offset)
-            .await
-            .map_err(|error| {
-                tracing::warn!(?error, "registered host parse-offset advance failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
-    }
-
-    pub(crate) async fn has_session_message(
-        &self,
-        scope: &ObservationScopeV1,
-        provider: &str,
-        message_id: &str,
-    ) -> Result<bool, HostAdmissionOutcome> {
-        self.authorities.validate_scope(scope)?;
-        let database = self
-            .authorities
-            .registered_database(host_scope(scope))?
-            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
-        database
-            .has_session_message(provider, message_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "registered host session-message lookup failed");
-                HostAdmissionOutcome::registered_authority_unavailable()
-            })
     }
 
     pub async fn capture_observation(

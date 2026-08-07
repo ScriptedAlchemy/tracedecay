@@ -19,6 +19,7 @@
 //! `impl HostAdmission for dyn HostAdmission`.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use serde::Serialize;
@@ -57,6 +58,12 @@ pub use wire::{
 /// write it guards.
 pub type AdmissionFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, HostAdmissionOutcome>> + Send + 'a>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostDiscoveryQueueEntry {
+    pub sequence: u64,
+    pub path: PathBuf,
+}
 
 /// Terminal disposition of one host-admission attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -330,6 +337,38 @@ pub trait HostAdmission: Send + Sync {
         path: &'a str,
         offset: ParseOffset,
     ) -> AdmissionFuture<'a, ()>;
+
+    /// Adds provider paths to the durable discovery queue and returns the
+    /// stable identity of the final input path.
+    fn enqueue_discovery_paths<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _provider: &'a str,
+        _paths: Vec<PathBuf>,
+    ) -> AdmissionFuture<'a, Option<HostDiscoveryQueueEntry>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Reads a bounded queue window in stable insertion order.
+    fn discovery_paths_after<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _provider: &'a str,
+        _after_sequence: u64,
+        _limit: usize,
+    ) -> AdmissionFuture<'a, Vec<HostDiscoveryQueueEntry>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
+
+    /// Resolves a stable queue identity back to its provider path.
+    fn discovery_path<'a>(
+        &'a self,
+        _scope: &'a ObservationScopeV1,
+        _provider: &'a str,
+        _sequence: u64,
+    ) -> AdmissionFuture<'a, Option<HostDiscoveryQueueEntry>> {
+        Box::pin(async { Err(HostAdmissionOutcome::registered_authority_unavailable()) })
+    }
 }
 
 #[cfg(test)]
@@ -424,6 +463,8 @@ pub(crate) mod test_support {
         cursors: Vec<ObservationSourceCursorV1>,
         projected_sequences: Vec<u64>,
         parse_offsets: Vec<(ObservationScopeV1, String, ParseOffset)>,
+        discovery_paths: Vec<(ObservationScopeV1, String, HostDiscoveryQueueEntry)>,
+        next_discovery_sequence: u64,
         capture_failures_remaining: usize,
         session_message_failures_remaining: usize,
         session_message_reads: usize,
@@ -578,6 +619,7 @@ pub(crate) mod test_support {
         store: MemoryObservationStore,
         cancel_on_cursor_read: Arc<Mutex<Option<ObservationCancellation>>>,
         projection_failure: Arc<Mutex<Option<(HostAdmissionOutcome, ObservationCancellation)>>>,
+        cancel_on_discovery_queue_read: Arc<Mutex<Option<ObservationCancellation>>>,
     }
 
     impl MemoryHostAdmission {
@@ -620,6 +662,16 @@ pub(crate) mod test_support {
                 .projection_failure
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some((outcome, cancellation));
+        }
+
+        pub(crate) fn cancel_on_next_discovery_queue_read(
+            &self,
+            cancellation: ObservationCancellation,
+        ) {
+            *self
+                .cancel_on_discovery_queue_read
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(cancellation);
         }
 
         pub(crate) fn session_message_read_count(&self) -> usize {
@@ -824,6 +876,103 @@ pub(crate) mod test_support {
                     .parse_offsets
                     .push((scope.clone(), path.to_owned(), offset));
                 Ok(())
+            })
+        }
+
+        fn enqueue_discovery_paths<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            provider: &'a str,
+            paths: Vec<PathBuf>,
+        ) -> AdmissionFuture<'a, Option<HostDiscoveryQueueEntry>> {
+            Box::pin(async move {
+                let mut state = self.store.state();
+                let mut last_entry = None;
+                for path in paths {
+                    let existing = state
+                        .discovery_paths
+                        .iter()
+                        .find(|(stored_scope, stored_provider, entry)| {
+                            stored_scope == scope
+                                && stored_provider == provider
+                                && entry.path == path
+                        })
+                        .map(|(_, _, entry)| entry.clone());
+                    let entry = match existing {
+                        Some(entry) => entry,
+                        None => {
+                            state.next_discovery_sequence =
+                                state.next_discovery_sequence.saturating_add(1);
+                            let entry = HostDiscoveryQueueEntry {
+                                sequence: state.next_discovery_sequence,
+                                path,
+                            };
+                            state.discovery_paths.push((
+                                scope.clone(),
+                                provider.to_owned(),
+                                entry.clone(),
+                            ));
+                            entry
+                        }
+                    };
+                    last_entry = Some(entry);
+                }
+                Ok(last_entry)
+            })
+        }
+
+        fn discovery_paths_after<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            provider: &'a str,
+            after_sequence: u64,
+            limit: usize,
+        ) -> AdmissionFuture<'a, Vec<HostDiscoveryQueueEntry>> {
+            Box::pin(async move {
+                if let Some(cancellation) = self
+                    .cancel_on_discovery_queue_read
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    cancellation.cancel();
+                }
+                let mut entries = self
+                    .store
+                    .state()
+                    .discovery_paths
+                    .iter()
+                    .filter(|(stored_scope, stored_provider, entry)| {
+                        stored_scope == scope
+                            && stored_provider == provider
+                            && entry.sequence > after_sequence
+                    })
+                    .map(|(_, _, entry)| entry.clone())
+                    .collect::<Vec<_>>();
+                entries.sort_by_key(|entry| entry.sequence);
+                entries.truncate(limit);
+                Ok(entries)
+            })
+        }
+
+        fn discovery_path<'a>(
+            &'a self,
+            scope: &'a ObservationScopeV1,
+            provider: &'a str,
+            sequence: u64,
+        ) -> AdmissionFuture<'a, Option<HostDiscoveryQueueEntry>> {
+            Box::pin(async move {
+                Ok(self
+                    .store
+                    .state()
+                    .discovery_paths
+                    .iter()
+                    .find(|(stored_scope, stored_provider, entry)| {
+                        stored_scope == scope
+                            && stored_provider == provider
+                            && entry.sequence == sequence
+                    })
+                    .map(|(_, _, entry)| entry.clone()))
             })
         }
     }

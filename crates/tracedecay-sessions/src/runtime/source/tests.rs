@@ -846,6 +846,45 @@ fn raw_strict_resume_checkpoint_detects_same_inode_rewrite_past_the_head() {
 }
 
 #[test]
+fn raw_strict_resume_checkpoint_detects_same_inode_middle_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("same-inode-middle.jsonl");
+    let original = b"{\"v\":0}\n".repeat(12_000);
+    std::fs::write(&path, &original).unwrap();
+
+    let first = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        StoredCursor::default(),
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        None,
+    )
+    .unwrap();
+    let checkpoint = JsonlResumeState {
+        generation: first.new_cursor.file_id,
+        file_identity: first.file_identity,
+        fingerprint: first.frames.last().unwrap().resume_fingerprint,
+    };
+
+    let mut rewritten = original;
+    let changed = b"{\"v\":0}\n".len() * 2_111;
+    rewritten[changed..changed + b"{\"v\":0}\n".len()].copy_from_slice(b"{\"v\":1}\n");
+    std::fs::write(&path, rewritten).unwrap();
+
+    let second = try_stream_new_jsonl_raw_strict_with_resume(
+        &path,
+        first.new_cursor,
+        None,
+        MAX_JSONL_RECORD_BYTES,
+        Some(checkpoint),
+    )
+    .unwrap();
+    assert_eq!(second.start_offset, 0);
+    assert_ne!(second.new_cursor.file_id, checkpoint.generation);
+    assert_eq!(second.frames.len(), 4_096);
+}
+
+#[test]
 fn raw_strict_resume_checkpoint_preserves_append_only_progress() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("append-only.jsonl");
