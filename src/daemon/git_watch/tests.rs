@@ -40,6 +40,18 @@ fn retention_window_conversion_never_wraps_negative() {
     assert_eq!(retention_window_secs(u64::MAX), i64::MAX);
 }
 
+#[test]
+fn timed_out_identity_discovery_retries_instead_of_degrading_forever() {
+    assert!(matches!(
+        identity_discovery_disposition(crate::worktree::GitRepoIdentityOutcome::Unknown),
+        IdentityDiscoveryDisposition::Retry
+    ));
+    assert!(matches!(
+        identity_discovery_disposition(crate::worktree::GitRepoIdentityOutcome::NotFound),
+        IdentityDiscoveryDisposition::Degraded
+    ));
+}
+
 /// The ordinary retention cadence must sweep the same scoped code-index root the
 /// scheduler publishes into. A cadence aimed anywhere else would find no sealed
 /// generations and silently reclaim nothing.
