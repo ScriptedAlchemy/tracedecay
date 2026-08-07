@@ -1,8 +1,13 @@
 //! Production Plan 26 read-model composition over the canonical accounting store.
 
+mod emit;
 mod export;
 mod producer;
 
+pub use emit::{
+    record_adoption_eligibility, record_adoption_outcome, record_index, record_latency,
+    record_operation_resource, record_retrieval_query, record_storage,
+};
 pub use export::RegisteredAggregateShareExporterV1;
 pub use producer::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
