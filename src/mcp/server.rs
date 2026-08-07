@@ -1069,6 +1069,10 @@ impl McpServer {
         }
     }
 
+    pub(crate) fn watcher_sync_config(&self) -> &crate::config::SyncConfig {
+        &self.sync_config
+    }
+
     /// Enables or disables per-call timing reporting. When enabled, every
     /// `tools/call` response gains a `_meta.duration_us` field with the
     /// handler's pure execution time in microseconds. Useful for profiling
