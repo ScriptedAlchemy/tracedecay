@@ -392,7 +392,10 @@ tracedecay-sdk = { path = "crates/tracedecay-sdk", version = "0.1.0" }
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
+# The dev edge keeps code-index's default grammar profile active so the
+# default and explicit-production feature graphs resolve identically
+# (mirrors code-index's own default-features dev edge on code-extraction).
+tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
