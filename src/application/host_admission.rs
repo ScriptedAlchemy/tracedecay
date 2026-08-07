@@ -577,7 +577,7 @@ impl HostAdmissionTestRuntimeV1 {
         git_common_dir: Option<&Path>,
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
-    ) -> Option<crate::global_db::CodeProjectRecord> {
+    ) -> Result<crate::global_db::CodeProjectRecord> {
         self.profile_database
             .upsert_code_project(
                 project_id,

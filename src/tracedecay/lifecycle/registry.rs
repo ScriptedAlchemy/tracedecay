@@ -163,8 +163,14 @@ impl TraceDecay {
                 git_remote_url.as_deref(),
                 default_branch,
             )
-            .await
-            .ok_or_else(|| registry_registration_error("upsert code project failed"))?;
+            // Propagated verbatim. The registry now separates three answers
+            // this call site used to flatten into one message: a refused
+            // ephemeral root (typed `ProjectRoute`), an unresolvable authority
+            // conflict (typed `ResetRequired`, which tells the operator to
+            // reset the profile), and a database fault. Re-wrapping them as
+            // "upsert code project failed" is exactly the coercion being
+            // removed.
+            .await?;
 
         storage::write_repository_identity_marker(&self.project_root, &project.project_id)?;
 
