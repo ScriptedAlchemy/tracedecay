@@ -4,12 +4,15 @@ use std::time::Duration;
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffScope, WorkflowEffectAuthorityErrorV1,
-    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1,
-    WorkflowEffectJournalStateV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
-    WorkflowEffectProblemV1, WorkflowEffectTerminalV1,
+    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
+    WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1,
+    WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1, WorkflowEffectJournalStateV1,
+    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
+    WorkflowEffectTerminalV1,
 };
-use tracedecay_domain::{ManifestDigest, UtcMicros, WorkflowDefinition, canonical_sha256};
+use tracedecay_domain::{
+    ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
+};
 
 use crate::exact_sql::{
     ExactSqlError, ExactSqlError as MigrationSqlError, ExactSqlHandle, ExactSqlRows,
@@ -95,6 +98,123 @@ impl WorkflowSqliteAuthority {
         }
         Ok(Some(definition))
     }
+}
+
+impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
+    fn insert(
+        &self,
+        definition: &WorkflowDefinition,
+    ) -> Result<(), WorkflowDefinitionAuthorityError> {
+        let version = version_i64(definition.definition_version())
+            .map_err(|_| definition_authority_unavailable())?;
+        let payload =
+            serde_json::to_string(definition).map_err(|_| definition_authority_unavailable())?;
+        let digest =
+            canonical_sha256(definition).map_err(|_| definition_authority_unavailable())?;
+        let transaction = self
+            .storage
+            .begin_immediate()
+            .map_err(|_| definition_authority_unavailable())?;
+        let existing = query_tx(
+            &transaction,
+            "SELECT payload_digest FROM workflow_definition_source_journal
+             WHERE definition_id = ?1 AND definition_version = ?2",
+            vec![
+                ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
+                ExactSqlValue::Integer(version),
+            ],
+        )
+        .map_err(|_| definition_authority_unavailable())?;
+        if let Some(row) = existing.rows.first() {
+            let outcome = if sql_text(&row.values, 0) == Some(digest.as_str()) {
+                WorkflowDefinitionAuthorityError::AlreadyExists
+            } else {
+                WorkflowDefinitionAuthorityError::Conflict
+            };
+            let _ = transaction.rollback();
+            return Err(outcome);
+        }
+        execute_tx(
+            &transaction,
+            "INSERT INTO workflow_definition_source_journal (
+                 definition_id, definition_version, payload, payload_digest
+             ) VALUES (?1, ?2, ?3, ?4)",
+            vec![
+                ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
+                ExactSqlValue::Integer(version),
+                ExactSqlValue::Text(payload),
+                ExactSqlValue::Text(digest.as_str().to_owned()),
+            ],
+        )
+        .map_err(|_| definition_authority_unavailable())?;
+        transaction
+            .commit()
+            .map(|_| ())
+            .map_err(|_| definition_authority_unavailable())
+    }
+
+    fn load(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Option<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
+        self.load_definition_source(definition_id, definition_version)
+            .map_err(|_| definition_authority_unavailable())
+    }
+
+    fn list(
+        &self,
+        definition_id: Option<&WorkflowDefinitionId>,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
+        let (sql, values) = match definition_id {
+            Some(definition_id) => (
+                "SELECT payload, payload_digest
+                 FROM workflow_definition_source_journal
+                 WHERE definition_id = ?1
+                 ORDER BY definition_id, definition_version",
+                vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
+            ),
+            None => (
+                "SELECT payload, payload_digest
+                 FROM workflow_definition_source_journal
+                 ORDER BY definition_id, definition_version",
+                Vec::new(),
+            ),
+        };
+        let rows = self
+            .storage
+            .query(
+                ExactSqlStatement::new(sql.to_owned(), values)
+                    .map_err(|_| definition_authority_unavailable())?,
+                Duration::from_secs(5),
+            )
+            .map_err(|_| definition_authority_unavailable())?;
+        rows.rows.iter().map(decode_definition_source_row).collect()
+    }
+}
+
+fn decode_definition_source_row(
+    row: &crate::exact_sql::ExactSqlRow,
+) -> Result<WorkflowDefinition, WorkflowDefinitionAuthorityError> {
+    let Some(ExactSqlValue::Text(payload)) = row.values.first() else {
+        return Err(definition_authority_unavailable());
+    };
+    let Some(ExactSqlValue::Text(stored_digest)) = row.values.get(1) else {
+        return Err(definition_authority_unavailable());
+    };
+    let definition: WorkflowDefinition =
+        serde_json::from_str(payload).map_err(|_| definition_authority_unavailable())?;
+    let digest = canonical_sha256(&definition).map_err(|_| definition_authority_unavailable())?;
+    if digest.as_str() != stored_digest {
+        return Err(definition_authority_unavailable());
+    }
+    Ok(definition)
+}
+
+fn definition_authority_unavailable() -> WorkflowDefinitionAuthorityError {
+    WorkflowDefinitionAuthorityError::Unavailable(
+        "workflow definition source journal is unavailable".to_owned(),
+    )
 }
 
 /// Construction failure for the durable workflow authority.
@@ -253,9 +373,7 @@ fn version_i64(version: u64) -> Result<i64, ()> {
     i64::try_from(version).map_err(|_| ())
 }
 
-fn definition_digest(
-    definition: &WorkflowDefinition,
-) -> Result<ManifestDigest, ()> {
+fn definition_digest(definition: &WorkflowDefinition) -> Result<ManifestDigest, ()> {
     canonical_sha256(definition).map_err(|_| ())
 }
 

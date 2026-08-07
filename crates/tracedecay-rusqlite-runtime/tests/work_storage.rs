@@ -118,7 +118,7 @@ fn immutable_history_and_projection_rebuild_survive_restart() {
 }
 
 #[test]
-fn schema_retains_only_events_and_owner_watermarks() {
+fn schema_has_no_materialized_work_projection_tables() {
     let store = RegisteredWorkStore::start("schema");
     let tables = store.inspect(|connection| {
         let mut statement = connection
@@ -137,6 +137,8 @@ fn schema_retains_only_events_and_owner_watermarks() {
     assert_eq!(
         tables,
         vec![
+            "work_attempt_fences_v1".to_owned(),
+            "work_attempts_v1".to_owned(),
             "work_events_v1".to_owned(),
             "work_owner_cursors_v1".to_owned()
         ]

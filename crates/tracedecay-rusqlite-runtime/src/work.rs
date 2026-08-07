@@ -7,7 +7,8 @@ use tracedecay_application::{
     WorkAppendOutcome, WorkAppendRequest, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
-    TaskId, WorkAuthority, WorkEvent, WorkProjection, WorkVersion,
+    TaskId, WorkAuthority, WorkEvent, WorkProjection, WorkProjectionResumeCursorV1,
+    WorkProjectionSnapshotV1, WorkVersion,
 };
 
 use crate::exact_sql::{
@@ -15,6 +16,7 @@ use crate::exact_sql::{
 };
 
 mod events;
+mod projection;
 mod schema;
 mod sql;
 
@@ -65,5 +67,11 @@ impl WorkSqliteStorage {
         authority: &WorkAuthority,
     ) -> Result<Vec<WorkEvent>, WorkStorageError> {
         events::load_registered_authority_events(&self.handle, authority)
+    }
+
+    pub fn resume_cursor(
+        snapshot: &WorkProjectionSnapshotV1,
+    ) -> Result<WorkProjectionResumeCursorV1, tracedecay_application::WorkProjectionPortError> {
+        projection::projection_cursor(snapshot.generation_id().clone(), snapshot.sequence())
     }
 }
