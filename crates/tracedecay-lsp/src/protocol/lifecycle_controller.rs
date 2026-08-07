@@ -278,25 +278,25 @@ where
             .semantic
             .pending
             .iter()
-            .filter_map(|(request_id, pending)| {
+            .filter(|(_, pending)| {
                 pending
                     .request
                     .document_uri()
                     .is_some_and(belongs_to_removed_root)
-                    .then(|| request_id.clone())
             })
+            .map(|(request_id, _)| request_id.clone())
             .chain(
                 self.context
                     .pending_requests
                     .iter()
-                    .filter_map(|(request_id, pending)| {
+                    .filter(|(_, pending)| {
                         pending
                             .request
                             .document_uri
                             .as_deref()
                             .is_some_and(belongs_to_removed_root)
-                            .then(|| request_id.clone())
-                    }),
+                    })
+                    .map(|(request_id, _)| request_id.clone()),
             )
             .collect::<BTreeSet<_>>();
         for request_id in request_ids {

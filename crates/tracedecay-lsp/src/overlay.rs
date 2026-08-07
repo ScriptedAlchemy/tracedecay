@@ -141,20 +141,11 @@ struct DocumentOverlay {
 }
 
 /// In-memory overlays owned by exactly one LSP client session.
+#[derive(Default)]
 pub struct OverlayStore {
     documents: BTreeMap<String, DocumentOverlay>,
     limits: OverlayLimits,
     retained_bytes: usize,
-}
-
-impl Default for OverlayStore {
-    fn default() -> Self {
-        Self {
-            documents: BTreeMap::new(),
-            limits: OverlayLimits::default(),
-            retained_bytes: 0,
-        }
-    }
 }
 
 impl OverlayStore {

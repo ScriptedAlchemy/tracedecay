@@ -13,9 +13,12 @@ use tracedecay_code_extraction::{LanguageExtractor, LanguageRegistry};
 use tracedecay_domain::ExtractionResult;
 
 /// Parser state exposed with an ephemeral overlay snapshot.
+///
+/// A ready report is boxed: it dwarfs the typed unavailable reason, and every
+/// snapshot of every open document carries one of these.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OverlayParseState {
-    Ready(ParseReport),
+    Ready(Box<ParseReport>),
     Unavailable(OverlayParseUnavailable),
 }
 
@@ -117,7 +120,7 @@ impl RetainedOverlayParse {
             Ok((document, report)) => {
                 let mut retained = Self {
                     document: Some(document),
-                    parse_state: OverlayParseState::Ready(report.clone()),
+                    parse_state: OverlayParseState::Ready(Box::new(report.clone())),
                     prior_raw_extraction: None,
                     extraction_state: OverlayExtractionState::Unavailable(
                         OverlayParseUnavailable::StaleReport,
@@ -167,7 +170,7 @@ impl RetainedOverlayParse {
                 if let Some(document) = replacement {
                     self.document = Some(document);
                 }
-                self.parse_state = OverlayParseState::Ready(report.clone());
+                self.parse_state = OverlayParseState::Ready(Box::new(report.clone()));
                 self.extract(extractor, &report);
             }
             Err(error) => {

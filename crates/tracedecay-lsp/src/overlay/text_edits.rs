@@ -52,14 +52,18 @@ pub(super) fn apply_change(
 
 fn parse_point_at(text: &str, byte_offset: usize) -> ParsePoint {
     let prefix = &text.as_bytes()[..byte_offset];
-    let row = prefix.iter().filter(|byte| **byte == b'\n').count();
-    let column = prefix
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(prefix.len(), |last_newline| {
-            prefix.len().saturating_sub(last_newline + 1)
-        });
-    ParsePoint { row, column }
+    let mut row = 0;
+    let mut line_start = 0;
+    for (index, byte) in prefix.iter().enumerate() {
+        if *byte == b'\n' {
+            row += 1;
+            line_start = index + 1;
+        }
+    }
+    ParsePoint {
+        row,
+        column: prefix.len().saturating_sub(line_start),
+    }
 }
 
 fn replacement_end_point(start: ParsePoint, replacement: &str) -> ParsePoint {
