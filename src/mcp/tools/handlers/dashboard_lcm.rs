@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures_util::stream::{self, StreamExt};
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1};
 use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
 
@@ -33,13 +34,13 @@ struct SummaryHydrationRequest {
     content: String,
 }
 
-pub(super) struct DashboardLcmReadAdapter {
+pub(crate) struct DashboardLcmReadAdapter {
     retrieval: Arc<dyn SessionRetrievalServicePort>,
     project_id: String,
 }
 
 impl DashboardLcmReadAdapter {
-    pub(super) fn new(retrieval: Arc<dyn SessionRetrievalServicePort>, project_id: String) -> Self {
+    pub(crate) fn new(retrieval: Arc<dyn SessionRetrievalServicePort>, project_id: String) -> Self {
         Self {
             retrieval,
             project_id,
@@ -592,6 +593,14 @@ fn retrieval_command(
             }
         };
     let limit = usize::try_from(limit.clamp(1, 500)).ok()?;
+    // The default execution limits hydrate at most 64 records per request;
+    // dashboard reads legitimately page up to 500 rows, so the request
+    // carries execution limits sized to its own page (still validated
+    // against the port's absolute read caps by the executor).
+    let mut execution_limits = ExecutionLimits::default();
+    if limit > execution_limits.hydration_limit {
+        execution_limits.hydration_limit = limit;
+    }
     let query = SessionTemporalQuery::new(
         session_id,
         None,
@@ -612,6 +621,7 @@ fn retrieval_command(
         },
     )
     .ok()?
+    .with_execution_limits(execution_limits)
     .with_retrieval_scope(retrieval_scope);
     Some(SessionRetrievalCommand::new(
         query,

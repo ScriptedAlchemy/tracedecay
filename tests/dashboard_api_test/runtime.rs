@@ -111,6 +111,26 @@ impl DashboardTestRuntimeV1 {
         ))
     }
 
+    /// The dashboard authority plus the daemon-owned LCM read port —
+    /// the composition production mounts for `hermes-lcm` and explorer
+    /// session reads.
+    pub(crate) async fn dashboard_test_authority_with_session_reads(
+        self: &Arc<Self>,
+        cg: &TraceDecay,
+    ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
+        let authority = self.dashboard_test_authority()?;
+        let lcm_read_authority = dashboard::dashboard_lcm_read_authority_for_test(
+            cg,
+            self.profile_database.as_ref(),
+            Arc::clone(&self.project_database),
+        )
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "dashboard fixture could not compose the LCM read authority".to_owned(),
+        })?;
+        Ok(authority.with_lcm_read_authority(lcm_read_authority))
+    }
+
     fn database(&self, scope: HostAdmissionScope) -> Result<&RegisteredGlobalDb> {
         match scope {
             HostAdmissionScope::Project => Ok(self.project_database.as_ref()),

@@ -17,6 +17,7 @@ mod application_surface;
 pub mod ast_grep_search;
 pub mod dashboard;
 mod dashboard_lcm;
+pub(crate) use dashboard_lcm::DashboardLcmReadAdapter;
 mod dependency_hints;
 mod dispatch_groups;
 pub mod edit;

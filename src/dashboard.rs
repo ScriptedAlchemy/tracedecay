@@ -203,6 +203,36 @@ impl DashboardGraphTestRuntimeV1 {
     }
 }
 
+/// Composes the daemon-owned LCM read authority over the fixture's
+/// registered project-sessions store — the same `DashboardLcmReadAdapter`
+/// over the daemon session retrieval service that the MCP dashboard
+/// composition mounts in production. Without it every `hermes-lcm` and
+/// explorer session read answers `lcm_daemon_authority_unavailable`.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub async fn dashboard_lcm_read_authority_for_test(
+    cg: &crate::tracedecay::TraceDecay,
+    registry: &crate::global_db::RegisteredGlobalDb,
+    project_database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
+) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
+    let root = match crate::mcp::server::DaemonSessionRetrievalRoot::project(cg, registry).await {
+        Some(root) => root,
+        None => crate::mcp::server::DaemonSessionRetrievalRoot::project_for_test(cg),
+    };
+    let service = crate::mcp::server::DaemonSessionRetrievalService::new(
+        std::sync::Arc::clone(&project_database),
+        root,
+        None,
+    )?;
+    let project_id = cg.store_layout().identity.project_id.clone()?;
+    Some(std::sync::Arc::new(
+        crate::mcp::tools::handlers::DashboardLcmReadAdapter::new(
+            std::sync::Arc::new(service),
+            project_id,
+        ),
+    ))
+}
+
 /// Records one git span through a registered ProjectSessions authority.
 ///
 /// Root-owned bridge for the dashboard integration suite: span evidence is

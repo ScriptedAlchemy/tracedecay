@@ -139,7 +139,8 @@ fn spawn_dashboard_server_with_runner(
                 ),
             };
             let authority = host_runtime
-                .dashboard_test_authority()
+                .dashboard_test_authority_with_session_reads(cg.as_ref())
+                .await
                 .expect("dashboard test authority");
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
                 cg.clone(),
