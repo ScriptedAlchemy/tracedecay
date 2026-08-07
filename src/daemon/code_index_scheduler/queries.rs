@@ -590,13 +590,24 @@ fn bounded_result<T>(
         })
         .into_iter()
         .collect();
-    let mut page_state = PageState::first_page(
+    // `first_page` rejects `returned > total`. Both numbers are store readings
+    // on a live query, so disagreement is a stale count, not a caller error.
+    let page_state = PageState::first_page(
         SortContractId::new(CALLABLE_CODE_SORT).unwrap_or_else(|_| panic!("static sort id")),
         1,
         page.total,
         returned,
-    )
-    .unwrap_or_else(|_| panic!("bounded code query page"));
+    );
+    let mut page_state = match page_state {
+        Ok(page_state) => page_state,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "bounded code query page state failed the application contract"
+            );
+            return unavailable_for_generation(finished_at, page.generation.clone());
+        }
+    };
     page_state.cursor.clone_from(&page.next_cursor);
     page_state.expires_at = cursor_expires_at;
     let evidence = RetrievalEvidence {
@@ -1080,8 +1091,9 @@ fn finish_direct_query<T: serde::Serialize>(
 /// it to [`finish_direct_query`].
 ///
 /// The whole list is in hand, so every item is eligible and no cursor is needed.
-/// The page cannot fail to build for a generation-owned list; `page_label` names
-/// what was being paged if that invariant is ever broken.
+/// A page that still fails the application contract means the served generation
+/// identity did not validate, which is a degraded read rather than a caller
+/// error; `page_label` names what was being paged in that report.
 fn finish_generation_page<T: serde::Serialize>(
     prepared: &PreparedCallableQueryV1,
     context: &RetrievalPortContext<'_>,
@@ -1092,14 +1104,19 @@ fn finish_generation_page<T: serde::Serialize>(
     page_label: &'static str,
 ) -> RetrievalPortOutcome<CodeQueryPage<T>> {
     let eligible = items.len() as u64;
-    let page = CodeQueryPage::new(
-        prepared.latest.generation.manifest().generation_id.clone(),
-        items,
-        None,
-        None,
-        None,
-    )
-    .unwrap_or_else(|_| panic!("generation-owned {page_label} create a valid page"));
+    let generation = prepared.latest.generation.manifest().generation_id.clone();
+    let page = match CodeQueryPage::new(generation.clone(), items, None, None, None) {
+        Ok(page) => page,
+        Err(error) => {
+            tracing::warn!(
+                operation,
+                page_label,
+                %error,
+                "generation-owned page failed the application contract"
+            );
+            return unavailable_for_generation(query_finished_at(), generation);
+        }
+    };
     finish_direct_query(
         prepared,
         context,
@@ -1145,14 +1162,31 @@ fn finish_query_with_coverage<T: serde::Serialize>(
             let Ok(next_cursor) = next_cursor else {
                 return rejected_cursor(finished_at, generation, PreparedQueryErrorV1::Unavailable);
             };
-            let page = CodeQueryPage::new(
-                generation,
+            // `pagination.total` and the served generation identity are both
+            // store readings, so a page that fails the contract is a stale or
+            // inconsistent read. Answer with the typed evidence this surface
+            // already returns for a rejected cursor.
+            let page = match CodeQueryPage::new(
+                generation.clone(),
                 pagination.items,
                 Some(pagination.total),
                 next_cursor,
                 page.query_fallback,
-            )
-            .unwrap_or_else(|_| panic!("prepared query creates a valid application page"));
+            ) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        operation,
+                        %error,
+                        "prepared query page failed the application contract"
+                    );
+                    return rejected_cursor(
+                        finished_at,
+                        generation,
+                        PreparedQueryErrorV1::Unavailable,
+                    );
+                }
+            };
             bounded_result(page, coverage, finished_at, None, cursor_expires_at)
         }
         Err(error) => rejected_cursor(finished_at, generation, error),
@@ -1261,14 +1295,27 @@ where
     T: serde::Serialize,
 {
     let coverage = page.coverage;
-    let page = CodeQueryPage::new(
+    let generation = page.generation.clone();
+    // `total_eligible` is the lane's own count of what it could have returned;
+    // if it disagrees with the rows the lane actually produced, the lane read
+    // is inconsistent, not the request.
+    let page = match CodeQueryPage::new(
         page.generation,
         page.items.into_iter().map(map).collect(),
         Some(page.total_eligible),
         None,
         None,
-    )
-    .unwrap_or_else(|_| panic!("query-native lane creates a valid application page"));
+    ) {
+        Ok(page) => page,
+        Err(error) => {
+            tracing::warn!(
+                operation,
+                %error,
+                "query-native lane page failed the application contract"
+            );
+            return unavailable_for_generation(query_finished_at(), generation);
+        }
+    };
     finish_query_with_coverage(
         prepared,
         context,
@@ -2169,14 +2216,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 })
                 .collect::<Vec<_>>();
             let eligible = request.files.len() as u64;
-            let page = CodeQueryPage::new(
-                prepared.latest.generation.manifest().generation_id.clone(),
-                items,
-                None,
-                None,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("generation-owned metadata creates a valid page"));
+            let generation = prepared.latest.generation.manifest().generation_id.clone();
+            let page = match CodeQueryPage::new(generation.clone(), items, None, None, None) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "generation-owned source metadata page failed the application contract"
+                    );
+                    return unavailable_for_generation(query_finished_at(), generation);
+                }
+            };
             finish_direct_query(
                 &prepared,
                 &context,
@@ -2301,8 +2351,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                     .filter(|symbol| path_is_in_code_query_scope(&symbol.file, &request.scope))
                     .count() as u64,
             }];
-            let page = CodeQueryPage::new(generation, items, None, None, None)
-                .unwrap_or_else(|_| panic!("generation-owned timeline creates a valid page"));
+            let page = match CodeQueryPage::new(generation.clone(), items, None, None, None) {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "generation-owned timeline page failed the application contract"
+                    );
+                    return unavailable_for_generation(query_finished_at(), generation);
+                }
+            };
             finish_direct_query(
                 &prepared,
                 &context,
