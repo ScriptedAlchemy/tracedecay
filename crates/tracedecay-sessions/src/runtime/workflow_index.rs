@@ -72,9 +72,26 @@ impl From<tracedecay_runtime_core::db::engine::Error> for WorkflowIndexError {
 impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowIndexError {
     fn from(err: crate::runtime::git_correlation::GitCorrelationError) -> Self {
         match err {
-            crate::runtime::git_correlation::GitCorrelationError::Db(message) => Self::Db(message),
-            crate::runtime::git_correlation::GitCorrelationError::InvalidArgument(message) => {
+            crate::runtime::git_correlation::GitCorrelationError::Db(message)
+            | crate::runtime::git_correlation::GitCorrelationError::Corrupt(message) => {
+                Self::Db(message)
+            }
+            crate::runtime::git_correlation::GitCorrelationError::InvalidArgument(message)
+            | crate::runtime::git_correlation::GitCorrelationError::Contract(message) => {
                 Self::InvalidArgument(message)
+            }
+            crate::runtime::git_correlation::GitCorrelationError::Unavailable(authority) => {
+                Self::Db(authority)
+            }
+            crate::runtime::git_correlation::GitCorrelationError::Cancelled => {
+                Self::AuthorityUnavailable {
+                    authority: "Git evidence request was cancelled",
+                }
+            }
+            crate::runtime::git_correlation::GitCorrelationError::BudgetExhausted => {
+                Self::AuthorityUnavailable {
+                    authority: "Git evidence request exhausted its budget",
+                }
             }
         }
     }

@@ -37,36 +37,6 @@ pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
 pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
 pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
 
-pub async fn read_meta_value(
-    conn: &(impl QueryExecutor + ?Sized),
-    key: &str,
-) -> Result<Option<i64>, GitCorrelationError> {
-    let mut rows = conn
-        .query(
-            "SELECT value FROM git_correlation_meta WHERE key = ?1",
-            params![key],
-        )
-        .await?;
-    match rows.next().await? {
-        Some(row) => Ok(Some(row.get(0)?)),
-        None => Ok(None),
-    }
-}
-
-pub async fn write_meta_value(
-    conn: &(impl Executor + ?Sized),
-    key: &str,
-    value: i64,
-) -> Result<(), GitCorrelationError> {
-    conn.execute(
-        "INSERT INTO git_correlation_meta(key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = unixepoch()",
-        params![key, value],
-    )
-    .await?;
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpanSource {
@@ -118,6 +88,14 @@ impl CommitRelationFilter {
             other => Err(GitCorrelationError::InvalidArgument(format!(
                 "relation must be one of produced, observed, all (got `{other}`)"
             ))),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Produced => "produced",
+            Self::Observed => "observed",
+            Self::All => "all",
         }
     }
 
@@ -905,7 +883,7 @@ fn span_hit(spans: &[&SessionGitSpan]) -> SessionGitCorrelationHit {
         last_ts: spans.iter().map(|span| span.last_ts).max(),
         event_count: spans.iter().map(|span| span.event_count).sum(),
         span_count: i64::try_from(spans.len()).unwrap_or(i64::MAX),
-        sources: sources.into_iter().map(str::to_owned).collect(),
+        sources: sources.into_iter().collect(),
         commit_sha: None,
         committed_at: None,
         span_overlap_kind: None,
@@ -962,7 +940,8 @@ mod backfill;
 mod store;
 pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
-    match_commit_to_spans, run_commit_attribution_sweep,
+    graph_evidence_publication_key, match_commit_to_spans, publish_graph_evidence,
+    run_commit_attribution_sweep,
 };
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
