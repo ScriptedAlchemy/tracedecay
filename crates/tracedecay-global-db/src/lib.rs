@@ -71,8 +71,9 @@ use project_registry::project_path_alias_key;
 /// Registry reap contract, moved down beside `plan_registry_reap` — its only
 /// producer — so this crate no longer reaches up into the composition root.
 pub use project_registry::{
-    GIT_COMMON_DIR_ALIAS_PREFIX, ReapEntryKind, RegistryReapEntry, RegistryReapPlan,
-    RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
+    EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
+    ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry, alias_key_path,
+    ephemeral_root_rejection, is_ephemeral_path,
 };
 pub use registered::{
     ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,

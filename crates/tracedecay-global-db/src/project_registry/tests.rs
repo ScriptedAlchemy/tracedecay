@@ -87,13 +87,19 @@ async fn failed_reregistration_rolls_back_without_leaking_replacement_alias() {
         .await
         .expect("inject project registry write failure");
 
+    let failure = harness
+        .registered
+        .upsert_code_project("project-rollback", &replacement, None, None, None)
+        .await
+        .expect_err("injected project update failure must not report success");
     assert!(
-        harness
-            .registered
-            .upsert_code_project("project-rollback", &replacement, None, None, None)
-            .await
-            .is_none(),
-        "injected project update failure must not report success"
+        failure.is_database_error(),
+        "an injected write fault must surface as a database fault, not as an \
+         admission refusal or a reset demand: {failure:?}"
+    );
+    assert!(
+        failure.to_string().contains("upsert code project"),
+        "the database fault must name the operation it failed: {failure}"
     );
 
     harness

@@ -143,6 +143,21 @@ pub fn is_ephemeral_path(path: &Path) -> bool {
     path.starts_with(&temp_root)
 }
 
+/// Reason code carried by the [`TraceDecayError::ProjectRoute`] that
+/// [`RegisteredGlobalDb::upsert_code_project`] returns when
+/// [`ephemeral_root_rejection`] refuses a root. Callers match on this rather
+/// than on the human-readable reason text.
+///
+/// [`TraceDecayError::ProjectRoute`]: tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute
+pub const EPHEMERAL_PROJECT_ROOT_REASON_CODE: &str = "ephemeral_project_root";
+
+/// Authority name carried by the [`TraceDecayError::ResetRequired`] that
+/// [`RegisteredGlobalDb::upsert_code_project`] returns when more than one
+/// project id already claims a root or its repository.
+///
+/// [`TraceDecayError::ResetRequired`]: tracedecay_runtime_core::errors::TraceDecayError::ResetRequired
+pub const PROJECT_REGISTRY_AUTHORITY: &str = "project registry";
+
 /// Registry admission policy for a project root, returning the refusal reason
 /// when the root must not become a durable project authority.
 ///
@@ -664,6 +679,29 @@ impl RegisteredGlobalDb {
         self::ephemeral_root_rejection(project_root, profile_root)
     }
 
+    /// Mints or refreshes the durable authority row for a code project.
+    ///
+    /// Every non-success is a **named** state. The previous `Option` return
+    /// coerced three unrelated truths — an admission refusal, an unresolvable
+    /// authority conflict, and any database fault — into one indistinguishable
+    /// `None`, so no caller could tell "this root is not allowed to be an
+    /// authority" from "the registry is broken right now":
+    ///
+    /// * [`TraceDecayError::ProjectRoute`] with reason code
+    ///   `ephemeral_project_root` (not retryable): the root lives under the OS
+    ///   temporary directory while the profile does not, so it must never
+    ///   become a durable authority. This is a policy answer, not a failure.
+    /// * [`TraceDecayError::ResetRequired`] with authority `project registry`:
+    ///   two or more project ids already claim this root or its git common
+    ///   directory. Consolidating them would silently pick a winner, so the
+    ///   profile is reported as needing a reset instead.
+    /// * [`TraceDecayError::Database`]: the registry read, write, or
+    ///   post-commit read-back failed. Uncommitted work is dropped with the
+    ///   transaction.
+    ///
+    /// [`TraceDecayError::ProjectRoute`]: tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute
+    /// [`TraceDecayError::ResetRequired`]: tracedecay_runtime_core::errors::TraceDecayError::ResetRequired
+    /// [`TraceDecayError::Database`]: tracedecay_runtime_core::errors::TraceDecayError::Database
     pub async fn upsert_code_project(
         &self,
         project_id: &str,
@@ -671,14 +709,20 @@ impl RegisteredGlobalDb {
         git_common_dir: Option<&Path>,
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
-    ) -> Option<CodeProjectRecord> {
+    ) -> tracedecay_runtime_core::errors::Result<CodeProjectRecord> {
+        const OPERATION: &str = "upsert code project";
         // The one door through which a project authority is minted. Enforcing
         // admission here rather than at each caller means an ephemeral root
         // cannot become a durable authority even from a call site that has
         // never heard of the policy.
         if let Some(reason) = self.ephemeral_root_rejection(project_root) {
-            eprintln!("warning: refusing to register a TraceDecay project — {reason}");
-            return None;
+            return Err(
+                tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                    EPHEMERAL_PROJECT_ROOT_REASON_CODE,
+                    false,
+                    reason,
+                ),
+            );
         }
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let canonical_project_root = canonical_project_path(project_root);
@@ -692,7 +736,10 @@ impl RegisteredGlobalDb {
             super::repo_identity_aliases(canonical_git_common_dir.as_deref())
                 .into_iter()
                 .next();
-        let transaction = self.begin_write_transaction().await.ok()?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
         let mut existing_authorities = BTreeSet::new();
         for alias in [
@@ -708,9 +755,16 @@ impl RegisteredGlobalDb {
                     params![alias],
                 )
                 .await
-                .ok()?;
-            if let Some(row) = rows.next().await.ok()? {
-                existing_authorities.insert(row.get::<String>(0).ok()?);
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            if let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?
+            {
+                existing_authorities.insert(
+                    row.get::<String>(0)
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                );
             }
         }
         if let Some(git_common_dir_text) = git_common_dir_text.as_deref() {
@@ -720,17 +774,36 @@ impl RegisteredGlobalDb {
                     params![git_common_dir_text],
                 )
                 .await
-                .ok()?;
-            while let Some(row) = rows.next().await.ok()? {
-                existing_authorities.insert(row.get::<String>(0).ok()?);
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?
+            {
+                existing_authorities.insert(
+                    row.get::<String>(0)
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                );
             }
         }
         if existing_authorities.len() > 1 {
-            eprintln!(
-                "warning: refusing to consolidate conflicting TraceDecay project authorities for '{}'; reset the profile",
-                canonical_project_root.display()
+            // Two ids already claim this root or its repository. Picking one
+            // would fabricate a consolidation the caller never asked for, so
+            // the conflict is surfaced with the ids that produced it.
+            return Err(
+                tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+                    PROJECT_REGISTRY_AUTHORITY,
+                    format!(
+                        "conflicting project authorities [{}] already claim '{}'",
+                        existing_authorities
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        canonical_project_root.display()
+                    ),
+                ),
             );
-            return None;
         }
         let authority_project_id = existing_authorities
             .into_iter()
@@ -767,7 +840,7 @@ impl RegisteredGlobalDb {
                     ],
                 )
                 .await
-                .ok()?;
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
         } else {
             transaction
                 .execute(
@@ -775,7 +848,7 @@ impl RegisteredGlobalDb {
                     params![authority_project_id.as_str(), now],
                 )
                 .await
-                .ok()?;
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
         }
         let mut aliases = vec![current_root_alias];
         aliases.extend(git_common_dir_alias);
@@ -793,10 +866,26 @@ impl RegisteredGlobalDb {
                     params![alias, authority_project_id.as_str(), now],
                 )
                 .await
-                .ok()?;
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
         }
-        transaction.commit().await.ok()?;
-        self.get_code_project(&authority_project_id).await
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        // A committed authority that cannot be read back is a registry
+        // inconsistency, not an "unregistered project" — say so rather than
+        // handing the caller an absence it would read as a clean refusal.
+        self.get_code_project(&authority_project_id)
+            .await
+            .ok_or_else(|| {
+                global_db_operation_message(
+                    OPERATION,
+                    format!(
+                        "project '{authority_project_id}' is not readable after its \
+                         registration committed"
+                    ),
+                )
+            })
     }
 
     pub async fn upsert_project_alias(
