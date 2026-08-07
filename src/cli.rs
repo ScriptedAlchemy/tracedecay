@@ -118,7 +118,7 @@ pub struct Cli {
     /// Verify and print the exact signed lifecycle plan without mutating.
     /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
     /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `migrate storage-report`).
+    /// from unrelated subcommands (e.g. `branch gc`, `storage storage-report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
     /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
@@ -648,11 +648,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: AutomationAction,
     },
-    /// Inspect stores before profile-storage migration
-    #[command(long_about = MIGRATE_LONG_ABOUT, after_help = MIGRATE_AFTER_HELP)]
-    Migrate {
+    /// Inspect and preserve exact-final profile storage
+    #[command(long_about = STORAGE_LONG_ABOUT, after_help = STORAGE_AFTER_HELP)]
+    Storage {
         #[command(subcommand)]
-        action: MigrateAction,
+        action: ProfileStorageAction,
     },
     /// Wipe local tracedecay DBs (current folder, parents, and children)
     #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
@@ -1085,7 +1085,7 @@ pub enum MemoryAction {
 }
 
 #[derive(Subcommand)]
-pub enum MigrateAction {
+pub enum ProfileStorageAction {
     /// Read-only per-store size, free-page ratio, and retention-backlog report
     /// (plan 38 §7). Never mutates anything; use `branch gc` and the daemon's
     /// automatic sweeps to reclaim what this reports.

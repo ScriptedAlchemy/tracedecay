@@ -566,7 +566,7 @@ impl CommandFamily {
             | Commands::Projects { .. }
             | Commands::Branch { .. }
             | Commands::Memory { .. }
-            | Commands::Migrate { .. }
+            | Commands::Storage { .. }
             | Commands::Wipe { .. }
             | Commands::List { .. } => Self::Project,
             Commands::Tool { .. }
@@ -659,7 +659,7 @@ fn validate_host_bundle_options(
     // meaningful for the agent-lifecycle commands. Enforcing that scope here
     // (rather than via a global clap `requires = "component"`) keeps the flags
     // from leaking a spurious `--component` requirement onto unrelated verbs
-    // such as `branch gc` and `migrate storage-report`.
+    // such as `branch gc` and `storage storage-report`.
     if !matches!(family, CommandFamily::Agent)
         && (host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes)
     {
@@ -742,8 +742,8 @@ async fn dispatch_project_command(
         Commands::Memory { action } => {
             dispatch_memory_command(action).await?;
         }
-        Commands::Migrate { action } => {
-            commands::handle_migrate_action(action).await?;
+        Commands::Storage { action } => {
+            commands::handle_profile_storage_action(action).await?;
         }
         Commands::Wipe { all } => {
             commands::handle_wipe(all, assume_yes).await?;
@@ -1359,7 +1359,7 @@ impl CommandStartupPolicy {
                     | SessionsAction::GitSync { .. }
                     | SessionsAction::Unfinished { .. },
             }
-            | Commands::Migrate { .. }
+            | Commands::Storage { .. }
             | Commands::Projects { .. }
             | Commands::Daemon { .. }
             | Commands::Serve { .. } => Self::SkipAll,

@@ -1,21 +1,23 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::cli::MigrateAction;
+use crate::cli::ProfileStorageAction;
 
-pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_profile_storage_action(
+    action: ProfileStorageAction,
+) -> tracedecay::errors::Result<()> {
     match action {
-        MigrateAction::StorageReport {
+        ProfileStorageAction::StorageReport {
             profile_root,
             project_id,
             project_root,
             json,
-        } => handle_migrate_storage_report(profile_root, project_id, project_root, json).await,
-        MigrateAction::BackupProfile { to, backup_id } => {
-            handle_migrate_backup_profile(to, backup_id)
+        } => handle_storage_report(profile_root, project_id, project_root, json).await,
+        ProfileStorageAction::BackupProfile { to, backup_id } => {
+            handle_backup_profile(to, backup_id)
         }
-        MigrateAction::RehearseProfileBackup { backup, restore } => {
-            handle_migrate_rehearse_profile_backup(backup, restore)
+        ProfileStorageAction::RehearseProfileBackup { backup, restore } => {
+            handle_rehearse_profile_backup(backup, restore)
         }
     }
 }
@@ -91,7 +93,7 @@ fn merge_storage_report_page(
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
 /// (plan 38 §7). The active profile routes through the daemon's retained
 /// authority; explicit offline profiles retain the bounded read-only path.
-async fn handle_migrate_storage_report(
+async fn handle_storage_report(
     profile_root: Option<String>,
     project_id: Option<String>,
     project_root: Option<String>,
@@ -261,7 +263,7 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn handle_migrate_backup_profile(
+fn handle_backup_profile(
     destination: String,
     backup_id: String,
 ) -> tracedecay::errors::Result<()> {
@@ -298,7 +300,7 @@ fn handle_migrate_backup_profile(
     Ok(())
 }
 
-fn handle_migrate_rehearse_profile_backup(
+fn handle_rehearse_profile_backup(
     backup: String,
     restore: String,
 ) -> tracedecay::errors::Result<()> {

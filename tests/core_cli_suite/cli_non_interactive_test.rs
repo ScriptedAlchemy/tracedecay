@@ -2116,12 +2116,12 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
     );
 }
 
-/// `migrate storage-report` is read-only and works against an explicit
+/// `storage storage-report` is read-only and works against an explicit
 /// `--profile-root` without any daemon or registered project, reporting a
 /// real registered store's size and an unregistered directory's presence
 /// (plan 38 §7 — size observability reachable from a command).
 #[test]
-fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog() {
+fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let profile_root = profile_root(home.path());
@@ -2158,7 +2158,7 @@ fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog(
 
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args([
-        "migrate",
+        "storage",
         "storage-report",
         "--profile-root",
         profile_root.to_str().unwrap(),
@@ -2181,7 +2181,7 @@ fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog(
 }
 
 #[tokio::test]
-async fn migrate_storage_report_uses_active_daemon_authority_without_hanging() {
+async fn storage_report_uses_active_daemon_authority_without_hanging() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
@@ -2211,7 +2211,7 @@ async fn migrate_storage_report_uses_active_daemon_authority_without_hanging() {
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
-    command.args(["migrate", "storage-report", "--json"]);
+    command.args(["storage", "storage-report", "--json"]);
     let started = Instant::now();
     let output = run_with_timeout(command, Duration::from_secs(15));
 

@@ -1,7 +1,7 @@
-//! Root-owned seam onto the residual `tracedecay-migrate` modules.
+//! Root-owned seam onto the residual `tracedecay-migrate` module.
 //!
-//! Only the final-V2 schema stamp and the profile backup remain; both are
-//! re-exported here so their `crate::migrate::*` and `tracedecay::migrate::*`
-//! caller paths keep resolving until each finds its final owner.
+//! Only the profile backup remains; it is re-exported here so its
+//! `crate::migrate::profile_backup` and `tracedecay::migrate::profile_backup`
+//! caller paths keep resolving until it finds its final owner.
 
-pub use tracedecay_migrate::{final_v2, profile_backup};
+pub use tracedecay_migrate::profile_backup;

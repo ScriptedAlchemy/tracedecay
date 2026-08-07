@@ -343,19 +343,6 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     Err(unsupported_schema_version(current))
 }
 
-/// Compatibility alias for `crates/tracedecay-migrate`, which still names the
-/// schema door `migrate`. It performs no migration: see
-/// [`ensure_schema_current`].
-pub async fn migrate(database: &crate::db::Database) -> Result<()> {
-    ensure_schema_current(database).await
-}
-
-/// Connection-level compatibility alias. See [`migrate`].
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn migrate_connection(conn: &Connection) -> Result<()> {
-    ensure_schema_current_connection(conn).await
-}
-
 async fn create_memory_fact_relations_schema(conn: &impl Executor, operation: &str) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS memory_fact_relations (
