@@ -32,8 +32,8 @@ mod registered_lcm;
 mod registered_legacy_relations;
 mod registered_session_sync;
 mod registered_sessions;
-mod remote_deletion;
 pub mod registry_maintenance;
+mod remote_deletion;
 pub mod schema_contract;
 pub mod schema_stages;
 pub use schema_stages::ensure_registered_schema;
@@ -93,9 +93,9 @@ const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 pub use api_types::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
-    ProjectRegistryContext, ProjectStoreContext,
-    ProjectStoreResolution, RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal,
-    SessionActivityRow, SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    ProjectRegistryContext, ProjectStoreContext, ProjectStoreResolution,
+    RegisteredProjectRootInventoryV1, SavingsDay, SavingsTotal, SessionActivityRow,
+    SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
     StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
     TranscriptBatch,
 };

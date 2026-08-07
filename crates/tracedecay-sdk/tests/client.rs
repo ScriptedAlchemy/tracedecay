@@ -558,9 +558,9 @@ fn http_operations_refuse_the_mcp_execution_path_with_a_typed_error() {
 
     let error = client
         .execute_mcp::<WorkflowListDefinitions>(
-            &serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(
-                json!({}),
-            )
+            &serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!(
+                {}
+            ))
             .unwrap(),
         )
         .expect_err("HTTP-bound operations must not reach the MCP bridge");

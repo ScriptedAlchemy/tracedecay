@@ -25,8 +25,8 @@ use tracedecay_domain::{
 };
 
 use crate::feedback::observations::{
-    FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1, FeedbackSystemMetricKindV1,
-    FeedbackSystemMetricUnitV1, FeedbackCoverageV1,
+    FeedbackCoverageV1, FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1,
+    FeedbackSystemMetricKindV1, FeedbackSystemMetricUnitV1,
 };
 use tracedecay_global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 

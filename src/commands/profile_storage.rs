@@ -263,10 +263,7 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn handle_backup_profile(
-    destination: String,
-    backup_id: String,
-) -> tracedecay::errors::Result<()> {
+fn handle_backup_profile(destination: String, backup_id: String) -> tracedecay::errors::Result<()> {
     let profile_root = tracedecay::storage::default_profile_root()?;
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)

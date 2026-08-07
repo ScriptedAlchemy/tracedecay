@@ -255,7 +255,12 @@ where
             .workspace()
             .roots()
             .iter()
-            .filter(|root| mutation.removed.iter().any(|uri| root.matches_root_uri(uri)))
+            .filter(|root| {
+                mutation
+                    .removed
+                    .iter()
+                    .any(|uri| root.matches_root_uri(uri))
+            })
             .cloned()
             .collect::<Vec<_>>();
         self.clear_removed_workspace_root_state(&removed_roots);

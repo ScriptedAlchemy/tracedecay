@@ -324,7 +324,9 @@ pub async fn reject_fact_proposal<A: ProjectMemoryFactStore>(
     record_from_authority(&proposal)
 }
 
-fn record_from_authority(proposal: &ProjectMemoryFactProposalRecordV1) -> Result<FactProposalRecord> {
+fn record_from_authority(
+    proposal: &ProjectMemoryFactProposalRecordV1,
+) -> Result<FactProposalRecord> {
     let run_id = proposal.automation_run_id().ok_or_else(|| {
         config_error(format!(
             "fact proposal '{}' is missing its automation run identity",

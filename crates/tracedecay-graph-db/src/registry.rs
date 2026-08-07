@@ -217,10 +217,7 @@ impl GraphDbRegistry {
     /// via the publication surface; the raw runtime is for graphs whose native
     /// state is itself the authority (for example daemon-owned session
     /// relation graphs) and for direct storage tests.
-    pub fn resolve(
-        &self,
-        registration: GraphDbRegistration,
-    ) -> Result<Arc<GraphDb>, GraphDbError> {
+    pub fn resolve(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
         let path = registration.canonical_path().to_path_buf();

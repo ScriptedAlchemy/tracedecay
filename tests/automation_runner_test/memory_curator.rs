@@ -9,7 +9,8 @@ impl AgentTaskBackend for TransientThenJsonBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= 2 {
             return Err(

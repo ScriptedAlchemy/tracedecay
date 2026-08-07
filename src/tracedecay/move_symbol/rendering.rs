@@ -127,15 +127,15 @@ pub(super) fn strip_orphaned_imports(source_modified: &str, orphaned: &[String])
     let mut remaining: Vec<&str> = orphaned.iter().map(String::as_str).collect();
     let lines: Vec<&str> = source_modified
         .lines()
-        .filter(|line| {
-            match remaining.iter().position(|import| line.trim() == *import) {
+        .filter(
+            |line| match remaining.iter().position(|import| line.trim() == *import) {
                 Some(index) => {
                     remaining.swap_remove(index);
                     false
                 }
                 None => true,
-            }
-        })
+            },
+        )
         .collect();
     let mut out = lines.join("\n");
     if ends_with_newline && !out.is_empty() {

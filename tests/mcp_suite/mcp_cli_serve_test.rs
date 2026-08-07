@@ -42,9 +42,7 @@ use tracedecay::mcp::handle_tool_call;
 use tracedecay::serve;
 use tracedecay::storage::default_profile_sharded_layout;
 #[cfg(unix)]
-use tracedecay::storage::{
-    EnrollmentMarker, PrivateStoreIo, StorageMode, write_enrollment_marker,
-};
+use tracedecay::storage::{EnrollmentMarker, PrivateStoreIo, StorageMode, write_enrollment_marker};
 #[cfg(unix)]
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::tracedecay::TraceDecayOpenOptions;

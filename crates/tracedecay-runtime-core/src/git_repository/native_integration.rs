@@ -423,9 +423,7 @@ fn cherry_pick_candidate(
                     .map_err(|error| operation("native integration cherry-pick options", error))?,
             )
             .map_err(|error| operation("native integration cherry-pick merge", error))?;
-        if outcome
-            .has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::default())
-        {
+        if outcome.has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::default()) {
             return Ok((GitNativePreflightDisposition::Conflict, None));
         }
         current_tree = outcome
@@ -508,9 +506,7 @@ fn materialize_cherry_pick_chain(
                     .map_err(|error| operation("native integration cherry-pick options", error))?,
             )
             .map_err(|error| operation("native integration cherry-pick merge", error))?;
-        if outcome
-            .has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::default())
-        {
+        if outcome.has_unresolved_conflicts(gix::merge::tree::TreatAsUnresolved::default()) {
             return Err(GitRepositoryError::Operation {
                 operation: "native integration cherry-pick apply",
                 detail: "conflict after revalidation".to_owned(),

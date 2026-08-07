@@ -635,13 +635,11 @@ fn code_graph_error(
             "missing_registry",
             "the exact project graph registry is missing",
         ),
-        DashboardGraphReadErrorV1::Unavailable { detail } => {
-            ExplorerSourceProgressV1::unavailable(
-                ExplorerSourceIdV1::CodeGraph,
-                "graph_authority_unavailable",
-                detail,
-            )
-        }
+        DashboardGraphReadErrorV1::Unavailable { detail } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_authority_unavailable",
+            detail,
+        ),
         DashboardGraphReadErrorV1::Stale { detail } => ExplorerSourceProgressV1::unavailable(
             ExplorerSourceIdV1::CodeGraph,
             "graph_generation_stale",
@@ -667,13 +665,11 @@ fn code_graph_error(
             "graph_read_denied",
             "the graph read is not authorized",
         ),
-        DashboardGraphReadErrorV1::InvalidRequest { detail } => {
-            ExplorerSourceProgressV1::error(
-                ExplorerSourceIdV1::CodeGraph,
-                "graph_request_invalid",
-                detail,
-            )
-        }
+        DashboardGraphReadErrorV1::InvalidRequest { detail } => ExplorerSourceProgressV1::error(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_request_invalid",
+            detail,
+        ),
         DashboardGraphReadErrorV1::Corrupt { detail } => ExplorerSourceProgressV1::error(
             ExplorerSourceIdV1::CodeGraph,
             "verified_graph_corrupt",

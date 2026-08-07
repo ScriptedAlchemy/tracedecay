@@ -37,19 +37,13 @@ pub(super) fn feedback_observation_operation(
     operation: DaemonInvocationOperation,
 ) -> FeedbackOperationV1 {
     match operation {
-        DaemonInvocationOperation::FeedbackDiagnostics => {
-            FeedbackOperationV1::FeedbackDiagnostics
-        }
+        DaemonInvocationOperation::FeedbackDiagnostics => FeedbackOperationV1::FeedbackDiagnostics,
         DaemonInvocationOperation::FeedbackGet => FeedbackOperationV1::FeedbackGet,
         DaemonInvocationOperation::FeedbackExpand => FeedbackOperationV1::FeedbackExpand,
         DaemonInvocationOperation::FeedbackList => FeedbackOperationV1::FeedbackList,
-        DaemonInvocationOperation::FeedbackAdvisoryCycle => {
-            FeedbackOperationV1::FeedbackCycle
-        }
+        DaemonInvocationOperation::FeedbackAdvisoryCycle => FeedbackOperationV1::FeedbackCycle,
         DaemonInvocationOperation::FeedbackImpact => FeedbackOperationV1::PrimitiveImpact,
-        DaemonInvocationOperation::AffectedTests => {
-            FeedbackOperationV1::PrimitiveAffectedTests
-        }
+        DaemonInvocationOperation::AffectedTests => FeedbackOperationV1::PrimitiveAffectedTests,
         DaemonInvocationOperation::PrimitiveImpact => FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::PrimitiveAffectedTests => {
             FeedbackOperationV1::PrimitiveAffectedTests

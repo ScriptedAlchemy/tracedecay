@@ -748,7 +748,13 @@ mod tests {
     fn retained_parse_follows_overlay_edits_and_resets_on_replacement() {
         let mut overlays = OverlayStore::default();
         let opened = overlays
-            .open(&test_root(), "file:///root/a.rs", "rust", 1, "fn before() {}")
+            .open(
+                &test_root(),
+                "file:///root/a.rs",
+                "rust",
+                1,
+                "fn before() {}",
+            )
             .expect("open overlay");
         assert!(matches!(opened.parse_state, OverlayParseState::Ready(_)));
         assert!(matches!(
@@ -798,7 +804,13 @@ mod tests {
     fn unsupported_overlay_languages_stay_typed_and_do_not_fail_admission() {
         let mut overlays = OverlayStore::default();
         let opened = overlays
-            .open(&test_root(), "file:///root/notes.unknown", "plain", 1, "text")
+            .open(
+                &test_root(),
+                "file:///root/notes.unknown",
+                "plain",
+                1,
+                "text",
+            )
             .expect("unsupported languages still admit an overlay");
         assert_eq!(
             opened.parse_state,
@@ -941,7 +953,13 @@ mod tests {
         let mut overlays = OverlayStore::default();
         for index in 0..MAX_OPEN_DOCUMENTS {
             overlays
-                .open(&test_root(), format!("file:///root/{index}.rs"), "rust", 1, "")
+                .open(
+                    &test_root(),
+                    format!("file:///root/{index}.rs"),
+                    "rust",
+                    1,
+                    "",
+                )
                 .unwrap();
         }
         assert_eq!(

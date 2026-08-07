@@ -426,7 +426,6 @@ where
         let observed = observer.activation_committed(committed).await.is_ok();
         Some((ticket, observed))
     }
-
 }
 
 fn validate_activation_transition(

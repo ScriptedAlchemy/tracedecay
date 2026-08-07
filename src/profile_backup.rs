@@ -242,9 +242,7 @@ pub fn rehearse_complete_profile_backup(
     write_new_synced(
         &marker_path,
         &serde_json::to_vec_pretty(&marker).map_err(|error| {
-            ProfileBackupError::unavailable(format!(
-                "encode profile rehearsal marker: {error}"
-            ))
+            ProfileBackupError::unavailable(format!("encode profile rehearsal marker: {error}"))
         })?,
     )?;
     let result = (|| {
@@ -408,9 +406,11 @@ fn recover_interrupted_staging(
             staging.display()
         ))
     })?;
-    sync_directory(staging.parent().ok_or_else(|| {
-        ProfileBackupError::invalid("profile rehearsal staging has no parent")
-    })?)
+    sync_directory(
+        staging.parent().ok_or_else(|| {
+            ProfileBackupError::invalid("profile rehearsal staging has no parent")
+        })?,
+    )
 }
 
 fn finish_published_rehearsal(
@@ -537,9 +537,10 @@ fn rebind_restored_store_manifests(
                     manifest_path.display()
                 ))
             })?;
-        let project_id = store.file_name().into_string().map_err(|_| {
-            ProfileBackupError::corrupt("restored project store id is not Unicode")
-        })?;
+        let project_id = store
+            .file_name()
+            .into_string()
+            .map_err(|_| ProfileBackupError::corrupt("restored project store id is not Unicode"))?;
         let manifest = rebound_store_manifest(
             manifest,
             &project_id,
@@ -712,9 +713,7 @@ fn load_verified_backup(
         }
     })?;
     let manifest: CompleteProfileBackupManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| {
-            ProfileBackupError::corrupt(format!("decode backup manifest: {error}"))
-        })?;
+        .map_err(|error| ProfileBackupError::corrupt(format!("decode backup manifest: {error}")))?;
     validate_manifest(&manifest)?;
     for entry in manifest.entries.iter().filter(|entry| entry.present) {
         let path = checked_join(&root, &entry.logical_path)?;
@@ -904,10 +903,7 @@ fn copy_verified_file(
 
 fn verify_file(path: &Path, expected: &ProfileBackupEntry) -> Result<(), ProfileBackupError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
-        ProfileBackupError::corrupt(format!(
-            "inspect backup file '{}': {error}",
-            path.display()
-        ))
+        ProfileBackupError::corrupt(format!("inspect backup file '{}': {error}", path.display()))
     })?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(ProfileBackupError::corrupt(format!(
@@ -1004,10 +1000,7 @@ fn checked_join(root: &Path, logical: &str) -> Result<PathBuf, ProfileBackupErro
 
 fn sha256_file(path: &Path) -> Result<String, ProfileBackupError> {
     let mut file = File::open(path).map_err(|error| {
-        ProfileBackupError::unavailable(format!(
-            "open '{}' for hashing: {error}",
-            path.display()
-        ))
+        ProfileBackupError::unavailable(format!("open '{}' for hashing: {error}", path.display()))
     })?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
@@ -1052,10 +1045,7 @@ fn sync_file(path: &Path) -> Result<(), ProfileBackupError> {
 
 fn sync_directory(path: &Path) -> Result<(), ProfileBackupError> {
     tracedecay_application::sync_directory(path, DirectorySyncPolicy::Strict).map_err(|error| {
-        ProfileBackupError::unavailable(format!(
-            "sync directory '{}': {error}",
-            path.display()
-        ))
+        ProfileBackupError::unavailable(format!("sync directory '{}': {error}", path.display()))
     })
 }
 
@@ -1064,10 +1054,7 @@ fn restrict_private_directory(path: &Path) -> Result<(), ProfileBackupError> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-        ProfileBackupError::unavailable(format!(
-            "restrict directory '{}': {error}",
-            path.display()
-        ))
+        ProfileBackupError::unavailable(format!("restrict directory '{}': {error}", path.display()))
     })
 }
 

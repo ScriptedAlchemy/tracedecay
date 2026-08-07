@@ -500,8 +500,8 @@ pub(crate) fn validate_result(
     if !mode_matches {
         return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
     }
-    if let WorkGraphReadV1::Evolution { timeline, .. }
-    | WorkGraphReadV1::Forensic { timeline, .. } = result
+    if let WorkGraphReadV1::Evolution { timeline, .. } | WorkGraphReadV1::Forensic { timeline, .. } =
+        result
         && timeline.validate().is_err()
     {
         return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);

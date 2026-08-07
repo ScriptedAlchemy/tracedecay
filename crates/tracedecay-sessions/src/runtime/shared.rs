@@ -396,10 +396,7 @@ impl ProjectRootMatcherCache {
                 return entry.matcher.clone();
             }
 
-            let mut matchers = self
-                .matchers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+            let mut matchers = self.matchers.lock().unwrap_or_else(PoisonError::into_inner);
             if matchers
                 .get(&key)
                 .is_some_and(|cached| Arc::ptr_eq(cached, &entry))
@@ -551,7 +548,12 @@ impl TranscriptScopeMatcher {
 
     /// [`Self::profile`] resolved through a source-lifetime matcher cache.
     pub fn profile_cached(registered_roots: &[PathBuf], cache: &ProjectRootMatcherCache) -> Self {
-        Self::Profile(registered_roots.iter().map(|root| cache.get(root)).collect())
+        Self::Profile(
+            registered_roots
+                .iter()
+                .map(|root| cache.get(root))
+                .collect(),
+        )
     }
 
     /// [`Self::for_scope`] resolved through a source-lifetime matcher cache,
@@ -585,9 +587,9 @@ impl TranscriptScopeMatcher {
     /// scope undecided — deferring callers must not persist their cursor.
     pub fn membership(&self, cwd: Option<&Path>) -> ProjectMembership {
         match self {
-            Self::Project(project) => {
-                cwd.map_or(ProjectMembership::NoMatch, |cwd| project.contains_status(cwd))
-            }
+            Self::Project(project) => cwd.map_or(ProjectMembership::NoMatch, |cwd| {
+                project.contains_status(cwd)
+            }),
             Self::Profile(registered) => {
                 let Some(cwd) = cwd else {
                     return ProjectMembership::Match;

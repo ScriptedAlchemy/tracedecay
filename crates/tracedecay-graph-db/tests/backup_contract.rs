@@ -157,8 +157,7 @@ fn full_backup_restores_the_fenced_snapshot_and_excludes_later_writes() {
 
     fs::create_dir(&restored_root).unwrap();
     let destination = graph_path(&restored_root);
-    let restore_receipt =
-        GraphDb::restore_verified_backup(&backup, &destination, &live()).unwrap();
+    let restore_receipt = GraphDb::restore_verified_backup(&backup, &destination, &live()).unwrap();
     assert_eq!(restore_receipt, backup_receipt);
     assert_no_staging_residue(&restored_root);
 
@@ -292,12 +291,9 @@ fn restore_rejects_an_artifact_inventory_that_outgrew_its_manifest() {
     GraphDb::create_verified_backup(&source, &backup, &live()).unwrap();
     fs::write(backup.join("native").join("unlisted-artifact"), b"foreign").unwrap();
 
-    let error = GraphDb::restore_verified_backup(
-        &backup,
-        &temp.path().join("restored.grafeo"),
-        &live(),
-    )
-    .unwrap_err();
+    let error =
+        GraphDb::restore_verified_backup(&backup, &temp.path().join("restored.grafeo"), &live())
+            .unwrap_err();
 
     assert!(matches!(error, GraphDbError::Corrupt { .. }));
 }
@@ -313,7 +309,11 @@ fn restore_rejects_a_stale_format_backup_with_reset_required() {
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     manifest["graph_format_version"] = serde_json::Value::from(1);
-    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
     let destination = temp.path().join("restored.grafeo");
 
     let error = GraphDb::restore_verified_backup(&backup, &destination, &live()).unwrap_err();
@@ -335,7 +335,10 @@ fn restore_never_replaces_an_existing_destination() {
     let error = GraphDb::restore_verified_backup(&backup, &destination, &live()).unwrap_err();
 
     assert_eq!(error, GraphDbError::Conflict);
-    assert_eq!(fs::read(&destination).unwrap(), b"operator-owned destination");
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"operator-owned destination"
+    );
 }
 
 #[test]

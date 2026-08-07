@@ -27,10 +27,7 @@ pub(super) fn read_required_profile_identity(
 ) -> Result<(String, String), ProfileBackupError> {
     crate::daemon::profile_identity::read_required(profile_root)
         .map(|(brain_id, profile_id)| {
-            (
-                brain_id.as_str().to_owned(),
-                profile_id.as_str().to_owned(),
-            )
+            (brain_id.as_str().to_owned(), profile_id.as_str().to_owned())
         })
         .map_err(|error| {
             let message = format!(
@@ -65,7 +62,8 @@ pub(super) fn collect_project_identities(
                 ))
             })?;
         if manifest.project_id.as_deref() != Some(project_id)
-            || manifest.storage_mode != tracedecay_runtime_core::storage::StorageMode::ProfileSharded
+            || manifest.storage_mode
+                != tracedecay_runtime_core::storage::StorageMode::ProfileSharded
         {
             return Err(ProfileBackupError::corrupt(format!(
                 "project store manifest '{}' does not match its final enrollment identity",

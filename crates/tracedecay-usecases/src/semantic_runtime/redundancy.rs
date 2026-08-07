@@ -153,9 +153,7 @@ pub fn project_semantic_activation_gate(project_root: &Path) -> std::sync::Arc<M
 ///
 /// The process-local embedding handle is only an observed cache and must not
 /// select a generation independently of this durable activation projection.
-pub fn project_committed_semantic_pins(
-    project_root: &Path,
-) -> Option<SemanticCompatibilityPinsV1> {
+pub fn project_committed_semantic_pins(project_root: &Path) -> Option<SemanticCompatibilityPinsV1> {
     let activation = project_semantic_activation_gate(project_root);
     let _activation = activation
         .lock()

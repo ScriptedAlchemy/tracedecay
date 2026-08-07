@@ -44,6 +44,7 @@ use tracedecay_lsp::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+use super::service::invocation::HookOrchestrationPortV1;
 use super::{
     BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
@@ -52,7 +53,6 @@ use super::{
     DaemonPrimitiveRuntimeRegistrationError, HookOrchestrationRequestV1,
     HookOrchestrationTriggerV1, advisory_cycle_invocation_result,
 };
-use super::service::invocation::HookOrchestrationPortV1;
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
@@ -85,8 +85,8 @@ use crate::application::advisory::{
 };
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1,
-    FeedbackOutcomeV1, FeedbackSourceEventV1,
+    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
+    FeedbackSourceEventV1,
 };
 use crate::application::feedback::{
     FeedbackCycleInvocation, FeedbackCycleLspInput, ProductionFeedbackCycleAuthorizationFuture,
@@ -2045,10 +2045,12 @@ async fn register_production_advisory_owner(
         }
     };
     let orchestrator: Arc<dyn HookOrchestrationPortV1> = orchestrator;
-    Ok(crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1::new(
-        orchestrator,
-        move || publication.commit(),
-    ))
+    Ok(
+        crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1::new(
+            orchestrator,
+            move || publication.commit(),
+        ),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

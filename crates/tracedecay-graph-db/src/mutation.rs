@@ -48,7 +48,8 @@ pub(crate) fn apply(
 ) -> Result<GraphCommit, GraphDbError> {
     check()?;
     let existing = ExistingBatchState::load(database, &batch)?;
-    let external_endpoints = validate_references(database, &batch, &existing, endpoint_namespaces, check)?;
+    let external_endpoints =
+        validate_references(database, &batch, &existing, endpoint_namespaces, check)?;
     let sequence = state
         .sequence
         .checked_add(1)

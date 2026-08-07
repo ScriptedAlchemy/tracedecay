@@ -60,8 +60,7 @@ impl<'a> DaemonAdmissionPort<'a> {
 
 pub(crate) struct DaemonAdmissionResponseV1 {
     pub(crate) immediate: HookImmediateAdmissionV1,
-    pub(crate) feedback_notice:
-        Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>,
+    pub(crate) feedback_notice: Option<crate::application::advisory::AdvisoryHookLookupNoticeV1>,
 }
 
 #[derive(Clone, Copy, Deserialize)]

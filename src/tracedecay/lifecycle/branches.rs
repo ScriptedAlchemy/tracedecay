@@ -338,8 +338,7 @@ impl TraceDecay {
         }
 
         // Fallback: find nearest tracked ancestor
-        if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta)
-        {
+        if let Some(ancestor) = branch::find_nearest_tracked_ancestor(project_root, branch, &meta) {
             return (
                 default_db,
                 Some(ancestor.clone()),

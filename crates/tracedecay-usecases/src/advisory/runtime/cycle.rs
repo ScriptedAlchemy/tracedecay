@@ -90,9 +90,7 @@ where
         self.feedback_cycle.publication_store()
     }
 
-    pub fn source_observation_port(
-        &self,
-    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
+    pub fn source_observation_port(&self) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.observations)
     }
 
@@ -444,13 +442,9 @@ where
         let outcome = match ingress.outcome {
             GitHubReviewIngressProviderOutcomeV1::Complete => FeedbackOutcomeV1::Completed,
             GitHubReviewIngressProviderOutcomeV1::Partial => FeedbackOutcomeV1::Partial,
-            GitHubReviewIngressProviderOutcomeV1::Unavailable => {
-                FeedbackOutcomeV1::Unavailable
-            }
+            GitHubReviewIngressProviderOutcomeV1::Unavailable => FeedbackOutcomeV1::Unavailable,
             GitHubReviewIngressProviderOutcomeV1::Denied => FeedbackOutcomeV1::Denied,
-            GitHubReviewIngressProviderOutcomeV1::RateLimited => {
-                FeedbackOutcomeV1::RateLimited
-            }
+            GitHubReviewIngressProviderOutcomeV1::RateLimited => FeedbackOutcomeV1::RateLimited,
             GitHubReviewIngressProviderOutcomeV1::Stale => FeedbackOutcomeV1::Stale,
             GitHubReviewIngressProviderOutcomeV1::Failed => FeedbackOutcomeV1::Failed,
         };
@@ -758,9 +752,7 @@ pub(super) fn saturating_u32(value: u64) -> u32 {
     value.try_into().unwrap_or(u32::MAX)
 }
 
-pub(super) fn provider_state_event(
-    provider: &AdvisoryProviderStateV1,
-) -> FeedbackSourceEventV1 {
+pub(super) fn provider_state_event(provider: &AdvisoryProviderStateV1) -> FeedbackSourceEventV1 {
     let provider_kind = match provider.provider {
         AdvisoryProviderV1::GitHub => FeedbackAdvisoryProviderV1::GitHubReview,
         AdvisoryProviderV1::Ci => FeedbackAdvisoryProviderV1::CiLocalization,

@@ -267,7 +267,11 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
             "ordinary body",
             Some(r#"{"ingest_protection":{}}"#),
         ),
-        ("missing-section", "ordinary body", Some(r#"{"other":true}"#)),
+        (
+            "missing-section",
+            "ordinary body",
+            Some(r#"{"other":true}"#),
+        ),
         ("null-metadata", "ordinary body", None),
     ];
     for (idx, (message_id, content, metadata)) in variants.iter().enumerate() {

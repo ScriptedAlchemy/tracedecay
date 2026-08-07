@@ -18,7 +18,6 @@ pub use types::{
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
     ConfigurationPlanContext, ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1,
-    CredentialWriteHandleV1,
-    DirectConfigurationMutation, ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation,
-    configuration_layer_scope_digest,
+    CredentialWriteHandleV1, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
+    WriteOnlyCredentialMutation, configuration_layer_scope_digest,
 };

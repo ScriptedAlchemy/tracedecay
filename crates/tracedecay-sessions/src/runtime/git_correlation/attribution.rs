@@ -7,8 +7,8 @@ use tracedecay_graph_db::{GraphIdempotencyKey, GraphNamespace, GraphProjectorRev
 use super::{
     CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION_V1,
     GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionV1, SessionGitSpan,
-    SpanOverlapKind, git_evidence_projection_identity, normalize_worktree,
-    providers_compatible, publish_git_evidence_projection, recover_git_evidence_projection,
+    SpanOverlapKind, git_evidence_projection_identity, normalize_worktree, providers_compatible,
+    publish_git_evidence_projection, recover_git_evidence_projection,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";

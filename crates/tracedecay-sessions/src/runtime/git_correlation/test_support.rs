@@ -28,8 +28,7 @@ impl GitEvidenceGraphRuntimePort for MemoryEvidenceGraphRuntime {
         _idempotency_key: GraphIdempotencyKey,
         _cancelled: Arc<AtomicBool>,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        let snapshot =
-            VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
+        let snapshot = VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
         *self.snapshot.lock().unwrap() = Some(snapshot.clone());
         Ok(snapshot)
     }
@@ -39,10 +38,12 @@ impl GitEvidenceGraphRuntimePort for MemoryEvidenceGraphRuntime {
         _projection: &GraphProjectionIdentity,
         _cancelled: Arc<AtomicBool>,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
-        self.snapshot.lock().unwrap().clone().ok_or_else(|| {
-            GraphDbError::Unavailable {
+        self.snapshot
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| GraphDbError::Unavailable {
                 message: super::MISSING_VERIFIED_HEAD.to_owned(),
-            }
-        })
+            })
     }
 }

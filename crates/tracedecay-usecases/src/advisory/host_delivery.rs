@@ -24,8 +24,8 @@ use tracedecay_lsp::DaemonLspProviderBundle;
 
 use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1,
-    FeedbackOutcomeV1, FeedbackSourceEventV1, FeedbackHookScoutPhaseV1,
+    FeedbackDeliveryRouteV1, FeedbackHookScoutPhaseV1, FeedbackObservationEmitterV1,
+    FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
 use crate::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_host_integration::{

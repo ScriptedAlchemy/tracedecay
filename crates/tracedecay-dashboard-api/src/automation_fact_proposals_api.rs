@@ -114,8 +114,7 @@ pub async fn apply(
             );
         }
     };
-    match apply_fact_proposal_with_result(&memory, &id, Some("dashboard".to_string())).await
-    {
+    match apply_fact_proposal_with_result(&memory, &id, Some("dashboard".to_string())).await {
         Ok(result) => {
             if result.newly_promoted {
                 tracedecay_agent_hosts::automation::memory_digest::refresh_memory_digest_after_memory_change(
@@ -153,8 +152,7 @@ pub async fn reject(
             );
         }
     };
-    match reject_fact_proposal(&memory, &id, Some("dashboard".to_string()), reason).await
-    {
+    match reject_fact_proposal(&memory, &id, Some("dashboard".to_string()), reason).await {
         Ok(proposal) => (StatusCode::OK, Json(proposal_payload(&proposal))),
         Err(err) => (
             StatusCode::BAD_REQUEST,

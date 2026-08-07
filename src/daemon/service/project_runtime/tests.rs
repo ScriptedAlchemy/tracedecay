@@ -958,7 +958,9 @@ impl FeedbackCycleRuntimePort for CountingFeedbackCycle {
 
 struct PendingAdvisoryCycle;
 
-impl crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationPort for PendingAdvisoryCycle {
+impl crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationPort
+    for PendingAdvisoryCycle
+{
     fn invoke(
         &self,
         _request: crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationRequest,

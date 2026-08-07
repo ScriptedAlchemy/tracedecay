@@ -444,9 +444,7 @@ fn identity_and_canonical_path_cannot_be_rebound() {
         drop_counter: None,
     });
     assert_eq!(
-        registry
-            .resolve(changed_locator)
-            .unwrap_err(),
+        registry.resolve(changed_locator).unwrap_err(),
         GraphDbError::InvalidRequest {
             message: "verified graph locator digest does not bind the canonical graph path"
                 .to_owned()
@@ -603,9 +601,7 @@ fn close_and_retention_refuse_an_active_handle() {
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let first_identity = identity("profile-a", "project-a");
     let first_request = registration(first_identity.clone(), first_root.path());
-    let active = registry
-        .resolve(first_request.clone())
-        .unwrap();
+    let active = registry.resolve(first_request.clone()).unwrap();
 
     assert_eq!(
         registry.close(&first_request).unwrap_err(),

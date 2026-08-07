@@ -15,8 +15,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitDegradationV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewInputV1, GitIndexPreviewV1,
-    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexPreviewDispositionV1, GitIndexPreviewInputV1, GitIndexPreviewV1, GitIndexReceiptId,
+    GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitIndexUnsupportedStateV1,
     GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,

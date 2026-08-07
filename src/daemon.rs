@@ -195,9 +195,9 @@ pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
 pub(crate) use core_lifecycle::*;
-pub(crate) use shutdown_coordination::ShutdownStatus;
 pub use core_logging::*;
 pub use core_proxy::*;
+pub(crate) use shutdown_coordination::ShutdownStatus;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;

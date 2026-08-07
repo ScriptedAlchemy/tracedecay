@@ -42,8 +42,8 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use super::concrete_evidence::{complete, interruption, unavailable};
 use super::observations::{
     DurableFeedbackObservationQueueAdapterV1, DurableFeedbackObservationSinkV1,
-    FeedbackObservationEnvelopeV1, FeedbackObservationReadModelV1, FeedbackObservationSinkOutcome,
     FeedbackAnchorOperationV1, FeedbackObservationAdapter, FeedbackObservationEmitterV1,
+    FeedbackObservationEnvelopeV1, FeedbackObservationReadModelV1, FeedbackObservationSinkOutcome,
     FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
 use super::owner::{
@@ -293,17 +293,15 @@ impl Drop for ProjectFeedbackObservationSinkV1 {
         let dropped = self.dropped_count.swap(0, Ordering::Relaxed);
         let sequence = self.next_sequence();
         let observed_at = now_micros();
-        let Some(mut envelope) =
-            super::observations::feedback_source_event_envelope_for_subject(
-                self.boot_id.clone(),
-                observed_at,
-                FeedbackSourceEventV1::TelemetryDropObserved {
-                    dropped_count: dropped,
-                    last_sequence: sequence.saturating_sub(1),
-                    terminal: true,
-                },
-            )
-        else {
+        let Some(mut envelope) = super::observations::feedback_source_event_envelope_for_subject(
+            self.boot_id.clone(),
+            observed_at,
+            FeedbackSourceEventV1::TelemetryDropObserved {
+                dropped_count: dropped,
+                last_sequence: sequence.saturating_sub(1),
+                terminal: true,
+            },
+        ) else {
             return;
         };
         if envelope
@@ -375,8 +373,7 @@ impl FeedbackRuntime {
         let durable_observations = DurableFeedbackObservationQueueAdapterV1::new(
             ProjectFeedbackObservationSinkV1::start(publications.database.clone()).await?,
         );
-        let observation_adapter =
-            Arc::new(FeedbackObservationAdapter::new(durable_observations));
+        let observation_adapter = Arc::new(FeedbackObservationAdapter::new(durable_observations));
         publications.source_observations = Some(observation_adapter.clone());
         let service = FeedbackReadService::new(
             CanonicalFeedbackReadOwnerV1::new(publications.clone()),
@@ -413,9 +410,7 @@ impl FeedbackRuntime {
         Arc::clone(&self.observations)
     }
 
-    pub fn source_observation_port(
-        &self,
-    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
+    pub fn source_observation_port(&self) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.source_observations)
     }
 
@@ -1474,10 +1469,7 @@ fn decode_ledger(
     Ok(ledger.publications)
 }
 
-fn interruption_outcome(
-    context: &RequestContext,
-    observed_at: UtcMicros,
-) -> FeedbackOutcomeV1 {
+fn interruption_outcome(context: &RequestContext, observed_at: UtcMicros) -> FeedbackOutcomeV1 {
     match context.admission_at(observed_at) {
         RequestAdmission::Cancelled => FeedbackOutcomeV1::Cancelled,
         RequestAdmission::TimedOut => FeedbackOutcomeV1::TimedOut,

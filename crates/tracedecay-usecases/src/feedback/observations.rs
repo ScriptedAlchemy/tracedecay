@@ -259,7 +259,9 @@ impl FeedbackObservationDeliveryV1 {
                 Some(())
             }
             FeedbackCoverageV1::Unknown if !persisted && self.emitted == 0 => Some(()),
-            FeedbackCoverageV1::Sampled | FeedbackCoverageV1::Capped | FeedbackCoverageV1::Stale
+            FeedbackCoverageV1::Sampled
+            | FeedbackCoverageV1::Capped
+            | FeedbackCoverageV1::Stale
                 if !persisted || self.emitted == 1 =>
             {
                 Some(())
@@ -901,10 +903,10 @@ impl FeedbackSystemQualityReadModelV1 {
             }
             if let Some(outcome) = source_event_outcome(event) {
                 outcome_total = outcome_total.saturating_add(1);
-                denied_outcomes = denied_outcomes
-                    .saturating_add(u64::from(outcome == FeedbackOutcomeV1::Denied));
-                stale_outcomes = stale_outcomes
-                    .saturating_add(u64::from(outcome == FeedbackOutcomeV1::Stale));
+                denied_outcomes =
+                    denied_outcomes.saturating_add(u64::from(outcome == FeedbackOutcomeV1::Denied));
+                stale_outcomes =
+                    stale_outcomes.saturating_add(u64::from(outcome == FeedbackOutcomeV1::Stale));
             }
             match event {
                 FeedbackSourceEventV1::RelevanceFeedback { disposition } => {
@@ -1376,11 +1378,9 @@ where
         observed_at: UtcMicros,
         source_event: FeedbackSourceEventV1,
     ) {
-        if let Some(envelope) = feedback_source_event_envelope_for_subject(
-            subject_digest,
-            observed_at,
-            source_event,
-        ) {
+        if let Some(envelope) =
+            feedback_source_event_envelope_for_subject(subject_digest, observed_at, source_event)
+        {
             let _ = self.sink.enqueue_feedback_observation(envelope);
         }
     }

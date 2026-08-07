@@ -19,8 +19,8 @@ use super::invocation::{
     DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
     DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, RegisteredCallableCodeRuntime,
     RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredHookOrchestrationRuntimeV1, RegisteredWorkRuntime,
-    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    RegisteredHookOrchestrationRuntimeV1, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
+    UnavailableFeedbackCycleRuntimeV1,
 };
 
 mod shutdown;

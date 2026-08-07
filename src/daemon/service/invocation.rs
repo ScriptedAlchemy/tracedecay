@@ -116,7 +116,7 @@ use crate::application::feedback::cycle_production::{
 use crate::application::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
     FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
-    FeedbackSourceEventV1, FeedbackRejectedArgumentV1,
+    FeedbackRejectedArgumentV1, FeedbackSourceEventV1,
 };
 use crate::application::feedback::owner::{
     DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
@@ -249,8 +249,8 @@ pub(crate) use registrars::{
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredHookOrchestrationRuntimeV1, RegisteredWorkRuntime,
-    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    RegisteredHookOrchestrationRuntimeV1, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
+    UnavailableFeedbackCycleRuntimeV1,
 };
 
 #[derive(Clone)]

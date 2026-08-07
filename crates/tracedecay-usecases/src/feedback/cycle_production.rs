@@ -1633,13 +1633,14 @@ mod tests {
         )
         .expect("policy context");
 
-        let admitted = AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
-            &PolicyEvaluatorCompositionV1::from_application_catalog().expect("policy"),
-            &context,
-            identity,
-            input,
-        )
-        .expect("typed unavailable provider");
+        let admitted =
+            AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
+                &PolicyEvaluatorCompositionV1::from_application_catalog().expect("policy"),
+                &context,
+                identity,
+                input,
+            )
+            .expect("typed unavailable provider");
 
         assert_eq!(
             admitted.state(),

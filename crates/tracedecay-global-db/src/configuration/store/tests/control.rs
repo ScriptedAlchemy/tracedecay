@@ -20,10 +20,9 @@ use tracedecay_domain::configuration::CredentialReferenceMetadataV1;
 use tracedecay_domain::configuration::{
     AccessRuleId, AuthorityRef, ConfigurationLayerIdV1, ConfigurationMutationOperationV1,
     ConfigurationSettlementAuthorityV1, ConfigurationValueV1, CredentialKindV1,
-    DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest,
-    ProtectedChange, RollbackModeV1, RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule,
-    ScopeAccessSubjectV1, ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId,
-    SourceKindV1,
+    DIAGNOSTICS_PREWARM_SETTING_KEY, ProtectedApplyRequest, ProtectedChange, RollbackModeV1,
+    RuleEffect, SOURCE_BINDINGS_SETTING_KEY, ScopeAccessRule, ScopeAccessSubjectV1,
+    ScopeControlOperationV1, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::research::CapabilityId;
 use tracedecay_domain::{ActorId, LocatorDigest, ProjectId, UtcMicros, canonical_sha256};

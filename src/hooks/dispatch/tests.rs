@@ -199,10 +199,8 @@ fn daemon_feedback_notice_survives_into_host_delivery() {
     assert!(rendered.starts_with("TraceDecay feedback ready for authorized lookup: "));
     let encoded = rendered.split_once(": ").unwrap().1;
     assert_eq!(
-        serde_json::from_str::<crate::application::advisory::AdvisoryHookLookupNoticeV1>(
-            encoded
-        )
-        .unwrap(),
+        serde_json::from_str::<crate::application::advisory::AdvisoryHookLookupNoticeV1>(encoded)
+            .unwrap(),
         notice
     );
 }

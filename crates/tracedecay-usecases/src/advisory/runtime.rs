@@ -32,9 +32,9 @@ use crate::feedback::concrete::{ConcreteFeedbackOwner, ProjectFeedbackStore};
 use crate::feedback::cycle_runtime::{CanonicalFeedbackResultV1, FeedbackCycleRuntime};
 use crate::feedback::observations::{
     FeedbackAdvisoryProviderV1, FeedbackCiProviderV1, FeedbackCoverageV1,
-    FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
-    FeedbackSourceEventV1, FeedbackGitHubLifecycleV1, FeedbackProximityRiskV1,
-    FeedbackProximityTransitionV1,
+    FeedbackGitHubLifecycleV1, FeedbackObservationEmitterV1, FeedbackOperationV1,
+    FeedbackOutcomeV1, FeedbackProximityRiskV1, FeedbackProximityTransitionV1,
+    FeedbackSourceEventV1,
 };
 use crate::operation_stream::OperationEmitter;
 use tracedecay_runtime_core::db::Database;

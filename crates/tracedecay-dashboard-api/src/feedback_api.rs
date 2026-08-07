@@ -14,7 +14,7 @@ use tracedecay_api::feedback::{
 use tracedecay_application::ApplicationContractError;
 
 use crate::application::feedback::observations::{
-    FeedbackObservationReadModelV1, FeedbackCoverageV1,
+    FeedbackCoverageV1, FeedbackObservationReadModelV1,
 };
 
 use super::DashboardState;

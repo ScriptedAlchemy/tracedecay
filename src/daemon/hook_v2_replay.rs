@@ -865,8 +865,7 @@ mod tests {
                                 .push("replayed lifecycle suggestion");
                         }
                         HookV2AdmissionOutcomeV1::Admitted {
-                            orchestration:
-                                crate::daemon::HookOrchestrationAdmissionV1::Enqueued,
+                            orchestration: crate::daemon::HookOrchestrationAdmissionV1::Enqueued,
                             ready_guidance: serde_json::json!({
                                 "suggestion": "replayed lifecycle suggestion"
                             }),

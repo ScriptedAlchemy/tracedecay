@@ -125,11 +125,12 @@ impl AgentTaskBackend for CodexAppServerBackend {
         &self,
         request: &AgentTaskRequest,
     ) -> std::result::Result<AgentTaskResponse, AgentTaskError> {
-        let backend_message = request.backend_message().map_err(|error| {
-            AgentTaskError::Failed {
-                reason: error.to_string(),
-            }
-        })?;
+        let backend_message =
+            request
+                .backend_message()
+                .map_err(|error| AgentTaskError::Failed {
+                    reason: error.to_string(),
+                })?;
         // The app-server port renders its failure as one message; the typed
         // taxonomy admits that string exactly once, at this boundary.
         let summary = run_prompt_with_codex_app_server(

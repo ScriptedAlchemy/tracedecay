@@ -562,7 +562,8 @@ impl TraceDecay {
                 // so the move removes it instead of leaving a dead import.
                 let leaf = &stmt.leaves[0].binding;
                 if !source_identifiers.contains(leaf) {
-                    out.orphaned_source_imports.push(stmt.text.trim().to_string());
+                    out.orphaned_source_imports
+                        .push(stmt.text.trim().to_string());
                     out.hints.push(MoveHint {
                         kind: "orphaned_import_removed".to_string(),
                         file: source_rel.to_string(),

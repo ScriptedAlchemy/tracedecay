@@ -48,13 +48,13 @@ pub(crate) use location::{
 pub use owner::GraphDbOwner;
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
 pub(crate) use owner::GraphDbOwner;
-pub use projection::{NeverCancelled, ProjectionReplacement};
 pub use projection::{
     GraphCancellation, GraphCommit, GraphEntity, GraphEntityId, GraphGenerationId,
     GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace, GraphProjectionId,
     GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId, GraphRelationKind,
     GraphVector, GraphWatermark, GraphWriteBatch, SourceGeneration,
 };
+pub use projection::{NeverCancelled, ProjectionReplacement};
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use projection_read::GraphProjectionLabelPage;
 #[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]

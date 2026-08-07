@@ -67,20 +67,20 @@ pub(super) fn fold_scanned_frames(
         };
         let mut message =
             match map_sanitized_claude_record_cached(record, &context, &source.project_matchers) {
-            ClaudeRecordDisposition::Message { message, .. } => Some(*message),
-            ClaudeRecordDisposition::NonConversational => {
-                let owned_native = envelope_native_content(record);
-                let native = owned_native.as_ref().unwrap_or(record);
-                system_hook_message_from_line(
-                    native,
-                    source_path,
-                    &context,
-                    frame.raw_hook_tool_use_id().filter(|raw| {
-                        native.get("toolUseID").and_then(Value::as_str) == Some(*raw)
-                    }),
-                )
-            }
-        };
+                ClaudeRecordDisposition::Message { message, .. } => Some(*message),
+                ClaudeRecordDisposition::NonConversational => {
+                    let owned_native = envelope_native_content(record);
+                    let native = owned_native.as_ref().unwrap_or(record);
+                    system_hook_message_from_line(
+                        native,
+                        source_path,
+                        &context,
+                        frame.raw_hook_tool_use_id().filter(|raw| {
+                            native.get("toolUseID").and_then(Value::as_str) == Some(*raw)
+                        }),
+                    )
+                }
+            };
         if message.is_none() {
             let owned_native = envelope_native_content(record);
             let marker_source = owned_native.as_ref().unwrap_or(record);

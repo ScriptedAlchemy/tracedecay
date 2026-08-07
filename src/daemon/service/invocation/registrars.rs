@@ -530,7 +530,6 @@ impl DaemonFeedbackRuntimeRegistrar {
             .map_err(DaemonFeedbackRuntimeRegistrationError::from)?;
         Ok(runtime)
     }
-
 }
 
 impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
@@ -675,8 +674,9 @@ impl DaemonConfigurationRuntimeRegistrar {
             })
             .await
             .ok_or_else(|| TraceDecayError::Config {
-                message: "semantic configuration operation requires a registered configuration runtime"
-                    .to_owned(),
+                message:
+                    "semantic configuration operation requires a registered configuration runtime"
+                        .to_owned(),
             })?
     }
 

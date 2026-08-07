@@ -270,8 +270,7 @@ pub struct DashboardState {
     /// the CWD per request.
     pub resolved_scope: Option<tracedecay_application::ResolvedScope>,
     /// Exact verified-generation graph reader retained by the daemon.
-    pub graph_read_authority:
-        Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
+    pub graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
     /// Exact project graph retained by the daemon for this dashboard state.
     /// Absent for lightweight/profile-only states that cannot run project
     /// automation.

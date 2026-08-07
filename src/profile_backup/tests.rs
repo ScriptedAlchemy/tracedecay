@@ -66,9 +66,7 @@ fn released_profile(root: &Path) {
     .unwrap();
 }
 
-fn exclusive_lease(
-    profile: &Path,
-) -> tracedecay_runtime_core::lifecycle_lease::LifecycleLease {
+fn exclusive_lease(profile: &Path) -> tracedecay_runtime_core::lifecycle_lease::LifecycleLease {
     tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(profile, "backup test")
         .unwrap()
 }
@@ -88,13 +86,9 @@ fn complete_backup_rehearses_from_restored_isolated_copy() {
     let manifest = rehearse_complete_profile_backup(&backup, &restore).unwrap();
 
     // Database sidecars are folded into snapshot artifacts, never inventoried.
-    assert!(
-        manifest
-            .entries
-            .iter()
-            .all(|entry| !entry.logical_path.ends_with("-wal")
-                && !entry.logical_path.ends_with("-shm"))
-    );
+    assert!(manifest.entries.iter().all(
+        |entry| !entry.logical_path.ends_with("-wal") && !entry.logical_path.ends_with("-shm")
+    ));
     assert!(
         manifest
             .entries
@@ -202,7 +196,10 @@ fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
         fs::read(restore.join("user-sessions.db")).unwrap(),
         expected_lcm
     );
-    assert_eq!(fs::read(restore.join("config.toml")).unwrap(), expected_config);
+    assert_eq!(
+        fs::read(restore.join("config.toml")).unwrap(),
+        expected_config
+    );
 }
 
 #[test]
@@ -269,7 +266,11 @@ fn rehearsal_rejects_an_older_manifest_schema_as_reset_required() {
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     manifest["schema_version"] = serde_json::Value::from(1);
-    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 
     let error =
         rehearse_complete_profile_backup(&backup, &temp.path().join("restored")).unwrap_err();
@@ -352,7 +353,11 @@ fn rehearsal_publication_faults_resume_or_rollback_at_each_boundary() {
                 if message.contains("injected rehearsal publication fault")),
             "{fault}: unexpected error {error}"
         );
-        assert_eq!(staging.is_dir(), expect_staging, "{fault}: staging presence");
+        assert_eq!(
+            staging.is_dir(),
+            expect_staging,
+            "{fault}: staging presence"
+        );
         assert_eq!(
             restore.join(REHEARSAL_MARKER_FILENAME).is_file(),
             expect_published_marker,
@@ -382,7 +387,11 @@ fn rehearsal_rejects_project_store_missing_store_manifest() {
     manifest
         .entries
         .retain(|entry| entry.logical_path != manifest_entry);
-    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 
     let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
     assert!(

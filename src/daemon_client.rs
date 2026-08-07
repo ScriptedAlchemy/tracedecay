@@ -26,9 +26,7 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName,
 };
 
-use crate::application::feedback::observations::{
-    FeedbackDeliveryRouteV1, FeedbackSourceEventV1,
-};
+use crate::application::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use crate::request_identity::{
     ConnectionLocalRequestSequence, GlobalRequestSurface, mint_global_request_id,
 };

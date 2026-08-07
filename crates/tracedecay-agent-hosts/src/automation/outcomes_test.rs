@@ -409,8 +409,7 @@ async fn concurrent_refreshes_preserve_both_snapshot_halves() {
     let profile_root = temp.path().join("profile");
     let dashboard_root = temp.path().join("dashboard");
     seed_approved_skill(&profile_root).await;
-    let database =
-        seed_applied_fact_database(&temp.path().join("memory.db")).await;
+    let database = seed_applied_fact_database(&temp.path().join("memory.db")).await;
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let now = crate::tracedecay::current_timestamp();
@@ -440,8 +439,7 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     let profile_root = temp.path().join("profile");
     let dashboard_root = temp.path().join("dashboard");
     seed_approved_skill(&profile_root).await;
-    let database =
-        seed_applied_fact_database(&temp.path().join("memory.db")).await;
+    let database = seed_applied_fact_database(&temp.path().join("memory.db")).await;
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let path = automation_outcomes_path(&dashboard_root);

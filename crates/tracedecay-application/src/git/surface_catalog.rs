@@ -21,8 +21,9 @@ use tracedecay_tool_catalog::{
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::git::{
-    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest, GitHistorySurfaceRequest,
-    GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadResultV1, GitStatusSurfaceRequest,
+    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
+    GitHistorySurfaceRequest, GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadResultV1,
+    GitStatusSurfaceRequest,
 };
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;

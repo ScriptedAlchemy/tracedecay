@@ -44,11 +44,10 @@ pub use dashboard::{
 };
 pub use proposal::{
     FactProposalPromotionStateV1, ProjectMemoryFactProposalEvidenceV1,
-    ProjectMemoryFactProposalPageV1,
-    ProjectMemoryFactProposalPromotionDispositionV1, ProjectMemoryFactProposalPromotionResultV1,
-    ProjectMemoryFactProposalPromotionV1, ProjectMemoryFactProposalRecordV1,
-    ProjectMemoryFactProposalRevisionV1, ProjectMemoryFactProposalStateV1, PromoteFactProposal,
-    PromoteFactProposalOutcome,
+    ProjectMemoryFactProposalPageV1, ProjectMemoryFactProposalPromotionDispositionV1,
+    ProjectMemoryFactProposalPromotionResultV1, ProjectMemoryFactProposalPromotionV1,
+    ProjectMemoryFactProposalRecordV1, ProjectMemoryFactProposalRevisionV1,
+    ProjectMemoryFactProposalStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
 };
 pub use search::{
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,

@@ -13,13 +13,13 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay::profile_backup::{
+    ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
+};
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphEntity,
     GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphTraversalDirection,
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
-};
-use tracedecay::profile_backup::{
-    ProfileBackupError, create_complete_profile_backup, rehearse_complete_profile_backup,
 };
 use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
@@ -234,8 +234,14 @@ fn create_backup(temp: &TempDir, profile: &Path) -> PathBuf {
         "verified backup test",
     )
     .unwrap();
-    create_complete_profile_backup(profile, &temp.path().join("backups"), "backup.verified", 100, &lease)
-        .unwrap()
+    create_complete_profile_backup(
+        profile,
+        &temp.path().join("backups"),
+        "backup.verified",
+        100,
+        &lease,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -244,8 +250,7 @@ fn verified_backup_restores_databases_that_open_and_accept_writes() {
     let (profile, _) = seed_profile(&temp);
     let backup = create_backup(&temp, &profile);
 
-    let manifest =
-        tracedecay::profile_backup::load_and_verify_backup(&backup).unwrap();
+    let manifest = tracedecay::profile_backup::load_and_verify_backup(&backup).unwrap();
     assert_eq!(manifest.source_brain_id, BRAIN_ID);
     assert_eq!(manifest.source_profile_id, PROFILE_ID);
     assert_eq!(manifest.projects.len(), 1);
@@ -286,13 +291,21 @@ fn verified_backup_restores_databases_that_open_and_accept_writes() {
     // The restored graph store opens through the registry authority and
     // serves the fenced snapshot.
     assert_graph_store_serves_seeded_entity(
-        &restored.join("projects").join(PROJECT_ID).join(GRAPH_DB_FILENAME),
+        &restored
+            .join("projects")
+            .join(PROJECT_ID)
+            .join(GRAPH_DB_FILENAME),
     );
 
     // Retention journal state rides through byte-exact for post-restore replay.
     assert_eq!(
-        fs::read(restored.join("projects").join(PROJECT_ID).join("retention-journal.json"))
-            .unwrap(),
+        fs::read(
+            restored
+                .join("projects")
+                .join(PROJECT_ID)
+                .join("retention-journal.json")
+        )
+        .unwrap(),
         br#"{"pending":"generation-sweep"}"#
     );
 }
@@ -315,11 +328,14 @@ fn rehearsal_rejects_a_graph_artifact_that_fails_engine_verification() {
     for entry in manifest["entries"].as_array_mut().unwrap() {
         if entry["logical_path"] == artifact_logical.as_str() {
             entry["byte_len"] = serde_json::Value::from(corrupt_bytes.len() as u64);
-            entry["sha256"] =
-                serde_json::Value::from(hex::encode(Sha256::digest(&corrupt_bytes)));
+            entry["sha256"] = serde_json::Value::from(hex::encode(Sha256::digest(&corrupt_bytes)));
         }
     }
-    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
     let restored = temp.path().join("restored");
 
     let error = rehearse_complete_profile_backup(&backup, &restored).unwrap_err();

@@ -311,10 +311,10 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
     .await
     .unwrap();
     let text = extract_text(&result.value);
-    let envelope: Value =
-        serde_json::from_str(text).expect("large grep response envelope");
+    let envelope: Value = serde_json::from_str(text).expect("large grep response envelope");
     assert_eq!(
-        envelope["truncated"], true,
+        envelope["truncated"],
+        true,
         "expected MCP truncation envelope ({} chars)",
         text.len()
     );

@@ -1693,13 +1693,10 @@ mod tests {
         .await
         .unwrap();
 
-        let (applied, newly_promoted) = auto_apply_session_fact_proposals(
-            &memory,
-            Some(&project_root),
-            records.clone(),
-        )
-        .await
-        .unwrap();
+        let (applied, newly_promoted) =
+            auto_apply_session_fact_proposals(&memory, Some(&project_root), records.clone())
+                .await
+                .unwrap();
         assert!(newly_promoted);
         assert_eq!(applied[0].state, FactProposalState::Applied);
 
@@ -1707,13 +1704,10 @@ mod tests {
         assert!(snapshot.exists(), "new promotion must refresh the digest");
         std::fs::remove_file(&snapshot).unwrap();
 
-        let (replayed, newly_promoted) = auto_apply_session_fact_proposals(
-            &memory,
-            Some(&project_root),
-            records,
-        )
-        .await
-        .unwrap();
+        let (replayed, newly_promoted) =
+            auto_apply_session_fact_proposals(&memory, Some(&project_root), records)
+                .await
+                .unwrap();
         assert!(
             !newly_promoted,
             "an applied proposal replay is not a promotion"
@@ -1800,13 +1794,9 @@ mod tests {
             .await
             .unwrap();
 
-        let error = auto_apply_session_fact_proposals(
-            &memory,
-            Some(&project_root),
-            records,
-        )
-        .await
-        .expect_err("the rejected second proposal must keep its original error path");
+        let error = auto_apply_session_fact_proposals(&memory, Some(&project_root), records)
+            .await
+            .expect_err("the rejected second proposal must keep its original error path");
         assert!(error.to_string().contains("not pending approval"));
         assert!(
             crate::automation::memory_digest::memory_digest_snapshot_path(&profile_root).exists(),

@@ -54,10 +54,13 @@ pub(super) fn is_database_sidecar(path: &Path) -> bool {
         || name.ends_with(".grafeo.wal")
 }
 
-pub(super) fn snapshot_artifact(source: &Path, destination: &Path) -> Result<(), ProfileBackupError> {
-    let parent = destination.parent().ok_or_else(|| {
-        ProfileBackupError::invalid("backup artifact destination has no parent")
-    })?;
+pub(super) fn snapshot_artifact(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), ProfileBackupError> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ProfileBackupError::invalid("backup artifact destination has no parent"))?;
     fs::create_dir_all(parent).map_err(|error| {
         ProfileBackupError::unavailable(format!(
             "create backup artifact parent '{}': {error}",
@@ -210,9 +213,9 @@ fn snapshot_graph_store(source: &Path, destination: &Path) -> Result<(), Profile
 }
 
 fn native_backup_path(destination: &Path) -> Result<PathBuf, ProfileBackupError> {
-    let parent = destination.parent().ok_or_else(|| {
-        ProfileBackupError::invalid("graph snapshot destination has no parent")
-    })?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ProfileBackupError::invalid("graph snapshot destination has no parent"))?;
     let name = destination
         .file_name()
         .and_then(|name| name.to_str())

@@ -616,8 +616,7 @@ fn fallback_read_releases_writer_before_verified_head_cas() {
 
     fixture.readers.begin_shutdown_drain();
     let (read_control, read_probe) = control_and_probe("writer-only.read", None);
-    let read_context =
-        GraphPublicationOperationContextV1::new(&read_control, &read_probe).unwrap();
+    let read_context = GraphPublicationOperationContextV1::new(&read_control, &read_probe).unwrap();
     assert!(matches!(
         storage.replay(&publication.key, &read_context).unwrap(),
         GraphPublicationReplayLookupV1::Active(_)

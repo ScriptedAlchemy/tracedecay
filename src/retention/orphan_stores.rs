@@ -613,11 +613,11 @@ async fn check_store_durable_memory(
     graph_scope_relpaths: &[PathBuf],
     scratch_root: &Path,
 ) -> DurableMemoryCheck {
-    let inventory = match durable_database_inventory(data_root, manifest_bytes, graph_scope_relpaths)
-    {
-        DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
-        DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
-    };
+    let inventory =
+        match durable_database_inventory(data_root, manifest_bytes, graph_scope_relpaths) {
+            DurableDatabaseInventoryV1::Resolved(inventory) => inventory,
+            DurableDatabaseInventoryV1::Unverifiable => return DurableMemoryCheck::Unverifiable,
+        };
     for relpath in inventory {
         match check_durable_memory_rows(data_root, &relpath, scratch_root).await {
             DurableMemoryCheck::Empty => {}

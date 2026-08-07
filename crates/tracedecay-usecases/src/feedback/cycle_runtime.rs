@@ -48,8 +48,8 @@ use tracedecay_runtime_core::db::Database;
 use super::concrete::{FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore};
 use super::diagnostics::{DatabaseDiagnosticStore, DiagnosticStoreFeedbackProvider};
 use super::observations::{
-    FeedbackDeliveryRouteV1, FeedbackObservationEmitterV1, FeedbackOperationV1,
-    FeedbackOutcomeV1, FeedbackSourceEventV1, FeedbackLspMethodClassV1, FeedbackLspStateV1,
+    FeedbackDeliveryRouteV1, FeedbackLspMethodClassV1, FeedbackLspStateV1,
+    FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
 
 /// Resolves one LSP lifecycle request to the already-authorized, bounded
@@ -317,9 +317,7 @@ impl FeedbackCycleRuntime {
         &self.correlation_policy
     }
 
-    pub fn source_observation_port(
-        &self,
-    ) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
+    pub fn source_observation_port(&self) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.source_observations)
     }
 

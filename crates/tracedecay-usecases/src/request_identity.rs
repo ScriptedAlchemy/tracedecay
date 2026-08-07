@@ -539,12 +539,8 @@ mod tests {
     fn feedback_observation_identity_preserves_flat_persisted_derivation() {
         let saved = "saved.fixture";
         let observation = "observation.fixture";
-        let legacy = canonical_sha256(&(
-            "tracedecay.feedback.observation.v1",
-            saved,
-            observation,
-        ))
-        .unwrap();
+        let legacy =
+            canonical_sha256(&("tracedecay.feedback.observation.v1", saved, observation)).unwrap();
         assert_eq!(
             legacy.as_str(),
             "sha256:51e60d23798c7de9bd9df7893665b0e874eac9950aaa20c71350744a632b4adc"

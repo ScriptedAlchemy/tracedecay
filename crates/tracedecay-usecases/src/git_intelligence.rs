@@ -54,10 +54,10 @@ use tracedecay_domain::research::time::UtcMicros;
 use tracedecay_domain::research::{
     ManifestDigest, RefId, RepositoryId, WorktreeId, canonical_sha256,
 };
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_repository::{
     GitHistoryOptions as RepositoryHistoryOptions, GitReference, GitRepositoryAuthority,
 };
-use tracedecay_runtime_core::cancellation::CancellationToken;
 
 /// Read subcommands the adapter is allowed to run. Anything outside this
 /// list is refused before spawn, which makes index/ref/worktree/config

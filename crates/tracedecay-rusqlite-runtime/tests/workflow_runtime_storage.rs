@@ -333,9 +333,9 @@ fn definition_effects_retain_sources_without_sql_topology_authority() {
         .terminal()
         .unwrap()
         .outcome(),
-        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(
-            Box::new(first.clone())
-        ))
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(Box::new(
+            first.clone()
+        )))
     );
 
     let conflicting_identity = effect_identity(

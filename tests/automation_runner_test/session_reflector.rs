@@ -428,21 +428,13 @@ async fn session_reflector_runner_auto_applies_valid_fact_proposals_by_default()
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(
-        &memory,
-        Some(FactProposalState::PendingApproval),
-        10,
-    )
-    .await
-    .unwrap();
+    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+        .await
+        .unwrap();
     assert!(pending.is_empty());
-    let proposals = list_fact_proposals(
-        &memory,
-        Some(FactProposalState::Applied),
-        10,
-    )
-    .await
-    .unwrap();
+    let proposals = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
+        .await
+        .unwrap();
     assert_eq!(proposals.len(), 3);
     assert_eq!(proposals[0].run_id, run.run_id);
     assert_eq!(
@@ -645,21 +637,13 @@ async fn session_reflector_runner_auto_apply_ignores_dashboard_approval_gate() {
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let pending = list_fact_proposals(
-        &memory,
-        Some(FactProposalState::PendingApproval),
-        10,
-    )
-    .await
-    .unwrap();
+    let pending = list_fact_proposals(&memory, Some(FactProposalState::PendingApproval), 10)
+        .await
+        .unwrap();
     assert!(pending.is_empty());
-    let applied = list_fact_proposals(
-        &memory,
-        Some(FactProposalState::Applied),
-        10,
-    )
-    .await
-    .unwrap();
+    let applied = list_fact_proposals(&memory, Some(FactProposalState::Applied), 10)
+        .await
+        .unwrap();
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].run_id, HIGH_ENTROPY_RUN_ID);
 
@@ -1511,15 +1495,9 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
         ),
     ];
 
-    let recorded = record_session_fact_proposals(
-        &memory,
-        "run-a",
-        Some("evidence-a"),
-        &batch,
-        &[],
-    )
-    .await
-    .unwrap();
+    let recorded = record_session_fact_proposals(&memory, "run-a", Some("evidence-a"), &batch, &[])
+        .await
+        .unwrap();
     assert_eq!(
         recorded.len(),
         4,
@@ -1530,15 +1508,10 @@ async fn session_fact_proposals_keep_paraphrases_distinct() {
         "Require stable aggregate verification and live PR-state rechecks; never \
          merge the batch off one flaky green pass",
     )];
-    let second = record_session_fact_proposals(
-        &memory,
-        "run-b",
-        Some("evidence-b"),
-        &restated,
-        &[],
-    )
-    .await
-    .unwrap();
+    let second =
+        record_session_fact_proposals(&memory, "run-b", Some("evidence-b"), &restated, &[])
+            .await
+            .unwrap();
     assert_eq!(second.len(), 1);
 
     let proposals = memory
@@ -1663,15 +1636,10 @@ async fn session_fact_proposals_never_mutate_applied_records() {
         },
         "proposal": { "content": "paraphrase" }
     });
-    let recorded = record_session_fact_proposals(
-        &memory,
-        "run-new",
-        Some("evidence-new"),
-        &[paraphrase],
-        &[],
-    )
-    .await
-    .unwrap();
+    let recorded =
+        record_session_fact_proposals(&memory, "run-new", Some("evidence-new"), &[paraphrase], &[])
+            .await
+            .unwrap();
     assert_eq!(
         recorded.len(),
         1,

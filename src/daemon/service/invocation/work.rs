@@ -919,19 +919,31 @@ fn workflow_effect_outcome(
         }
         WorkflowEffectOutcomeV1::Problem(problem) => Err(workflow_effect_daemon_problem(*problem)),
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(result)) => {
-            work_effect(terminal, Some((**result).clone()), EffectTermination::Completed)
-                .map(WorkflowApplicationOutcome::RegisterDefinition)
-                .map_err(|_| DaemonInvocationProblem::Unavailable)
+            work_effect(
+                terminal,
+                Some((**result).clone()),
+                EffectTermination::Completed,
+            )
+            .map(WorkflowApplicationOutcome::RegisterDefinition)
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffIssued(result)) => {
-            work_effect(terminal, Some((**result).clone()), EffectTermination::Completed)
-                .map(WorkflowApplicationOutcome::HandoffIssue)
-                .map_err(|_| DaemonInvocationProblem::Unavailable)
+            work_effect(
+                terminal,
+                Some((**result).clone()),
+                EffectTermination::Completed,
+            )
+            .map(WorkflowApplicationOutcome::HandoffIssue)
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
         WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::HandoffRedeemed(result)) => {
-            work_effect(terminal, Some((**result).clone()), EffectTermination::Completed)
-                .map(WorkflowApplicationOutcome::HandoffRedeem)
-                .map_err(|_| DaemonInvocationProblem::Unavailable)
+            work_effect(
+                terminal,
+                Some((**result).clone()),
+                EffectTermination::Completed,
+            )
+            .map(WorkflowApplicationOutcome::HandoffRedeem)
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
         }
     }
 }

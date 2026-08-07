@@ -5,8 +5,9 @@
 use schemars::schema_for;
 use serde_json::Value;
 use tracedecay_application::git::{
-    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest, GitHistorySurfaceRequest,
-    GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadResultV1, GitStatusSurfaceRequest,
+    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
+    GitHistorySurfaceRequest, GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadResultV1,
+    GitStatusSurfaceRequest,
 };
 use tracedecay_application::git_surface_catalog_contribution;
 use tracedecay_tool_catalog::CapabilityId;

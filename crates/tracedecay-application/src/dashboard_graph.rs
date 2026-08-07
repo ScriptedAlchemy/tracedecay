@@ -39,10 +39,7 @@ impl VerifiedDashboardGraphGenerationV1 {
     pub fn cache_identity(&self) -> String {
         format!(
             "{}:{}:{}:{}",
-            self.project_id,
-            self.profile_id,
-            self.graph_generation_id,
-            self.recovered_state_digest
+            self.project_id, self.profile_id, self.graph_generation_id, self.recovered_state_digest
         )
     }
 }
@@ -342,15 +339,9 @@ pub enum DashboardGraphReadErrorV1 {
 }
 
 pub type DashboardGraphReadFutureV1<'a> = Pin<
-    Box<
-        dyn Future<Output = Result<DashboardGraphReadV1, DashboardGraphReadErrorV1>> + Send + 'a,
-    >,
+    Box<dyn Future<Output = Result<DashboardGraphReadV1, DashboardGraphReadErrorV1>> + Send + 'a>,
 >;
 
 pub trait DashboardGraphReadPortV1: Send + Sync {
-    fn read<'a>(
-        &'a self,
-        request: DashboardGraphReadRequestV1,
-    ) -> DashboardGraphReadFutureV1<'a>;
+    fn read<'a>(&'a self, request: DashboardGraphReadRequestV1) -> DashboardGraphReadFutureV1<'a>;
 }
-

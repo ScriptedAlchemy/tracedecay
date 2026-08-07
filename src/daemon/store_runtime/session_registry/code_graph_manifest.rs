@@ -62,10 +62,7 @@ fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bo
 /// the stable GetFileInformationByHandle authority instead of the unstable
 /// `windows_by_handle` metadata surface.
 #[cfg(windows)]
-fn same_windows_handle_identity(
-    file: &File,
-    path: &std::path::Path,
-) -> Result<bool, GraphDbError> {
+fn same_windows_handle_identity(file: &File, path: &std::path::Path) -> Result<bool, GraphDbError> {
     let path_file =
         File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
     let path_identity = tracedecay_runtime_core::windows_file::information(&path_file)

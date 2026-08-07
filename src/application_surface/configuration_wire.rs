@@ -4,8 +4,7 @@ use tracedecay_application::{
     ApplicationOutcome, ApplicationWireOperation, ApplicationWireSchemaRegistryV1,
     ApplicationWireSchemaV1, CancellationStage, ComponentConfigurationState,
     ConfigurationAuditPage, ConfigurationMutationReceipt, OperationTermination, ResolvedSetting,
-    SettingSummary,
-    configuration_surface_catalog_contribution, configuration_surface_operation,
+    SettingSummary, configuration_surface_catalog_contribution, configuration_surface_operation,
 };
 use tracedecay_domain::configuration::{CredentialReferenceMetadataV1, ProtectedChangePlan};
 use tracedecay_tool_catalog::{

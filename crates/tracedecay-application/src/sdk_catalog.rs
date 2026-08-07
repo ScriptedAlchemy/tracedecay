@@ -9,9 +9,9 @@ use std::collections::BTreeSet;
 use tracedecay_tool_catalog::{
     BindingStatus, BindingSurface, CapabilityId, CatalogContributionV1, CatalogValidationError,
     CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingV1,
-    ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1, ServiceId,
+    ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
     SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
-    SdkTransportBindingV1, SurfaceBindingV1, SurfaceOperationName,
+    SdkTransportBindingV1, ServiceId, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use crate::{

@@ -23,10 +23,10 @@ pub use native_integration::{
     NativeIntegrationStatusRequestV1,
 };
 pub use public_wire::{
-    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest, GitHistorySurfaceRequest,
-    GitHunkPreviewEntryV1, GitHunkPreviewInputV1, GitHunksSurfaceRequest, GitPreviewSurfaceRequest,
-    GitQueryEnvelopeV1, GitReadResultV1, GitStatusSummaryV1, GitStatusSurfaceRequest,
-    GitSurfaceDiffScopeV1,
+    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
+    GitHistorySurfaceRequest, GitHunkPreviewEntryV1, GitHunkPreviewInputV1, GitHunksSurfaceRequest,
+    GitPreviewSurfaceRequest, GitQueryEnvelopeV1, GitReadResultV1, GitStatusSummaryV1,
+    GitStatusSurfaceRequest, GitSurfaceDiffScopeV1,
 };
 pub use read::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,

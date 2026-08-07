@@ -403,10 +403,9 @@ fn staged_publication_digest(
         receipt_digest,
     ))
     .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-    SemanticVectorGraphBatchDigest::new(digest.as_str())
-        .map_err(|error| GraphDbError::Corrupt {
-            message: error.to_string(),
-        })
+    SemanticVectorGraphBatchDigest::new(digest.as_str()).map_err(|error| GraphDbError::Corrupt {
+        message: error.to_string(),
+    })
 }
 
 pub(crate) fn validate_stage_publication_replay(

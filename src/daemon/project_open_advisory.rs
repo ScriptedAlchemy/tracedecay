@@ -249,10 +249,7 @@ mod tests {
     async fn deadline_rolls_back_a_late_success_before_reporting_terminal() {
         struct Ready;
         impl HookOrchestrationPortV1 for Ready {
-            fn admit(
-                &self,
-                _request: HookOrchestrationRequestV1,
-            ) -> HookOrchestrationAdmissionV1 {
+            fn admit(&self, _request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
                 HookOrchestrationAdmissionV1::Unavailable
             }
         }
@@ -356,10 +353,7 @@ mod tests {
     async fn failed_setup_can_be_retried_without_republishing_the_gateway() {
         struct Ready;
         impl HookOrchestrationPortV1 for Ready {
-            fn admit(
-                &self,
-                _request: HookOrchestrationRequestV1,
-            ) -> HookOrchestrationAdmissionV1 {
+            fn admit(&self, _request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
                 HookOrchestrationAdmissionV1::Enqueued
             }
         }

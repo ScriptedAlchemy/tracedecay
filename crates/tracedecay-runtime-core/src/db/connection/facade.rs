@@ -352,9 +352,7 @@ impl DatabaseWriteTransaction<'_> {
                     .next()
                     .await
                     .map_err(|error| TraceDecayError::Database {
-                        message: format!(
-                            "failed to read graph transaction generation: {error}"
-                        ),
+                        message: format!("failed to read graph transaction generation: {error}"),
                         operation: "commit write transaction".to_owned(),
                     })? {
                     Some(row) => {

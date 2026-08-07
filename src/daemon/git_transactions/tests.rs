@@ -533,7 +533,8 @@ fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
     let result = harness
         .port
         .apply_cancellable(&harness.request, || {
-            (cancellation_checks.fetch_add(1, Ordering::SeqCst) + 1 >= 5).then_some(fixture_time(25))
+            (cancellation_checks.fetch_add(1, Ordering::SeqCst) + 1 >= 5)
+                .then_some(fixture_time(25))
         })
         .expect("pre-native cancellation is a durable no-change result");
 

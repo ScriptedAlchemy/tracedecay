@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use super::SessionTemporalRefreshTestAuthority;
 use super::history::{
     SessionHistoricalIngestOutcome, SessionHistoricalIngestPass, SessionHistoricalIngestor,
 };
@@ -16,7 +17,6 @@ use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRu
 use crate::application::session::{
     SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
 };
-use super::SessionTemporalRefreshTestAuthority;
 
 struct ScriptedHistoricalIngestor {
     outcomes: std::sync::Mutex<VecDeque<SessionHistoricalIngestOutcome>>,

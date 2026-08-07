@@ -111,10 +111,7 @@ pub(crate) struct BoundedHookOrchestratorV1 {
 impl BoundedHookOrchestratorV1 {
     pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
-        F: Fn(
-                HookOrchestrationRequestV1,
-                crate::application::context::CancellationToken,
-            ) -> Fut
+        F: Fn(HookOrchestrationRequestV1, crate::application::context::CancellationToken) -> Fut
             + Send
             + Sync
             + 'static,

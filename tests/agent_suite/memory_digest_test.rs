@@ -495,13 +495,9 @@ async fn fact_proposal_apply_then_refresh_regenerates_recorded_overlays() {
     )
     .await
     .unwrap();
-    let applied = apply_fact_proposal(
-        &memory,
-        &records[0].proposal_id,
-        Some("test".to_string()),
-    )
-    .await
-    .unwrap();
+    let applied = apply_fact_proposal(&memory, &records[0].proposal_id, Some("test".to_string()))
+        .await
+        .unwrap();
     assert_eq!(applied.state, FactProposalState::Applied);
 
     refresh_project_memory_digest(

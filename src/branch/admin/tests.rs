@@ -335,7 +335,10 @@ fn gc_collects_single_store_metadata_and_legacy_stores_but_keeps_the_project_sto
     );
     let report = prepared.commit().unwrap();
     assert_eq!(report.outcome, BranchAdminOutcome::Removed);
-    assert!(!legacy_db.exists(), "legacy private store must be collected");
+    assert!(
+        !legacy_db.exists(),
+        "legacy private store must be collected"
+    );
     assert!(main_db.exists(), "the project store must survive GC");
     let persisted = crate::branch_meta::load_branch_meta(&tracedecay_dir).unwrap();
     assert!(!persisted.is_tracked("topic"));

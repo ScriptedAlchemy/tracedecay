@@ -18,8 +18,8 @@ use crate::types::*;
 
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
-pub(super) mod controlled_sync;
 mod branch_publication;
+pub(super) mod controlled_sync;
 pub(super) use branch_publication::BranchGraphMutationV1;
 
 const GRAPH_REBUILD_STATE_KEY: &str = "graph_rebuild_state_v1";

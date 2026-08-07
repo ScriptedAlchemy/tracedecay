@@ -1395,9 +1395,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     &project_root,
                 ),
                 language_server_read_from_broker(&diagnostic_broker),
-                crate::application::feedback::concrete::feedback_observation_read_model(
-                    &graph,
-                ),
+                crate::application::feedback::concrete::feedback_observation_read_model(&graph,),
                 advisory_feedback_read,
                 host_scan,
                 code_index_read_from_registry(&schedulers, &project_root),

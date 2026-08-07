@@ -84,7 +84,10 @@ async fn search_limit_above_retrieval_budget_serves_full_candidate_set() {
         !results.is_empty(),
         "high-limit search must return the fused candidates: {payload}"
     );
-    assert!(results.len() <= 200, "results must respect the caller limit");
+    assert!(
+        results.len() <= 200,
+        "results must respect the caller limit"
+    );
     assert!(
         payload["code_generation"].as_str().is_some(),
         "search must have served from a bound generation: {payload}"

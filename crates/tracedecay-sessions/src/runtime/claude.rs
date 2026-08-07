@@ -234,8 +234,7 @@ impl ClaudeSource {
         for frame in scan.frames.drain(..) {
             let record = frame.scope_value();
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            let include =
-                scope_matcher.membership(line_cwd.as_deref()) == ProjectMembership::Match;
+            let include = scope_matcher.membership(line_cwd.as_deref()) == ProjectMembership::Match;
             if include {
                 retained.push(frame);
             } else {

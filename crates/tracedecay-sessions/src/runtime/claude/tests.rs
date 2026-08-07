@@ -996,11 +996,10 @@ fn claude_task_create_and_update_emit_workflow_lifecycle_facts() {
     assert!(!rendered.contains("\"type\":\"tool_use\""));
 }
 
-static UNKNOWN_PATH_ATTEMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static UNKNOWN_PATH_ATTEMPTS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
-fn retrying_identity(
-    path: &Path,
-) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
+fn retrying_identity(path: &Path) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
     use std::sync::atomic::Ordering;
     let root = path
         .ancestors()

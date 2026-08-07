@@ -296,7 +296,11 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
     // are still injected for every LCM surface.
     assert!(doctor.input_schema.get("required").is_none());
     assert!(doctor.input_schema["properties"].get("provider").is_none());
-    assert!(doctor.input_schema["properties"].get("session_id").is_none());
+    assert!(
+        doctor.input_schema["properties"]
+            .get("session_id")
+            .is_none()
+    );
     assert!(doctor.input_schema["properties"].get("format").is_some());
     assert_eq!(
         doctor.input_schema["properties"]["storage_scope"]["enum"],

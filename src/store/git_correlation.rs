@@ -19,13 +19,13 @@ use crate::global_db::{
 use crate::sessions::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats,
     BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter, CommitSessionRecord,
-    CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, MISSING_VERIFIED_HEAD,
+    CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
     GitCorrelationSessionStore, GitEvidenceGraphRuntimePort, GitEvidenceProjectionStore,
-    GitReflogSource, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
-    git_evidence_projection_identity, graph_evidence_publication_key, normalize_worktree,
-    observation_extends_span, providers_compatible, publish_graph_evidence, read_meta_value,
-    recover_git_evidence_projection, run_backfill, run_bounded_history_index_page,
-    run_incremental_backfill,
+    GitReflogSource, MISSING_VERIFIED_HEAD, SessionGitCorrelationHit, SessionGitSpan,
+    SessionsForQuery, SpanObservation, git_evidence_projection_identity,
+    graph_evidence_publication_key, normalize_worktree, observation_extends_span,
+    providers_compatible, publish_graph_evidence, read_meta_value, recover_git_evidence_projection,
+    run_backfill, run_bounded_history_index_page, run_incremental_backfill,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";

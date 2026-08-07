@@ -63,7 +63,8 @@ impl AgentTaskBackend for ContentBackend {
     fn run_task(
         &self,
         request: &AgentTaskRequest,
-    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+    ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::UserJob);
         assert!(request.contract.task_key.starts_with("user_job:"));
@@ -490,7 +491,8 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
         fn run_task(
             &self,
             request: &AgentTaskRequest,
-        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+        {
             assert!(request.prompt.contains("## Pre-run command output"));
             assert!(request.prompt.contains("hello-from-command"));
             Ok(AgentTaskResponse {
@@ -544,7 +546,8 @@ async fn user_job_pre_run_command_runs_from_project_root() {
         fn run_task(
             &self,
             request: &AgentTaskRequest,
-        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+        {
             assert!(request.prompt.contains("## Pre-run command output"));
             assert!(request.prompt.contains("project-marker"));
             Ok(AgentTaskResponse {
@@ -620,7 +623,8 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
         fn run_task(
             &self,
             request: &AgentTaskRequest,
-        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+        {
             assert!(request.prompt.contains("## Attached skill: Job context"));
             assert!(request.prompt.contains("profile-specific job context"));
             assert_eq!(request.context["attached_skills"], json!(["job-context"]));
@@ -700,7 +704,8 @@ async fn user_job_does_not_attach_archived_managed_skills() {
         fn run_task(
             &self,
             request: &AgentTaskRequest,
-        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+        {
             assert!(!request.prompt.contains("ARCHIVED_SKILL_BODY_MUST_NOT_RUN"));
             assert_eq!(request.context["attached_skills"], json!([]));
             assert_eq!(
@@ -867,7 +872,8 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
         fn run_task(
             &self,
             request: &AgentTaskRequest,
-        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError> {
+        ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
+        {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(200));
             Ok(AgentTaskResponse {

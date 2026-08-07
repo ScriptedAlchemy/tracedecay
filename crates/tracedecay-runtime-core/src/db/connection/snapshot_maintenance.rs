@@ -1,7 +1,7 @@
 use super::{
     Arc, CheckpointBlockers, CheckpointOutcome, CheckpointRequest, DATABASE_HEALTH_GATE, Database,
-    DatabaseHealth, DatabaseWriteTransaction, Result, TraceDecayError,
-    database_checkpoint_probe, database_health,
+    DatabaseHealth, DatabaseWriteTransaction, Result, TraceDecayError, database_checkpoint_probe,
+    database_health,
 };
 
 impl Database {

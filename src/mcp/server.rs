@@ -36,8 +36,8 @@ use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     ProjectRegistryReadPort, SessionRefreshServicePort, SessionRetrievalServicePort,
     SessionRetrievalSweepPort, ToolCallRegistryOptions, ToolRegistryMode,
-    default_catalog_discovery_authority,
-    explore_call_budget, get_catalog_filtered_tool_definitions_with_budget,
+    default_catalog_discovery_authority, explore_call_budget,
+    get_catalog_filtered_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
@@ -859,16 +859,17 @@ impl McpServer {
                 },
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
-        let session_retrieval_sweep = registry_db
-            .as_ref()
-            .zip(profile_identity.as_ref())
-            .map(|(registry, identity)| {
-                Arc::new(DaemonSessionRetrievalSweep::new(
-                    Arc::clone(registry),
-                    Arc::clone(cg.store_runtime_registry()),
-                    identity.clone(),
-                )) as Arc<dyn SessionRetrievalSweepPort>
-            });
+        let session_retrieval_sweep =
+            registry_db
+                .as_ref()
+                .zip(profile_identity.as_ref())
+                .map(|(registry, identity)| {
+                    Arc::new(DaemonSessionRetrievalSweep::new(
+                        Arc::clone(registry),
+                        Arc::clone(cg.store_runtime_registry()),
+                        identity.clone(),
+                    )) as Arc<dyn SessionRetrievalSweepPort>
+                });
         let project_lcm_authority = project_session_retrieval_root
             .as_ref()
             .zip(registered_session_db.as_ref())

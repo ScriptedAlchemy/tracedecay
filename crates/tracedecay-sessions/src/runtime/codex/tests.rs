@@ -842,9 +842,7 @@ mod source_matcher_cache_tests {
 
     static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
-    fn retrying_identity(
-        path: &Path,
-    ) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
+    fn retrying_identity(path: &Path) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome {
         let root = path
             .ancestors()
             .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
