@@ -124,9 +124,8 @@ Move to Grafeo as the sole persisted/query graph and vector projection:
 - LCM summary/source/successor, logical-copy, thread, and agent hierarchy relations;
 - derived memory fact/entity/assertion links and cross-domain retrieval
   references, without moving fact content out of the project-wide memory
-  authority (holographic vector banks may also move here per the Task 7
-  owner decision of 2026-08-07, as rebuildable derivations of that content);
-  and
+  authority (persisted holographic vector banks were resolved as deleted,
+  not relocated, per the Task 7 owner decisions of 2026-08-07); and
 - cross-domain relation locators used for bounded authorized traversal.
 
 Keep in SQLite:
@@ -137,9 +136,10 @@ Keep in SQLite:
   watermarks until the corresponding canonical sources are retained;
 - raw session/message content, external payload references, redaction authority, exact evidence spans, and retention/GC journals;
 - project-wide fact content, exact provenance, trust/feedback history,
-  current-fact CAS, and deletion/retention state (holographic banks default
-  here today but may relocate to the graph-db vector projection per the
-  Task 7 owner decision of 2026-08-07);
+  current-fact CAS, and deletion/retention state (persisted holographic bank
+  storage is deleted as unread per the Task 7 owner decisions of 2026-08-07;
+  holographic recall derives vectors from this canonical content at query
+  time);
 - immutable Work/workflow event payloads, runtime fencing, execution receipts, and artifact metadata;
 - embedding model manifests, acquisition/install state, generation publication state, and exact source manifests; and
 - telemetry/event accounting and other relational aggregates that do not need graph traversal or vector similarity.
@@ -611,17 +611,27 @@ ordinary holographic fact retrieval unavailable.
 Owner decision (2026-08-07): the binding invariant is that project memory
 remains a holographic implementation (FHRR/HRR binding and unbinding, the
 `amari_fhrr` algebra, holographic recall) over durable canonical fact content.
-The FHRR/HRR fact vectors and holographic banks are deterministic derivations
-of that content, so their storage placement is flexible: they may stay in the
-SQLite memory store or move into the graph-db vector projection under the same
-verified-publication protocol as admitted code vectors, provided holographic
-recall behavior is preserved and canonical content never exists only in a
-rebuildable projection. Replacing the holographic algebra itself is out of
-scope of this flexibility.
+Recall re-derives candidate vectors from canonical content at query time; that
+is the production holographic path and it must be preserved.
+
+Owner decision (2026-08-07, second, supersedes the placement flexibility
+above): evidence review found persisted derived vectors are write-only — no
+recall path reads stored bank vectors or stored per-fact vectors. They are
+therefore deleted, not relocated: remove the bank tables (V1 `memory_banks`,
+`memory_v2_banks`, `memory_v2_bank_dirty`), the bank rebuild/repair/scheduler
+machinery, the never-wired `memory_v2_assertion_vectors` table, and the
+per-fact stored vectors (which leave with `memory_facts` in Step 3).
+Status/dashboard read models recompute their counts from facts directly.
+Replacing the holographic algebra itself remains out of scope. For any future
+vector projection work: stored vectors are purely real, so FHRR similarity is
+exactly cosine — `VectorMetric::Cosine` is algebra-faithful, and this breaks
+if imaginary components are ever persisted. Any re-landed purge/retention
+writer must scope bank/vector deletes to the affected rows; the salvaged
+branch's unscoped `DELETE FROM memory_banks` data-loss defect must not return.
 
 - [ ] **Step 3: Delete legacy and branch-era memory machinery**
 
-Remove `memory_facts`, V1/V2 dual-write/fallback, cutover/migration/consolidation code, branch-only fact fixtures, archive-merge receipts, and compatibility schemas. An unexpected old store returns `ResetRequired`.
+Remove `memory_facts`, V1/V2 dual-write/fallback, cutover/migration/consolidation code, branch-only fact fixtures, archive-merge receipts, and compatibility schemas. Per the second 2026-08-07 owner decision, also remove the unread derived-vector storage: bank tables and dirty queue, bank rebuild/repair machinery, and `memory_v2_assertion_vectors`. An unexpected old store returns `ResetRequired`.
 
 - [ ] **Step 4: Verify and commit**
 
