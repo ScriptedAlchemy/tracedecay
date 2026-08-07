@@ -74,7 +74,7 @@ impl DaemonInvocationService {
         // workspace authority.
         self.lsp_sessions.lock().await.clear();
         let runtime_owners_retired = self.project_runtimes.retire_roots(project_roots).await;
-        if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
+        if let Ok(mut registry) = hook_orchestration_registry().lock() {
             registry.retain(|_, runtime| runtime.strong_count() > 0);
         }
         runtime_owners_retired
