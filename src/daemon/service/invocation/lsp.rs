@@ -655,6 +655,40 @@ impl DaemonInvocationService {
         )
     }
 
+    /// The one fenced workspace-folder intent a session actor is holding for
+    /// its daemon owner, if any.
+    pub(crate) async fn pending_lsp_workspace_folder_mutation(
+        &self,
+        session: &DaemonLspSessionAccess,
+    ) -> Option<tracedecay_lsp::WorkspaceFolderMutation> {
+        let sessions = self.lsp_sessions.lock().await;
+        sessions
+            .get(session.session_id())?
+            .actor
+            .pending_workspace_folder_mutation()
+    }
+
+    /// Answers a fenced workspace-folder intent: an authorized workspace
+    /// applies it, `None` rejects it. A stale fence (the actor re-parsed a
+    /// newer change or the scope set moved) settles as a no-op.
+    pub(crate) async fn settle_lsp_workspace_folder_mutation(
+        &self,
+        session: &DaemonLspSessionAccess,
+        mutation: &tracedecay_lsp::WorkspaceFolderMutation,
+        workspace: Option<AuthorizedLspWorkspace>,
+    ) {
+        let mut sessions = self.lsp_sessions.lock().await;
+        let Some(state) = sessions.get_mut(session.session_id()) else {
+            return;
+        };
+        let _ = match workspace {
+            Some(workspace) => state
+                .actor
+                .apply_workspace_folder_mutation(mutation, workspace),
+            None => state.actor.reject_workspace_folder_mutation(mutation),
+        };
+    }
+
     pub(super) async fn poll_lsp_frame(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,

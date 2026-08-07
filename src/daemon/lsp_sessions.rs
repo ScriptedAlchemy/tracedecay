@@ -70,7 +70,51 @@ pub(super) async fn admitted_lsp_workspace_for_request(
         [] => vec![url::Url::from_file_path(project_path).ok()?.to_string()],
         folders => folders.to_vec(),
     };
-    if requested_uris.len() > tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS {
+    authorize_lsp_workspace_for_uris(store_administration, service, project_path, requested_uris)
+        .await
+}
+
+/// Settles the one fenced workspace-folder mutation a session actor may hold
+/// after a client frame. Only the daemon resolves and authorizes folder URIs:
+/// an authorized next root set is applied with the client's active root
+/// preserved as the anchor; anything else rejects the intent so the actor's
+/// fence never dangles.
+pub(super) async fn settle_pending_lsp_workspace_mutation(
+    store_administration: &StoreAdministration,
+    service: &service::invocation::DaemonInvocationService,
+    project_path: &Path,
+    session: &service::invocation::DaemonLspSessionAccess,
+) {
+    let Some(mutation) = service.pending_lsp_workspace_folder_mutation(session).await else {
+        return;
+    };
+    let workspace = authorize_lsp_workspace_for_uris(
+        store_administration,
+        service,
+        project_path,
+        mutation.next_root_uris.clone(),
+    )
+    .await
+    .and_then(|workspace| {
+        AuthorizedLspWorkspace::anchored(
+            workspace.scope_set_digest().cloned(),
+            workspace.roots().to_vec(),
+            mutation.active_root_uri.clone(),
+        )
+        .ok()
+    });
+    service
+        .settle_lsp_workspace_folder_mutation(session, &mutation, workspace)
+        .await;
+}
+
+async fn authorize_lsp_workspace_for_uris(
+    store_administration: &StoreAdministration,
+    service: &service::invocation::DaemonInvocationService,
+    project_path: &Path,
+    requested_uris: Vec<String>,
+) -> Option<AuthorizedLspWorkspace> {
+    if requested_uris.is_empty() || requested_uris.len() > tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS {
         return None;
     }
     // A single folder is only ever the active project: a lone sibling hint

@@ -231,7 +231,7 @@ mod lsp_sessions;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
     cleanup_connection_lsp_sessions, invocation_lsp_session_transition,
-    update_connection_lsp_sessions,
+    settle_pending_lsp_workspace_mutation, update_connection_lsp_sessions,
 };
 mod maintenance;
 mod maintenance_tasks;
