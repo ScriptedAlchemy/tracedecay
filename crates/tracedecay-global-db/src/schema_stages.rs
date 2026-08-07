@@ -390,7 +390,7 @@ pub async fn ensure_registered_schema_for_admission(
                 },
                 error => global_db_operation_error("initialize LCM schema", error),
             })?;
-        tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_schema_in_transaction(
+        tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction(
             &transaction,
         )
         .await
