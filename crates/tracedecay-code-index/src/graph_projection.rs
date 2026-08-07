@@ -265,6 +265,11 @@ impl CodeGraphProjectionStore {
         })
     }
 
+    /// The published generation this store is pinned to.
+    pub fn generation(&self) -> &CodeGenerationId {
+        &self.generation
+    }
+
     pub fn interactive_reader(
         &self,
         generation: &CodeGenerationId,
