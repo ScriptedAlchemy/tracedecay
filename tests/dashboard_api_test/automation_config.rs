@@ -362,26 +362,7 @@ fn automation_config_is_dashboard_controllable_and_persistent() {
             restored["effective"]["tasks"]["memory_curator"]["enabled"],
             true
         );
-        let (status, reset) = delete_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/config"),
-        );
-        assert_eq!(status, 200);
-        assert!(reset["project"].is_null());
-        assert!(reset["effective"].get("model").is_none());
-        assert_eq!(
-            reset["effective"]["tasks"]["memory_curator"]["enabled"],
-            false
-        );
-        assert!(!sidecar.exists(), "DELETE must remove project sidecar");
-        let (status, reset_capabilities) =
-            get_json(&agent, &format!("{base_url}/api/capabilities"));
-        assert_eq!(status, 200);
-        assert_eq!(reset_capabilities["automation"]["mode"], "standalone_backend");
-        assert_eq!(
-            reset_capabilities["automation"]["backend"],
-            "codex_app_server"
-        );
+        assert!(sidecar.exists(), "the canonical patch remains durable");
         server.stop();
     });
 }

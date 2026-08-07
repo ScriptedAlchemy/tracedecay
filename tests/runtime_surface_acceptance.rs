@@ -67,6 +67,9 @@ use tracedecay_domain::{
 use tracedecay_lsp::{FramePoll, FrameSend, TRACEDECAY_CONTEXT_REVISION};
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 
+static DASHBOARD_CONFIGURATION_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 struct RuntimeFixture {
     _daemon: common::DaemonProcess,
     client: DaemonInvocationClient,
@@ -759,6 +762,7 @@ fn successful_application(result: &ApplicationSurfaceInvocationResult) -> &Value
 /// runtime configuration the next read serves.
 #[tokio::test(flavor = "multi_thread")]
 async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
+    let _dashboard_lock = DASHBOARD_CONFIGURATION_TEST_LOCK.lock().await;
     let fixture = runtime_fixture().await;
     let base_url = start_daemon_hosted_dashboard(&fixture).await;
     let agent = common::http_agent();
@@ -799,6 +803,7 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         &project_url,
         &serde_json::json!({
             "expected_revision_id": revision,
+            "idempotency_key": "configuration.idempotency.dashboard-project-commit",
             "exclude": ["target/**", "dist/**"],
             "include": [".github/**"],
             "max_file_size": 2048
@@ -856,12 +861,144 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
         &project_url,
         &serde_json::json!({
             "expected_revision_id": revision,
+            "idempotency_key": "configuration.idempotency.dashboard-project-stale",
             "track_call_sites": false
         }),
     );
     assert_eq!(status, 409, "a stale project patch must conflict: {stale}");
     assert_eq!(stale["code"], "configuration_revision_conflict");
     assert_eq!(stale["actual_revision_id"], applied_revision.as_str());
+
+    let _ = call_default_tool(
+        &fixture.handshake,
+        "tracedecay_dashboard",
+        serde_json::json!({ "action": "stop", "format": "json" }),
+    )
+    .await;
+}
+
+/// Profile settings use the same cataloged configuration effect as project
+/// settings. The effect receipt, not the dashboard task lifetime, owns replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_user_settings_replay_through_application_restart() {
+    let _dashboard_lock = DASHBOARD_CONFIGURATION_TEST_LOCK.lock().await;
+    let fixture = runtime_fixture().await;
+    let base_url = start_daemon_hosted_dashboard(&fixture).await;
+    let agent = common::http_agent();
+    let settings_url = format!("{base_url}/api/settings");
+    let user_url = format!("{settings_url}/user");
+
+    let (status, envelope) = get_dashboard_json(&agent, &settings_url);
+    assert_eq!(status, 200, "GET settings failed: {envelope}");
+    let initial = &envelope["payload"];
+    let initial_revision = initial["user"]["configuration_revision_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("profile settings must expose a revision: {initial}"))
+        .to_owned();
+    assert_eq!(
+        initial["project"]["configuration_revision_id"],
+        initial_revision.as_str(),
+        "project and profile settings must share the control-plane revision"
+    );
+    let legacy_user_config = PathBuf::from(
+        initial["user"]["legacy_config_path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("profile settings must expose the legacy path: {initial}")),
+    );
+    let legacy_user_config_before = std::fs::read(&legacy_user_config).ok();
+    let legal_actions = envelope["legal_actions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected legal actions: {envelope}"));
+    assert!(legal_actions.iter().any(|action| {
+        action["kind"] == "request_apply" && action["operation"] == "configuration_batch"
+    }));
+    assert!(
+        !legal_actions
+            .iter()
+            .any(|action| action["operation"] == "user_settings_mutate"),
+        "the uncataloged profile write must not be advertised: {envelope}"
+    );
+
+    let idempotency_key = "configuration.idempotency.dashboard-user-restart";
+    let request = serde_json::json!({
+        "expected_revision_id": initial_revision.clone(),
+        "idempotency_key": idempotency_key,
+        "upload_enabled": true,
+        "watcher_debounce": "15s"
+    });
+    let (status, applied) = patch_dashboard_json(&agent, &user_url, &request);
+    assert_eq!(status, 200, "profile mutation failed: {applied}");
+    assert_eq!(applied["payload"]["restart_recommended"], true);
+    assert_eq!(applied["payload"]["user"]["upload_enabled"], true);
+    assert_eq!(applied["payload"]["user"]["watcher_debounce"], "15s");
+    let applied_revision = applied["payload"]["user"]["configuration_revision_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("profile mutation omitted its revision: {applied}"))
+        .to_owned();
+    assert_ne!(applied_revision, initial_revision);
+    assert_eq!(
+        applied["payload"]["project"]["configuration_revision_id"],
+        applied_revision.as_str()
+    );
+    assert_eq!(
+        std::fs::read(&legacy_user_config).ok(),
+        legacy_user_config_before,
+        "the control-plane mutation must not write config.toml"
+    );
+
+    call_default_tool(
+        &fixture.handshake,
+        "tracedecay_dashboard",
+        serde_json::json!({ "action": "stop", "format": "json" }),
+    )
+    .await
+    .expect("stop the first dashboard application");
+    let restarted_base_url = start_daemon_hosted_dashboard(&fixture).await;
+    let restarted_settings_url = format!("{restarted_base_url}/api/settings");
+    let restarted_user_url = format!("{restarted_settings_url}/user");
+
+    let (status, reloaded) = get_dashboard_json(&agent, &restarted_settings_url);
+    assert_eq!(status, 200, "restarted dashboard read failed: {reloaded}");
+    assert_eq!(
+        reloaded["payload"]["user"]["configuration_revision_id"],
+        applied_revision.as_str()
+    );
+    assert_eq!(reloaded["payload"]["user"]["watcher_debounce"], "15s");
+
+    // The old expected revision is valid only because the same key and exact
+    // canonical input recover the original durable effect receipt.
+    let (status, replayed) = patch_dashboard_json(&agent, &restarted_user_url, &request);
+    assert_eq!(
+        status, 200,
+        "same-key replay after application restart must converge: {replayed}"
+    );
+    assert_eq!(
+        replayed["payload"]["user"]["configuration_revision_id"],
+        applied_revision.as_str()
+    );
+    assert_eq!(replayed["payload"]["restart_recommended"], true);
+
+    let conflicting_request = serde_json::json!({
+        "expected_revision_id": initial_revision.clone(),
+        "idempotency_key": idempotency_key,
+        "upload_enabled": false,
+        "watcher_debounce": "15s"
+    });
+    let (status, conflict) =
+        patch_dashboard_json(&agent, &restarted_user_url, &conflicting_request);
+    assert_eq!(
+        status, 409,
+        "same key with changed input must conflict: {conflict}"
+    );
+    assert_eq!(
+        conflict["problem"]["diagnostic"]["code"],
+        "configuration.conflict"
+    );
+    assert_eq!(
+        std::fs::read(&legacy_user_config).ok(),
+        legacy_user_config_before,
+        "replay and conflict must not mutate config.toml"
+    );
 
     let _ = call_default_tool(
         &fixture.handshake,

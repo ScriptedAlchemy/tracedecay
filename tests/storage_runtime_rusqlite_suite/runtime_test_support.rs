@@ -2,7 +2,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use rusqlite::{Connection, Savepoint, Transaction};
 use serde_json::json;
@@ -212,6 +215,7 @@ impl ReaderQueryExecutor for CountExecutor {
 pub(crate) struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
+    commit_started: AtomicBool,
 }
 
 impl Probe {
@@ -219,6 +223,7 @@ impl Probe {
         Self {
             cancellation: request.control().cancellation.clone(),
             deadline: request.control().deadline.clone(),
+            commit_started: AtomicBool::new(false),
         }
     }
 
@@ -226,6 +231,7 @@ impl Probe {
         Arc::new(Self {
             cancellation: request.control().cancellation.clone(),
             deadline: request.control().deadline.clone(),
+            commit_started: AtomicBool::new(false),
         })
     }
 }
@@ -241,6 +247,12 @@ impl RuntimeRequestProbeV1 for Probe {
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
         None
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.commit_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 }
 

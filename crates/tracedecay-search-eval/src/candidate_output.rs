@@ -39,8 +39,8 @@ use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-    CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1,
-    CodeIndexProductionOwnerV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+    CodeIndexGenerationScopeV1, CodeIndexProductionConfigV1, CodeIndexProductionOwnerV1,
+    CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1,
 };
 use tracedecay_code_index::projection::{
@@ -80,6 +80,10 @@ use tracedecay_query::retrieval::lexical::{
     LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
+
+#[path = "candidate_output/control.rs"]
+mod control;
+use control::{ActiveControl, CancelledControl};
 
 mod environment;
 
@@ -431,6 +435,13 @@ pub struct ProductionCandidateNativeGenerationResourcesV1 {
     pub vector_generation: Option<VectorGenerationIdV1>,
     pub artifact_digest: Option<ManifestDigest>,
     pub model_bytes: u64,
+    pub tokenizer_bytes: u64,
+    pub threads: u32,
+    pub max_concurrent_sessions: u32,
+    pub batch_size: u32,
+    pub sequence_length: u32,
+    pub load_deadline_ms: u64,
+    pub cold_model_load_micros: u64,
     pub vector_bytes: u64,
     pub index_bytes: u64,
     pub cache_bytes: u64,
@@ -560,30 +571,6 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
     }
 }
 
-struct ActiveControl;
-
-impl CodeIndexExecutionControlV1 for ActiveControl {
-    fn is_cancelled(&self) -> bool {
-        false
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        false
-    }
-}
-
-struct CancelledControl;
-
-impl CodeIndexExecutionControlV1 for CancelledControl {
-    fn is_cancelled(&self) -> bool {
-        true
-    }
-
-    fn is_deadline_exceeded(&self) -> bool {
-        false
-    }
-}
-
 #[derive(Clone)]
 struct OccurrenceMapEntry {
     document_id: String,
@@ -701,7 +688,7 @@ fn build_query_projections(
             .collect::<Vec<_>>();
         graph.insert(
             scope_key,
-            CodeGraphEvidenceReader::new(
+            CodeGraphEvidenceReader::new_for_evaluation(
                 generation_id.clone(),
                 Some(generation.snapshot().repository.clone()),
                 freshness.clone(),
@@ -1346,6 +1333,11 @@ fn measure_native_partition(
                 != published.incremental_before_content_digest
             || sample.provenance.incremental_after_content_digest
                 != published.incremental_after_content_digest
+            || sample.provenance.threads == 0
+            || sample.provenance.max_concurrent_sessions != 1
+            || sample.provenance.batch_size == 0
+            || sample.provenance.sequence_length == 0
+            || sample.provenance.load_deadline_ms == 0
             || sample.eligible_chunks != published.eligible_chunks
             || sample.measured_queries != queries.len() as u64
         {
@@ -2105,7 +2097,7 @@ fn prepare_production_query(
             budget,
         };
         graph_lane
-            .retrieve_graph(&graph_request)
+            .retrieve_graph(&graph_request, Arc::new(ActiveControl))
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
     };
     let graph_measurement = SemanticNativeStageMeasurementV1 {

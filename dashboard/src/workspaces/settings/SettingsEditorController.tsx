@@ -12,6 +12,7 @@
 import { useMutation } from '@tanstack/react-query';
 import { useEffect, useMemo, useReducer, useRef } from 'react';
 import type { SettingsPayloadV1 } from '../../contracts/generated.ts';
+import { mintBrowserIdempotencyKey } from '../../data/identity.ts';
 import { ProjectSettingsFields, UserSettingsFields } from './SettingsFields.tsx';
 import { SettingsReviewDialog } from './SettingsReviewDialog.tsx';
 import {
@@ -146,7 +147,7 @@ export function SettingsEditorPanel({
       <section className="border-b border-edge-subtle p-3" aria-label="Supported settings changes">
         <p className="text-xs text-state-error">
           Settings editing requires project configuration values and configuration_revision_id
-          from GET /api/settings, plus user settings and user_settings_revision_id from the same
+          from GET /api/settings, plus user settings and configuration_revision_id from the same
           authority. The response omitted at least one required field.
         </p>
       </section>
@@ -198,7 +199,13 @@ export function SettingsEditorPanel({
           dirty={settingsScopeDirty(state, 'project')}
           writable={writable.project}
           onChange={(values) => dispatch({ type: 'project_drafted', values })}
-          onReview={() => dispatch({ type: 'review_requested', scope: 'project' })}
+          onReview={() =>
+            dispatch({
+              type: 'review_requested',
+              scope: 'project',
+              idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
+            })
+          }
         />
         <UserSettingsFields
           values={state.draft.user}
@@ -206,7 +213,13 @@ export function SettingsEditorPanel({
           dirty={settingsScopeDirty(state, 'user')}
           writable={writable.user}
           onChange={(values) => dispatch({ type: 'user_drafted', values })}
-          onReview={() => dispatch({ type: 'review_requested', scope: 'user' })}
+          onReview={() =>
+            dispatch({
+              type: 'review_requested',
+              scope: 'user',
+              idempotencyKey: mintBrowserIdempotencyKey('dashboard-settings'),
+            })
+          }
         />
       </div>
 

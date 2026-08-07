@@ -99,7 +99,7 @@ function writableScopes(
     );
   return {
     project: settingsWriteGate(authorizes('configuration_batch'), writability),
-    user: settingsWriteGate(authorizes('user_settings_mutate'), writability),
+    user: settingsWriteGate(authorizes('configuration_batch'), writability),
   };
 }
 

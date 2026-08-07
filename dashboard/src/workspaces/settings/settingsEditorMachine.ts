@@ -57,6 +57,7 @@ export interface SettingsReview {
   readonly expectedRevisionId: string;
   readonly patch: ProjectSettingsChangeSet | UserSettingsChangeSet;
   readonly reviewId: string;
+  readonly idempotencyKey: string;
 }
 
 /** A write the authority confirmed, as the authority reported it. */
@@ -137,7 +138,11 @@ export type SettingsEditorAction =
   | { readonly type: 'authority_observed'; readonly authority: SettingsEditor | null }
   | { readonly type: 'project_drafted'; readonly values: ProjectSettingsValues }
   | { readonly type: 'user_drafted'; readonly values: UserSettingsValues }
-  | { readonly type: 'review_requested'; readonly scope: SettingsScope }
+  | {
+      readonly type: 'review_requested';
+      readonly scope: SettingsScope;
+      readonly idempotencyKey: string;
+    }
   | { readonly type: 'review_dismissed' }
   | { readonly type: 'confirmation_set'; readonly confirmed: boolean }
   | { readonly type: 'submit_started' }
@@ -165,7 +170,7 @@ export function reduceSettingsEditor(
     case 'user_drafted':
       return redraft(state, (draft) => ({ ...draft, user: action.values }));
     case 'review_requested':
-      return requestReview(state, action.scope);
+      return requestReview(state, action.scope, action.idempotencyKey);
     case 'review_dismissed':
       // A dismissal cannot cancel a write already in flight, and it cannot
       // clear a verdict the editor is resting on — closing the dialog after a
@@ -260,6 +265,7 @@ function redraft(
 function requestReview(
   state: SettingsEditorState,
   scope: SettingsScope,
+  idempotencyKey: string,
 ): SettingsEditorState {
   if (state.status === 'editor_unavailable') return state;
   const plan = planFor(state.authority, state.draft, scope);
@@ -283,7 +289,7 @@ function requestReview(
         status: 'reviewing',
         authority: state.authority,
         draft: state.draft,
-        review: reviewOf(scope, plan),
+        review: reviewOf(scope, plan, idempotencyKey),
       };
     default: {
       const exhaustive: never = plan;
@@ -462,6 +468,7 @@ export function settingsSubmission(
   return {
     scope: state.review.scope,
     expectedRevisionId: state.review.expectedRevisionId,
+    idempotencyKey: state.review.idempotencyKey,
     readUrl: routes.readUrl,
     patchUrl: patchUrlFor(state.review.scope, routes),
     patch: state.review.patch,
@@ -585,12 +592,14 @@ function planFor(
 function reviewOf(
   scope: SettingsScope,
   plan: Extract<SettingsPlan, { outcome: 'ready' }>,
+  idempotencyKey: string,
 ): SettingsReview {
   return {
     scope,
     expectedRevisionId: plan.expectedRevisionId,
     patch: plan.patch,
     reviewId: `${scope}@${plan.expectedRevisionId}#${stableJson(plan.patch)}`,
+    idempotencyKey,
   };
 }
 

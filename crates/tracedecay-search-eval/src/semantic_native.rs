@@ -827,12 +827,29 @@ pub struct SemanticNativeResourceSampleV1 {
     pub cpu_time_us: Option<u64>,
     pub peak_rss_bytes: Option<u64>,
     pub model_bytes: Option<u64>,
+    pub tokenizer_bytes: Option<u64>,
     pub vector_bytes: Option<u64>,
     pub index_bytes: Option<u64>,
     pub cache_bytes: Option<u64>,
+    /// Cold model/session-open observations from the exact evaluated runtime.
+    pub cold_model_load_samples_us: Vec<u64>,
     pub clean_projection_build_samples_us: Vec<u64>,
     pub incremental_rebuild_samples_us: Vec<u64>,
     pub projection_cases: BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
+}
+
+/// Exact resource pins derived only from complete current/10x native
+/// observations for one activation-selected profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SemanticActivationResourcePinsV1 {
+    pub model_bytes: u64,
+    pub tokenizer_bytes: u64,
+    pub resident_bytes: u64,
+    pub threads: u32,
+    pub max_concurrent_sessions: u32,
+    pub batch_size: u32,
+    pub sequence_length: u32,
+    pub load_deadline_ms: u64,
 }
 
 /// Required projection workload cases at each corpus scale.
@@ -885,6 +902,11 @@ pub struct SemanticNativeResourceProvenanceV1 {
     pub incremental_code_source_manifest_digest: String,
     pub incremental_before_content_digest: String,
     pub incremental_after_content_digest: String,
+    pub threads: u32,
+    pub max_concurrent_sessions: u32,
+    pub batch_size: u32,
+    pub sequence_length: u32,
+    pub load_deadline_ms: u64,
     pub vector_generation_id: Option<String>,
     pub artifact_digest: Option<String>,
     pub measurement_method: String,
@@ -906,19 +928,37 @@ impl SemanticNativeResourceSampleV1 {
             && !self.provenance.incremental_after_content_digest.is_empty()
             && self.provenance.incremental_before_content_digest
                 != self.provenance.incremental_after_content_digest
+            && self.provenance.threads != 0
+            && self.provenance.max_concurrent_sessions == 1
+            && self.provenance.batch_size != 0
+            && self.provenance.sequence_length != 0
+            && self.provenance.load_deadline_ms != 0
             && !self.provenance.measurement_method.is_empty()
             && self.eligible_chunks != 0
             && self.measured_queries != 0
             && self.measured_queries == self.latency_samples_us.len() as u64
             && self.cpu_time_us.is_some()
             && self.peak_rss_bytes.is_some()
-            && self.model_bytes.is_some()
+            && self.model_bytes.is_some_and(|bytes| bytes != 0)
+            && self.tokenizer_bytes.is_some_and(|bytes| bytes != 0)
             && self.vector_bytes.is_some()
             && self.index_bytes.is_some()
             && self.cache_bytes.is_some()
+            && self.cold_model_loads_within_deadline()
             && !self.clean_projection_build_samples_us.is_empty()
             && !self.incremental_rebuild_samples_us.is_empty()
             && self.projection_case_matrix_is_complete()
+    }
+
+    fn cold_model_loads_within_deadline(&self) -> bool {
+        let Some(deadline_micros) = self.provenance.load_deadline_ms.checked_mul(1_000) else {
+            return false;
+        };
+        !self.cold_model_load_samples_us.is_empty()
+            && self
+                .cold_model_load_samples_us
+                .iter()
+                .all(|sample| *sample != 0 && *sample <= deadline_micros)
     }
 
     fn projection_case_matrix_is_complete(&self) -> bool {
@@ -989,6 +1029,7 @@ impl SemanticNativeResourceSampleV1 {
             && cancellation.outcome == SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication
             && cancellation.projection_calls != 0
             && cancellation.chunks_added_or_changed != 0
+            && cancellation.projection_calls < cancellation.chunks_added_or_changed
             && incompatible.outcome == SemanticProjectionCaseOutcomeV1::FullRebuildIncompatible
             && incompatible.projection_calls != 0
     }
@@ -1192,6 +1233,11 @@ mod tests {
                 incremental_code_source_manifest_digest: "sha256:incremental-source".to_owned(),
                 incremental_before_content_digest: "sha256:before".to_owned(),
                 incremental_after_content_digest: "sha256:after".to_owned(),
+                threads: 4,
+                max_concurrent_sessions: 1,
+                batch_size: 32,
+                sequence_length: 512,
+                load_deadline_ms: 30_000,
                 vector_generation_id: Some("vector-generation".to_owned()),
                 artifact_digest: Some("sha256:artifact".to_owned()),
                 measurement_method: "linux-test".to_owned(),
@@ -1202,9 +1248,11 @@ mod tests {
             cpu_time_us: Some(1),
             peak_rss_bytes: Some(1),
             model_bytes: Some(1),
+            tokenizer_bytes: Some(1),
             vector_bytes: Some(1),
             index_bytes: Some(1),
             cache_bytes: Some(1),
+            cold_model_load_samples_us: vec![1],
             clean_projection_build_samples_us: vec![1],
             incremental_rebuild_samples_us: vec![1],
             projection_cases: BTreeMap::from([
@@ -1232,7 +1280,7 @@ mod tests {
                     SemanticProjectionCaseV1::Cancellation,
                     projection_case_sample(
                         SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication,
-                        1,
+                        2,
                         0,
                         0,
                         1,
@@ -1284,6 +1332,25 @@ mod tests {
     }
 
     #[test]
+    fn native_resource_sample_requires_tokenizer_and_bounded_cold_load_evidence() {
+        let mut sample = complete_resource_sample();
+        sample.tokenizer_bytes = None;
+        assert!(!sample.is_complete());
+
+        let mut sample = complete_resource_sample();
+        sample.cold_model_load_samples_us = vec![30_000_001];
+        assert!(!sample.is_complete());
+
+        let mut sample = complete_resource_sample();
+        sample.provenance.threads = 0;
+        assert!(!sample.is_complete());
+
+        let mut sample = complete_resource_sample();
+        sample.provenance.max_concurrent_sessions = 2;
+        assert!(!sample.is_complete());
+    }
+
+    #[test]
     fn projection_case_matrix_rejects_idempotency_replay_that_reprojects() {
         let mut sample = complete_resource_sample();
         sample
@@ -1308,6 +1375,21 @@ mod tests {
         assert!(
             !sample.is_complete(),
             "a pre-start cancellation cannot stand in for interrupted semantic projection"
+        );
+    }
+
+    #[test]
+    fn projection_case_matrix_rejects_cancellation_after_all_projection_work() {
+        let mut sample = complete_resource_sample();
+        let cancellation = sample
+            .projection_cases
+            .get_mut(&SemanticProjectionCaseV1::Cancellation)
+            .expect("cancellation case");
+        cancellation.projection_calls = cancellation.chunks_added_or_changed;
+
+        assert!(
+            !sample.is_complete(),
+            "a completed projection cannot stand in for mid-batch cancellation"
         );
     }
 }

@@ -224,6 +224,7 @@ fn binding_discovery_intersects_profile_surface_authority_and_scope() {
     let symbol_search = CapabilityId::new("capability.retrieval.symbol-search").unwrap();
     let authorized = BTreeSet::from([symbol_search.clone()]);
     let scope = BTreeSet::from([
+        ScopeDimension::ConfigurationLayer,
         ScopeDimension::Project,
         ScopeDimension::Repository,
         ScopeDimension::Worktree,
@@ -309,12 +310,21 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
     assert_eq!(documents.len(), visible_http_bindings.len());
     assert!(documents.iter().all(|document| {
         HttpApplicationOperation::from_catalog_name(&document.operation)
-            .is_some_and(|operation| operation.route_path() == document.path)
+            .is_some_and(|operation| operation.application_route_path() == document.path)
     }));
     assert!(documents.iter().all(|document| {
         !matches!(document.operation.as_str(), "git_preview" | "git_apply")
-            && !matches!(document.path.as_str(), "/git/preview" | "/git/apply")
+            && !matches!(
+                document.path.as_str(),
+                "/application/git/preview" | "/application/git/apply"
+            )
     }));
+    assert!(
+        documents
+            .iter()
+            .any(|document| document.operation == "configuration_list"
+                && document.path == "/application/configuration/configuration_list")
+    );
 }
 
 #[test]

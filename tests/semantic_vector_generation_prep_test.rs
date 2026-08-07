@@ -9,13 +9,11 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 use tracedecay::code_index::projection::{expected_request_digest, verify_batch_receipt};
 use tracedecay::store::vector_generation_test_support::{
-    CanonicalChunkVectorEncoderV1, GraphVectorGenerationStoreV1, ProjectionRequestBatchV1,
-    SemanticProjectionErrorV1, VectorGenerationIdV1, VectorGenerationPlanV1,
-    VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
-    fail_before_publication_swap_once, prepare_vector_generation,
-    prepare_vector_generation_async, split_projection_request,
+    CanonicalChunkVectorEncoderV1, ProjectionRequestBatchV1, SemanticProjectionErrorV1,
+    VectorGenerationIdV1, VectorGenerationPlanV1, VectorGenerationStateMachineV1,
+    VectorGenerationStoreErrorV1, prepare_vector_generation, prepare_vector_generation_async,
+    split_projection_request,
 };
-use tracedecay_graph_db::{GraphCancellation, GraphDbOwner, NeverCancelled};
 use tracedecay_domain::{
     BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
     CodeGenerationId, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId,
@@ -268,7 +266,7 @@ fn publish_initial_generation() -> (
         .expect("lost-ack duplicate is an idempotent no-op");
     assert_eq!(duplicate_checkpoint, checkpoint);
     let publication = store
-        .publish_generation(&build_id, None)
+        .publish_generation(&build_id)
         .expect("initial publication");
     let published = store
         .generation(&publication.generation_id)
@@ -343,16 +341,24 @@ async fn indexing_and_cancellation_leave_only_the_compatible_prior_generation_qu
     started_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("background projection started");
-    assert_eq!(store.active_generation_id(), Some(&base_generation));
     assert!(
         store
-            .active_generation_for(&admitted, &prior_source_generation, &prior_source_manifest,)
+            .generation(&base_generation)
+            .filter(|generation| {
+                generation.embedding_key() == &admitted
+                    && generation.source_generation() == &prior_source_generation
+                    && generation.source_manifest_digest() == &prior_source_manifest
+            })
             .is_some(),
         "an exactly compatible prior snapshot remains queryable while indexing"
     );
     assert!(
         store
-            .active_generation_for(&admitted, &id("code-generation.2"), &next_source_manifest,)
+            .generation(&base_generation)
+            .filter(|generation| {
+                generation.source_generation() == &id("code-generation.2")
+                    && generation.source_manifest_digest() == &next_source_manifest
+            })
             .is_none(),
         "the partial replacement is omitted instead of exposing stale semantic rows"
     );
@@ -365,11 +371,9 @@ async fn indexing_and_cancellation_leave_only_the_compatible_prior_generation_qu
     store
         .commit_batch(&build_id, None, prepared)
         .expect("checkpoint completed batch");
-    assert_eq!(store.active_generation_id(), Some(&base_generation));
     assert!(store.cancel_generation(&build_id));
-    assert_eq!(store.active_generation_id(), Some(&base_generation));
     assert_eq!(
-        store.publish_generation(&build_id, Some(&base_generation)),
+        store.publish_generation(&build_id),
         Err(VectorGenerationStoreErrorV1::UnknownBuild)
     );
 }
@@ -517,10 +521,8 @@ fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
         .commit_batch(&build_id, None, prepared)
         .expect("changed batch");
     assert_eq!(checkpoint.completed_batches, 1);
-    assert_eq!(store.active_generation_id(), Some(&base_generation));
-
     let publication = store
-        .publish_generation(&build_id, Some(&base_generation))
+        .publish_generation(&build_id)
         .expect("changed publication");
     let published = store
         .generation(&publication.generation_id)
@@ -534,7 +536,7 @@ fn fake_projection_uses_canonical_chunks_and_plan25_receipts() {
 }
 
 #[test]
-fn checkpoint_and_active_pointer_publish_atomically() {
+fn committed_checkpoint_remains_staged_until_immutable_publication() {
     let (mut store, key, base_generation) = publish_initial_generation();
     let projection_key = key.projection_key().unwrap();
     let alpha = chunk("code-generation.2", "alpha", "fn alpha() -> u8 { 2 }", 0);
@@ -571,23 +573,22 @@ fn checkpoint_and_active_pointer_publish_atomically() {
         .unwrap();
     store.commit_batch(&build_id, None, prepared).unwrap();
 
-    let prior_checkpoint = store.active_checkpoint().cloned();
-    fail_before_publication_swap_once(&mut store);
-    assert_eq!(
-        store.publish_generation(&build_id, Some(&base_generation)),
-        Err(VectorGenerationStoreErrorV1::InjectedPublicationFailure)
-    );
-    assert_eq!(store.active_generation_id(), Some(&base_generation));
-    assert_eq!(store.active_checkpoint(), prior_checkpoint.as_ref());
+    let staged_checkpoint = store
+        .staged_checkpoint(&build_id)
+        .cloned()
+        .expect("durable staged checkpoint");
+    assert!(store.generation(&base_generation).is_some());
 
     let publication = store
-        .publish_generation(&build_id, Some(&base_generation))
-        .expect("retry publishes atomically");
+        .publish_generation(&build_id)
+        .expect("publishes immutable generation");
+    assert_eq!(publication.checkpoint, staged_checkpoint);
     assert_eq!(
-        store.active_generation_id(),
-        Some(&publication.generation_id)
+        store
+            .generation(&publication.generation_id)
+            .map(|generation| generation.checkpoint()),
+        Some(&publication.checkpoint)
     );
-    assert_eq!(store.active_checkpoint(), Some(&publication.checkpoint));
 }
 
 #[test]
@@ -647,9 +648,7 @@ fn unchanged_generation_reuses_vectors_without_fake_inference() {
         })
         .unwrap();
     store.commit_batch(&build_id, None, prepared).unwrap();
-    let published = store
-        .publish_generation(&build_id, Some(&base_generation))
-        .unwrap();
+    let published = store.publish_generation(&build_id).unwrap();
     assert_eq!(
         store
             .generation(&published.generation_id)
@@ -865,7 +864,7 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
         .commit_batch(&single_build, None, single_prepared)
         .expect("single batch commit");
     let single = single_store
-        .publish_generation(&single_build, None)
+        .publish_generation(&single_build)
         .expect("single batch publication");
 
     let alpha_prepared = prepare_vector_generation(
@@ -910,16 +909,15 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
         .commit_batch(&multi_build, None, alpha_prepared)
         .expect("first batch commit");
     assert_eq!(
-        multi_store.publish_generation(&multi_build, None),
+        multi_store.publish_generation(&multi_build),
         Err(VectorGenerationStoreErrorV1::IncompleteGeneration),
-        "a partial batch checkpoint must never become the active generation"
+        "a partial batch checkpoint must never become readable"
     );
-    assert_eq!(multi_store.active_generation_id(), None);
     multi_store
         .commit_batch(&multi_build, Some(&checkpoint), beta_prepared)
         .expect("second batch commit");
     let multi = multi_store
-        .publish_generation(&multi_build, None)
+        .publish_generation(&multi_build)
         .expect("multi batch publication");
 
     assert_eq!(single.generation_id, multi.generation_id);
@@ -999,7 +997,7 @@ fn publish_in_batches(
                 .expect("batch commit"),
         );
     }
-    let publication = store.publish_generation(&build, None).expect("publication");
+    let publication = store.publish_generation(&build).expect("publication");
     (store, publication)
 }
 
@@ -1133,7 +1131,7 @@ fn a_partial_incremental_run_resumes_from_its_checkpoint() {
         );
     }
     assert_eq!(
-        store.publish_generation(&build, None),
+        store.publish_generation(&build),
         Err(VectorGenerationStoreErrorV1::IncompleteGeneration),
         "a partial run must never become the active generation"
     );
@@ -1168,7 +1166,7 @@ fn a_partial_incremental_run_resumes_from_its_checkpoint() {
         );
     }
     let publication = store
-        .publish_generation(&resumed_build, None)
+        .publish_generation(&resumed_build)
         .expect("resumed publication");
     assert_eq!(
         publication.generation_id, reference.generation_id,
@@ -1179,10 +1177,6 @@ fn a_partial_incremental_run_resumes_from_its_checkpoint() {
 
 #[tokio::test]
 async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
-    let cancellation: Arc<dyn GraphCancellation> = Arc::new(NeverCancelled);
-    let graph = GraphDbOwner::memory(Arc::new(NeverCancelled))
-        .expect("memory graph")
-        .handle();
     let key = embedding_key();
     let admitted = admitted_key(&key);
     let projection_key = key.projection_key().expect("projection key");
@@ -1209,61 +1203,32 @@ async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
         &mut FakeEncoder::default(),
     )
     .expect("initial projection");
-    let store = GraphVectorGenerationStoreV1::open(Arc::clone(&graph), Arc::clone(&cancellation))
-        .expect("persistent vector store");
+    let mut store = VectorGenerationStateMachineV1::new();
     let mut initial_chunk_ids = vec![alpha_v1.id.clone(), stable_v1.id.clone()];
     initial_chunk_ids.sort();
     let initial_build = store
-        .begin_generation(
-            VectorGenerationPlanV1 {
-                target_projection_key: projection_key.clone(),
-                source_generation: id("code-generation.1"),
-                source_manifest_digest: initial.receipt.source_manifest_digest.clone(),
-                expected_chunk_ids: initial_chunk_ids.into(),
-                base_generation: None,
-            },
-            Arc::clone(&cancellation),
-        )
-        .await
-        .expect("initial persistent build");
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: projection_key.clone(),
+            source_generation: id("code-generation.1"),
+            source_manifest_digest: initial.receipt.source_manifest_digest.clone(),
+            expected_chunk_ids: initial_chunk_ids.into(),
+            base_generation: None,
+        })
+        .expect("initial build");
     store
-        .commit_batch(&initial_build, None, initial, Arc::clone(&cancellation))
-        .await
-        .expect("initial persistent batch");
-    drop(store);
+        .commit_batch(&initial_build, None, initial)
+        .expect("initial batch");
+    let initial_publication = store
+        .publish_generation(&initial_build)
+        .expect("initial publication");
 
-    let resumed = GraphVectorGenerationStoreV1::open(Arc::clone(&graph), Arc::clone(&cancellation))
-        .expect("resume checkpointed vector build");
-    assert_eq!(
-        resumed
-            .active_generation_id(Arc::clone(&cancellation))
-            .await
-            .unwrap(),
-        None,
-        "checkpointed partial generations remain unqueryable"
-    );
-    let initial_publication = resumed
-        .publish_generation(&initial_build, None, Arc::clone(&cancellation))
-        .await
-        .expect("publish resumed persistent generation");
-    drop(resumed);
-
-    let restarted =
-        GraphVectorGenerationStoreV1::open(Arc::clone(&graph), Arc::clone(&cancellation))
-            .expect("restart persistent vector store");
+    let encoded = serde_json::to_vec(&store).expect("persist vector state");
+    let mut restarted: VectorGenerationStateMachineV1 =
+        serde_json::from_slice(&encoded).expect("reopen vector state");
     assert_eq!(
         restarted
-            .active_generation_id(Arc::clone(&cancellation))
-            .await
-            .unwrap(),
-        Some(initial_publication.generation_id.clone())
-    );
-    assert_eq!(
-        restarted
-            .generation(&initial_publication.generation_id, Arc::clone(&cancellation))
-            .await
-            .unwrap()
-            .expect("initial immutable generation")
+            .generation(&initial_publication.generation_id)
+            .expect("recovered initial generation")
             .vectors()
             .len(),
         2
@@ -1304,27 +1269,17 @@ async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
         base_generation: Some(initial_publication.generation_id.clone()),
     };
     let next_build = restarted
-        .begin_generation(next_plan.clone(), Arc::clone(&cancellation))
-        .await
+        .begin_generation(next_plan.clone())
         .expect("superseding build");
     restarted
-        .commit_batch(&next_build, None, next.clone(), Arc::clone(&cancellation))
-        .await
+        .commit_batch(&next_build, None, next.clone())
         .expect("superseding batch");
     let next_publication = restarted
-        .publish_generation(
-            &next_build,
-            Some(&initial_publication.generation_id),
-            Arc::clone(&cancellation),
-        )
-        .await
-        .expect("atomic supersession");
-
+        .publish_generation(&next_build)
+        .expect("superseding publication");
     let current = restarted
-        .generation(&next_publication.generation_id, Arc::clone(&cancellation))
-        .await
-        .unwrap()
-        .expect("current immutable generation");
+        .generation(&next_publication.generation_id)
+        .expect("new immutable generation");
     assert_eq!(
         current.base_generation(),
         Some(&initial_publication.generation_id)
@@ -1334,94 +1289,32 @@ async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
         vec![&stable_v2.id]
     );
     assert_eq!(current.tombstones(), &[alpha_v1.id.clone()]);
-    assert_eq!(
-        current.tombstone_digests().get(&alpha_v1.id),
-        Some(&alpha_v1.content_digest)
-    );
     assert!(
         restarted
-            .generation(&initial_publication.generation_id, Arc::clone(&cancellation))
-            .await
-            .unwrap()
-            .expect("superseded generation remains addressable")
+            .generation(&initial_publication.generation_id)
+            .expect("superseded generation remains exact-addressable")
             .vectors()
             .contains_key(&alpha_v1.id)
     );
 
-    drop(restarted);
-    let rebuilt = GraphVectorGenerationStoreV1::open(Arc::clone(&graph), Arc::clone(&cancellation))
-        .expect("second restart");
-    assert_eq!(
-        rebuilt
-            .active_generation_id(Arc::clone(&cancellation))
-            .await
-            .unwrap(),
-        Some(next_publication.generation_id.clone())
-    );
-    let replay_build = rebuilt
-        .rebuild_generation(next_plan.clone(), Arc::clone(&cancellation))
-        .await
-        .expect("restart deterministic rebuild from query inputs");
-    rebuilt
-        .commit_batch(&replay_build, None, next.clone(), Arc::clone(&cancellation))
-        .await
-        .expect("lost-ack replay");
-    assert_eq!(
-        rebuilt
-            .active_generation_id(Arc::clone(&cancellation))
-            .await
-            .unwrap(),
-        Some(next_publication.generation_id.clone()),
-        "rebuild staging cannot expose a partial generation"
-    );
+    let encoded = serde_json::to_vec(&restarted).expect("persist superseded generations");
+    let reopened: VectorGenerationStateMachineV1 =
+        serde_json::from_slice(&encoded).expect("second reopen");
     assert!(
-        rebuilt
-            .cancel_generation(&replay_build, Arc::clone(&cancellation))
-            .await
-            .expect("cancel staged rebuild")
+        reopened
+            .generation(&initial_publication.generation_id)
+            .expect("historical generation after restart")
+            .vectors()
+            .contains_key(&alpha_v1.id)
     );
     assert_eq!(
-        rebuilt
-            .active_generation_id(Arc::clone(&cancellation))
-            .await
-            .unwrap(),
-        Some(next_publication.generation_id.clone()),
-        "cancelling a rebuild preserves the prior active pointer"
-    );
-    let replay_build = rebuilt
-        .rebuild_generation(next_plan, Arc::clone(&cancellation))
-        .await
-        .expect("restart deterministic rebuild after cancellation");
-    rebuilt
-        .commit_batch(&replay_build, None, next, Arc::clone(&cancellation))
-        .await
-        .expect("replay after cancellation");
-    let replay = rebuilt
-        .publish_generation(
-            &replay_build,
-            Some(&next_publication.generation_id),
-            Arc::clone(&cancellation),
-        )
-        .await
-        .expect("deterministic rebuild publication");
-    assert_eq!(replay.generation_id, next_publication.generation_id);
-
-    let restored = rebuilt
-        .activate_generation(
-            &initial_publication.generation_id,
-            Some(&next_publication.generation_id),
-            Arc::clone(&cancellation),
-        )
-        .await
-        .expect("rollback to immutable prior generation");
-    assert_eq!(restored.generation_id, initial_publication.generation_id);
-    assert_eq!(
-        rebuilt
-            .active_generation_id(Arc::clone(&cancellation))
-            .await
-            .unwrap(),
-        Some(initial_publication.generation_id),
-        "rollback atomically restores the prior active pointer"
+        reopened
+            .generation(&next_publication.generation_id)
+            .expect("new generation after restart")
+            .vectors()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec![&stable_v2.id]
     );
 }
 

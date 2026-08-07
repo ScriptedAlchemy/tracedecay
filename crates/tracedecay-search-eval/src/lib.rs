@@ -1,21 +1,19 @@
 //! Search-quality evaluator for the production retrieval kernel.
 //!
 //! Candidate generation, direct (locked-quality) evaluation, and native
-//! semantic measurement over a checked-in workload and corpus. The evaluator
-//! mounts the production code-index owner and retrieval kernel directly; the
-//! only capability it cannot own is the authoritative repository identity of
-//! the checkout under evaluation, which the composing binary injects as an
-//! [`AdmittedCorpusScopeFn`].
+//! semantic measurement over its packaged authoritative workload and corpus.
+//! Default validation and evaluation materialize those assets independently of
+//! the mounted project. Explicit developer workloads may still inject an
+//! admitted repository identity through [`AdmittedCorpusScopeFn`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub mod candidate_output;
+mod packaged_assets;
 mod report;
 pub mod semantic_native;
 
@@ -70,11 +68,6 @@ pub(crate) fn checked_in_fixture_root() -> PathBuf {
 
 const DEFAULT_WORKLOAD: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
-// Re-pinned 2026-08-01: the workload's partition digests were refreshed
-// deliberately (its sibling pins in the suite fixture and the -direct bin
-// were updated in the same commit); this whole-file pin was the one missed.
-const DEFAULT_WORKLOAD_SHA256: &str =
-    "1c546758a8c61f65ac48e6d834c2112caf9f98926c0802310aa8c76cb1f1749a";
 const QUERY_BASELINE_PROFILE: &str = "query-fallback";
 const SEMANTIC_PROFILE: &str = "hybrid-conservative";
 const RERANK_PROFILE: &str = "hybrid-reranked";
@@ -140,42 +133,17 @@ pub fn default_workload_path(repo_root: &Path) -> PathBuf {
     repo_root.join(DEFAULT_WORKLOAD)
 }
 
-fn load_authoritative_default_workload(
-    repo_root: &Path,
-) -> Result<(PathBuf, CandidateWorkloadV1), SearchEvalError> {
-    let canonical_root = fs::canonicalize(repo_root).map_err(|error| {
-        SearchEvalError::Contract(format!(
-            "canonicalize repository root {}: {error}",
-            repo_root.display()
-        ))
-    })?;
-    let expected_path = canonical_root.join(DEFAULT_WORKLOAD);
-    let canonical_path = fs::canonicalize(&expected_path).map_err(|error| {
-        SearchEvalError::Contract(format!(
-            "canonicalize authoritative direct workload {}: {error}",
-            expected_path.display()
-        ))
-    })?;
-    if canonical_path != expected_path {
-        return Err(SearchEvalError::Contract(
-            "authoritative direct workload must be the checked-in non-symlink fixture".to_owned(),
-        ));
-    }
-    let bytes = fs::read(&canonical_path).map_err(|error| {
-        SearchEvalError::Contract(format!(
-            "read authoritative direct workload {}: {error}",
-            canonical_path.display()
-        ))
-    })?;
-    let observed_digest = hex::encode(Sha256::digest(&bytes));
-    if observed_digest != DEFAULT_WORKLOAD_SHA256 {
-        return Err(SearchEvalError::Contract(format!(
-            "authoritative direct workload digest mismatch: expected {DEFAULT_WORKLOAD_SHA256}, observed {observed_digest}"
-        )));
-    }
-    let workload = load_candidate_workload(&canonical_path)?;
+fn load_authoritative_default_workload()
+-> Result<packaged_assets::PackagedEvaluatorAssets, SearchEvalError> {
+    let assets = packaged_assets::materialize()?;
+    validate_activation_profile_matrix(assets.workload())?;
+    Ok(assets)
+}
+
+fn load_authoritative_default_workload_metadata() -> Result<CandidateWorkloadV1, SearchEvalError> {
+    let workload = packaged_assets::load_workload()?;
     validate_activation_profile_matrix(&workload)?;
-    Ok((canonical_path, workload))
+    Ok(workload)
 }
 
 fn validate_activation_profile_matrix(
@@ -242,10 +210,10 @@ fn activation_profile_chain(
 /// Ordinary developer comparisons may use an explicit workload, but only this
 /// byte-pinned default fixture can mint an activation-eligible evaluation.
 pub fn validate_default_activation_workload(
-    repo_root: &Path,
+    _repo_root: &Path,
 ) -> Result<DirectWorkloadSummaryV1, SearchEvalError> {
-    let (path, _) = load_authoritative_default_workload(repo_root)?;
-    validate_direct_workload(repo_root, Some(&path))
+    let assets = load_authoritative_default_workload()?;
+    validate_direct_workload(assets.root(), Some(&assets.workload_path()))
 }
 
 pub fn validate_direct_workload(
@@ -290,6 +258,20 @@ pub fn compare_direct(
     evaluate_generated_outputs(repo_root, &workload, &generated)
 }
 
+pub fn compare_default_direct(
+    _project_root: &Path,
+    profile_ids: Option<&[String]>,
+) -> Result<DirectEvaluationReportV1, SearchEvalError> {
+    let assets = load_authoritative_default_workload()?;
+    let generated = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
+        repo_root: assets.root(),
+        workload_path: Some(&assets.workload_path()),
+        profile_ids,
+        admitted_scope: packaged_assets::admitted_scope,
+    })?;
+    evaluate_generated_outputs(assets.root(), assets.workload(), &generated)
+}
+
 /// Run the exact checked-in activation matrix through genuine native
 /// semantic/rerank authorities.
 ///
@@ -297,30 +279,36 @@ pub fn compare_direct(
 /// query baseline; semantic with semantic-disabled query ablations; and, for the
 /// reranked profile, the same semantic profile with rerank disabled.
 pub fn evaluate_default_activation_candidate(
-    repo_root: &Path,
     evaluated_profile_id: &str,
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
-    admitted_scope: AdmittedCorpusScopeFn,
 ) -> Result<DirectActivationEvaluationV1, SearchEvalError> {
-    let (workload_path, workload) = load_authoritative_default_workload(repo_root)?;
-    let profile_ids = activation_profile_chain(&workload, evaluated_profile_id)?;
+    let assets = load_authoritative_default_workload()?;
+    let workload = assets.workload();
+    let profile_ids = activation_profile_chain(workload, evaluated_profile_id)?;
     let generated = generate_candidate_outputs_with_native(
         &GenerateCandidateOutputsOptions {
-            repo_root,
-            workload_path: Some(&workload_path),
+            repo_root: assets.root(),
+            workload_path: Some(&assets.workload_path()),
             profile_ids: Some(&profile_ids),
-            admitted_scope,
+            admitted_scope: packaged_assets::admitted_scope,
         },
         authority,
     )?;
     validate_activation_native_matrix(&profile_ids, &generated)?;
-    let report = evaluate_generated_outputs(repo_root, &workload, &generated)?;
-    report.validate_for_activation(repo_root, &workload)?;
-    let evaluated_material = direct_evaluated_profile_material(&workload, evaluated_profile_id)?;
+    let report = evaluate_generated_outputs(assets.root(), workload, &generated)?;
+    report.validate_for_activation(assets.root(), workload)?;
+    let evaluated_material = direct_evaluated_profile_material(workload, evaluated_profile_id)?;
     Ok(DirectActivationEvaluationV1 {
         report,
         evaluated_material,
     })
+}
+
+pub fn load_default_evaluated_profile_material(
+    profile_id: &str,
+) -> Result<DirectEvaluatedProfileMaterialV1, SearchEvalError> {
+    let workload = load_authoritative_default_workload_metadata()?;
+    Ok(direct_evaluated_profile_material(&workload, profile_id)?)
 }
 
 fn validate_activation_native_matrix(
@@ -1369,30 +1357,29 @@ mod tests {
 
     #[test]
     fn activation_profile_chain_is_closed_and_ordered() {
-        let repo_root = crate::checked_in_fixture_root();
-        let (_, workload) =
-            load_authoritative_default_workload(&repo_root).expect("authoritative workload");
+        let assets = load_authoritative_default_workload().expect("authoritative workload");
+        let workload = assets.workload();
 
         assert_eq!(
-            activation_profile_chain(&workload, QUERY_BASELINE_PROFILE).expect("query chain"),
+            activation_profile_chain(workload, QUERY_BASELINE_PROFILE).expect("query chain"),
             vec![QUERY_BASELINE_PROFILE.to_owned()]
         );
         assert_eq!(
-            activation_profile_chain(&workload, SEMANTIC_PROFILE).expect("semantic chain"),
+            activation_profile_chain(workload, SEMANTIC_PROFILE).expect("semantic chain"),
             vec![
                 QUERY_BASELINE_PROFILE.to_owned(),
                 SEMANTIC_PROFILE.to_owned()
             ]
         );
         assert_eq!(
-            activation_profile_chain(&workload, RERANK_PROFILE).expect("rerank chain"),
+            activation_profile_chain(workload, RERANK_PROFILE).expect("rerank chain"),
             vec![
                 QUERY_BASELINE_PROFILE.to_owned(),
                 SEMANTIC_PROFILE.to_owned(),
                 RERANK_PROFILE.to_owned()
             ]
         );
-        assert!(activation_profile_chain(&workload, "caller-authored").is_err());
+        assert!(activation_profile_chain(workload, "caller-authored").is_err());
     }
 
     #[test]
@@ -1523,21 +1510,5 @@ mod tests {
             aggregate_profile_status(&[baseline, candidate]),
             super::DirectEvaluationStatusV1::Pass
         );
-    }
-
-    #[test]
-    fn altered_or_relabelled_workload_cannot_mint_activation() {
-        let temp = tempfile::tempdir().expect("temp repository");
-        let path = temp.path().join(super::DEFAULT_WORKLOAD);
-        std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
-        let mut bytes =
-            std::fs::read(crate::checked_in_fixture_root().join(super::DEFAULT_WORKLOAD))
-                .expect("checked-in workload");
-        bytes.push(b'\n');
-        std::fs::write(path, bytes).expect("altered workload");
-
-        let error =
-            load_authoritative_default_workload(temp.path()).expect_err("digest must reject copy");
-        assert!(error.to_string().contains("digest mismatch"));
     }
 }

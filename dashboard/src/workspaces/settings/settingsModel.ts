@@ -192,7 +192,10 @@ export interface UserSettingsChangeSet {
  * keep being sent under its old name.
  */
 type Assert<T extends true> = T;
-type WritableFieldsOf<TPatch> = Exclude<keyof TPatch, 'expected_revision_id'>;
+type WritableFieldsOf<TPatch> = Exclude<
+  keyof TPatch,
+  'expected_revision_id' | 'idempotency_key'
+>;
 type SameKeys<TLeft, TRight> = [keyof TLeft] extends [TRight]
   ? [TRight] extends [keyof TLeft]
     ? true
@@ -358,7 +361,7 @@ export function buildSettingsModel(payload: unknown): SettingsModel {
  */
 export function buildSettingsEditor(payload: SettingsPayloadV1): SettingsEditor | null {
   const { config, configuration_revision_id: projectRevision } = payload.project;
-  const { user_settings_revision_id: userRevision } = payload.user;
+  const { configuration_revision_id: userRevision } = payload.user;
   const maxFileSize = unsignedIntegerString(config.max_file_size);
   const pollSecs = unsignedIntegerString(config.sync.auto_track_pr_poll_secs);
   const extractionTimeout = unsignedIntegerString(payload.user.extraction_timeout_secs);
@@ -474,7 +477,7 @@ export function planUserChangeAgainst(
       outcome: 'invalid',
       errors: [
         {
-          field: 'user_settings_revision_id',
+          field: 'configuration_revision_id',
           message: 'current editable settings and revision are unavailable',
         },
       ],

@@ -53,10 +53,21 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .as_str()
             .unwrap_or_else(|| panic!("missing configuration revision: {settings}"))
             .to_owned();
-        let user_revision = settings["user"]["user_settings_revision_id"]
+        let user_revision = settings["user"]["configuration_revision_id"]
             .as_str()
             .unwrap_or_else(|| panic!("missing user settings revision: {settings}"))
             .to_owned();
+        assert_eq!(
+            user_revision, revision,
+            "project and profile values must share one configuration revision"
+        );
+        let user_legacy_config_path = std::path::PathBuf::from(
+            settings["user"]["legacy_config_path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing legacy user config path: {settings}")),
+        );
+        let user_legacy_config_before = std::fs::read(&user_legacy_config_path).ok();
+        assert_eq!(settings["user"]["legacy_config_read_only"], true);
         let legacy_config_path = std::path::PathBuf::from(
             settings["project"]["legacy_config_path"]
                 .as_str()
@@ -123,12 +134,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(global_db_var["active"], true);
         assert!(settings["environment"]["global_accounting_enabled"].is_boolean());
 
-        // A project configuration write is performed by the daemon-owned
-        // configuration control plane. This fixture serves the dashboard
-        // directly, so that control plane is not mounted, and the envelope has
-        // to say so instead of advertising an apply that can only fail. User
-        // settings keep their apply: they are written through the profile
-        // authority every dashboard state carries.
+        // Both editable scopes use the cataloged daemon configuration effect.
+        // This fixture serves the dashboard directly, so neither scope may
+        // advertise or perform a write.
         let legal_actions = settings_envelope["legal_actions"]
             .as_array()
             .unwrap_or_else(|| panic!("expected legal actions: {settings_envelope}"));
@@ -141,10 +149,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             !advertises("configuration_batch"),
             "project apply must not be advertised without a control plane: {settings_envelope}"
         );
-        assert!(
-            advertises("user_settings_mutate"),
-            "user apply is always authorized: {settings_envelope}"
-        );
+        assert!(!advertises("user_settings_mutate"));
 
         let project_url = format!("{url}/project");
         let (status, unchanged_envelope) = patch_json_body(
@@ -152,6 +157,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &project_url,
             &json!({
                 "expected_revision_id": revision,
+                "idempotency_key": "configuration.idempotency.dashboard-project-noop",
                 "max_file_size": 1_048_576
             }),
         );
@@ -159,7 +165,8 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             status, 200,
             "no-op project patch failed: {unchanged_envelope}"
         );
-        let unchanged = unchanged_envelope["payload"].clone();
+        assert!(unchanged_envelope["application_outcome"].is_null());
+        let unchanged = unchanged_envelope["current"]["payload"].clone();
         assert_eq!(unchanged["resync_recommended"], false);
         assert_eq!(
             unchanged["project"]["configuration_revision_id"], revision,
@@ -174,6 +181,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &project_url,
             &json!({
                 "expected_revision_id": revision,
+                "idempotency_key": "configuration.idempotency.dashboard-project-unavailable",
                 "exclude": ["target/**", "dist/**"],
                 "include": [".github/**"],
                 "max_file_size": 2048
@@ -200,21 +208,24 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "an unavailable authority must not advance the revision: {after_unavailable}"
         );
 
-        // Compare-and-set runs before the authority is consulted, so a stale
-        // revision still conflicts rather than reporting the authority gap.
+        // A stale request cannot bypass the durable replay authority: without
+        // that authority mounted, the route cannot truthfully decide whether
+        // this is an exact replay or an unseen stale mutation.
         const FOREIGN_REVISION: &str = "configuration-revision-that-never-existed";
         let (status, stale) = patch_json_body(
             &agent,
             &project_url,
             &json!({
                 "expected_revision_id": FOREIGN_REVISION,
+                "idempotency_key": "configuration.idempotency.dashboard-project-stale",
                 "track_call_sites": false
             }),
         );
-        assert_eq!(status, 409, "stale project patch should conflict: {stale}");
-        assert_eq!(stale["code"], "configuration_revision_conflict");
-        assert_eq!(stale["expected_revision_id"], FOREIGN_REVISION);
-        assert_eq!(stale["actual_revision_id"], revision);
+        assert_eq!(
+            status, 503,
+            "stale project patch needs the replay authority: {stale}"
+        );
+        assert_eq!(stale["code"], "configuration_authority_unavailable");
 
         let (status, absent) =
             patch_json_body(&agent, &project_url, &json!({ "track_call_sites": false }));
@@ -227,11 +238,29 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "expected_revision_id"
         );
 
+        let (status, absent_project_idempotency) = patch_json_body(
+            &agent,
+            &project_url,
+            &json!({
+                "expected_revision_id": revision,
+                "track_call_sites": false
+            }),
+        );
+        assert_eq!(
+            status, 400,
+            "missing project idempotency must be rejected: {absent_project_idempotency}"
+        );
+        assert_eq!(
+            absent_project_idempotency["validation_errors"][0]["field"],
+            "idempotency_key"
+        );
+
         let (status, invalid) = patch_json_body(
             &agent,
             &project_url,
             &json!({
                 "expected_revision_id": revision,
+                "idempotency_key": "configuration.idempotency.dashboard-project-invalid",
                 "exclude": ["[invalid"]
             }),
         );
@@ -249,6 +278,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &project_url,
             &json!({
                 "expected_revision_id": revision,
+                "idempotency_key": "configuration.idempotency.dashboard-project-unknown",
                 "made_up_field": true
             }),
         );
@@ -260,6 +290,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &project_url,
             &json!({
                 "expected_revision_id": revision,
+                "idempotency_key": "configuration.idempotency.dashboard-project-zero",
                 "max_file_size": 0
             }),
         );
@@ -267,84 +298,49 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(zero["validation_errors"][0]["field"], "max_file_size");
 
         let user_url = format!("{url}/user");
-        let (status, user_envelope) = patch_json_body(
+        let (status, unavailable_user) = patch_json_body(
             &agent,
             &user_url,
             &json!({
                 "expected_revision_id": user_revision,
+                "idempotency_key": "configuration.idempotency.dashboard-user-unmounted",
                 "upload_enabled": false,
                 "watcher_debounce": "15s"
             }),
         );
-        assert_eq!(status, 200, "user patch failed: {user_envelope}");
-        let user = user_envelope["payload"].clone();
         assert_eq!(
-            user["restart_recommended"], true,
-            "watcher debounce changes need a daemon restart: {user}"
+            status, 503,
+            "user patch without the control plane must be unavailable: {unavailable_user}"
         );
-        assert_eq!(user["user"]["upload_enabled"], false);
-        assert_eq!(user["user"]["watcher_debounce"], "15s");
-        let next_user_revision = user["user"]["user_settings_revision_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("user mutation omitted revision: {user}"))
-            .to_owned();
-        assert_ne!(
-            next_user_revision, user_revision,
-            "a user mutation must publish a new user-settings revision"
+        assert_eq!(
+            std::fs::read(&user_legacy_config_path).ok(),
+            user_legacy_config_before,
+            "an unavailable profile mutation must not write config.toml"
         );
 
-        let (status, stale_user) = patch_json_body(
+        let (status, absent_user_idempotency) = patch_json_body(
             &agent,
             &user_url,
             &json!({
                 "expected_revision_id": user_revision,
-                "upload_enabled": true
+                "upload_enabled": false
             }),
         );
-        assert_eq!(
-            status, 409,
-            "concurrent stale user patch should conflict: {stale_user}"
-        );
-        assert_eq!(stale_user["code"], "configuration_revision_conflict");
-        assert_eq!(stale_user["expected_revision_id"], user_revision);
-        assert_eq!(stale_user["actual_revision_id"], next_user_revision);
-
-        let (status, upload_only_envelope) = patch_json_body(
-            &agent,
-            &user_url,
-            &json!({
-                "expected_revision_id": next_user_revision,
-                "upload_enabled": true
-            }),
-        );
-        assert_eq!(
-            status, 200,
-            "upload-only patch failed: {upload_only_envelope}"
-        );
-        let upload_only = upload_only_envelope["payload"].clone();
-        assert_eq!(upload_only["restart_recommended"], false);
-        let final_user_revision = upload_only["user"]["user_settings_revision_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("upload mutation omitted revision: {upload_only}"))
-            .to_owned();
-        assert_ne!(final_user_revision, next_user_revision);
-
-        let (status, absent_user_revision) =
-            patch_json_body(&agent, &user_url, &json!({ "upload_enabled": false }));
         assert_eq!(
             status, 400,
-            "missing user revision must be rejected: {absent_user_revision}"
+            "missing user idempotency must be rejected: {absent_user_idempotency}"
         );
         assert_eq!(
-            absent_user_revision["validation_errors"][0]["field"],
-            "expected_revision_id"
+            absent_user_idempotency["validation_errors"][0]["field"],
+            "idempotency_key"
         );
 
         let (status, bad_debounce) = patch_json_body(
             &agent,
             &user_url,
             &json!({
-                "expected_revision_id": final_user_revision,
+                "expected_revision_id": user_revision,
+                "idempotency_key": "configuration.idempotency.dashboard-user-invalid",
                 "watcher_debounce": "1h"
             }),
         );
@@ -359,7 +355,8 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         let reloaded = reloaded_envelope["payload"].clone();
         assert_eq!(reloaded["project"]["config"]["max_file_size"], 1_048_576);
         assert_eq!(reloaded["project"]["configuration_revision_id"], revision);
-        assert_eq!(reloaded["user"]["upload_enabled"], true);
-        assert_eq!(reloaded["user"]["watcher_debounce"], "15s");
+        assert_eq!(reloaded["user"]["configuration_revision_id"], user_revision);
+        assert_eq!(reloaded["user"]["upload_enabled"], false);
+        assert_eq!(reloaded["user"]["watcher_debounce"], "2s");
     });
 }

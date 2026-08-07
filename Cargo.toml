@@ -95,12 +95,12 @@ include = [
     "/tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json",
     "/tests/fixtures/transcript_golden/cline_like/**",
     "/benchmarks/queries/default.toml",
-    "/benchmarks/pr5-observation/**",
+    "/benchmarks/claude-observation/**",
     "/benchmarks/pr7-memory/**",
-    "/benchmarks/pr8-temporal/**",
+    "/benchmarks/session-temporal/**",
     "/benchmarks/query-code-index/**",
     "/benchmarks/search-quality/query-fallback-report-v1.json",
-    "/scripts/run-pr8-temporal-benchmark.sh",
+    "/scripts/run-session-temporal-benchmark.sh",
     "/plugin/.claude-plugin/**",
     "/plugin/.cursor-plugin/**",
     "/plugin/.codex-plugin/**",
@@ -388,9 +388,11 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 jsonschema = { version = "0.46.8", default-features = false }
 tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
+tracedecay-sdk = { path = "crates/tracedecay-sdk", version = "0.1.0" }
 # Test builds opt into the query kernel's `*_for_test` constructors; the
 # feature stays off for production builds.
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-code-index = { path = "crates/tracedecay-code-index", version = "0.1.0", default-features = false, features = ["test-helpers"] }
 tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0", features = ["test-helpers"] }
 # Same policy for the extracted global-db harness the root test suite drives.
@@ -446,6 +448,12 @@ opt-level = 2
 
 [profile.dev.package.regex]
 opt-level = 2
+
+# Graph publication digest checks hash multi-megabyte canonical replay
+# sources on every durable read/write; unoptimized sha2 alone exceeds the
+# exact-SQL test transaction budget.
+[profile.dev.package.sha2]
+opt-level = 3
 
 # Workspace dependencies keep the upstream package API while the canonical
 # patched grammar sources ship inside the standalone code-extraction package.

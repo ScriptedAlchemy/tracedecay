@@ -309,6 +309,120 @@ impl DirectEvaluationReportV1 {
         }
         Ok(())
     }
+
+    /// Derive the accepted semantic resource pins from the exact selected
+    /// profile's retained train/validation, current/10x native observations.
+    /// Configuration ceilings are deliberately not an input.
+    pub fn semantic_activation_resource_pins(
+        &self,
+        evaluated_profile_id: &str,
+    ) -> Result<crate::semantic_native::SemanticActivationResourcePinsV1, SearchEvalError> {
+        use crate::semantic_native::{
+            SemanticActivationResourcePinsV1, SemanticNativeStageResultV1,
+        };
+
+        let mut fixed = None;
+        let mut resident_bytes = 0_u64;
+        let mut output_count = 0_u8;
+        let mut sample_count = 0_u8;
+        for output in self
+            .raw_outputs
+            .iter()
+            .filter(|output| output.profile_id == evaluated_profile_id)
+        {
+            output_count = output_count.checked_add(1).ok_or_else(|| {
+                SearchEvalError::Contract(
+                    "activation resource evidence has too many profile outputs".to_owned(),
+                )
+            })?;
+            let resources = output.native_resources.as_ref().ok_or_else(|| {
+                SearchEvalError::Contract(
+                    "activation profile lacks native resource evidence".to_owned(),
+                )
+            })?;
+            resources
+                .validate()
+                .map_err(|error| SearchEvalError::Contract(error.to_string()))?;
+            for sample in resources.samples.values() {
+                let SemanticNativeStageResultV1::Complete(sample) = sample else {
+                    return Err(SearchEvalError::Contract(
+                        "activation resource evidence is not complete".to_owned(),
+                    ));
+                };
+                sample_count = sample_count.checked_add(1).ok_or_else(|| {
+                    SearchEvalError::Contract(
+                        "activation resource evidence has too many samples".to_owned(),
+                    )
+                })?;
+                let observed = (
+                    sample.model_bytes.filter(|bytes| *bytes != 0),
+                    sample.tokenizer_bytes.filter(|bytes| *bytes != 0),
+                    sample.provenance.threads,
+                    sample.provenance.max_concurrent_sessions,
+                    sample.provenance.batch_size,
+                    sample.provenance.sequence_length,
+                    sample.provenance.load_deadline_ms,
+                );
+                match fixed {
+                    None => fixed = Some(observed),
+                    Some(expected) if expected == observed => {}
+                    Some(_) => {
+                        return Err(SearchEvalError::Contract(
+                            "activation resource samples disagree on artifact or execution pins"
+                                .to_owned(),
+                        ));
+                    }
+                }
+                resident_bytes = resident_bytes.max(
+                    sample
+                        .peak_rss_bytes
+                        .filter(|bytes| *bytes != 0)
+                        .ok_or_else(|| {
+                            SearchEvalError::Contract(
+                                "activation resource sample lacks peak RSS".to_owned(),
+                            )
+                        })?,
+                );
+            }
+        }
+        let (
+            Some(model_bytes),
+            Some(tokenizer_bytes),
+            threads,
+            max_concurrent_sessions,
+            batch_size,
+            sequence_length,
+            load_deadline_ms,
+        ) = fixed.ok_or_else(|| {
+            SearchEvalError::Contract(
+                "activation resource evidence has no selected profile output".to_owned(),
+            )
+        })?
+        else {
+            return Err(SearchEvalError::Contract(
+                "activation resource evidence lacks exact artifact bytes".to_owned(),
+            ));
+        };
+        if output_count != 2
+            || sample_count != 4
+            || resident_bytes < model_bytes
+            || resident_bytes < tokenizer_bytes
+        {
+            return Err(SearchEvalError::Contract(
+                "activation resource evidence is incomplete or internally inconsistent".to_owned(),
+            ));
+        }
+        Ok(SemanticActivationResourcePinsV1 {
+            model_bytes,
+            tokenizer_bytes,
+            resident_bytes,
+            threads,
+            max_concurrent_sessions,
+            batch_size,
+            sequence_length,
+            load_deadline_ms,
+        })
+    }
 }
 
 pub(super) fn validate_native_measurement_method(

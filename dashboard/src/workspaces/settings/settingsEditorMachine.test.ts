@@ -42,13 +42,18 @@ const ROUTES: SettingsRoutes = {
 };
 
 const AUTHORITY = fixtureAuthority();
+const IDEMPOTENCY_KEY = 'idempotency.dashboard-settings.fixture';
 
 describe('settings editor: reaching a confirmed change', () => {
   it('takes a validated change from editing through review to confirmation', () => {
     const confirmed = run(
       initialSettingsEditorState(AUTHORITY),
       { type: 'project_drafted', values: draftMaxFileSize('2097152') },
-      { type: 'review_requested', scope: 'project' },
+      {
+        type: 'review_requested',
+        scope: 'project',
+        idempotencyKey: IDEMPOTENCY_KEY,
+      },
       { type: 'confirmation_set', confirmed: true },
     );
 
@@ -57,6 +62,7 @@ describe('settings editor: reaching a confirmed change', () => {
     expect(settingsReviewOf(confirmed)).toMatchObject({
       scope: 'project',
       expectedRevisionId: 'rev-42',
+      idempotencyKey: IDEMPOTENCY_KEY,
       patch: { max_file_size: 2_097_152 },
     });
     expect(settingsScopeDirty(confirmed, 'project')).toBe(true);
@@ -71,6 +77,7 @@ describe('settings editor: reaching a confirmed change', () => {
     expect(settingsSubmission(submitting, ROUTES)).toEqual({
       scope: 'project',
       expectedRevisionId: 'rev-42',
+      idempotencyKey: IDEMPOTENCY_KEY,
       readUrl: '/api/settings',
       patchUrl: '/api/settings/project',
       patch: { max_file_size: 2_097_152 },
@@ -229,6 +236,18 @@ describe('settings editor: each verdict is its own state', () => {
     expect(settingsApplied(failed)).toBeNull();
   });
 
+  it('reuses the held caller key when a response-loss retry resubmits the same intent', () => {
+    const first = submitting();
+    const failed = settle(first, {
+      outcome: 'offline',
+      detail: 'The response was lost after dispatch.',
+    });
+    const retried = expectSubmitting(run(failed, { type: 'submit_started' }));
+
+    expect(settingsSubmission(first, ROUTES).idempotencyKey).toBe(IDEMPOTENCY_KEY);
+    expect(settingsSubmission(retried, ROUTES).idempotencyKey).toBe(IDEMPOTENCY_KEY);
+  });
+
   it('keeps server validation as typed field state rather than a generic failure', () => {
     const rejected = settle(submitting(), {
       outcome: 'validation',
@@ -290,6 +309,7 @@ describe('settings editor: each verdict is its own state', () => {
       revisionId: 'rev-43',
       resyncRecommended: false,
       restartRecommended: false,
+      effectReceipt: null,
     });
 
     expect(settled).toBe(editing);
@@ -306,6 +326,7 @@ describe('settings editor: a save and a pending change cannot be shown at once',
       revisionId: 'rev-43',
       resyncRecommended: true,
       restartRecommended: false,
+      effectReceipt: null,
     });
 
   it('records the save the authority reported, and nothing it did not', () => {
@@ -328,7 +349,11 @@ describe('settings editor: a save and a pending change cannot be shown at once',
     const reviewing = run(
       applied(),
       { type: 'project_drafted', values: draftMaxFileSize('4096') },
-      { type: 'review_requested', scope: 'project' },
+      {
+        type: 'review_requested',
+        scope: 'project',
+        idempotencyKey: IDEMPOTENCY_KEY,
+      },
     );
 
     expect(reviewing.status).toBe('reviewing');
@@ -352,6 +377,7 @@ describe('settings editor: a save and a pending change cannot be shown at once',
     const rejected = run(initialSettingsEditorState(AUTHORITY), {
       type: 'review_requested',
       scope: 'project',
+      idempotencyKey: IDEMPOTENCY_KEY,
     });
     expect(settingsRejection(rejected)).toMatchObject({ origin: 'client' });
 
@@ -376,6 +402,7 @@ describe('settings editor: refusing to review what cannot be sent', () => {
     const state = run(initialSettingsEditorState(AUTHORITY), {
       type: 'review_requested',
       scope: 'user',
+      idempotencyKey: IDEMPOTENCY_KEY,
     });
 
     expect(settingsReviewOf(state)).toBeNull();
@@ -390,7 +417,11 @@ describe('settings editor: refusing to review what cannot be sent', () => {
     const state = run(
       initialSettingsEditorState(AUTHORITY),
       { type: 'project_drafted', values: draftPollSecs('59') },
-      { type: 'review_requested', scope: 'project' },
+      {
+        type: 'review_requested',
+        scope: 'project',
+        idempotencyKey: IDEMPOTENCY_KEY,
+      },
     );
 
     expect(settingsReviewOf(state)).toBeNull();
@@ -411,7 +442,11 @@ describe('settings editor: refusing to review what cannot be sent', () => {
     expect(settingsFieldErrors(unavailable)).toEqual([]);
     expect(settingsScopeDirty(unavailable, 'project')).toBe(false);
     for (const action of [
-      { type: 'review_requested', scope: 'project' },
+      {
+        type: 'review_requested',
+        scope: 'project',
+        idempotencyKey: IDEMPOTENCY_KEY,
+      },
       { type: 'confirmation_set', confirmed: true },
       { type: 'submit_started' },
     ] satisfies SettingsEditorAction[]) {
@@ -471,7 +506,11 @@ function confirmedProjectChange(): Extract<SettingsEditorState, { status: 'confi
   const state = run(
     initialSettingsEditorState(AUTHORITY),
     { type: 'project_drafted', values: draftMaxFileSize('2097152') },
-    { type: 'review_requested', scope: 'project' },
+    {
+      type: 'review_requested',
+      scope: 'project',
+      idempotencyKey: IDEMPOTENCY_KEY,
+    },
     { type: 'confirmation_set', confirmed: true },
   );
   if (state.status !== 'confirmed') throw new Error(`expected confirmed, got ${state.status}`);

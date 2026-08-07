@@ -22,6 +22,8 @@ export type SettingsMutationResult =
       readonly revisionId: string;
       readonly resyncRecommended: boolean;
       readonly restartRecommended: boolean;
+      /** Canonical durable application receipt for project writes. */
+      readonly effectReceipt: Readonly<Record<string, unknown>> | null;
     }
   | {
       readonly outcome: 'conflict';
@@ -65,6 +67,7 @@ export type SettingsMutationResult =
 export interface SettingsMutationRequest {
   readonly scope: SettingsMutationScope;
   readonly expectedRevisionId: string;
+  readonly idempotencyKey: string;
   readonly readUrl: string;
   readonly patchUrl: string;
   readonly patch: ProjectSettingsChangeSet | UserSettingsChangeSet;
@@ -115,6 +118,7 @@ export async function applySettingsMutation(
     body: JSON.stringify({
       ...request.patch,
       expected_revision_id: request.expectedRevisionId,
+      idempotency_key: request.idempotencyKey,
     }),
   });
   if (patched.outcome !== 'response') return patched;
@@ -143,7 +147,14 @@ export async function applySettingsMutation(
       detail: `Settings update failed (HTTP ${patched.response.status}).`,
     };
   }
-  const patchedPayload = contractedPayload(patched.body, patchAuthority);
+  const projectPatch = request.scope === 'project'
+    ? projectSettingsPatchResponse(patched.body, patchAuthority)
+    : null;
+  if (projectPatch && !projectPatch.parsed) return projectPatch.violation;
+  const patchedPayload = contractedPayload(
+    projectPatch?.parsed ? projectPatch.current : patched.body,
+    patchAuthority,
+  );
   if (!patchedPayload.parsed) return patchedPayload.violation;
   const editor = buildSettingsEditor(patchedPayload.payload);
   if (!editor) {
@@ -159,6 +170,47 @@ export async function applySettingsMutation(
     revisionId: settingsRevisionId(editor, request.scope),
     resyncRecommended: patchedPayload.payload.resync_recommended === true,
     restartRecommended: patchedPayload.payload.restart_recommended === true,
+    effectReceipt: projectPatch?.parsed ? projectPatch.effectReceipt : null,
+  };
+}
+
+function projectSettingsPatchResponse(
+  body: unknown,
+  authority: string,
+):
+  | {
+      readonly parsed: true;
+      readonly current: unknown;
+      readonly effectReceipt: Readonly<Record<string, unknown>> | null;
+    }
+  | { readonly parsed: false; readonly violation: Extract<SettingsMutationResult, { outcome: 'protocol_error' }> } {
+  const response = z
+    .object({
+      application_outcome: z.union([
+        z.null(),
+        z.object({
+          Effect: z.object({
+            receipt: z.record(z.string(), z.unknown()),
+          }).passthrough(),
+        }).strict(),
+      ]),
+      current: z.unknown(),
+    })
+    .strict()
+    .safeParse(body);
+  if (!response.success) {
+    return {
+      parsed: false,
+      violation: protocolError(
+        authority,
+        'the response omitted the canonical application effect receipt or current settings.',
+      ),
+    };
+  }
+  return {
+    parsed: true,
+    current: response.data.current,
+    effectReceipt: response.data.application_outcome?.Effect.receipt ?? null,
   };
 }
 

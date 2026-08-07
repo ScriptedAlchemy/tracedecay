@@ -11,6 +11,21 @@ import { applySettingsMutation } from './settingsMutation.ts';
  * case below is about something other than. */
 const ACTIVE_SCOPE: ScopeWritability = { state: 'writable', target: 'tracedecay' };
 
+function projectPatchResponse(current: unknown) {
+  return {
+    application_outcome: {
+      Effect: {
+        receipt: {
+          request_id: 'request.configuration.settings-fixture',
+          idempotency_key: 'settings-fixture',
+          outcome: 'completed',
+        },
+      },
+    },
+    current,
+  };
+}
+
 /**
  * These suites assert the exact request sequence the settings write protocol
  * performs: read, re-read for the confirmation, patch, refresh. The page also
@@ -46,7 +61,7 @@ describe('SettingsPage authorized changes', () => {
           applied = true;
           const envelope = updatedSettings('rev-43');
           settingsBody(envelope)['resync_recommended'] = true;
-          return jsonResponse(envelope);
+          return jsonResponse(projectPatchResponse(envelope));
         }
         throw new Error(`unexpected request ${method} ${url}`);
       }),
@@ -83,6 +98,7 @@ describe('SettingsPage authorized changes', () => {
     ]);
     expect(calls[2]?.body).toEqual({
       expected_revision_id: 'rev-42',
+      idempotency_key: expect.any(String),
       max_file_size: 2_097_152,
     });
   });
@@ -472,6 +488,7 @@ describe('Settings response authority', () => {
       writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
+      idempotencyKey: 'settings-idempotency-fixture',
       readUrl: '/api/settings',
       patchUrl: '/api/settings/project',
       patch: { max_file_size: 2_097_152 },
@@ -492,6 +509,7 @@ describe('Settings response authority', () => {
       writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
+      idempotencyKey: 'settings-idempotency-fixture',
       readUrl: '/api/settings',
       patchUrl: '/api/settings/project',
       patch: { max_file_size: 2_097_152 },
@@ -518,6 +536,7 @@ describe('Settings response authority', () => {
       writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
+      idempotencyKey: 'settings-idempotency-fixture',
       readUrl: '/api/settings',
       patchUrl: '/api/settings/project',
       patch: { max_file_size: 2_097_152 },
@@ -527,7 +546,7 @@ describe('Settings response authority', () => {
       outcome: 'protocol_error',
       authority: 'PATCH /api/settings/project',
       detail:
-        'PATCH /api/settings/project violated the settings contract: expected an envelope carrying a payload.',
+        'PATCH /api/settings/project violated the settings contract: the response omitted the canonical application effect receipt or current settings.',
     });
   });
 
@@ -544,6 +563,7 @@ describe('Settings response authority', () => {
       writability: ACTIVE_SCOPE,
       scope: 'user',
       expectedRevisionId: 'user-rev-7',
+      idempotencyKey: 'settings-idempotency-fixture',
       readUrl: '/api/settings',
       patchUrl: '/api/settings/user',
       patch: { watcher_debounce: '15s' },
@@ -564,6 +584,7 @@ describe('Settings response authority', () => {
       writability: ACTIVE_SCOPE,
       scope: 'project',
       expectedRevisionId: 'rev-42',
+      idempotencyKey: 'settings-idempotency-fixture',
       readUrl: '/api/settings',
       patchUrl: '/api/settings/project',
       patch: { max_file_size: 2_097_152 },
@@ -593,7 +614,7 @@ describe('Settings response authority', () => {
 
     expect(
       await screen.findByText(
-        'Settings editing requires project configuration values and configuration_revision_id from GET /api/settings, plus user settings and user_settings_revision_id from the same authority. The response omitted at least one required field.',
+        'Settings editing requires project configuration values and configuration_revision_id from GET /api/settings, plus user settings and configuration_revision_id from the same authority. The response omitted at least one required field.',
       ),
     ).toBeTruthy();
   });

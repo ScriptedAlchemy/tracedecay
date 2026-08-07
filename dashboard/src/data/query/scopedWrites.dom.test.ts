@@ -101,6 +101,7 @@ describe('writes under a scope that does not accept them', () => {
       const result = await applySettingsMutation({
         scope: 'project',
         expectedRevisionId: 'rev-42',
+        idempotencyKey: 'settings-idempotency-fixture',
         readUrl: '/api/settings',
         patchUrl: '/api/settings/project',
         patch: { max_file_size: 2_097_152 },
@@ -150,6 +151,7 @@ describe('the gateway refusal a dispatched write can still meet', () => {
   const stale = {
     scope: 'project',
     expectedRevisionId: 'rev-42',
+    idempotencyKey: 'settings-idempotency-fixture',
     readUrl: '/api/settings',
     patchUrl: '/api/settings/project',
     patch: { max_file_size: 2_097_152 },

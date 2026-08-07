@@ -79,7 +79,7 @@ assert_required_assets() {
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
     "tests/fixtures/provider_normalization/codex/agent_message.input.json"
     "tests/fixtures/analytics/codex_skill_prose.txt"
-    "benchmarks/pr5-observation/workload-v1.json"
+    "benchmarks/claude-observation/workload-v1.json"
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json"
     "benchmarks/search-quality/query-fallback-report-v1.json"
   )
@@ -486,6 +486,21 @@ TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
   --lib \
   --run-ignored all \
   --config "$patch_config" \
+  --no-tests=fail
+
+echo "distribution acceptance: exercising packaged semantic activation and recovery"
+TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
+  TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT="$work/semantic-activation-profile" \
+  CARGO_NET_OFFLINE=true \
+  HF_HUB_OFFLINE=1 \
+  cargo nextest run \
+  --manifest-path "$root_package/Cargo.toml" \
+  --release \
+  --no-default-features \
+  --features production \
+  --lib \
+  --config "$patch_config" \
+  -E 'test(~semantic_activation_journey_test::public_semantic_activation_rollback_and_exact_retry_preserve_graph_authority)' \
   --no-tests=fail
 
 install_root="$work/install"

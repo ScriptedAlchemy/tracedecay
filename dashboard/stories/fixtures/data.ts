@@ -1959,7 +1959,7 @@ const storageFindings = envelope({
  * (mod.rs::capabilities). Settings answers a DashboardEnvelopeV1 whose
  * payload is `SettingsPayloadV1`, and whose legal actions name the two write
  * scopes separately: `configuration_batch` appears only when the daemon-owned
- * configuration control plane is mounted, `user_settings_mutate` always.
+ * configuration control plane is mounted, `configuration_batch` always.
  * ========================================================================== */
 
 const settingsPayload: Record<string, unknown> = {
@@ -1984,7 +1984,7 @@ const settingsPayload: Record<string, unknown> = {
   },
   user: {
     config_path: '/home/zack/.tracedecay/config.toml',
-    user_settings_revision_id: 'user-rev-7',
+    configuration_revision_id: 'user-rev-7',
     upload_enabled: false,
     watcher_debounce: '2s',
     extraction_timeout_secs: 30,
@@ -2030,7 +2030,6 @@ const settingsPayload: Record<string, unknown> = {
 
 const settings: Record<string, unknown> = envelope(settingsPayload, 'ready', [
   { kind: 'request_apply', operation: 'configuration_batch' },
-  { kind: 'request_apply', operation: 'user_settings_mutate' },
   { kind: 'refresh', operation: 'configuration_list' },
 ]);
 

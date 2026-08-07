@@ -36,6 +36,10 @@ impl RuntimeRequestProbeV1 for Probe {
     fn interruption(&self) -> Option<tracedecay_store::RuntimeInterruptionV1> {
         None
     }
+
+    fn try_begin_commit(&self) -> bool {
+        false
+    }
 }
 
 fn health_request(binding: StoreRuntimeBindingV1) -> (RuntimeReadRequestV1, Probe) {

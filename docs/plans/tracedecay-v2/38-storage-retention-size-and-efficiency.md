@@ -93,10 +93,14 @@ measurements, not inferred table sizes.
    7.2 GiB that no retention pass could reach and no report counted. Scope-root
    reconciliation now closes this: it collects a stranded scope through the same
    journal/quarantine/receipt ordering, only under the maintenance writer lease,
-   only against a *proven* live-root set (registry plus git's own worktree
-   registry per repository; any unreadable source collects nothing and emits a
-   named degradation), only past a seven-day minimum stranding age, and never by
-   recursively removing anything outside the journaled quarantine path.
+   and only against one revision-bound, complete liveness proof. That proof joins
+   registered and `gix`-observed worktree scopes, every durable configuration
+   active/rollback vector root, pending/ready/published vector dependencies,
+   exact verified-generation leases, and the durable physical-scope-to-logical-
+   shard binding. Any missing, corrupt, stale, or unreadable authority collects
+   nothing and emits a named degradation. Collection starts only past a
+   seven-day minimum stranding age and never recursively removes anything
+   outside the journaled quarantine path.
 
    A second, quieter failure sat beside it: the Doctor and storage-report
    entry points guarded this family with byte budgets (64 MiB and 32 MiB) that
@@ -186,17 +190,18 @@ measurements, not inferred table sizes.
 - Code-index *scope-root* reconciliation is implemented and engaged. It is the
   only pass that reaches a scope directory whose canonical project root no
   longer exists. It runs beside generation retention on the maintenance cadence,
-  fails closed on any unreadable live-root source, holds the target scope's own
-  retention lock, refuses a scope with a pending generation-retention journal,
-  and applies a seven-day minimum stranding age.
+  requires the revision-bound complete liveness proof described above, holds the
+  target scope's own retention lock, refuses a scope with a pending generation-
+  retention journal, and applies a seven-day minimum stranding age.
 - Code-index retention observability is reachable. The Doctor storage finding
   reports superseded, collectable, and stranded-scope counts and bytes; stranded
   scopes make the finding non-clean even when the in-scope generation census is
   clean, because a clean scope-local census structurally cannot see them.
-- Open gap: reconciliation is bounded by what the live-root enumeration can
-  prove. A repository whose worktree registry cannot be read retains every scope
-  and reports a named degradation, which is correct but leaves the bytes in
-  place until the enumeration succeeds.
+- Reconciliation remains deliberately fail-closed. If the worktree registry,
+  durable configuration-root inventory, vector-stage dependency census, lease
+  authority, or physical/logical scope binding cannot produce one complete
+  revision-bound receipt, it retains every candidate scope and reports the
+  exact named degradation until convergence succeeds.
 - Superseded `source_cursor_advances` are reclaimed in bounded batches by the
   daemon-authorized retention owner. The exact receipt supporting the current
   source frontier is retained; the delete trigger is suspended and restored
