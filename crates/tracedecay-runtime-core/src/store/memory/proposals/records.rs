@@ -7,13 +7,13 @@ use super::super::primitives::{
     project_memory_category_label, row_i64, row_optional_string, row_string, storage_error,
     storage_message, to_json,
 };
-use super::super::projection::project_memory_legacy_mapping_tx;
+use super::super::projection::{project_memory_fact_status_tx, project_memory_legacy_mapping_tx};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    ActorId, Confidence, FactCategoryV1, FactEventId, FactId, FactOwnerV1, ProvenanceId,
-    SanitizationReceiptV1, UtcMicros,
+    ActorId, Confidence, FactCategoryV1, FactEventId, FactId, FactOwnerV1, PayloadAccessState,
+    ProvenanceId, SanitizationReceiptV1, UtcMicros,
 };
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1,
@@ -340,16 +340,31 @@ pub(in crate::store::memory) async fn project_memory_proposal_record_tx(
         .transpose()
         .map_err(FactStoreError::from)?;
     let applied_mapping = match (&state, &applied_fact_id) {
-        (ProjectMemoryFactProposalStateV1::Applied, Some(fact_id)) => Some(
-            project_memory_legacy_mapping_tx(transaction, owner, fact_id)
-                .await?
-                .ok_or_else(|| {
-                    storage_message(
+        (ProjectMemoryFactProposalStateV1::Applied, Some(fact_id)) => {
+            let legacy = project_memory_legacy_mapping_tx(transaction, owner, fact_id).await?;
+            if legacy.is_none() {
+                // A deleted or quarantined fact legitimately loses its legacy
+                // projection row; the record then carries an absent mapping.
+                // A live fact without one is real corruption and still errors.
+                let removed = project_memory_fact_status_tx(transaction, owner, fact_id)
+                    .await?
+                    .and_then(|status| status.payload_access())
+                    .is_some_and(|access| {
+                        matches!(
+                            access,
+                            PayloadAccessState::Deleted | PayloadAccessState::Quarantined
+                        )
+                    });
+                if !removed {
+                    return Err(storage_message(
                         PROJECT_MEMORY_READ_OPERATION,
                         "applied compatibility proposal is missing its fixed legacy mapping",
                     )
-                })?,
-        ),
+                    .into());
+                }
+            }
+            legacy
+        }
         (ProjectMemoryFactProposalStateV1::Applied, None) => {
             return Err(storage_message(
                 PROJECT_MEMORY_READ_OPERATION,
@@ -367,10 +382,14 @@ pub(in crate::store::memory) async fn project_memory_proposal_record_tx(
         (_, None) => None,
     };
     let mapping = match (applied_mapping, applied_fact_id.as_ref()) {
-        (Some(mapping), Some(fact_id)) => Some(ProjectMemoryFactMappingV1::new(
-            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
-            Some(mapping),
-        )?),
+        (mapping @ (Some(_) | None), Some(fact_id))
+            if state == ProjectMemoryFactProposalStateV1::Applied =>
+        {
+            Some(ProjectMemoryFactMappingV1::new(
+                ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
+                mapping,
+            )?)
+        }
         (None, None) => None,
         _ => {
             return Err(storage_message(

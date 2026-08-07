@@ -25,7 +25,7 @@ pub enum MemoryApplicationError {
     Store(#[from] FactStoreError),
     #[error("memory authority operation failed")]
     Authority(#[from] FactProposalStoreError),
-    #[error("memory compatibility authority operation failed")]
+    #[error("memory compatibility authority operation failed: {0}")]
     Compatibility(#[from] ProjectMemoryStoreError),
     #[error("memory compatibility input is invalid: {invariant}")]
     InvalidCompatibilityInput { invariant: &'static str },
