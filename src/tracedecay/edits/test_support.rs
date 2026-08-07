@@ -14,6 +14,7 @@ use tracedecay_application::{
     PolicyDecisionRef, RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationFuture,
     SourceEditAuthorizationPort, SourceEditEffectProofV1, SourceEditEffectRequestV1,
     SourceEditRequest, source_edit_operation, source_edit_reconciliation_operation,
+    source_edit_rollback_operation,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
@@ -131,6 +132,7 @@ pub(super) fn fixture_request_for_edit(
 ) -> SourceEditEffectRequestV1 {
     let operation = source_edit_operation(edit.kind()).unwrap();
     let reconciliation_operation = source_edit_reconciliation_operation().unwrap();
+    let rollback_operation = source_edit_rollback_operation().unwrap();
     let scope = ResolvedScope::new(
         ProjectId::new("project.edit.fixture").unwrap(),
         RepositoryId::new("repository.edit.fixture").unwrap(),
@@ -149,10 +151,12 @@ pub(super) fn fixture_request_for_edit(
         BTreeSet::from([
             operation.capability_id().clone(),
             reconciliation_operation.capability_id().clone(),
+            rollback_operation.capability_id().clone(),
         ]),
         BTreeSet::from([
             operation.use_case_id().clone(),
             reconciliation_operation.use_case_id().clone(),
+            rollback_operation.use_case_id().clone(),
         ]),
         DisclosureClass::Sensitive,
     )
@@ -282,6 +286,8 @@ pub(super) struct EffectUnknownFixture {
     pub(super) request: SourceEditEffectRequestV1,
     pub(super) authorization: FixtureSourceEditAuthorization,
     pub(super) result: SourceEditApplicationResult,
+    moved_preimage_id: String,
+    caller_id: String,
 }
 
 const MOVE_SOURCE_PREIMAGE: &[u8] = b"pub fn keep() {}\n\npub fn moved() {}\n";
@@ -323,6 +329,40 @@ impl EffectUnknownFixture {
         );
     }
 
+    pub(super) async fn assert_postimage_graph(&self) {
+        assert!(
+            self.graph
+                .get_node(&self.moved_preimage_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the source-path symbol identity must be retired"
+        );
+        let moved = self
+            .graph
+            .get_nodes_by_name("moved")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|node| node.file_path == "src/b.rs")
+            .expect("moved symbol must have the destination-path identity");
+        assert_ne!(moved.id, self.moved_preimage_id);
+
+        let callers = self.graph.get_callers(&moved.id, 1).await.unwrap();
+        assert_eq!(callers.len(), 1, "one exact caller edge must survive");
+        let (caller, edge) = &callers[0];
+        assert_eq!(caller.id, self.caller_id);
+        assert_eq!(caller.name, "caller");
+        assert_eq!(edge.source, self.caller_id);
+        assert_eq!(edge.target, moved.id);
+        assert_eq!(edge.kind, crate::types::EdgeKind::Calls);
+
+        let callees = self.graph.get_callees(&self.caller_id, 1).await.unwrap();
+        assert_eq!(callees.len(), 1, "caller must have one exact callee edge");
+        assert_eq!(callees[0].0.id, moved.id);
+        assert_eq!(&callees[0].1, edge);
+    }
+
     #[cfg(unix)]
     pub(super) fn permission_preserving_path(&self) -> std::path::PathBuf {
         self.destination_path()
@@ -335,6 +375,17 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     fs::create_dir_all(&locked_directory).unwrap();
     fs::write(locked_directory.join("a.rs"), MOVE_SOURCE_PREIMAGE).unwrap();
     fs::write(project.path().join("src/b.rs"), MOVE_DESTINATION_PREIMAGE).unwrap();
+    fs::write(
+        project.path().join("src/caller.rs"),
+        "use crate::locked::a::moved;\npub fn caller() { moved(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("src/lib.rs"),
+        "pub mod b;\npub mod caller;\npub mod locked;\n",
+    )
+    .unwrap();
+    fs::write(locked_directory.join("mod.rs"), "pub mod a;\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -348,7 +399,7 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         project.path(),
         &["init", "--quiet", "--initial-branch=main"],
     );
-    git(project.path(), &["add", "src/locked/a.rs", "src/b.rs"]);
+    git(project.path(), &["add", "src"]);
     git(
         project.path(),
         &[
@@ -364,7 +415,28 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     );
     let (graph, database_scope) = fixture_graph(project.path()).await;
     let indexed = graph.index_all().await.unwrap();
-    assert!(indexed.node_count >= 2);
+    assert!(indexed.node_count >= 4);
+    let moved_preimage_id = graph
+        .get_nodes_by_name("moved")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|node| node.file_path == "src/locked/a.rs")
+        .expect("fixture moved symbol")
+        .id;
+    let caller_id = graph
+        .get_nodes_by_name("caller")
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|node| node.file_path == "src/caller.rs")
+        .expect("fixture caller symbol")
+        .id;
+    let preimage_callers = graph.get_callers(&moved_preimage_id, 1).await.unwrap();
+    assert_eq!(preimage_callers.len(), 1);
+    assert_eq!(preimage_callers[0].0.id, caller_id);
+    assert_eq!(preimage_callers[0].1.source, caller_id);
+    assert_eq!(preimage_callers[0].1.target, moved_preimage_id);
     let edit = SourceEditRequest::MoveSymbol {
         symbol: "moved".to_owned(),
         dest_file: "src/b.rs".to_owned(),
@@ -402,6 +474,8 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
         request,
         authorization,
         result,
+        moved_preimage_id,
+        caller_id,
     };
     fixture.assert_preimages();
     fixture

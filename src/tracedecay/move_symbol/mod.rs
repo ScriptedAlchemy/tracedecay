@@ -22,7 +22,7 @@ use super::TraceDecay;
 use super::edits::{
     LeadingBlock, LeadingKind, capture_planned_source_edit, classify_leading_line,
     edit_success_message, item_line_span, publish_planned_source_edit, resolve_symbol_for_edit,
-    splice_lines, validate_planned_source_edit,
+    rollback_planned_source_edit_files, splice_lines, validate_planned_source_edit,
 };
 
 use fs_guards::{
@@ -97,12 +97,12 @@ impl TraceDecay {
                 Vec::new(),
             ));
         }
-        // The source write now goes through the project-root-scoped source edit
-        // authority, so only the resolver's validation is still needed here (it
-        // errors when the path cannot be inspected). The destination path is
-        // still used directly by the rollback below.
+        // Both writes and the rollback below now go through the
+        // project-root-scoped source edit authority, so only the resolver's
+        // validation is still needed here: it errors when either path cannot be
+        // inspected, and neither resolved path is used afterwards.
         write_path_preserving_final_symlink(&source_abs, "source")?;
-        let dest_write_abs = write_path_preserving_final_symlink(&dest_abs, "destination")?;
+        write_path_preserving_final_symlink(&dest_abs, "destination")?;
         let source = std::fs::read_to_string(&source_abs).map_err(|e| TraceDecayError::Config {
             message: format!("failed to read {source_rel}: {e}"),
         })?;
@@ -305,27 +305,21 @@ impl TraceDecay {
             // created it, delete it (and any now-empty parent dirs we created)
             // rather than leaving an empty file behind. Never overwrite a
             // third party's destination edit while rolling back.
-            let rollback = if std::fs::read_to_string(&dest_abs).ok().as_deref()
-                == Some(dest_modified.as_str())
-            {
-                if dest_existed {
-                    crate::agents::safe_write_text_file(&dest_write_abs, &dest_original, None)
-                } else {
-                    std::fs::remove_file(&dest_write_abs).map_err(|remove_error| {
-                        TraceDecayError::Config {
-                            message: format!(
-                                "failed to remove newly-created destination {dest_rel}: {remove_error}"
-                            ),
-                        }
-                    })
-                }
-            } else {
-                Err(TraceDecayError::Config {
-                    message: format!(
-                        "destination {dest_rel} changed concurrently; refusing to overwrite it during rollback"
-                    ),
-                })
-            };
+            let rollback = rollback_planned_source_edit_files(
+                &self.project_root,
+                &[
+                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                        relative_path: source_rel.clone(),
+                        expected: Some(source.clone()),
+                        intended: Some(source_modified.clone()),
+                    },
+                    tracedecay_usecases::tracedecay::PlannedSourceEditFile {
+                        relative_path: dest_rel.clone(),
+                        expected: dest_existed.then_some(dest_original.clone()),
+                        intended: Some(dest_modified.clone()),
+                    },
+                ],
+            );
             if !dest_existed && rollback.is_ok() {
                 let mut dir = dest_abs.parent().map(Path::to_path_buf);
                 while let Some(d) = dir {

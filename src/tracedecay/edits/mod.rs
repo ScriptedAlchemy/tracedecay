@@ -79,7 +79,8 @@ mod test_support;
 // stable across the split, resolving each name at `crate::tracedecay::edits`
 // exactly as it did when they were all defined directly in `edits.rs`.
 pub(in crate::tracedecay) use plan::{
-    capture_planned_source_edit, publish_planned_source_edit, validate_planned_source_edit,
+    capture_planned_source_edit, publish_planned_source_edit, rollback_planned_source_edit_files,
+    validate_planned_source_edit,
 };
 pub(in crate::tracedecay) use preview::{
     LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,

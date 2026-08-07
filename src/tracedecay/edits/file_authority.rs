@@ -289,6 +289,34 @@ impl SourceEditFileAuthority {
         })
     }
 
+    pub(super) fn remove(
+        &self,
+        relative_path: &str,
+        expected: &str,
+        expected_identity: &Handle,
+    ) -> Result<()> {
+        self.verify_parent_binding()?;
+        let (current, current_identity) = self.read_optional_with_identity()?;
+        if current.as_deref() != Some(expected.as_bytes()) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "source edit candidate {relative_path} changed before atomic removal"
+                ),
+            });
+        }
+        if current_identity.as_ref() != Some(expected_identity) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "source edit candidate {relative_path} was replaced before atomic removal"
+                ),
+            });
+        }
+        self.parent.remove_file(&self.name).map_err(|error| {
+            source_edit_path_error("atomically remove source edit candidate", error)
+        })?;
+        sync_source_edit_directory(&self.parent)
+    }
+
     pub(super) fn metadata(&self) -> Result<cap_std::fs::Metadata> {
         self.parent
             .symlink_metadata(&self.name)

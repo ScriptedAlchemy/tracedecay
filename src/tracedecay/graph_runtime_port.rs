@@ -413,6 +413,13 @@ impl GraphRuntimePort for TraceDecay {
         Box::pin(TraceDecay::recover_source_edit_preimages(self, files))
     }
 
+    fn apply_source_edit_rollback<'a>(
+        &'a self,
+        files: &'a [PlannedSourceEditFile],
+    ) -> GraphFuture<'a, ()> {
+        Box::pin(TraceDecay::apply_source_edit_rollback(self, files))
+    }
+
     fn commit_source_edit_postimages<'a>(
         &'a self,
         files: &'a [PlannedSourceEditFile],
