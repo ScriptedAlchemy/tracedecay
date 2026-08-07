@@ -57,6 +57,53 @@ use tracedecay_domain::{
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+#[cfg(feature = "test-transport")]
+use tracedecay::application::ProjectSourceAccessSnapshot;
+#[cfg(feature = "test-transport")]
+use tracedecay::application::advisory::fixtures::AdvisoryProximityFixtureEvidenceV1;
+#[cfg(feature = "test-transport")]
+use tracedecay::application::advisory::proximity_runtime::{
+    CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
+    ProximityRuntimeOutcomeV1, ProximityRuntimeOwnerV1, ProximityThresholdPinV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay::application::feedback::concrete::open_feedback_runtime;
+#[cfg(feature = "test-transport")]
+use tracedecay_application::feedback::{
+    FeedbackCycleAdvisoryV1, FeedbackCycleControl, FeedbackCycleExecutionRequest,
+    FeedbackCycleService, FeedbackDiagnosticsPort, FeedbackDiagnosticsRequest, FeedbackImpactPort,
+    FeedbackImpactPortOutcome, FeedbackImpactRequest, FeedbackObservationPort,
+    FeedbackRuntimeStateV1, ProximityEvaluationRequestV1, feedback_surface_operation,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_application::{
+    AdvisoryFindingContributorV1, AdvisoryFindingValidityWindowV1, DiagnosticProviderDescriptor,
+    DiagnosticProviderIdentity, DiagnosticProviderIdentityParts, DiagnosticProviderResult,
+    DiagnosticProviderState, PolicyDecisionRef, ProviderCoverage, ProviderDocumentIdentity,
+    ProviderFreshness, ProviderOrigin, ProviderProvenance, ProviderSourceIdentity, RevisionDigest,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::configuration::{
+    AuthorityRef, ScopeSourceBinding, SourceBindingId, SourceKindV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::feedback::{
+    FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineHorizonV1, FeedbackBaselineStateV1,
+    FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
+    FeedbackCycleRuntimeSnapshotV1, FeedbackDiagnosticBaselineIdentityV1,
+    FeedbackDiagnosticBaselineV1, FeedbackDiagnosticV1, FeedbackEvaluationInputV1,
+    FeedbackFindingLifecycleV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackTargetV1,
+    FeedbackTriggerV1, ProximityBranchWorktreeIncompatibilityV1, ProximityCoverageV1,
+    ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityWarningClassV1,
+};
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::{
+    CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CodeGenerationId,
+    ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
+    ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
+};
+
 mod common;
 
 struct NoAnchors;
@@ -1262,4 +1309,879 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
             .and_then(find_advisory_cycle),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Plan 37's positive four-pillar scenario.
+//
+// `packaged_host_ingest_delivers_a_registered_advisory_cycle` above proves the
+// truthful *negative*: a hermetic project has no GitHub/CI reachability, so
+// those pillars report their own unavailable state. The plan additionally
+// requires one scenario where a single saved-edit/stop boundary returns
+// post-edit diagnostics/impact, a localized CI failure, an existing GitHub
+// review finding, and a concurrent-agent proximity warning *together*, in one
+// cycle result.
+//
+// The remote halves cannot come from the network in a hermetic test, and the
+// plan rejects synthetic lookalike providers as acceptance evidence. So both
+// remote pillars are replayed from the suite's checked-in recorded provider
+// captures (`crates/tracedecay-usecases/src/advisory/fixtures/
+// provider_branch_review/`, the same captures the decoder tests above consume)
+// through the shipped decoders, sanitizer, and canonical anchor authorities.
+// Only immutable *identity* (head commit, reviewed path and lines) is
+// retargeted onto this test's real repository — the same retargeting
+// `ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph`
+// already performs — so the recorded protocol shape, bodies, digests, and
+// lifecycle flags stay exactly as captured.
+// ---------------------------------------------------------------------------
+
+/// Recorded proximity evidence mounted behind the production provider seam.
+///
+/// The evidence is admitted by the composite fixture's own gate, which requires
+/// at least two of the *recorded* concurrent sessions and a resolved agent
+/// identity per observation. Tier, inclusion, coverage, contribution identity,
+/// and the projected warning are all computed by the shipped proximity owner.
+#[cfg(feature = "test-transport")]
+struct RecordedProximityEvidenceAuthority {
+    batch: CanonicalProximityEvidenceBatchV1,
+}
+
+#[cfg(feature = "test-transport")]
+impl CanonicalProximityEvidenceAuthorityV1 for RecordedProximityEvidenceAuthority {
+    fn current_evidence<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a ProximityEvaluationRequestV1,
+    ) -> FeedbackPortFuture<'a, Option<CanonicalProximityEvidenceBatchV1>> {
+        let batch = self.batch.clone();
+        Box::pin(async move { Some(batch) })
+    }
+}
+
+/// Diagnostics for the saved generation under evaluation. Classification,
+/// finding identity, and anchoring stay with the production cycle service.
+#[cfg(feature = "test-transport")]
+struct SavedGenerationDiagnostics {
+    results: Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>,
+    baselines: Vec<FeedbackDiagnosticBaselineV1>,
+}
+
+#[cfg(feature = "test-transport")]
+impl FeedbackDiagnosticsPort for SavedGenerationDiagnostics {
+    fn diagnostics<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackDiagnosticsRequest,
+    ) -> FeedbackPortFuture<'a, Vec<DiagnosticProviderResult<Vec<FeedbackDiagnosticV1>>>> {
+        let results = self.results.clone();
+        Box::pin(async move { results })
+    }
+
+    fn diagnostic_history<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackDiagnosticsRequest,
+        _runtime: &'a FeedbackRuntimeStateV1,
+    ) -> FeedbackPortFuture<'a, Vec<FeedbackDiagnosticBaselineV1>> {
+        let baselines = self.baselines.clone();
+        Box::pin(async move { baselines })
+    }
+}
+
+/// Impact projected from the canonical-graph evidence the production CI
+/// localization store resolved for this generation, so the impact pillar is
+/// graph-derived rather than invented.
+#[cfg(feature = "test-transport")]
+struct GraphDerivedImpact(FeedbackImpactV1);
+
+#[cfg(feature = "test-transport")]
+impl FeedbackImpactPort for GraphDerivedImpact {
+    fn impact<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _request: &'a FeedbackImpactRequest,
+    ) -> FeedbackPortFuture<'a, FeedbackImpactPortOutcome> {
+        let impact = self.0.clone();
+        Box::pin(async move { FeedbackImpactPortOutcome::Complete(impact) })
+    }
+}
+
+#[cfg(feature = "test-transport")]
+struct SharedFeedbackObservations(Arc<dyn FeedbackObservationPort + Send + Sync>);
+
+#[cfg(feature = "test-transport")]
+impl FeedbackObservationPort for SharedFeedbackObservations {
+    fn observe(
+        &self,
+        input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+        observation: tracedecay_domain::feedback::FeedbackCycleObservationV1,
+    ) {
+        self.0.observe(input, observation);
+    }
+}
+
+#[cfg(feature = "test-transport")]
+fn four_pillar_digest(fill: char) -> ManifestDigest {
+    ManifestDigest::new(format!("sha256:{}", fill.to_string().repeat(64))).expect("digest")
+}
+
+/// One grant covering every pillar of the same cycle. Production issues exactly
+/// one request context per cycle, so the pillars below must all admit against
+/// this single grant rather than one bespoke context each.
+#[cfg(feature = "test-transport")]
+fn four_pillar_context(
+    resolved: &ResolvedScope,
+    requester: &ActorId,
+    operation: &tracedecay_application::ApplicationOperation,
+    now: UtcMicros,
+) -> RequestContext {
+    let capabilities = BTreeSet::from([
+        operation.capability_id().clone(),
+        CapabilityId::new(
+            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1.to_owned(),
+        )
+        .expect("ci capability"),
+        CapabilityId::new(
+            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1.to_owned(),
+        )
+        .expect("github capability"),
+        CapabilityId::new(tracedecay_application::feedback::PROXIMITY_CAPABILITY_ID_V1.to_owned())
+            .expect("proximity capability"),
+    ]);
+    let use_cases = BTreeSet::from([
+        operation.use_case_id().clone(),
+        UseCaseId::new(
+            tracedecay_application::feedback::CI_FAILURE_LOCALIZE_USE_CASE_ID_V1.to_owned(),
+        )
+        .expect("ci use case"),
+        UseCaseId::new(
+            tracedecay_application::feedback::GITHUB_REVIEW_INGEST_USE_CASE_ID_V1.to_owned(),
+        )
+        .expect("github use case"),
+        UseCaseId::new(tracedecay_application::feedback::PROXIMITY_USE_CASE_ID_V1.to_owned())
+            .expect("proximity use case"),
+    ]);
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.advisory.four-pillar").expect("grant id"),
+        1,
+        four_pillar_digest('a'),
+        ActorId::new("actor.advisory.four-pillar.issuer").expect("issuer"),
+        UtcMicros(now.0.saturating_sub(60_000_000)),
+        UtcMicros(now.0.saturating_add(600_000_000)),
+        resolved.clone(),
+        capabilities,
+        use_cases,
+        DisclosureClass::Evidence,
+    )
+    .expect("four-pillar grant");
+    RequestContext::new(
+        requester.clone(),
+        resolved.clone(),
+        grant,
+        RequestId::new("request.advisory.four-pillar").expect("request id"),
+        Deadline::new(UtcMicros(now.0.saturating_add(300_000_000))).expect("deadline"),
+        CancellationContext::active("cancel.advisory.four-pillar").expect("cancellation"),
+    )
+    .expect("four-pillar request context")
+}
+
+/// One canonical observation per recorded peer session. Session identity comes
+/// from the checked-in `proximity_sessions.json` capture; the fixture's own
+/// admission gate rejects anything that is not at least two of those recorded
+/// sessions with resolved agent identity.
+#[cfg(feature = "test-transport")]
+fn recorded_peer_observation(session: &SessionId, ordinal: u64) -> CanonicalObservationEnvelopeV1 {
+    CanonicalObservationEnvelopeV1::new(
+        ProviderId::new("provider.cursor").expect("provider"),
+        "message",
+        ObservationId::new(format!("observation.advisory.proximity.{ordinal}"))
+            .expect("observation id"),
+        CanonicalObservationRelationsV1::new(session.clone())
+            .with_agent_id(ObservationId::new(format!("agent.advisory.peer.{ordinal}")).unwrap()),
+        vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({ "text": "Editing the shared symbol." }),
+            model: None,
+            timestamp: None,
+        }],
+        CanonicalObservationEvidenceV1::new(
+            ObservationOrderingDomainV1::SqliteRowId,
+            ObservationSourceRangeV1::new(ordinal, ordinal.saturating_add(1))
+                .expect("observation range"),
+        ),
+    )
+    .expect("canonical peer observation")
+}
+
+/// A single saved-edit/stop boundary returns all four Plan 37 pillars in one
+/// canonical cycle result, and provider outcome stays orthogonal to per-finding
+/// lifecycle: the GitHub pillar is a *complete* provider read whose recorded
+/// thread is `isOutdated`, so it contributes a `Superseded` finding without
+/// degrading its own provider state.
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
+    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        concat!(
+            "pub fn caller() { failed_symbol(); }\n",
+            "pub fn failed_symbol() {}\n",
+            "#[test]\n",
+            "fn failed_symbol_test() { failed_symbol(); }\n",
+        ),
+    )
+    .unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "tests@example.invalid"],
+        vec!["config", "user.name", "TraceDecay Tests"],
+        vec!["add", "."],
+        vec!["commit", "-m", "seed four-pillar canonical graph"],
+    ] {
+        let output = Command::new("git")
+            .args(&args)
+            .current_dir(&project)
+            .output()
+            .expect("git command runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&project)
+        .output()
+        .expect("read fixture head");
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+
+    let graph = TraceDecay::init(&project).await.expect("canonical graph");
+    graph.index_all().await.expect("canonical graph index");
+    let database = graph.db().clone();
+    let graph = Arc::new(graph);
+
+    let resolved = ResolvedScope::new(
+        ProjectId::new("project.advisory.four-pillar").unwrap(),
+        RepositoryId::new("repository.advisory.four-pillar").unwrap(),
+        WorktreeId::new("worktree.advisory.four-pillar").unwrap(),
+        Some(RefId::new("refs/heads/advisory-four-pillar").unwrap()),
+    )
+    .unwrap();
+    let scope = FeedbackScopeV1 {
+        project_id: resolved.project_id.clone(),
+        repository_id: resolved.repository_id.clone(),
+        worktree_id: resolved.worktree_id.clone(),
+        branch_ref: "refs/heads/advisory-four-pillar".to_owned(),
+        head_commit_id: CommitId::new(head.clone()).unwrap(),
+    };
+    let requester = ActorId::new("actor.advisory.four-pillar").unwrap();
+    let now = now_micros();
+    let operation = feedback_surface_operation("feedback_diagnostics")
+        .expect("feedback operation catalog")
+        .expect("feedback diagnostics operation");
+    let context = four_pillar_context(&resolved, &requester, &operation, now);
+
+    // The one authentic capture set every remote pillar below replays. Loading
+    // it re-verifies the recorded capture metadata, body digests, and
+    // cross-response identity, so a drifted or hand-edited fixture fails here
+    // rather than silently weakening the assertions.
+    let fixture = tracedecay::application::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
+        .expect("checked-in composite provider capture");
+
+    // ---- Pillar 2: a localized CI failure, through the production store ----
+    let mut provider_record = fixture.ci_provider_record.clone();
+    provider_record.workflow_run.head_sha = head.clone();
+    provider_record.workflow_job.head_sha = head.clone();
+    provider_record.check_run.head_sha = head.clone();
+    let annotation = provider_record
+        .annotations
+        .first_mut()
+        .expect("recorded failure annotation");
+    annotation.path = "src/lib.rs".to_owned();
+    annotation.start_line = 2;
+    annotation.end_line = 2;
+    annotation.start_column = Some(1);
+    annotation.end_column = None;
+    let ci_request = CiFailureLocalizationRequestV1 {
+        scope: scope.clone(),
+        run: provider_record.run_identity(),
+    };
+    let retained = CiRetainedProviderRecordV1 {
+        provider_record,
+        observation: CiRetainedProviderObservationV1 {
+            observation_id: CanonicalObservationIdV1::new(
+                canonical_sha256(&"observation.advisory.four-pillar.ci")
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+            )
+            .unwrap(),
+            failure_anchor: RetrievalAnchorId::new("anchor.advisory.four-pillar.ci").unwrap(),
+            provider_head_commit_id: scope.head_commit_id.clone(),
+            failure_kind: tracedecay_domain::feedback::CiFailureKindV1::TestFailure,
+            observed_at: now,
+        },
+    };
+    let ci_code_evidence = ProjectCiCodeAnchorStoreV1::new(graph.clone(), scope.clone())
+        .unwrap()
+        .resolve(&context, &ci_request, &retained)
+        .await
+        .expect("production CI localization over the canonical graph");
+    assert_eq!(
+        ci_code_evidence.state,
+        tracedecay_domain::feedback::CiFailureLocalizationStateV1::Complete,
+        "the retargeted recorded CI run must localize completely against this graph"
+    );
+    let ci_symbol = ci_code_evidence
+        .symbol
+        .clone()
+        .expect("canonical-graph symbol evidence");
+    let ci_generation = ci_code_evidence
+        .generation
+        .clone()
+        .expect("canonical-graph generation evidence");
+    // The production owner that assembles this projection also performs a live
+    // provider read, which a hermetic project has no reachability for. The
+    // projection itself is a pure join of the recorded provider record with the
+    // canonical-graph evidence resolved just above, so it is reproduced here
+    // field-for-field; every value still originates from the shipped store or
+    // the checked-in capture, never from an invented provider.
+    let ci_localization = tracedecay_domain::feedback::CiFailureLocalizationResultV1 {
+        provider: ProviderId::new("provider.github-actions").unwrap(),
+        run: ci_request.run.clone(),
+        parser: tracedecay_domain::feedback::CiFailureParserIdentityV1 {
+            parser_id: "parser.github-actions.check-annotation".to_owned(),
+            parser_version: "1".to_owned(),
+        },
+        state: ci_code_evidence.state,
+        coverage: ci_code_evidence.coverage,
+        source_degradation: None,
+        failure_kind: retained.observation.failure_kind,
+        failure_anchor: retained.observation.failure_anchor.clone(),
+        branch: tracedecay_domain::feedback::CiFailureBranchEvidenceV1 {
+            scope: scope.clone(),
+            provider_head_commit_id: retained.observation.provider_head_commit_id.clone(),
+        },
+        generation: ci_code_evidence.generation.clone(),
+        symbol: ci_code_evidence.symbol.clone(),
+        callers: ci_code_evidence.callers.clone(),
+        tests: ci_code_evidence.tests.clone(),
+        rerun_hints: Vec::new(),
+        observed_at: retained.observation.observed_at,
+    };
+    ci_localization
+        .validate()
+        .expect("assembled CI localization stays canonical");
+
+    // ---- Pillar 3: an existing GitHub review finding, through the production
+    // decoder, sanitizer, and canonical anchor authority ----
+    let mut thread = captured_response(include_str!(
+        "../crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json"
+    ));
+    let pull_request = thread
+        .pointer_mut("/data/repository/pullRequest")
+        .expect("recorded pull request");
+    pull_request["headRefOid"] = json!(head.clone());
+    let node = pull_request
+        .pointer_mut("/reviewThreads/nodes/0")
+        .expect("recorded review thread");
+    node["path"] = json!("src/lib.rs");
+    node["originalStartLine"] = json!(2);
+    node["originalLine"] = json!(2);
+    let comment = node
+        .pointer_mut("/comments/nodes/0")
+        .expect("recorded review comment");
+    comment["originalCommit"]["oid"] = json!(head.clone());
+    comment["pullRequestReview"]["commit"]["oid"] = json!(head.clone());
+    let github_request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+        scope: scope.clone(),
+        pull_request_id: fixture.github.pull_request_id.clone(),
+    };
+    let anchors = Arc::new(
+        ProjectGitHubAnchorAuthorityV1::new(database.clone(), &project, scope.clone())
+            .expect("production GitHub anchor authority"),
+    );
+    let decoder = GitHubOfficialResponseDecoderV1::new(
+        GitHubReviewProviderIdentityV1 {
+            provider: ProviderId::new("provider.github").unwrap(),
+            repository_owner: "ScriptedAlchemy".to_owned(),
+            repository_name: "tracedecay".to_owned(),
+            pull_request_number: fixture.pull_request_number,
+            base_commit_id: fixture.base_commit_id.clone(),
+            head_commit_id: scope.head_commit_id.clone(),
+            merge_base_commit_id: fixture.merge_base_commit_id.clone(),
+        },
+        anchors,
+    )
+    .unwrap();
+    let github_ingress = decoder
+        .decode(
+            &github_request,
+            &GitHubReadNetworkMetadataV1 {
+                retry_at: None,
+                status: GitHubReadNetworkStatusV1::Ok,
+                etag: None,
+                next_cursor: None,
+                rate_limit: None,
+            },
+            serde_json::to_vec(&thread).unwrap().as_slice(),
+        )
+        .await
+        .expect("recorded review thread decodes through the production path");
+    assert_eq!(github_ingress.items.len(), 1);
+    assert_eq!(
+        github_ingress.items[0].lifecycle,
+        tracedecay_domain::feedback::GitHubReviewLifecycleV1::Outdated,
+        "the recorded thread is captured outdated; that lifecycle must survive decoding"
+    );
+
+    // ---- Pillar 4: a concurrent-agent proximity warning, through the shipped
+    // proximity owner ----
+    let peers = &fixture.proximity.source_sessions;
+    assert!(
+        peers.len() >= 2,
+        "the recorded capture must carry concurrent peer sessions"
+    );
+    let proximity_request = ProximityEvaluationRequestV1 {
+        scope: scope.clone(),
+        observed_at: now,
+    };
+    let proximity_evidence = fixture
+        .proximity_evidence(AdvisoryProximityFixtureEvidenceV1 {
+            observations: peers
+                .iter()
+                .enumerate()
+                .map(|(ordinal, session)| recorded_peer_observation(session, ordinal as u64 + 1))
+                .collect(),
+            retrieval_anchor_ids: vec![
+                RetrievalAnchorId::new("anchor.advisory.four-pillar.proximity").unwrap(),
+            ],
+            address: tracedecay_domain::feedback::ProximityAddressV1 {
+                scope: scope.clone(),
+                file: ci_symbol.file.clone(),
+                span: Some(ci_symbol.span),
+                symbol: Some(ci_symbol.symbol.clone()),
+            },
+            relation_paths: Vec::new(),
+            risk_inputs: ProximityRiskInputsV1 {
+                overlap_size: 1,
+                blast_radius_size: 2,
+                relation_strength: ProximityRelationStrengthV1::Direct,
+                branch_worktree_incompatibility:
+                    ProximityBranchWorktreeIncompatibilityV1::Compatible,
+                freshness_decay_basis_points: 0,
+            },
+            // Same file as the saved edit: the shipped owner classifies that as
+            // the immediate tier, so inclusion never depends on the threshold.
+            warning_class: ProximityWarningClassV1::SameFile,
+            raw_risk_basis_points: 9_000,
+            observed_at: UtcMicros(now.0.saturating_sub(1_000_000)),
+            expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
+            coverage: ProximityCoverageV1::Complete,
+        })
+        .expect("recorded concurrent sessions admit proximity evidence");
+    let proximity_owner = ProximityRuntimeOwnerV1::new(
+        scope.clone(),
+        RecordedProximityEvidenceAuthority {
+            batch: CanonicalProximityEvidenceBatchV1::new(
+                vec![proximity_evidence],
+                ProximityCoverageV1::Complete,
+            )
+            .expect("proximity evidence batch"),
+        },
+        (),
+    )
+    .expect("proximity runtime owner");
+    let threshold = ProximityThresholdPinV1::new(
+        tracedecay_domain::configuration::ConfigurationRevisionId::new(
+            "configuration.advisory.four-pillar",
+        )
+        .unwrap(),
+        four_pillar_digest('2'),
+        5_000,
+    )
+    .expect("effective Plan 20 threshold pin");
+    let ProximityRuntimeOutcomeV1::Completed(proximity) = proximity_owner
+        .evaluate_with_threshold_pin(&context, &proximity_request, &threshold)
+        .await
+    else {
+        panic!("recorded concurrent-agent evidence must complete the proximity provider");
+    };
+
+    // ---- Compose the three advisory pillars for exactly one cycle ----
+    let validity = AdvisoryFindingValidityWindowV1 {
+        valid_at: now_micros(),
+        expires_at: UtcMicros(now.0.saturating_add(300_000_000)),
+    };
+    let ci_batch = ci_localization
+        .advisory_findings(validity)
+        .expect("CI advisory contribution");
+    let github_batch = github_ingress
+        .advisory_findings(validity)
+        .expect("GitHub advisory contribution");
+    let proximity_batch = proximity
+        .advisory_findings(validity)
+        .expect("proximity advisory contribution");
+    let advisory = FeedbackCycleAdvisoryV1 {
+        provider_states: vec![
+            github_batch.provider_state,
+            ci_batch.provider_state,
+            proximity_batch.provider_state,
+        ],
+        findings: github_batch
+            .findings
+            .iter()
+            .chain(ci_batch.findings.iter())
+            .chain(proximity_batch.findings.iter())
+            .cloned()
+            .collect(),
+    };
+    assert_eq!(
+        advisory.findings.len(),
+        3,
+        "each remote pillar must contribute exactly one finding: {advisory:?}"
+    );
+
+    // ---- Pillar 1 + the single cycle: post-edit diagnostics and impact, then
+    // one canonical result carrying all four ----
+    let access = ProjectSourceAccessSnapshot {
+        scope: resolved.clone(),
+        requester: requester.clone(),
+        binding: ScopeSourceBinding::new(
+            SourceBindingId::new("binding.advisory.four-pillar").unwrap(),
+            SourceKindV1::Cursor,
+            LocatorDigest::new(format!("sha256:{}", "1".repeat(64))).unwrap(),
+            AuthorityRef::Project(resolved.project_id.clone()),
+        )
+        .unwrap(),
+        configuration_revision: tracedecay_domain::configuration::ConfigurationRevisionId::new(
+            "configuration.advisory.four-pillar",
+        )
+        .unwrap(),
+        configuration_digest: four_pillar_digest('2'),
+        configuration_provenance_digest: four_pillar_digest('3'),
+        effective_capabilities: BTreeSet::from([operation.capability_id().clone()]),
+        grant_expires_at: UtcMicros(now.0.saturating_add(600_000_000)),
+    };
+    let feedback = open_feedback_runtime(database, &project, resolved.clone(), access)
+        .await
+        .expect("production feedback runtime");
+
+    let generation = ci_generation.generation_id.clone();
+    let file_digest = four_pillar_digest('4');
+    let request = FeedbackCycleRequestV1::new(
+        FeedbackCycleId::new("cycle.advisory.four-pillar").unwrap(),
+        scope.clone(),
+        FeedbackContentIdentityV1::SavedContent {
+            generation_digest: four_pillar_digest('5'),
+            file_digest: file_digest.clone(),
+        },
+        // One saved-edit/stop boundary drives this cycle.
+        FeedbackTriggerV1::AgentStopGate,
+        four_pillar_digest('6'),
+        four_pillar_digest('2'),
+        FeedbackBudgetV1::bounded(600_000, 600_000, 1_000_000, 1_000_000),
+    )
+    .expect("saved-edit cycle request");
+    let input = FeedbackEvaluationInputV1 {
+        request,
+        target: FeedbackTargetV1 {
+            file: ci_symbol.file.clone(),
+            span: Some(ci_symbol.span),
+            symbol: Some(ci_symbol.symbol.clone()),
+            generation_id: Some(generation.clone()),
+        },
+        actor: tracedecay_domain::feedback::FeedbackActorContextV1::default(),
+        observed_at: now,
+    };
+    let provider = DiagnosticProviderIdentity::new(DiagnosticProviderIdentityParts {
+        scope: resolved.clone(),
+        source: ProviderSourceIdentity::CleanGeneration {
+            generation: generation.clone(),
+        },
+        document: ProviderDocumentIdentity {
+            file: ci_symbol.file.clone(),
+            content_digest: ContentDigest::new(file_digest.as_str().to_owned()).unwrap(),
+            document_version: None,
+        },
+        producer: DiagnosticProviderDescriptor {
+            provider: ProviderId::new("provider.advisory.four-pillar").unwrap(),
+            analyzer_revision: ComponentVersion::new("analyzer.advisory.four-pillar.v1").unwrap(),
+            language: tracedecay_domain::LanguageId::new("rust").unwrap(),
+            language_descriptor_revision: tracedecay_domain::LanguageDescriptorRevision::new(
+                "language.rust.advisory.four-pillar.v1",
+            )
+            .unwrap(),
+        },
+        requested_capability: CapabilityId::new("capability.diagnostics.current").unwrap(),
+        freshness: ProviderFreshness::current(now),
+        coverage: ProviderCoverage::complete(1, 1),
+        provenance: ProviderProvenance {
+            origin: ProviderOrigin::ConfiguredAnalyzer,
+            anchor: Some(RetrievalAnchorId::new("anchor.advisory.four-pillar.provider").unwrap()),
+        },
+        configuration: RevisionDigest {
+            revision: ComponentVersion::new("configuration.advisory.four-pillar.v1").unwrap(),
+            digest: four_pillar_digest('2'),
+        },
+        policy: PolicyDecisionRef::new(
+            "policy.advisory.four-pillar",
+            1,
+            four_pillar_digest('6'),
+            ComponentVersion::new("policy.evaluator.advisory.four-pillar.v1").unwrap(),
+        )
+        .unwrap(),
+    })
+    .expect("saved-generation diagnostic provider identity");
+
+    let mut post_edit_diagnostic = tracedecay_domain::GenerationDiagnosticV1 {
+        diagnostic_anchor: RetrievalAnchorId::new("anchor.advisory.four-pillar.diagnostic")
+            .unwrap(),
+        generation_id: generation.clone(),
+        repository: scope.repository_id.clone(),
+        worktree: Some(scope.worktree_id.clone()),
+        reference: Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+        source_revision: Some(scope.head_commit_id.clone()),
+        file_occurrence_id: ci_symbol.file.clone(),
+        content_digest: ContentDigest::new(file_digest.as_str().to_owned()).unwrap(),
+        span: ci_symbol.span,
+        symbol_occurrence_id: Some(ci_symbol.symbol.clone()),
+        code: "E0308".to_owned(),
+        severity: tracedecay_domain::DiagnosticSeverityV1::Error,
+        message: "mismatched types".to_owned(),
+        message_digest: four_pillar_digest('7'),
+        provenance: tracedecay_domain::DiagnosticProvenanceV1 {
+            producer_kind: tracedecay_domain::DiagnosticProducerKindV1::UpstreamCompiler,
+            producer: ProviderId::new("provider.advisory.four-pillar").unwrap(),
+            analyzer_revision: ComponentVersion::new("analyzer.advisory.four-pillar.v1").unwrap(),
+            configuration_revision: ComponentVersion::new("configuration.advisory.four-pillar.v1")
+                .unwrap(),
+            sanitization_receipt: None,
+        },
+        evidence_class: tracedecay_domain::DiagnosticEvidenceClassV1::ProducerReported,
+        collected_at: now,
+        state: tracedecay_domain::DiagnosticRecordStateV1::Current,
+    };
+    post_edit_diagnostic.message_digest = post_edit_diagnostic.compute_message_digest().unwrap();
+
+    let baseline = FeedbackDiagnosticBaselineV1 {
+        identity: FeedbackDiagnosticBaselineIdentityV1 {
+            current_generation_id: generation.clone(),
+            current_generation_digest: four_pillar_digest('5'),
+            current_head_commit_id: scope.head_commit_id.clone(),
+            current_content_digest: file_digest.clone(),
+            provider_identity_digest: provider.compute_digest().unwrap(),
+            horizon: FeedbackBaselineHorizonV1 {
+                comparison_generation_id: CodeGenerationId::new(
+                    "generation.advisory.four-pillar.previous",
+                )
+                .unwrap(),
+                comparison_generation_digest: four_pillar_digest('8'),
+                comparison_head_commit_id: CommitId::new(
+                    "0000000000000000000000000000000000000001",
+                )
+                .unwrap(),
+                comparison_content_digest: four_pillar_digest('8'),
+                watermark: four_pillar_digest('8'),
+            },
+        },
+        diagnostic_anchors: Vec::new(),
+        state: FeedbackBaselineStateV1::Complete,
+    };
+    let runtime_state = FeedbackRuntimeStateV1::new(
+        FeedbackAuthoritativeRuntimeStateV1 {
+            snapshot: FeedbackCycleRuntimeSnapshotV1::from_request(&input.request),
+            baseline_horizon: Some(baseline.identity.horizon.clone()),
+            runtime_watermark: four_pillar_digest('9'),
+        },
+        Some(generation.clone()),
+    )
+    .expect("authoritative runtime state");
+
+    let impact = FeedbackImpactV1 {
+        target: input.target.clone(),
+        affected_files: vec![ci_symbol.file.clone()],
+        affected_callers: ci_localization
+            .callers
+            .iter()
+            .map(|caller| caller.caller_symbol.clone())
+            .collect::<Vec<SymbolOccurrenceId>>(),
+        affected_tests: ci_localization
+            .tests
+            .iter()
+            .map(|test| test.test_symbol.clone())
+            .collect::<Vec<SymbolOccurrenceId>>(),
+        evidence_anchors: vec![ci_symbol.retrieval_anchor_id.clone()],
+        state: FeedbackImpactStateV1::Complete,
+        affected_tests_state: FeedbackImpactStateV1::Complete,
+    };
+    assert!(
+        !impact.affected_callers.is_empty() && !impact.affected_tests.is_empty(),
+        "impact must come from real canonical-graph evidence: {impact:?}"
+    );
+
+    let service = FeedbackCycleService::new(
+        move |_context: &RequestContext, _input: &FeedbackEvaluationInputV1| {
+            Some(runtime_state.clone())
+        },
+        SavedGenerationDiagnostics {
+            results: vec![
+                DiagnosticProviderResult::new(
+                    provider.clone(),
+                    DiagnosticProviderState::SupportedComplete,
+                    Some(vec![FeedbackDiagnosticV1::Saved(Box::new(
+                        post_edit_diagnostic,
+                    ))]),
+                )
+                .expect("saved diagnostics provider result"),
+            ],
+            baselines: vec![baseline],
+        },
+        GraphDerivedImpact(impact),
+        feedback.publication_store(),
+        SharedFeedbackObservations(feedback.observation_port()),
+        feedback.route_authorization(),
+        operation,
+    );
+
+    let execution = service
+        .execute_with_advisory(
+            &context,
+            FeedbackCycleExecutionRequest {
+                input,
+                providers: vec![provider],
+                maximum_returned_findings: 32,
+                usage: tracedecay_application::feedback::FeedbackBudgetUsage {
+                    completed_at: UtcMicros(now.0.saturating_add(1_000)),
+                    tokens_consumed: 1,
+                    cost_microunits: 1,
+                },
+                control: FeedbackCycleControl::Continue,
+            },
+            advisory,
+        )
+        .await
+        .expect("one canonical four-pillar cycle");
+
+    // Exactly one cycle result carries every pillar.
+    let cycle = execution.cycle;
+    let finding_ids = cycle
+        .findings
+        .iter()
+        .map(|finding| finding.finding_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    for pillar in [
+        "finding.ci-localization.",
+        "finding.github-review.",
+        "finding.proximity.",
+    ] {
+        assert!(
+            finding_ids.iter().any(|id| id.starts_with(pillar)),
+            "one cycle result must carry the {pillar} pillar: {finding_ids:?}"
+        );
+    }
+    // The diagnostics pillar mints its finding id from the diagnostic anchor,
+    // so it is exactly the finding that is not one of the three advisory
+    // contributions above.
+    let diagnostics_findings = finding_ids
+        .iter()
+        .filter(|id| {
+            !id.starts_with("finding.ci-localization.")
+                && !id.starts_with("finding.github-review.")
+                && !id.starts_with("finding.proximity.")
+        })
+        .count();
+    assert_eq!(
+        diagnostics_findings, 1,
+        "the post-edit diagnostics pillar must contribute its own finding: {finding_ids:?}"
+    );
+    assert!(
+        cycle.impact.is_some(),
+        "one cycle result must carry post-edit impact: {cycle:?}"
+    );
+    assert_eq!(
+        cycle.impact_state,
+        Some(FeedbackImpactStateV1::Complete),
+        "graph-derived impact must report complete coverage: {cycle:?}"
+    );
+
+    // Provider outcome and per-finding lifecycle stay orthogonal: every remote
+    // pillar completed, yet the recorded GitHub thread is outdated and so
+    // contributes a superseded finding rather than an active one.
+    assert!(
+        cycle
+            .provider_states
+            .iter()
+            .all(|state| *state == ProviderEvaluationStateV1::SupportedCompletedComplete),
+        "every pillar of a positive cycle reports a complete provider state: {:?}",
+        cycle.provider_states
+    );
+    let github_finding = cycle
+        .findings
+        .iter()
+        .find(|finding| {
+            finding
+                .finding_id
+                .as_str()
+                .starts_with("finding.github-review.")
+        })
+        .expect("github pillar finding");
+    assert_eq!(
+        github_finding.lifecycle,
+        FeedbackFindingLifecycleV1::Superseded,
+        "an outdated review thread stays superseded even though its provider read completed"
+    );
+    assert_eq!(
+        github_finding.provider_state,
+        ProviderEvaluationStateV1::SupportedCompletedComplete,
+        "provider outcome must not be degraded by a per-finding lifecycle"
+    );
+    let ci_finding = cycle
+        .findings
+        .iter()
+        .find(|finding| {
+            finding
+                .finding_id
+                .as_str()
+                .starts_with("finding.ci-localization.")
+        })
+        .expect("ci pillar finding");
+    assert_eq!(ci_finding.lifecycle, FeedbackFindingLifecycleV1::Active);
+    let proximity_finding = cycle
+        .findings
+        .iter()
+        .find(|finding| {
+            finding
+                .finding_id
+                .as_str()
+                .starts_with("finding.proximity.")
+        })
+        .expect("proximity pillar finding");
+    assert_eq!(
+        proximity_finding.lifecycle,
+        FeedbackFindingLifecycleV1::Active
+    );
+    // `Clean` is reserved for a covered cycle that found nothing, so a positive
+    // four-pillar cycle terminates `Blocked` — findings present, coverage
+    // complete. The point of pinning it is that it is neither `Clean` (which
+    // would mean the pillars produced nothing) nor any degraded terminal.
+    assert_eq!(
+        cycle.termination,
+        FeedbackCycleTerminationV1::Blocked,
+        "a covered cycle carrying four pillars of findings terminates blocked: {cycle:?}"
+    );
+    assert_eq!(
+        (
+            cycle.total_findings,
+            cycle.returned_findings,
+            cycle.omitted_findings
+        ),
+        (4, 4, 0),
+        "all four pillars are accounted for and none is omitted: {cycle:?}"
+    );
 }

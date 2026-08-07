@@ -330,7 +330,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         let Some(current_file) = current_file else {
             return remap_state(original.clone(), current_scope.clone(), None, true);
         };
-        let current_digest = ContentDigest::new(current_file.content_hash).ok()?;
+        let current_digest = indexed_content_digest(&current_file.content_hash)?;
         if current_digest != original.content_digest {
             return remap_state(original.clone(), current_scope.clone(), None, true);
         }
@@ -977,6 +977,22 @@ fn git_historical_blob(
         return None;
     }
     blob.bytes
+}
+
+/// Converts a code-index `content_hash` into canonical content identity.
+///
+/// The index stores the hash as bare lowercase hex, while `ContentDigest` is
+/// the tagged `sha256:<hex>` form that `ContentDigest::of_bytes` produces.
+/// Requiring the tagged form here made the conversion fail for every file the
+/// project had actually indexed, and that failure propagated out of anchor
+/// resolution — so a review comment on an indexed file produced no anchors at
+/// all rather than a remapped one. Both encodings are accepted.
+fn indexed_content_digest(content_hash: &str) -> Option<ContentDigest> {
+    if content_hash.starts_with("sha256:") {
+        ContentDigest::new(content_hash.to_owned()).ok()
+    } else {
+        ContentDigest::new(format!("sha256:{content_hash}")).ok()
+    }
 }
 
 fn content_digest(bytes: &[u8]) -> Option<ContentDigest> {
