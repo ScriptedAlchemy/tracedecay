@@ -375,7 +375,14 @@ describe("TraceDecayClient generated operation bindings", () => {
         token: "sdk-secret",
       }).operations,
     ).toBe(true);
-    const quarantined = [
+    // Handoff and multi-root are mounted HTTP families, so the generator must
+    // publish them like Work and Workflow. Multi-root was quarantined here
+    // while its public surface was torn out; the multi-root HTTP owner landed
+    // on 2026-08-07 and its production router test answers on all three
+    // routes, so the quarantine no longer describes the daemon.
+    const mountedFamilies = [
+      "handoff_open_investigation_handoff",
+      "handoff_open_task_handoff",
       "multi_root_scope_set_read",
       "multi_root_scope_set_compare_and_swap",
       "multi_root_execute",
@@ -385,10 +392,10 @@ describe("TraceDecayClient generated operation bindings", () => {
       projectId: "project.sdk",
       token: "sdk-secret",
     }).operations;
-    for (const operation of quarantined) {
-      expect(available).not.toContain(operation);
+    for (const operation of mountedFamilies) {
+      expect(available).toContain(operation);
       expect(unavailable).not.toContain(operation);
-      expect(operation in clientOperations).toBe(false);
+      expect(operation in clientOperations).toBe(true);
     }
   });
 

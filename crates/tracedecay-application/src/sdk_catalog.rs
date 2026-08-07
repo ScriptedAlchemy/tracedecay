@@ -8,17 +8,36 @@ use std::collections::BTreeSet;
 
 use tracedecay_tool_catalog::{
     BindingStatus, BindingSurface, CapabilityId, CatalogContributionV1, CatalogValidationError,
-    CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingV1,
-    ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
+    CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
+    ExecutableBindingV1, ExecutableUnavailableDispositionV1, OperationId, RouteExposureV1,
     SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1, SdkExecutableBindingV1,
     SdkTransportBindingV1, ServiceId, SurfaceBindingV1, SurfaceOperationName,
 };
 
 use crate::{
     ApplicationContractError, application_catalog_contributions,
-    configuration_executable_binding_registry, work_executable_binding_registry,
+    configuration_executable_binding_registry, handoff_executable_binding_registry,
+    multi_root::multi_root_executable_binding_registry, work_executable_binding_registry,
     workflow_executable_binding_registry,
 };
+
+/// Every mounted HTTP executable registry the SDK projects.
+///
+/// This is the single place a product family joins the official SDK. Both the
+/// projection below and its conformance guard read this list, so a registry
+/// cannot be projected without being asserted, and a registry added here is
+/// exposed in the generated Rust and TypeScript SDKs by the same edit. Each
+/// operation ID names its own family, so the list needs no parallel labels.
+fn mounted_executable_binding_registries()
+-> Result<Vec<ExecutableBindingRegistryV1>, ApplicationContractError> {
+    Ok(vec![
+        work_executable_binding_registry()?,
+        workflow_executable_binding_registry()?,
+        configuration_executable_binding_registry()?,
+        handoff_executable_binding_registry()?,
+        multi_root_executable_binding_registry()?,
+    ])
+}
 
 /// Canonical SDK state for every current application operation.
 ///
@@ -28,13 +47,10 @@ use crate::{
 /// request/result schemas and an official SDK MCP transport are shipped.
 pub fn sdk_executable_binding_registry()
 -> Result<SdkExecutableBindingRegistryV1, ApplicationContractError> {
-    let work = work_executable_binding_registry()?;
-    let workflow = workflow_executable_binding_registry()?;
-    let configuration = configuration_executable_binding_registry()?;
-    let mut bindings = work
+    let mounted = mounted_executable_binding_registries()?;
+    let mut bindings = mounted
         .iter()
-        .chain(workflow.iter())
-        .chain(configuration.iter())
+        .flat_map(|registry| registry.iter())
         .map(project_http_binding)
         .collect::<Result<Vec<_>, _>>()?;
     let http_operations = bindings
@@ -209,11 +225,14 @@ mod tests {
     use tracedecay_tool_catalog::{
         BindingSurface, CancellationContract, DeadlineBehavior, EffectClass,
         ExecutableUnavailableDispositionV1, IdempotencyContract, OperationId, ReceiptContract,
-        ReconciliationContract, SdkExecutableBindingAvailabilityV1, SdkTransportBindingV1,
-        TerminalState,
+        ReconciliationContract, RouteExposureV1, SdkExecutableBindingAvailabilityV1,
+        SdkTransportBindingV1, TerminalState,
     };
 
-    use super::{project_mcp_availability, sdk_executable_binding_registry};
+    use super::{
+        mounted_executable_binding_registries, project_mcp_availability,
+        sdk_executable_binding_registry,
+    };
     use crate::{application_catalog_contributions, git_surface_catalog_contribution};
 
     #[derive(JsonSchema)]
@@ -226,6 +245,77 @@ mod tests {
     #[allow(dead_code)]
     struct TestGitStatusResult {
         changed_paths: Vec<String>,
+    }
+
+    /// Every mounted product family reaches the official SDK.
+    ///
+    /// Handoff and multi-root shipped mounted HTTP routes that the SDK
+    /// projection silently omitted, so authorized non-enumerating results were
+    /// callable over HTTP but absent from both generated SDKs. Asserting the
+    /// whole mounted set — not one named family — is what keeps a future
+    /// family from repeating that omission.
+    #[test]
+    fn sdk_registry_projects_every_mounted_family_including_handoff_and_multi_root() {
+        let registry = sdk_executable_binding_registry().expect("SDK registry");
+        let mounted = mounted_executable_binding_registries().expect("mounted registries");
+        let mounted_operations = mounted
+            .iter()
+            .flat_map(|source| source.iter())
+            .map(|availability| availability.operation_id().as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        for operation_id in [
+            "operation.handoff.open_investigation_handoff",
+            "operation.handoff.open_task_handoff",
+            "operation.multi_root.scope_set_read",
+            "operation.multi_root.scope_set_compare_and_swap",
+            "operation.multi_root.execute",
+        ] {
+            assert!(
+                mounted_operations.contains(operation_id),
+                "{operation_id} is mounted, so the SDK must project it"
+            );
+        }
+
+        for availability in mounted.iter().flat_map(|source| source.iter()) {
+            let operation_id = availability.operation_id();
+            let projected = registry.get(operation_id).unwrap_or_else(|| {
+                panic!(
+                    "mounted operation {} is missing from the SDK registry",
+                    operation_id.as_str()
+                )
+            });
+            let Some(mounted_binding) = availability.binding() else {
+                continue;
+            };
+            let projected_binding = projected.binding().unwrap_or_else(|| {
+                panic!(
+                    "mounted operation {} must not be projected as SDK-unavailable",
+                    operation_id.as_str()
+                )
+            });
+            let RouteExposureV1::Public { route_path, .. } = mounted_binding.exposure() else {
+                continue;
+            };
+            assert!(
+                matches!(
+                    projected_binding.transport(),
+                    SdkTransportBindingV1::Http { route_path: projected }
+                        if projected == route_path
+                ),
+                "{} must keep its mounted route {route_path} in the SDK",
+                operation_id.as_str()
+            );
+            assert_eq!(
+                projected_binding.sdk_method().as_str(),
+                operation_id
+                    .as_str()
+                    .strip_prefix("operation.")
+                    .expect("canonical operation ID")
+                    .replace('.', "_"),
+                "{} must keep its canonical SDK method spelling",
+                operation_id.as_str()
+            );
+        }
     }
 
     #[test]
