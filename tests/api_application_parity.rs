@@ -8,8 +8,8 @@ use tracedecay::application_surface::{
     APPLICATION_SURFACE_OPERATIONS, AffectedTestsSurfaceRequest, ApplicationSurfaceOperation,
     ApplicationSurfaceRequest, FeedbackImpactSurfaceRequest, FeedbackSurfaceRequest,
     GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
-    TestResultsSurfaceRequest, resolve_application_surface_dispatch,
-    resolve_http_application_surface_dispatch,
+    TestResultsSurfaceRequest, parse_application_surface_request,
+    resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
 };
 use tracedecay::daemon_client::{
     BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
@@ -35,6 +35,45 @@ use tracedecay_tool_catalog::{BindingSurface, ProfileId, SchemaId, SurfaceOperat
 
 const PARITY_FIXTURE: &str =
     include_str!("../benchmarks/transport-boundary/goldens/application-surface-parity.json");
+
+/// The operations whose decoded surface request carries a
+/// `CallableCodeSurfaceMeta`, and therefore a `cursor` continuation that every
+/// transport must accept identically. Mirrors
+/// `operation_carries_callable_code_meta` in `src/application_surface.rs`; the
+/// drift guard below fails as soon as one of them stops being pinned, stops
+/// binding a surface, or stops advertising its cursor over MCP.
+const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
+    ApplicationSurfaceOperation::CodeExactOccurrence,
+    ApplicationSurfaceOperation::CodePhraseSearch,
+    ApplicationSurfaceOperation::CodeSymbolSearch,
+    ApplicationSurfaceOperation::CodeSignatureSearch,
+    ApplicationSurfaceOperation::CodeImplementations,
+    ApplicationSurfaceOperation::CodeTypeHierarchy,
+    ApplicationSurfaceOperation::CodeCallers,
+    ApplicationSurfaceOperation::CodeCallees,
+    ApplicationSurfaceOperation::CodeFacets,
+    ApplicationSurfaceOperation::CodeTimeline,
+    ApplicationSurfaceOperation::CodeDeclaration,
+    ApplicationSurfaceOperation::CodeDefinition,
+    ApplicationSurfaceOperation::CodeTypeDefinition,
+    ApplicationSurfaceOperation::CodeReferences,
+];
+
+fn parity_fixture() -> serde_json::Value {
+    serde_json::from_str(PARITY_FIXTURE).expect("application parity fixture")
+}
+
+/// Operations the golden deliberately does not pin yet. Every entry must still
+/// be a real catalog operation, and an operation that appears in neither roster
+/// fails the parity test instead of being skipped.
+fn unpinned_operations(fixture: &serde_json::Value) -> BTreeSet<String> {
+    fixture["unpinned_operations"]
+        .as_array()
+        .expect("unpinned operation roster")
+        .iter()
+        .map(|operation| operation.as_str().expect("operation name").to_owned())
+        .collect()
+}
 
 #[tokio::test]
 async fn catalog_advertised_feedback_http_routes_invoke_the_application_owner() {
@@ -119,8 +158,8 @@ async fn catalog_advertised_feedback_http_routes_invoke_the_application_owner() 
 
 #[test]
 fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(PARITY_FIXTURE).expect("application parity fixture");
+    let fixture = parity_fixture();
+    let unpinned = unpinned_operations(&fixture);
     let catalog = tracedecay::application_surface::application_surface_catalog()
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
@@ -128,6 +167,14 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
     for operation in APPLICATION_SURFACE_OPERATIONS {
         let expected = &fixture["operations"][operation.as_str()];
         if !expected.is_object() {
+            assert!(
+                unpinned.contains(operation.as_str()),
+                "{} is advertised by the application catalog but the parity golden \
+                 neither pins its contract nor lists it under unpinned_operations; \
+                 pin the operation or declare it unpinned instead of leaving it \
+                 silently unverified",
+                operation.as_str()
+            );
             continue;
         }
         let resolution = BindingResolution {
@@ -203,6 +250,105 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
                 ),
             }
         }
+    }
+}
+
+#[test]
+fn the_parity_golden_accounts_for_every_catalog_operation() {
+    let fixture = parity_fixture();
+    let catalog: BTreeSet<&str> = APPLICATION_SURFACE_OPERATIONS
+        .iter()
+        .map(|operation| operation.as_str())
+        .collect();
+
+    let pinned: BTreeSet<String> = fixture["operations"]
+        .as_object()
+        .expect("pinned operation contracts")
+        .keys()
+        .cloned()
+        .collect();
+    let unpinned = unpinned_operations(&fixture);
+
+    for operation in pinned.iter().chain(unpinned.iter()) {
+        assert!(
+            catalog.contains(operation.as_str()),
+            "{operation} is named by the parity golden but is not an application \
+             catalog operation; remove the stale roster entry"
+        );
+    }
+    let overlap: Vec<&String> = pinned.intersection(&unpinned).collect();
+    assert!(
+        overlap.is_empty(),
+        "operations cannot be both pinned and unpinned: {overlap:?}"
+    );
+
+    let accounted: BTreeSet<&str> = pinned
+        .iter()
+        .chain(unpinned.iter())
+        .map(String::as_str)
+        .collect();
+    let missing: Vec<&&str> = catalog.difference(&accounted).collect();
+    assert!(
+        missing.is_empty(),
+        "the parity golden must account for every application catalog operation, \
+         either by pinning its transport contract or by listing it under \
+         unpinned_operations; unaccounted: {missing:?}"
+    );
+}
+
+#[test]
+fn cursor_carrying_code_operations_are_pinned_on_every_surface() {
+    let fixture = parity_fixture();
+    let catalog = tracedecay::application_surface::application_surface_catalog()
+        .expect("application catalog");
+    let resolver = CatalogBindingResolver::new(&catalog);
+    let definitions = get_tool_definitions();
+
+    for operation in CURSOR_CARRYING_CODE_OPERATIONS {
+        let expected = &fixture["operations"][operation.as_str()];
+        assert!(
+            expected.is_object(),
+            "{} carries a callable-code cursor and must be pinned by the parity \
+             golden, not left to the unpinned roster",
+            operation.as_str()
+        );
+
+        let resolution = BindingResolution {
+            profile_id: ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile"),
+            operation: SurfaceOperationName::new(operation.as_str()).expect("operation"),
+            protocol_revision: 1,
+            negotiated_features: BTreeSet::new(),
+        };
+        for (surface, surface_name) in [
+            (BindingSurface::Cli, "cli"),
+            (BindingSurface::Mcp, "mcp"),
+            (BindingSurface::Http, "http"),
+        ] {
+            let resolved = resolver
+                .resolve_binding(surface, &resolution)
+                .unwrap_or_else(|| panic!("{} must bind on {surface:?}", operation.as_str()));
+            assert_eq!(
+                resolved.binding_id.as_str(),
+                expected["bindings"][surface_name]
+                    .as_str()
+                    .unwrap_or_else(|| panic!(
+                        "{} must pin its {surface_name} binding",
+                        operation.as_str()
+                    )),
+                "{} {surface_name} binding drifted from the golden",
+                operation.as_str()
+            );
+        }
+
+        let tool_name = format!("tracedecay_{}", operation.as_str());
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} definition"));
+        assert!(
+            definition.input_schema["properties"]["meta"]["properties"]["cursor"].is_object(),
+            "{tool_name} must advertise its continuation cursor over MCP"
+        );
     }
 }
 
@@ -366,8 +512,7 @@ fn handle_gated_feedback_capabilities_follow_catalog_availability() {
 
 #[test]
 fn sse_projects_the_same_canonical_feedback_payload() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(PARITY_FIXTURE).expect("application parity fixture");
+    let fixture = parity_fixture();
     let expected = &fixture["http_sse"];
     let sequence = expected["sequence"].as_u64().expect("SSE sequence");
     let payload = expected["item"].clone();
@@ -389,8 +534,7 @@ fn sse_projects_the_same_canonical_feedback_payload() {
 
 #[test]
 fn http_concealment_omits_binding_identity() {
-    let fixture: serde_json::Value =
-        serde_json::from_str(PARITY_FIXTURE).expect("application parity fixture");
+    let fixture = parity_fixture();
     let concealed = &fixture["authorization_concealment"];
     let result = Err(tracedecay_application::ApplicationProblemEnvelope::new(
         ResultContractRef::new(
@@ -473,6 +617,18 @@ fn application_request(
         }
         ApplicationSurfaceOperation::TestResults => {
             ApplicationSurfaceRequest::TestResults(TestResultsSurfaceRequest::default())
+        }
+        // Cursor-carrying code operations decode straight from the golden's
+        // pinned request body, so the fixture proves the reviewed request
+        // schema still accepts it rather than restating it in Rust.
+        operation if CURSOR_CARRYING_CODE_OPERATIONS.contains(&operation) => {
+            parse_application_surface_request(operation, expected["request"].clone())
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{} golden request body must parse: {error:?}",
+                        operation.as_str()
+                    )
+                })
         }
         _ => feedback_request(expected["request_handle"].as_str().expect("request handle")),
     }

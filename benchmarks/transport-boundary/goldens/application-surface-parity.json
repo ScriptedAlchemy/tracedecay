@@ -71,7 +71,9 @@
     },
     "affected_tests": {
       "request": {
-        "files": ["src/lib.rs"]
+        "files": [
+          "src/lib.rs"
+        ]
       },
       "request_schema": "schema.application.feedback.affected-tests.request",
       "result_schema": "schema.application.feedback.affected-tests.result",
@@ -90,6 +92,305 @@
         "mcp": "binding.mcp.test_results.v1",
         "http": "binding.http.test_results.v1"
       }
+    },
+    "code_callees": {
+      "bindings": {
+        "cli": "binding.cli.code_callees.v1",
+        "http": "binding.http.code_callees.v1",
+        "mcp": "binding.mcp.code_callees.v1"
+      },
+      "request": {
+        "maximum_depth": 3,
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "node_id": "node.application-parity",
+        "resolve_trait_dispatch": true,
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.callees.request",
+      "result_schema": "schema.application.code-query.callees.result"
+    },
+    "code_callers": {
+      "bindings": {
+        "cli": "binding.cli.code_callers.v1",
+        "http": "binding.http.code_callers.v1",
+        "mcp": "binding.mcp.code_callers.v1"
+      },
+      "request": {
+        "maximum_depth": 3,
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "node_id": "node.application-parity",
+        "resolve_trait_dispatch": true,
+        "scope": {
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.primitive.code-callers.request",
+      "result_schema": "schema.application.primitive.code-callers.result"
+    },
+    "code_declaration": {
+      "bindings": {
+        "cli": "binding.cli.code_declaration.v1",
+        "http": "binding.http.code_declaration.v1",
+        "mcp": "binding.mcp.code_declaration.v1"
+      },
+      "request": {
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "node_id": "symbol.application-parity",
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.declaration.request",
+      "result_schema": "schema.application.code-query.declaration.result"
+    },
+    "code_definition": {
+      "bindings": {
+        "cli": "binding.cli.code_definition.v1",
+        "http": "binding.http.code_definition.v1",
+        "mcp": "binding.mcp.code_definition.v1"
+      },
+      "request": {
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "node_id": "symbol.application-parity",
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.definition.request",
+      "result_schema": "schema.application.code-query.definition.result"
+    },
+    "code_exact_occurrence": {
+      "bindings": {
+        "cli": "binding.cli.code_exact_occurrence.v1",
+        "http": "binding.http.code_exact_occurrence.v1",
+        "mcp": "binding.mcp.code_exact_occurrence.v1"
+      },
+      "request": {
+        "kind": "whole_symbol",
+        "literal": "ApplicationSurfaceOperation",
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.exact-occurrence.request",
+      "result_schema": "schema.application.code-query.exact-occurrence.result"
+    },
+    "code_facets": {
+      "bindings": {
+        "cli": "binding.cli.code_facets.v1",
+        "http": "binding.http.code_facets.v1",
+        "mcp": "binding.mcp.code_facets.v1"
+      },
+      "request": {
+        "dimension": "language",
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.facets.request",
+      "result_schema": "schema.application.code-query.facets.result"
+    },
+    "code_implementations": {
+      "bindings": {
+        "cli": "binding.cli.code_implementations.v1",
+        "http": "binding.http.code_implementations.v1",
+        "mcp": "binding.mcp.code_implementations.v1"
+      },
+      "request": {
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "scope": {
+          "path_prefix": "src"
+        },
+        "selector": {
+          "name": "HttpApplicationOwners",
+          "selector": "trait"
+        }
+      },
+      "request_schema": "schema.application.primitive.code-implementations.request",
+      "result_schema": "schema.application.primitive.code-implementations.result"
+    },
+    "code_phrase_search": {
+      "bindings": {
+        "cli": "binding.cli.code_phrase_search.v1",
+        "http": "binding.http.code_phrase_search.v1",
+        "mcp": "binding.mcp.code_phrase_search.v1"
+      },
+      "request": {
+        "field_filters": [
+          {
+            "field": "path",
+            "include": true
+          }
+        ],
+        "fuzzy_budget": 7,
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "phrases": [
+          "callable application",
+          "surface"
+        ],
+        "query": "callable application surface",
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.phrase-search.request",
+      "result_schema": "schema.application.code-query.phrase-search.result"
+    },
+    "code_references": {
+      "bindings": {
+        "cli": "binding.cli.code_references.v1",
+        "http": "binding.http.code_references.v1",
+        "mcp": "binding.mcp.code_references.v1"
+      },
+      "request": {
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "node_id": "symbol.application-parity",
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.references.request",
+      "result_schema": "schema.application.code-query.references.result"
+    },
+    "code_signature_search": {
+      "bindings": {
+        "cli": "binding.cli.code_signature_search.v1",
+        "http": "binding.http.code_signature_search.v1",
+        "mcp": "binding.mcp.code_signature_search.v1"
+      },
+      "request": {
+        "is_async": true,
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "params": [
+          "RequestContext"
+        ],
+        "returns": "ApplicationResult",
+        "scope": {
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.primitive.code-signature-search.request",
+      "result_schema": "schema.application.primitive.code-signature-search.result"
+    },
+    "code_symbol_search": {
+      "bindings": {
+        "cli": "binding.cli.code_symbol_search.v1",
+        "http": "binding.http.code_symbol_search.v1",
+        "mcp": "binding.mcp.code_symbol_search.v1"
+      },
+      "request": {
+        "lazy_index_ignored_dependencies": false,
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "query": "ApplicationSurfaceOperation",
+        "scope": {
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.symbol-search.request",
+      "result_schema": "schema.application.symbol-search.result"
+    },
+    "code_timeline": {
+      "bindings": {
+        "cli": "binding.cli.code_timeline.v1",
+        "http": "binding.http.code_timeline.v1",
+        "mcp": "binding.mcp.code_timeline.v1"
+      },
+      "request": {
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.timeline.request",
+      "result_schema": "schema.application.code-query.timeline.result"
+    },
+    "code_type_definition": {
+      "bindings": {
+        "cli": "binding.cli.code_type_definition.v1",
+        "http": "binding.http.code_type_definition.v1",
+        "mcp": "binding.mcp.code_type_definition.v1"
+      },
+      "request": {
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "node_id": "symbol.application-parity",
+        "scope": {
+          "generation": "generation.application-parity",
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.code-query.type-definition.request",
+      "result_schema": "schema.application.code-query.type-definition.result"
+    },
+    "code_type_hierarchy": {
+      "bindings": {
+        "cli": "binding.cli.code_type_hierarchy.v1",
+        "http": "binding.http.code_type_hierarchy.v1",
+        "mcp": "binding.mcp.code_type_hierarchy.v1"
+      },
+      "request": {
+        "maximum_depth": 3,
+        "meta": {
+          "order": "source_position",
+          "projection": "evidence"
+        },
+        "node_id": "node.application-parity",
+        "scope": {
+          "path_prefix": "src"
+        }
+      },
+      "request_schema": "schema.application.primitive.code-type-hierarchy.request",
+      "result_schema": "schema.application.primitive.code-type-hierarchy.result"
     }
   },
   "http_sse": {
@@ -105,5 +406,55 @@
     "problem_kind": "not_found_or_not_authorized",
     "binding_identity": "omitted",
     "unknown_handle_behavior": "same_as_unauthorized"
-  }
+  },
+  "unpinned_operations": [
+    "git_status",
+    "git_diff",
+    "git_history",
+    "git_blame",
+    "git_hunks",
+    "stack_snapshot",
+    "preflight_native_integration",
+    "apply_native_integration",
+    "native_integration_status",
+    "cancel_native_integration",
+    "feedback_advisory_cycle",
+    "session_lookup",
+    "qualified_name",
+    "call_chain",
+    "file_dependents",
+    "source_lines",
+    "source_body",
+    "source_outline",
+    "module_api",
+    "file_metadata",
+    "health_read",
+    "health_delta",
+    "storage_status",
+    "diagnostics_read",
+    "configuration_list",
+    "configuration_explain",
+    "configuration_get",
+    "configuration_set",
+    "configuration_unset",
+    "configuration_batch",
+    "configuration_write_credential",
+    "configuration_observed_state",
+    "configuration_protected_preview",
+    "configuration_protected_apply",
+    "configuration_rollback_preview",
+    "configuration_rollback_apply",
+    "configuration_audit",
+    "context_scout_status",
+    "context_scout_recent",
+    "context_scout_explain",
+    "context_scout_capability",
+    "context_scout_budget",
+    "context_scout_pause",
+    "context_scout_resume",
+    "context_scout_cancel",
+    "context_scout_claim",
+    "context_scout_delivery",
+    "context_scout_feedback"
+  ]
 }
