@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::Command;
 use std::sync::Arc;
 
 use tracedecay_application::diagnostics::{
@@ -40,8 +39,8 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ComponentVersion, ContentDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, LanguageId, ManifestDigest, ProviderId, RetrievalAnchorId, ShardId,
-    UtcMicros, VectorWatermark, canonical_sha256,
+    GitHeadStateV1, LanguageDescriptorRevision, LanguageId, ManifestDigest, ProviderId,
+    RetrievalAnchorId, ShardId, UtcMicros, VectorWatermark, canonical_sha256,
 };
 use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
@@ -489,29 +488,33 @@ fn feedback_scope_for_project(
     project_root: &Path,
     scope: &ResolvedScope,
 ) -> Result<FeedbackScopeV1, ApplicationContractError> {
-    let branch = tracedecay_runtime_core::branch::current_branch(project_root).ok_or(
-        ApplicationContractError::Inconsistent {
-            field: "project-open feedback branch",
-        },
-    )?;
-    let branch_ref = format!("refs/heads/{branch}");
-    let head = Command::new("git")
-        .args(["-C", &project_root.to_string_lossy(), "rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "project-open feedback head commit",
-        })?;
+    scope.validate()?;
+    // One bounded native read of the exact admitted checkout: the branch and
+    // the commit come from the same HEAD observation, so they cannot disagree
+    // the way two independent unbounded `git` spawns could.
+    let head = crate::git_intelligence::NativeGitIntelligence::new(
+        project_root,
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+    )
+    .head()
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "project-open feedback git identity",
+    })?;
+    let (branch, head) = match head {
+        GitHeadStateV1::Attached { branch, commit } => (branch, commit),
+        GitHeadStateV1::Detached { .. } | GitHeadStateV1::Unborn { .. } => {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "project-open feedback branch",
+            });
+        }
+    };
     let feedback = FeedbackScopeV1 {
         project_id: scope.project_id.clone(),
         repository_id: scope.repository_id.clone(),
         worktree_id: scope.worktree_id.clone(),
-        branch_ref,
-        head_commit_id: CommitId::new(head).map_err(|_| {
+        branch_ref: format!("refs/heads/{branch}"),
+        head_commit_id: CommitId::new(head.as_str().to_owned()).map_err(|_| {
             ApplicationContractError::Inconsistent {
                 field: "project-open feedback head commit id",
             }

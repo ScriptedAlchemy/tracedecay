@@ -271,6 +271,18 @@ impl NativeGitIntelligence {
         &self.worktree
     }
 
+    /// Current HEAD state for this exact admitted repository/worktree.
+    ///
+    /// This is the canonical lightweight identity read for feedback, LSP, and
+    /// managed-test consumers that do not need worktree status entries. It
+    /// reuses the native repository snapshot, so it spawns no subprocess on
+    /// repositories `gix` can open — including linked worktrees, where the
+    /// snapshot resolves the checkout-specific HEAD rather than the common
+    /// directory's.
+    pub fn head(&self) -> Result<GitHeadStateV1, GitIntelligenceError> {
+        Ok(self.repository_snapshot()?.head)
+    }
+
     pub fn topology_ref_watermark(&self) -> Result<ManifestDigest, GitIntelligenceError> {
         let authority =
             GitRepositoryAuthority::discover(&self.repo_root).map_err(map_repository_error)?;
@@ -484,7 +496,7 @@ impl NativeGitIntelligence {
             degradations.insert(GitDegradationV1::SparseCheckout);
         }
 
-        let split_index = std::fs::read_dir(git_dir).is_ok_and(|entries| {
+        let split_index = std::fs::read_dir(&git_dir).is_ok_and(|entries| {
             entries.filter_map(Result::ok).any(|entry| {
                 entry
                     .file_name()
@@ -1738,6 +1750,73 @@ mod tests {
         fn assert_port<T: GitReadPort>() {}
 
         assert_port::<NativeGitIntelligence>();
+    }
+
+    #[test]
+    fn head_read_uses_exact_linked_worktree_without_spawning_status() {
+        let Some(fixture) = Fixture::standard() else {
+            return;
+        };
+        let linked_parent = TempDir::new().unwrap();
+        let linked = linked_parent.path().join("feature-worktree");
+        fixture.git_ok(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/exact-head",
+            linked.to_str().unwrap(),
+        ]);
+        std::fs::write(linked.join("src/main.txt"), "feature\n").unwrap();
+        let output = Command::new(tracedecay_runtime_core::git::git_program())
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "add",
+                "-A",
+            ])
+            .current_dir(&linked)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let output = Command::new(tracedecay_runtime_core::git::git_program())
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "feature",
+            ])
+            .current_dir(&linked)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let feature_head =
+            tracedecay_runtime_core::git::git_capture(&linked, &["rev-parse", "HEAD"]).unwrap();
+        let repository = RepositoryId::new("repository.exact").unwrap();
+        let worktree =
+            tracedecay_domain::research::WorktreeId::new("worktree.exact-feature").unwrap();
+        let adapter = NativeGitIntelligence::new(&linked, repository.clone(), worktree.clone());
+
+        GIT_SUBPROCESS_COUNT.set(0);
+        let head = adapter.head().unwrap();
+
+        assert_eq!(adapter.repository(), &repository);
+        assert_eq!(adapter.worktree(), &worktree);
+        assert_eq!(GIT_SUBPROCESS_COUNT.get(), 0);
+        assert!(matches!(
+            head,
+            GitHeadStateV1::Attached { branch, commit }
+                if branch == "feature/exact-head" && commit.as_str() == feature_head
+        ));
     }
 
     #[test]
