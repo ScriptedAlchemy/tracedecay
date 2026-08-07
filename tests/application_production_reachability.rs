@@ -30,6 +30,21 @@ use tracedecay_application::{
 const SURFACE_PAGE_SIZE: usize = 10;
 const PROBE_SYMBOL_COUNT: usize = 24;
 const PROBE_TOKEN: &str = "application_pagination_probe";
+/// Called by every `*_caller_NN` probe, so its callers and references both
+/// exceed one page.
+const PROBE_SINK: &str = "application_pagination_probe_sink";
+/// Calls every `*_leaf_NN` probe, so its callees exceed one page.
+const PROBE_FANOUT: &str = "application_pagination_probe_fanout";
+/// Implemented by every `ApplicationPaginationProbeImplNN`.
+const PROBE_TRAIT: &str = "ApplicationPaginationProbeBehavior";
+/// Extends every `ApplicationPaginationProbeBaseNN`.
+const PROBE_HIERARCHY_LEAF: &str = "ApplicationPaginationProbeLeafTrait";
+/// Takes one parameter of every `ApplicationPaginationProbeTypeNN`.
+const PROBE_TYPE_ANCHOR: &str = "application_pagination_probe_type_anchor";
+/// Size of `operation_carries_callable_code_meta` in `application_surface`: the
+/// operations whose decoded request carries a `CallableCodeSurfaceMeta`, and so
+/// can be handed a continuation cursor.
+const CURSOR_CARRYING_CODE_OPERATIONS: usize = 14;
 
 struct ProductionFixture {
     _daemon: common::DaemonProcess,
@@ -78,17 +93,123 @@ async fn production_fixture() -> ProductionFixture {
 
 /// Writes enough uniformly named symbols that a single query cannot be answered
 /// inside one page.
+///
+/// Each generated file feeds a different continuation-capable operation, and
+/// every one of them is sized past [`SURFACE_PAGE_SIZE`] so the operation is
+/// forced to mint a cursor instead of answering in one page:
+///
+/// * uniform free functions — symbol, signature, exact, and phrase reads;
+/// * one call sink with many callers and one caller with many callees —
+///   the relation and reference reads;
+/// * one trait with many implementors — the implementations read;
+/// * one trait with many supertrait bounds — the type-hierarchy read;
+/// * one function with many distinctly typed parameters — the type-definition
+///   read.
 fn write_pagination_probe(project: &Path) {
+    let destination = project.join("src");
+    std::fs::create_dir_all(&destination).expect("probe destination");
+    for (name, source) in [
+        ("application_pagination_probe.rs", probe_symbol_source()),
+        (
+            "application_pagination_relations.rs",
+            probe_relation_source(),
+        ),
+        ("application_pagination_traits.rs", probe_trait_source()),
+        (
+            "application_pagination_hierarchy.rs",
+            probe_hierarchy_source(),
+        ),
+        ("application_pagination_types.rs", probe_type_source()),
+    ] {
+        std::fs::write(destination.join(name), source)
+            .unwrap_or_else(|error| panic!("write the paginated probe {name}: {error}"));
+    }
+}
+
+fn probe_symbol_source() -> String {
     let mut source = String::new();
     for index in 0..PROBE_SYMBOL_COUNT {
         source.push_str(&format!(
             "pub fn {PROBE_TOKEN}_{index:02}(input: u32) -> u32 {{\n    input + {index}\n}}\n\n"
         ));
     }
-    let destination = project.join("src");
-    std::fs::create_dir_all(&destination).expect("probe destination");
-    std::fs::write(destination.join("application_pagination_probe.rs"), source)
-        .expect("write the paginated symbol probe");
+    source
+}
+
+/// One heavily called function and one heavily calling function, so `Calls`
+/// edges are dense in both directions from a single named anchor.
+fn probe_relation_source() -> String {
+    let mut source = format!("pub fn {PROBE_SINK}(input: u32) -> u32 {{\n    input\n}}\n\n");
+    for index in 0..PROBE_SYMBOL_COUNT {
+        source.push_str(&format!(
+            "pub fn {PROBE_TOKEN}_caller_{index:02}(input: u32) -> u32 {{\n    {PROBE_SINK}(input) + {index}\n}}\n\n"
+        ));
+    }
+    for index in 0..PROBE_SYMBOL_COUNT {
+        source.push_str(&format!(
+            "pub fn {PROBE_TOKEN}_leaf_{index:02}(input: u32) -> u32 {{\n    input + {index}\n}}\n\n"
+        ));
+    }
+    source.push_str(&format!("pub fn {PROBE_FANOUT}(input: u32) -> u32 {{\n"));
+    for index in 0..PROBE_SYMBOL_COUNT {
+        let joiner = if index == 0 { "    " } else { "        + " };
+        source.push_str(&format!("{joiner}{PROBE_TOKEN}_leaf_{index:02}(input)\n"));
+    }
+    source.push_str("}\n");
+    source
+}
+
+/// One trait carrying more implementors than a page holds.
+fn probe_trait_source() -> String {
+    let mut source =
+        format!("pub trait {PROBE_TRAIT} {{\n    fn {PROBE_TOKEN}_behavior(&self) -> u32;\n}}\n\n");
+    for index in 0..PROBE_SYMBOL_COUNT {
+        source.push_str(&format!(
+            "pub struct ApplicationPaginationProbeImpl{index:02};\n\n\
+             impl {PROBE_TRAIT} for ApplicationPaginationProbeImpl{index:02} {{\n    \
+             fn {PROBE_TOKEN}_behavior(&self) -> u32 {{\n        {index}\n    }}\n}}\n\n"
+        ));
+    }
+    source
+}
+
+/// One trait whose supertrait bounds exceed a page, which is the only shape in
+/// Rust that gives a single node more outgoing hierarchy edges than a page.
+fn probe_hierarchy_source() -> String {
+    let mut source = String::new();
+    for index in 0..PROBE_SYMBOL_COUNT {
+        source.push_str(&format!(
+            "pub trait ApplicationPaginationProbeBase{index:02} {{}}\n\n"
+        ));
+    }
+    source.push_str(&format!("pub trait {PROBE_HIERARCHY_LEAF}:\n"));
+    for index in 0..PROBE_SYMBOL_COUNT {
+        let joiner = if index == 0 { "    " } else { "    + " };
+        source.push_str(&format!(
+            "{joiner}ApplicationPaginationProbeBase{index:02}\n"
+        ));
+    }
+    source.push_str("{\n}\n");
+    source
+}
+
+/// One function whose parameters name more distinct types than a page holds, so
+/// its outgoing `TypeOf` edges cross the page boundary.
+fn probe_type_source() -> String {
+    let mut source = String::new();
+    for index in 0..PROBE_SYMBOL_COUNT {
+        source.push_str(&format!(
+            "pub struct ApplicationPaginationProbeType{index:02};\n\n"
+        ));
+    }
+    source.push_str(&format!("pub fn {PROBE_TYPE_ANCHOR}(\n"));
+    for index in 0..PROBE_SYMBOL_COUNT {
+        source.push_str(&format!(
+            "    argument_{index:02}: ApplicationPaginationProbeType{index:02},\n"
+        ));
+    }
+    source.push_str(") -> u32 {\n    0\n}\n");
+    source
 }
 
 fn copy_dir(source: &Path, destination: &Path) {
@@ -262,11 +383,26 @@ fn assert_first_page_of_many(surface: &str, payload: &Value) {
         SURFACE_PAGE_SIZE,
         "{surface} must return a full first page"
     );
-    assert_eq!(payload["truncated"], Value::Bool(true), "{surface} page");
     assert!(
         !payload["next_cursor"].is_null(),
         "{surface} must issue a continuation cursor for the remaining {} rows: {payload:#}",
         total - items.len() as u64
+    );
+    assert_truncation_agrees_with_cursor(surface, payload);
+}
+
+/// The symbol-graph page carries an explicit `truncated` flag while the
+/// callable-code page derives truncation from the cursor alone. Wherever the
+/// flag exists it must agree with the cursor, so neither shape can advertise a
+/// continuation it did not mint.
+fn assert_truncation_agrees_with_cursor(surface: &str, payload: &Value) {
+    let Some(truncated) = payload.get("truncated") else {
+        return;
+    };
+    assert_eq!(
+        truncated,
+        &Value::Bool(!payload["next_cursor"].is_null()),
+        "{surface} truncation flag must follow its continuation cursor: {payload:#}"
     );
 }
 
@@ -532,9 +668,11 @@ async fn operation_family_executes_through_cli_mcp_and_http() {
 /// symbol-graph cursor authority to mint a continuation: a broken authority
 /// fails the whole read rather than returning a short page, which is how a
 /// digest-shape defect in that authority stayed invisible to single-page reads.
-/// Spending that continuation through the same shipped surface reaches
-/// `resume_offset`, which no surface could call while the page was hard-coded to
-/// the first one.
+/// Spending that continuation through the same shipped surface reaches the
+/// cursor authority's resume path, which no surface could call while the page
+/// was hard-coded to the first one. Both reads run against one live graph
+/// generation, so the resumed page is the same generation's continuation rather
+/// than a second generation's first page.
 #[tokio::test(flavor = "multi_thread")]
 async fn production_project_open_serves_a_paginated_symbol_graph_read() {
     let fixture = production_fixture().await;
@@ -634,6 +772,431 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
         .to_owned();
     let resumed = cli_symbol_search_payload(&fixture, PROBE_TOKEN, Some(cursor.as_str()));
     assert_second_page_continues("CLI", &cli, &resumed);
+}
+
+/// What the production runtime can actually page for one operation.
+///
+/// This is a claim about the runtime, not about the test: an operation is
+/// either forced across a page boundary by the fixture, or bounded to a single
+/// row by the code named in `authority`. There is no third state, so an
+/// operation can never be quietly skipped.
+#[derive(Clone, Copy, Debug)]
+enum ContinuationExpectation {
+    /// The fixture must drive this operation past [`SURFACE_PAGE_SIZE`]. A
+    /// short page fails and says to grow the fixture.
+    CrossesPages,
+    /// The runtime materializes at most one row here whatever the fixture
+    /// holds, so there is no continuation to mint. A page that does mint one
+    /// fails, because the operation has become continuation-capable and owes
+    /// the round trip above.
+    BoundedToOneRow { authority: &'static str },
+}
+
+/// One cursor-carrying operation, the arguments that reach its paginating
+/// result set, and the page behaviour its runtime can produce.
+struct ContinuationCase {
+    operation: ApplicationSurfaceOperation,
+    arguments: fn(&ProbeAnchors, Option<&str>) -> Value,
+    expectation: ContinuationExpectation,
+}
+
+/// Node ids minted by the live index for the fixture's paging anchors.
+///
+/// They are read back out of the running daemon rather than constructed, so a
+/// change to node identity fails this test instead of silently querying a node
+/// that no longer exists.
+struct ProbeAnchors {
+    sink: String,
+    fanout: String,
+    hierarchy_leaf: String,
+    type_anchor: String,
+}
+
+impl ProbeAnchors {
+    async fn resolve(fixture: &ProductionFixture) -> Self {
+        Self {
+            sink: resolve_probe_node_id(fixture, PROBE_SINK).await,
+            fanout: resolve_probe_node_id(fixture, PROBE_FANOUT).await,
+            hierarchy_leaf: resolve_probe_node_id(fixture, PROBE_HIERARCHY_LEAF).await,
+            type_anchor: resolve_probe_node_id(fixture, PROBE_TYPE_ANCHOR).await,
+        }
+    }
+}
+
+async fn resolve_probe_node_id(fixture: &ProductionFixture, name: &str) -> String {
+    let result = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        RequestId::new(format!("request.application-continuation.anchor.{name}"))
+            .expect("request id"),
+        symbol_search_surface_request(name, None),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP application dispatch");
+    let payload = evidence_payload(&result);
+    payload["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("anchor page items for {name}: {payload:#}"))
+        .iter()
+        .find(|item| item["name"] == Value::from(name))
+        .and_then(|item| item["node_id"].as_str())
+        .unwrap_or_else(|| {
+            panic!("fixture must index a symbol named {name}, saw: {payload:#}");
+        })
+        .to_owned()
+}
+
+fn callable_code_meta(cursor: Option<&str>) -> Value {
+    serde_json::json!({
+        "projection": "summary",
+        "order": "relevance",
+        "cursor": cursor,
+    })
+}
+
+/// The reserved unpinned generation every shipped caller passes when it wants
+/// the freshness-resolved latest complete generation.
+fn code_query_scope() -> Value {
+    serde_json::json!({
+        "generation": tracedecay_application::UNPINNED_LATEST_GENERATION_SENTINEL,
+        "path_prefix": Value::Null,
+    })
+}
+
+fn symbol_graph_scope() -> Value {
+    serde_json::json!({ "path_prefix": Value::Null })
+}
+
+/// Every operation in the surface's `operation_carries_callable_code_meta`
+/// list, paired with a request that reaches a result set big enough to page.
+fn continuation_cases() -> Vec<ContinuationCase> {
+    vec![
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeExactOccurrence,
+            arguments: |_, cursor| {
+                serde_json::json!({
+                    "literal": PROBE_TOKEN,
+                    "kind": Value::Null,
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodePhraseSearch,
+            arguments: |_, cursor| {
+                serde_json::json!({
+                    "query": PROBE_TOKEN,
+                    "phrases": [PROBE_TOKEN],
+                    "field_filters": [],
+                    "fuzzy_budget": 0,
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeSymbolSearch,
+            arguments: |_, cursor| {
+                serde_json::json!({
+                    "query": PROBE_TOKEN,
+                    "scope": symbol_graph_scope(),
+                    "lazy_index_ignored_dependencies": false,
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeSignatureSearch,
+            arguments: |_, cursor| {
+                serde_json::json!({
+                    "returns": "u32",
+                    "params": ["u32"],
+                    "is_async": Value::Null,
+                    "scope": symbol_graph_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeImplementations,
+            arguments: |_, cursor| {
+                serde_json::json!({
+                    "selector": { "selector": "trait", "name": PROBE_TRAIT },
+                    "scope": symbol_graph_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeTypeHierarchy,
+            arguments: |anchors, cursor| {
+                serde_json::json!({
+                    "node_id": anchors.hierarchy_leaf,
+                    "maximum_depth": 1,
+                    "scope": symbol_graph_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeCallers,
+            arguments: |anchors, cursor| {
+                serde_json::json!({
+                    "node_id": anchors.sink,
+                    "maximum_depth": 1,
+                    "resolve_trait_dispatch": false,
+                    "scope": symbol_graph_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeCallees,
+            arguments: |anchors, cursor| {
+                serde_json::json!({
+                    "node_id": anchors.fanout,
+                    "maximum_depth": 1,
+                    "resolve_trait_dispatch": false,
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeFacets,
+            arguments: |_, cursor| {
+                serde_json::json!({
+                    "dimension": "path",
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeReferences,
+            arguments: |anchors, cursor| {
+                serde_json::json!({
+                    "node_id": anchors.sink,
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeTypeDefinition,
+            arguments: |anchors, cursor| {
+                serde_json::json!({
+                    "node_id": anchors.type_anchor,
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::CrossesPages,
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeDeclaration,
+            arguments: |anchors, cursor| {
+                serde_json::json!({
+                    "node_id": anchors.sink,
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::BoundedToOneRow {
+                authority: "navigation_symbol_query pushes the one resolved start symbol",
+            },
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeDefinition,
+            arguments: |anchors, cursor| {
+                serde_json::json!({
+                    "node_id": anchors.sink,
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::BoundedToOneRow {
+                authority: "navigation_symbol_query pushes the one resolved start symbol",
+            },
+        },
+        ContinuationCase {
+            operation: ApplicationSurfaceOperation::CodeTimeline,
+            arguments: |_, cursor| {
+                serde_json::json!({
+                    "scope": code_query_scope(),
+                    "meta": callable_code_meta(cursor),
+                })
+            },
+            expectation: ContinuationExpectation::BoundedToOneRow {
+                authority: "the timeline query describes exactly one served generation",
+            },
+        },
+    ]
+}
+
+async fn continuation_page(
+    fixture: &ProductionFixture,
+    operation: ApplicationSurfaceOperation,
+    label: &str,
+    arguments: Value,
+) -> Value {
+    let request =
+        parse_application_surface_request(operation, arguments.clone()).unwrap_or_else(|error| {
+            panic!(
+                "parse {} {label} request: {error}\n{arguments:#}",
+                operation.as_str()
+            )
+        });
+    // The surface decodes exactly its cursor-carrying operations into these two
+    // request families, so a case that stopped carrying a cursor would land in
+    // another family and fail here rather than pass with nothing to continue.
+    assert!(
+        matches!(
+            request,
+            ApplicationSurfaceRequest::CallableCode(_)
+                | ApplicationSurfaceRequest::PrimitiveCode(_)
+        ),
+        "{} must decode into a request that carries a surface cursor",
+        operation.as_str()
+    );
+    let result = resolve_mcp_application_surface(
+        operation,
+        RequestId::new(format!(
+            "request.application-continuation.{}.{label}",
+            operation.as_str()
+        ))
+        .expect("request id"),
+        request,
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("dispatch {} {label}: {error}", operation.as_str()));
+    evidence_payload(&result).clone()
+}
+
+/// The continuation contract holds for every operation whose surface request
+/// carries a cursor, not only for symbol search.
+///
+/// A cursor is only real if it is minted from a result set the page cannot
+/// hold, spent back through the shipped surface, and answered with rows the
+/// first page did not contain. Each operation here is driven through that whole
+/// round trip against one live generation, and the same continuation is spent
+/// twice so a resume that consumed server state would fail rather than pass.
+///
+/// The operations that cannot page are not skipped: their runtime bounds them
+/// to a single row, so they are asserted to complete with no continuation at
+/// all. If one of them ever starts issuing a cursor, this test fails and the
+/// operation must be moved onto the round trip above.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() {
+    let fixture = production_fixture().await;
+    let anchors = ProbeAnchors::resolve(&fixture).await;
+    let cases = continuation_cases();
+
+    // The surface lists fourteen operations in
+    // `operation_carries_callable_code_meta`, and each is covered once. The
+    // predicate is private, so the size is restated here; every case still
+    // proves its own membership when its request decodes, in
+    // `continuation_page`.
+    let declared = cases
+        .iter()
+        .map(|case| case.operation.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        declared.len(),
+        CURSOR_CARRYING_CODE_OPERATIONS,
+        "every cursor-carrying code operation is covered exactly once"
+    );
+    assert_eq!(declared.len(), cases.len(), "no operation is covered twice");
+
+    for case in cases {
+        let surface = case.operation.as_str();
+        let first = continuation_page(
+            &fixture,
+            case.operation,
+            "first",
+            (case.arguments)(&anchors, None),
+        )
+        .await;
+        match case.expectation {
+            ContinuationExpectation::BoundedToOneRow { authority } => {
+                let items = first["items"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{surface} page items: {first:#}"));
+                assert_eq!(
+                    items.len(),
+                    1,
+                    "{surface} is bounded to one row because {authority}: {first:#}"
+                );
+                assert!(
+                    first["next_cursor"].is_null(),
+                    "{surface} now issues a continuation and must be covered by the \
+                     round trip instead of this single-row assertion: {first:#}"
+                );
+                assert_truncation_agrees_with_cursor(surface, &first);
+                continue;
+            }
+            ContinuationExpectation::CrossesPages => {}
+        }
+
+        let items = first["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{surface} page items: {first:#}"));
+        let total = first["total"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{surface} page total: {first:#}"));
+        assert!(
+            total > SURFACE_PAGE_SIZE as u64 && items.len() == SURFACE_PAGE_SIZE,
+            "{surface} must be driven past one page of {SURFACE_PAGE_SIZE} rows; the \
+             fixture produced {total} matching rows, so grow the probe sources in \
+             `write_pagination_probe` rather than accepting single-page coverage: {first:#}"
+        );
+        assert_first_page_of_many(surface, &first);
+
+        let cursor = first["next_cursor"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{surface} continuation cursor: {first:#}"))
+            .to_owned();
+        let second = continuation_page(
+            &fixture,
+            case.operation,
+            "resume",
+            (case.arguments)(&anchors, Some(cursor.as_str())),
+        )
+        .await;
+        assert_second_page_continues(surface, &first, &second);
+        assert_truncation_agrees_with_cursor(surface, &second);
+
+        // A continuation is a value the caller holds, so spending it again must
+        // return the same page rather than advancing or exhausting a server-side
+        // reader.
+        let replayed = continuation_page(
+            &fixture,
+            case.operation,
+            "replay",
+            (case.arguments)(&anchors, Some(cursor.as_str())),
+        )
+        .await;
+        for field in ["items", "total", "next_cursor"] {
+            assert_eq!(
+                replayed[field], second[field],
+                "{surface} must replay one continuation idempotently ({field}): {replayed:#}"
+            );
+        }
+    }
 }
 
 fn cli_symbol_search_payload(
