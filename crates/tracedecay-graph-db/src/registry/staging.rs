@@ -57,7 +57,7 @@ impl GraphDbRegistry {
             tracedecay_store::SemanticVectorStageBeginOutcome::Published {
                 record,
                 verified_head: _,
-            } => (*record, true),
+            } => (record, true),
             tracedecay_store::SemanticVectorStageBeginOutcome::InputConflict { .. }
             | tracedecay_store::SemanticVectorStageBeginOutcome::SemanticGenerationConflict {
                 ..
@@ -122,7 +122,7 @@ impl GraphDbRegistry {
                     SemanticVectorPublishedGenerationLookup::Published {
                         record: verified_record,
                         verified_head,
-                    } if *verified_record == record => {
+                    } if verified_record == record => {
                         Ok(SemanticVectorStageResumeOutcome::Published {
                             record: verified_record,
                             verified_head,
