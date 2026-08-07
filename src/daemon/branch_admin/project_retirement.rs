@@ -44,7 +44,9 @@ impl StoreAdministration {
         });
     }
 
-    pub(super) async fn join_project_server_retirements(&self) {
+    // pub(crate): the test-transport production harness joins retirements from
+    // outside branch_admin during its shutdown sequence.
+    pub(crate) async fn join_project_server_retirements(&self) {
         let completions = self
             .project_server_retirements
             .lock()
