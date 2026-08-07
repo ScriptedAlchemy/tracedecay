@@ -77,6 +77,7 @@ pub(super) struct ProjectOpenTasks {
 #[derive(Default)]
 struct ProjectOpenTaskRegistry {
     routes: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
+    retiring: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
 }
 
 struct ProjectOpenTaskEntry {
@@ -338,6 +339,9 @@ impl ProjectOpenTasks {
         let now = Instant::now();
         let mut registry = self.registry.lock().await;
         registry.prune(now);
+        if let Some(entry) = registry.retiring.get(&route) {
+            return ProjectOpenTaskClaim::InFlight(entry.state.clone());
+        }
         if let Some(entry) = registry.routes.get(&route) {
             return match entry.state.borrow().clone() {
                 ProjectOpenTaskState::Failed(failure) => ProjectOpenTaskClaim::Failed(failure),
@@ -410,45 +414,66 @@ impl ProjectOpenTasks {
             .await
     }
 
+    pub(super) async fn shutdown_project_roots(
+        &self,
+        profile_root: &Path,
+        project_roots: &std::collections::BTreeSet<PathBuf>,
+    ) -> bool {
+        {
+            let mut registry = self.registry.lock().await;
+            let routes = registry
+                .routes
+                .keys()
+                .filter(|route| {
+                    route.profile_root == profile_root
+                        && project_roots.contains(&route.project_path)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for route in routes {
+                if let Some(entry) = registry.routes.remove(&route) {
+                    entry.cancellation.cancel();
+                    registry.retiring.insert(route, entry);
+                }
+            }
+        }
+        self.drain_retiring(DAEMON_TASK_ABORT_DEADLINE).await
+    }
+
     pub(super) async fn shutdown_with_deadline(
         &self,
         cooperative_deadline: Duration,
         post_abort_deadline: Duration,
     ) -> bool {
-        let mut entries = {
+        {
             let mut registry = self.registry.lock().await;
-            std::mem::take(&mut registry.routes)
+            for (route, entry) in std::mem::take(&mut registry.routes) {
+                entry.cancellation.cancel();
+                registry.retiring.insert(route, entry);
+            }
         }
-        .into_values()
-        .collect::<Vec<_>>();
-        for entry in &entries {
-            entry.cancellation.cancel();
-        }
-        let cooperative_deadline = tokio::time::Instant::now() + cooperative_deadline;
+        self.drain_retiring(cooperative_deadline + post_abort_deadline)
+            .await
+    }
+
+    async fn drain_retiring(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut registry = self.registry.lock().await;
+        let routes = registry.retiring.keys().cloned().collect::<Vec<_>>();
+        let mut joined = Vec::new();
         let mut drained = true;
-        for entry in &mut entries {
-            if tokio::time::timeout_at(cooperative_deadline, &mut entry.task)
-                .await
-                .is_err()
-            {
-                drained = false;
-                entry.task.abort();
+        for route in routes {
+            let Some(entry) = registry.retiring.get_mut(&route) else {
+                continue;
+            };
+            entry.cancellation.cancel();
+            match tokio::time::timeout_at(deadline, &mut entry.task).await {
+                Ok(_) => joined.push(route),
+                Err(_) => drained = false,
             }
         }
-        if !drained {
-            let post_abort_deadline = tokio::time::Instant::now() + post_abort_deadline;
-            for entry in &mut entries {
-                if entry.task.is_finished() {
-                    continue;
-                }
-                let _ = tokio::time::timeout_at(post_abort_deadline, &mut entry.task).await;
-            }
-        }
-        if !drained {
-            log_daemon_event(
-                "project_server_warmup",
-                &[("outcome", "shutdown_abort_timeout".to_string())],
-            );
+        for route in joined {
+            registry.retiring.remove(&route);
         }
         drained
     }
@@ -457,18 +482,24 @@ impl ProjectOpenTasks {
     pub(super) async fn tracked_task_count(&self) -> usize {
         let mut registry = self.registry.lock().await;
         registry.prune(Instant::now());
-        registry
+        let active = registry
             .routes
             .values()
             .filter(|entry| !entry.task.is_finished())
-            .count()
+            .count();
+        active
+            + registry
+                .retiring
+                .values()
+                .filter(|entry| !entry.task.is_finished())
+                .count()
     }
 
     #[cfg(test)]
     pub(super) async fn tracked_route_count(&self) -> usize {
         let mut registry = self.registry.lock().await;
         registry.prune(Instant::now());
-        registry.routes.len()
+        registry.routes.len() + registry.retiring.len()
     }
 }
 

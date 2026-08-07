@@ -625,6 +625,24 @@ impl DaemonGitIndexTransactionServiceRegistry {
         Ok(())
     }
 
+    /// Retires every invocation owner attached to one exact project-session
+    /// database. The caller has already fenced admission with a durable
+    /// tombstone; dropping these process-local owners prevents a stale actor
+    /// from retaining the deleted database.
+    pub(crate) async fn retire_project_database(
+        &self,
+        project_id: &ProjectId,
+        database_path: &Path,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        self.services
+            .lock()
+            .await
+            .retain(|key, _| key.project_id != *project_id || key.database_path != database_path);
+        self.stores
+            .remove(database_path)
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)
+    }
+
     /// Resolve only an owner already mounted by project-open admission.
     /// Missing and ambiguous roots deliberately share the same outcome.
     pub(crate) async fn for_repository_root(

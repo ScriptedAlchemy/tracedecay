@@ -21,9 +21,14 @@ use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
 use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
-use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
+use super::{
+    DaemonHandshake, DatabaseOwnerRegistry, authority, project_server_lifecycle,
+    write_json_rpc_response,
+};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
+
+mod remote_deletion_lifecycle;
 
 /// Resolves the writer scope for one store family.
 ///
@@ -583,6 +588,7 @@ impl StoreAdministration {
     pub(super) async fn registered_profile_session_database(
         &self,
     ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+        self.ensure_profile_not_remote_deleted().await?;
         self.session_runtime_registry()
             .await?
             .profile_sessions()
@@ -592,10 +598,46 @@ impl StoreAdministration {
     pub(super) async fn registered_profile_database(
         &self,
     ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
+        let database = self.raw_registered_profile_database().await?;
+        let profile_id = self.profile_identity()?.profile_id().as_str();
+        if database
+            .remote_account_deletion_tombstone(profile_id)
+            .await?
+            .is_some()
+        {
+            return Err(TraceDecayError::project_route(
+                "remote_deleted",
+                false,
+                "authenticated profile was remotely deleted",
+            ));
+        }
+        Ok(database)
+    }
+
+    async fn raw_registered_profile_database(
+        &self,
+    ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
         self.session_runtime_registry()
             .await?
             .profile_database()
             .await
+    }
+
+    async fn ensure_profile_not_remote_deleted(&self) -> Result<()> {
+        let database = self.raw_registered_profile_database().await?;
+        let profile_id = self.profile_identity()?.profile_id().as_str();
+        if database
+            .remote_account_deletion_tombstone(profile_id)
+            .await?
+            .is_some()
+        {
+            return Err(TraceDecayError::project_route(
+                "remote_deleted",
+                false,
+                "authenticated profile was remotely deleted",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) async fn mounted_registered_session_databases(
@@ -663,13 +705,25 @@ impl StoreAdministration {
                 })
             })?;
         let registry = self.session_runtime_registry().await?;
+        let profile_database = self.registered_profile_database().await?;
+        let profile_id = self.profile_identity()?.profile_id().as_str();
+        if profile_database
+            .remote_deletion_tombstone_for_project(profile_id, project_id.as_str())
+            .await?
+            .is_some()
+        {
+            return Err(TraceDecayError::project_route(
+                "remote_deleted",
+                false,
+                format!("project '{}' was remotely deleted", project_id.as_str()),
+            ));
+        }
         // A mounted shard already carries the exact typed enrollment authority
         // that opened it. Later client routes may be linked-worktree aliases;
         // reuse by ProjectId instead of treating those paths as new authority.
         if let Some(database) = registry.mounted_project_sessions(&project_id).await {
             return Ok(database);
         }
-        let profile_database = self.registered_profile_database().await?;
         let enrollment_roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
             project_root,
             store_layout,
@@ -709,10 +763,42 @@ impl StoreAdministration {
         }
     }
 
+    pub(super) async fn settle_project_server_retirements(
+        &self,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut retirements = self.project_server_retirements.lock().await;
+        let mut joined = Vec::new();
+        let mut settled = true;
+        for (index, retirement) in retirements.iter_mut().enumerate() {
+            match tokio::time::timeout_at(deadline, retirement).await {
+                Ok(_) => joined.push(index),
+                Err(_) => settled = false,
+            }
+        }
+        for index in joined.into_iter().rev() {
+            retirements.swap_remove(index);
+        }
+        settled
+    }
+
     pub(super) async fn host_admission_broker(
         &self,
         database: &Arc<crate::global_db::RegisteredGlobalDb>,
     ) -> Result<HostAdmissionBrokerState> {
+        let profile_id = self.profile_identity()?.profile_id().as_str();
+        if database
+            .remote_account_deletion_tombstone(profile_id)
+            .await?
+            .is_some()
+        {
+            return Err(TraceDecayError::project_route(
+                "remote_deleted",
+                false,
+                "authenticated profile was remotely deleted",
+            ));
+        }
         self.host_admission_broker_for_path(database.db_path())
             .await
     }

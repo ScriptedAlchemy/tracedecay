@@ -333,6 +333,14 @@ impl fmt::Debug for DaemonQueryAuthorityProviderV1 {
 }
 
 impl DaemonQueryAuthorityProviderV1 {
+    pub(crate) fn retire_project(&self, project_id: &tracedecay_domain::ProjectId) {
+        let mut activated = match self.activated.write() {
+            Ok(activated) => activated,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        activated.retain(|_, activated| &activated.scope.project_id != project_id);
+    }
+
     pub(crate) fn prepare_after_successful_activation(
         &self,
         scope: ResolvedScope,

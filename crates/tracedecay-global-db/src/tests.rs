@@ -114,7 +114,7 @@ async fn remote_deletion_tombstone_preserves_exact_identity_and_cleanup_state() 
             .transition_remote_deletion_tombstone(
                 &pending,
                 RemoteDeletionCleanupState::Pending,
-                settling,
+                settling.clone(),
             )
             .await
             .expect("persist settling state"),
@@ -131,9 +131,25 @@ async fn remote_deletion_tombstone_preserves_exact_identity_and_cleanup_state() 
             .await
             .expect("reject stale cleanup transition"),
         RemoteDeletionTombstoneTransitionOutcome::StateChanged {
-            existing: settled_record
+            existing: settled_record.clone()
         }
     );
+    let partial = RemoteDeletionCleanupState::Partial {
+        failure_code: RemoteDeletionFailureCode::ShardCleanupFailed,
+        phase: RemoteDeletionPhase::RemoveShard,
+        retryable: true,
+    };
+    assert!(matches!(
+        harness
+            .registered
+            .transition_remote_deletion_tombstone(&settled_record, settling, partial)
+            .await
+            .expect("persist partial cleanup state"),
+        RemoteDeletionTombstoneTransitionOutcome::Updated(RemoteDeletionTombstone {
+            cleanup: RemoteDeletionCleanupState::Partial { .. },
+            ..
+        })
+    ));
 }
 
 #[tokio::test]

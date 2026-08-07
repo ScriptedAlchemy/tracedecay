@@ -49,6 +49,37 @@ pub(super) fn runtime_lsp_actor(
 }
 
 impl DaemonInvocationService {
+    pub(crate) async fn expire_project(
+        &self,
+        project_id: &ProjectId,
+        project_roots: &std::collections::BTreeSet<PathBuf>,
+    ) -> bool {
+        self.context_scout_registries
+            .lock()
+            .await
+            .remove(project_id);
+        {
+            let mut workspaces = self.authorized_lsp_workspaces.lock().await;
+            workspaces.retain(|_, workspace| {
+                !workspace
+                    .scope_set
+                    .roots()
+                    .iter()
+                    .any(|scope| &scope.project_id == project_id)
+            });
+        }
+        // Protocol sessions do not expose their admitted workspace after
+        // construction. Clearing this bounded daemon registry is the only
+        // fail-closed choice; surviving clients reconnect through the filtered
+        // workspace authority.
+        self.lsp_sessions.lock().await.clear();
+        let runtime_owners_retired = self.project_runtimes.retire_roots(project_roots).await;
+        if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
+            registry.retain(|_, runtime| runtime.strong_count() > 0);
+        }
+        runtime_owners_retired
+    }
+
     pub(crate) async fn begin_shutdown(&self) {
         *self.lsp_admission_open.lock().await = false;
         self.code_index_schedulers.cancel();

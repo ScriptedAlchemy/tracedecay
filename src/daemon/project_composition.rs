@@ -227,6 +227,9 @@ pub(super) async fn production_project_server(
         ],
     );
     project_open_cancellation_checkpoint(cancellation)?;
+    // A deletion may arrive while the graph opens. Recheck the durable replay
+    // fence before this in-flight open can republish its registry authority.
+    ensure_registered_project_route(store_administration, canonical_project_path, false).await?;
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await?;
     let code_index_store_root = cg.store_layout().data_root.join("code-index-v1");

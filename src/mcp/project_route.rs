@@ -136,6 +136,37 @@ pub(crate) struct HookProjectRouteCache {
 }
 
 impl HookProjectRouteCache {
+    /// Evicts cached graph routes for a tombstoned project. A route retains a
+    /// live graph handle, so leaving it behind would let a stale hook session
+    /// bypass the daemon's durable replay fence.
+    pub(crate) fn forget_project(&mut self, project_id: &str) {
+        let belongs_to = |route: &WorkspaceProjectRoute| {
+            matches!(route, WorkspaceProjectRoute::Resolved(resolved)
+                if resolved.owner.project.project_id == project_id)
+        };
+        let sessions = self
+            .routes_by_session
+            .iter()
+            .filter_map(|(session_id, route)| belongs_to(route).then_some(session_id.clone()))
+            .collect::<Vec<_>>();
+        for session_id in sessions {
+            self.paths_by_session.remove(&session_id);
+            self.routes_by_session.remove(&session_id);
+            if let Some(thread_id) = self.threads_by_session.remove(&session_id) {
+                self.remove_thread_route(&thread_id);
+            }
+        }
+        let threads = self
+            .routes_by_thread
+            .iter()
+            .filter_map(|(thread_id, route)| belongs_to(route).then_some(thread_id.clone()))
+            .collect::<Vec<_>>();
+        for thread_id in threads {
+            self.remove_thread_route(&thread_id);
+        }
+        self.project_path = None;
+    }
+
     pub(crate) fn route_cwd(event: &hook_events::HookEvent) -> Option<&std::path::Path> {
         event
             .route
@@ -444,6 +475,20 @@ impl SharedHookProjectRouteCache {
             .map(|cache| cache.clone())
             .unwrap_or_default();
         target.refresh_from_owned(cloned);
+    }
+
+    pub(crate) fn forget_project(
+        &self,
+        project_id: &str,
+    ) -> Result<(), crate::errors::TraceDecayError> {
+        let mut cache = self
+            .inner
+            .lock()
+            .map_err(|_| crate::errors::TraceDecayError::Config {
+                message: "project route cache lock is poisoned during remote deletion".to_owned(),
+            })?;
+        cache.forget_project(project_id);
+        Ok(())
     }
 }
 

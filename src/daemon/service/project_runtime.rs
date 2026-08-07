@@ -2,7 +2,7 @@
 //! Publication and shutdown operate on each project's components as a unit.
 
 use std::any::{Any, TypeId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -434,6 +434,10 @@ impl From<ProjectRuntimeAlreadyRegistered> for ProjectRuntimeRegistryError {
 #[derive(Clone)]
 pub(crate) struct ProjectRuntimeRegistryV1 {
     runtimes: Arc<StdMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
+    /// Roots retired by a deletion/replacement cleanup. Registration for a
+    /// retired root is refused until the root is explicitly readmitted, so a
+    /// late open cannot resurrect a runtime over a deleted store.
+    retired_roots: Arc<StdMutex<BTreeSet<PathBuf>>>,
     reservation_changed: watch::Sender<u64>,
     reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
     /// The blocking drain is retained independently of whichever async
@@ -455,6 +459,7 @@ impl Default for ProjectRuntimeRegistryV1 {
         let (shutdown_complete, _) = watch::channel(ShutdownState::Pending);
         Self {
             runtimes: Arc::new(StdMutex::new(BTreeMap::new())),
+            retired_roots: Arc::new(StdMutex::new(BTreeSet::new())),
             reservation_changed,
             reservation_blocking_changed: Arc::new((StdMutex::new(0), Condvar::new())),
             shutdown_task: Arc::new(AsyncMutex::new(None)),
@@ -496,9 +501,12 @@ impl ProjectRuntimeReservationLease {
         {
             commit_starting.send(()).expect("commit-starting receiver");
         }
+        let retired_roots = self.registry.lock_retired_roots();
         let mut runtimes = self.registry.lock_runtimes();
         let runtime = runtimes.entry(self.project_root.clone()).or_default();
-        let result = if self.registry.closed.load(Ordering::Acquire) {
+        let result = if self.registry.closed.load(Ordering::Acquire)
+            || retired_roots.contains(&self.project_root)
+        {
             Err(ProjectRuntimeRegistryError::Closed)
         } else if self.reservation.has_same_slots(&publication.reservation) {
             publication.commit_into(runtime).map_err(Into::into)
@@ -516,6 +524,7 @@ impl ProjectRuntimeReservationLease {
             runtimes.remove(&self.project_root);
         }
         drop(runtimes);
+        drop(retired_roots);
         self.active = false;
         self.registry.signal_reservation_changed();
         result
@@ -562,6 +571,13 @@ impl Drop for ProjectRuntimeReservationLease {
 }
 
 impl ProjectRuntimeRegistryV1 {
+    fn lock_retired_roots(&self) -> MutexGuard<'_, BTreeSet<PathBuf>> {
+        match self.retired_roots.lock() {
+            Ok(retired) => retired,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     fn lock_runtimes(&self) -> MutexGuard<'_, BTreeMap<PathBuf, ProjectRuntime>> {
         self.runtimes
             .lock()
@@ -585,8 +601,9 @@ impl ProjectRuntimeRegistryV1 {
         project_root: PathBuf,
         reservation: ProjectRuntimeReservation,
     ) -> Result<ProjectRuntimeReservationLease, ProjectRuntimeRegistryError> {
+        let retired_roots = self.lock_retired_roots();
         let mut runtimes = self.lock_runtimes();
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire) || retired_roots.contains(&project_root) {
             return Err(ProjectRuntimeRegistryError::Closed);
         }
         let runtime = runtimes.entry(project_root.clone()).or_default();
@@ -595,6 +612,7 @@ impl ProjectRuntimeRegistryV1 {
         }
         runtime.reservations.extend(reservation.type_ids());
         drop(runtimes);
+        drop(retired_roots);
         Ok(ProjectRuntimeReservationLease {
             registry: self.clone(),
             project_root,
@@ -615,8 +633,9 @@ impl ProjectRuntimeRegistryV1 {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
             {
+                let retired_roots = self.lock_retired_roots();
                 let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) {
+                if self.closed.load(Ordering::Acquire) || retired_roots.contains(&project_root) {
                     return Err(ProjectRuntimeRegistryError::Closed);
                 }
                 let runtime = runtimes.entry(project_root.clone()).or_default();
@@ -650,8 +669,9 @@ impl ProjectRuntimeRegistryV1 {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
             {
+                let retired_roots = self.lock_retired_roots();
                 let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) {
+                if self.closed.load(Ordering::Acquire) || retired_roots.contains(&project_root) {
                     return Err(ProjectRuntimeRegistryError::Closed);
                 }
                 let runtime = runtimes.entry(project_root.clone()).or_default();

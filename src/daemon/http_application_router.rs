@@ -31,11 +31,31 @@ fn build_http_application_router(project_id: &str, project_path: &Path) -> Resul
 pub(super) fn install_http_application_cold_resolver(
     registry: &http_application::DaemonHttpApplicationRegistry,
     store_administration: StoreAdministration,
+    invocation: DaemonInvocationState,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
 ) -> Result<()> {
+    registry.install_remote_deletion_runtime_owners(
+        super::remote_deletion::RemoteDeletionRuntimeOwners {
+            administration: store_administration.clone(),
+            invocation,
+            project_open_gates,
+        },
+    )?;
     registry.install_resolver(move |project_id| {
         let store_administration = store_administration.clone();
         async move {
             let database = store_administration.registered_profile_database().await?;
+            let profile_id = store_administration
+                .profile_identity()?
+                .profile_id()
+                .as_str();
+            if database
+                .remote_deletion_tombstone_for_project(profile_id, project_id.as_str())
+                .await?
+                .is_some()
+            {
+                return Ok(None);
+            }
             let Some(context) = database
                 .project_registry_context_by_id(project_id.as_str())
                 .await?

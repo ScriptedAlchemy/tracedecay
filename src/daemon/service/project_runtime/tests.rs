@@ -899,6 +899,48 @@ async fn shutting_down_empties_the_registry() {
     );
 }
 
+#[tokio::test]
+async fn retiring_exact_roots_fences_republication_without_closing_other_projects() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let retired = root("retired");
+    let retained = root("retained");
+    registry
+        .publish(retired.clone(), component(1))
+        .await
+        .unwrap();
+    registry
+        .publish(retained.clone(), component(2))
+        .await
+        .unwrap();
+
+    assert!(
+        registry
+            .retire_roots(&[retired.clone()].into_iter().collect())
+            .await
+    );
+    assert!(!registry.holds::<Component>(&retired).await);
+    assert_eq!(
+        registry.register(retired.clone(), component(3)).await,
+        Err(ProjectRuntimeRegistryError::Closed)
+    );
+    assert_eq!(
+        registry.publish(retired.clone(), component(4)).await,
+        Err(ProjectRuntimeRegistryError::Closed)
+    );
+    assert_eq!(
+        registry
+            .get::<Component>(&retained)
+            .await
+            .as_ref()
+            .and_then(mark),
+        Some(2)
+    );
+    registry
+        .publish(retained.clone(), component(5))
+        .await
+        .expect("unrelated project remains open");
+}
+
 struct CountingFeedbackCycle(Arc<AtomicUsize>);
 
 impl FeedbackCycleRuntimePort for CountingFeedbackCycle {

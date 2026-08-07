@@ -39,15 +39,6 @@ type ProjectRouterResolverFuture =
     Pin<Box<dyn Future<Output = Result<Option<Router>>> + Send + 'static>>;
 type ProjectRouterResolver =
     Arc<dyn Fn(ProjectId) -> ProjectRouterResolverFuture + Send + Sync + 'static>;
-type RemoteDeletionExecutorFuture =
-    Pin<Box<dyn Future<Output = super::remote_deletion::RemoteDeletionReceipt> + Send + 'static>>;
-pub(super) type RemoteDeletionExecutor = Arc<
-    dyn Fn(super::remote_deletion::RemoteDeletionHttpRequest) -> RemoteDeletionExecutorFuture
-        + Send
-        + Sync
-        + 'static,
->;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProjectRouterResolutionError {
     Saturated,
@@ -83,6 +74,17 @@ impl ProjectRouterCache {
             .retain(|candidate| candidate != project_id);
         self.least_recently_used.push_back(project_id.to_owned());
     }
+
+    fn remove(&mut self, project_id: &str) {
+        self.routers.remove(project_id);
+        self.least_recently_used
+            .retain(|candidate| candidate != project_id);
+    }
+
+    fn clear(&mut self) {
+        self.routers.clear();
+        self.least_recently_used.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -106,7 +108,8 @@ pub(super) struct DaemonHttpApplicationRegistry {
     resolver_admission: Arc<Semaphore>,
     remote: Arc<SyncRwLock<Option<RemoteHttpApplicationMount>>>,
     active: Arc<AtomicBool>,
-    remote_deletion_executor: Arc<SyncRwLock<Option<RemoteDeletionExecutor>>>,
+    remote_deletion_runtime_owners:
+        Arc<SyncRwLock<Option<super::remote_deletion::RemoteDeletionRuntimeOwners>>>,
 }
 
 impl Default for DaemonHttpApplicationRegistry {
@@ -117,7 +120,7 @@ impl Default for DaemonHttpApplicationRegistry {
             resolver_admission: Arc::new(Semaphore::new(MAX_HTTP_APPLICATION_COLD_RESOLUTIONS)),
             remote: Arc::new(SyncRwLock::new(None)),
             active: Arc::new(AtomicBool::new(false)),
-            remote_deletion_executor: Arc::new(SyncRwLock::new(None)),
+            remote_deletion_runtime_owners: Arc::new(SyncRwLock::new(None)),
         }
     }
 }
@@ -176,13 +179,12 @@ impl DaemonHttpApplicationRegistry {
         Ok(())
     }
 
-    pub(super) fn install_remote_deletion_executor<F, Fut>(&self, executor: F) -> Result<()>
-    where
-        F: Fn(super::remote_deletion::RemoteDeletionHttpRequest) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = super::remote_deletion::RemoteDeletionReceipt> + Send + 'static,
-    {
+    pub(super) fn install_remote_deletion_runtime_owners(
+        &self,
+        owners: super::remote_deletion::RemoteDeletionRuntimeOwners,
+    ) -> Result<()> {
         let mut slot =
-            self.remote_deletion_executor
+            self.remote_deletion_runtime_owners
                 .write()
                 .map_err(|_| TraceDecayError::Config {
                     message: "daemon remote deletion executor lock is poisoned".to_owned(),
@@ -192,17 +194,35 @@ impl DaemonHttpApplicationRegistry {
                 message: "daemon remote deletion executor is already installed".to_owned(),
             });
         }
-        *slot = Some(Arc::new(move |request| Box::pin(executor(request))));
+        *slot = Some(owners);
         Ok(())
     }
 
-    pub(super) fn remote_deletion_executor(&self) -> Result<Option<RemoteDeletionExecutor>> {
-        self.remote_deletion_executor
+    pub(super) fn remote_deletion_runtime_owners(
+        &self,
+    ) -> Result<Option<super::remote_deletion::RemoteDeletionRuntimeOwners>> {
+        self.remote_deletion_runtime_owners
             .read()
             .map(|executor| executor.clone())
             .map_err(|_| TraceDecayError::Config {
                 message: "daemon remote deletion executor lock is poisoned".to_owned(),
             })
+    }
+
+    pub(super) async fn forget_remote_deleted_routes(
+        &self,
+        target: super::remote_deletion::RemoteDeletionReceiptTarget,
+        project_id: Option<&str>,
+    ) {
+        let mut routers = self.routers.lock().await;
+        match target {
+            super::remote_deletion::RemoteDeletionReceiptTarget::Account => routers.clear(),
+            super::remote_deletion::RemoteDeletionReceiptTarget::Project => {
+                if let Some(project_id) = project_id {
+                    routers.remove(project_id);
+                }
+            }
+        }
     }
 
     async fn resolve(

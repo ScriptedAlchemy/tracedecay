@@ -143,6 +143,14 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(reservation)
     }
 
+    /// Drops the daemon's retained project facades before a destructive store
+    /// reservation closes the underlying physical runtimes. The reservation
+    /// then proves that no stale handle can recreate the deleted shard.
+    pub(crate) async fn drop_project_runtime_caches(&self, project_id: &ProjectId) {
+        self.project_memory.lock().await.remove(project_id);
+        self.project_sessions.lock().await.remove(project_id);
+    }
+
     /// Mounts the project-wide mutable graph. The checkout path is exact route
     /// provenance; the canonical database locator is supplied by StoreLayout.
     pub(crate) async fn project_graph(

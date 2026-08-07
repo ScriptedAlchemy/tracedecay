@@ -57,6 +57,17 @@ impl GitIndexTransactionStoreRegistry {
         Ok(store)
     }
 
+    /// Drops the exact project-session actor before its backing shard is
+    /// destructively removed by daemon-owned lifecycle administration.
+    pub(crate) fn remove(&self, path: &std::path::Path) -> GitIndexTransactionStoreResult<()> {
+        let mut stores = self
+            .stores
+            .lock()
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        stores.remove(path);
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn ensure_engine_test(
         &self,

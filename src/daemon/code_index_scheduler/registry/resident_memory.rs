@@ -30,6 +30,7 @@ impl CodeIndexSchedulerRegistryV1 {
             resident_memory,
             byte_pool: Arc::new(super::SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())),
+            retiring: Arc::new(tokio::sync::Mutex::new(std::collections::BTreeMap::new())),
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
                 super::bounded_daemon_admission_permits(),
             )),

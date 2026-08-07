@@ -154,6 +154,10 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) resident_memory: Arc<resident_memory::ProcessResidentMemoryV1>,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
+    /// Owners whose project was retired (remote deletion, replacement) but whose
+    /// reconcile task has not finished draining. A root parked here must never
+    /// re-mount: a fresh owner would race the dying one over the same store.
+    pub(super) retiring: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
@@ -654,10 +658,21 @@ impl CodeIndexSchedulerRegistryV1 {
         graph_activation: CodeGraphActivationAuthorityV1,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
+        // A retiring owner still holds the store: admitting a fresh mount here
+        // would race the dying reconcile task over the same physical shard.
+        // Upstream took this check after mount admission; that permit no longer
+        // exists at this tip, so the guard sits at the head of the mount path.
+        let retiring = self.retiring.lock().await;
+        if retiring.contains_key(&project_root) {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler owner is still retiring".to_owned(),
+            ));
+        }
         let mounted = self.mounted.lock().await;
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
             drop(mounted);
+            drop(retiring);
             // The scheduler mutex is held for the full duration of any
             // in-flight reconcile. Waiting for it on a runtime worker — while
             // also holding the mount-admission permit — parked that worker and
@@ -695,6 +710,7 @@ impl CodeIndexSchedulerRegistryV1 {
             ));
         }
         drop(mounted);
+        drop(retiring);
         // Opening a worktree restores the sealed generation: an O(store) decode
         // that re-mints every file's exact-extraction authority and repeats the
         // full canonical validation sweep. That is CPU, not I/O, and it must not
@@ -2319,7 +2335,10 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn shutdown(&self) {
         self.cancel();
+        let mut retiring_guard = self.retiring.lock().await;
         let mounted = std::mem::take(&mut *self.mounted.lock().await);
+        let retiring = std::mem::take(&mut *retiring_guard);
+        drop(retiring_guard);
         self.test_attribution_authorities
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2331,6 +2350,76 @@ impl CodeIndexSchedulerRegistryV1 {
         for (_, worktree) in mounted {
             let _ = worktree.task.await;
         }
+        for (_, worktree) in retiring {
+            let _ = worktree.task.await;
+        }
+    }
+
+    pub(in crate::daemon) async fn retire_project_roots(
+        &self,
+        project_roots: &std::collections::BTreeSet<PathBuf>,
+    ) -> bool {
+        self.retire_project_roots_with_deadline(
+            project_roots,
+            super::super::DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await
+    }
+
+    pub(super) async fn retire_project_roots_with_deadline(
+        &self,
+        project_roots: &std::collections::BTreeSet<PathBuf>,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let mut retiring = self.retiring.lock().await;
+        let retired = {
+            let mut mounted = self.mounted.lock().await;
+            project_roots
+                .iter()
+                .filter_map(|root| {
+                    mounted
+                        .remove(root)
+                        .map(|worktree| (root.clone(), worktree))
+                })
+                .collect::<Vec<_>>()
+        };
+        {
+            let mut authorities = match self.test_attribution_authorities.write() {
+                Ok(authorities) => authorities,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            for root in project_roots {
+                authorities.remove(root);
+            }
+        }
+        for (root, worktree) in retired {
+            worktree.shutting_down.store(true, Ordering::Release);
+            worktree.wake.notify_one();
+            retiring.insert(root, worktree);
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut drained = true;
+        let mut joined = BTreeSet::new();
+        for root in project_roots {
+            let Some(worktree) = retiring.get_mut(root) else {
+                continue;
+            };
+            match tokio::time::timeout_at(deadline, &mut worktree.task).await {
+                Ok(_) => {
+                    joined.insert(root.clone());
+                }
+                Err(_) => {
+                    drained = false;
+                }
+            }
+        }
+        retiring.retain(|root, _| !joined.contains(root));
+        drained
+    }
+
+    #[cfg(test)]
+    pub(super) async fn retiring_owner_count(&self) -> usize {
+        self.retiring.lock().await.len()
     }
 
     pub fn cancel(&self) {

@@ -120,6 +120,19 @@ pub(super) async fn ensure_registered_project_route(
     allow_init: bool,
 ) -> Result<()> {
     let registry = store_administration.registered_profile_database().await?;
+    let profile_id = store_administration
+        .profile_identity()?
+        .profile_id()
+        .as_str();
+    if registry
+        .remote_account_deletion_tombstone(profile_id)
+        .await?
+        .is_some()
+    {
+        return Err(remote_deleted_project_route_error(
+            "the authenticated account",
+        ));
+    }
     let context = match registry
         .project_registry_context_by_alias(project_path)
         .await?
@@ -134,10 +147,38 @@ pub(super) async fn ensure_registered_project_route(
                 .await?
         }
     };
-    if context.is_none() {
-        let project_path = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.to_path_buf());
+    let Some(context) = context else {
+        let project_path =
+            project_path
+                .canonicalize()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "could not canonicalize project route '{}': {error}",
+                        project_path.display()
+                    ),
+                })?;
+        if let Some(layout) = crate::storage::resolve_persisted_layout(
+            &project_path,
+            store_administration.profile_identity()?.profile_root(),
+        )? {
+            let project_id =
+                layout
+                    .identity
+                    .project_id
+                    .as_deref()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message:
+                            "persisted project enrollment has no authoritative project identity"
+                                .to_owned(),
+                    })?;
+            if registry
+                .remote_deletion_tombstone_for_project(profile_id, project_id)
+                .await?
+                .is_some()
+            {
+                return Err(remote_deleted_project_route_error(project_id));
+            }
+        }
         if durable_enrollment_resolves_existing_store(store_administration, &project_path) {
             return Ok(());
         }
@@ -149,8 +190,25 @@ pub(super) async fn ensure_registered_project_route(
             return Ok(());
         }
         return Err(unenrolled_project_route_error(&project_path));
+    };
+    if registry
+        .remote_deletion_tombstone_for_project(profile_id, &context.project.project_id)
+        .await?
+        .is_some()
+    {
+        return Err(remote_deleted_project_route_error(
+            &context.project.project_id,
+        ));
     }
     Ok(())
+}
+
+fn remote_deleted_project_route_error(identity: &str) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "remote_deleted",
+        false,
+        format!("project route is permanently deleted by remote tombstone: {identity}"),
+    )
 }
 
 /// Whether this route's durable on-disk enrollment already resolves a real

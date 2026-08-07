@@ -225,6 +225,11 @@ fn enroll_project_on_disk_only(
     let layout = crate::storage::profile_sharded_layout(project_root, profile_root, &marker)
         .expect("layout");
     std::fs::create_dir_all(&layout.data_root).expect("profile store root");
+    crate::storage::write_store_manifest(&layout).expect("store manifest");
+    let sessions = rusqlite::Connection::open(&layout.sessions_db_path).expect("sessions database");
+    sessions
+        .execute_batch("PRAGMA user_version = 1;")
+        .expect("initialize sessions database");
     std::fs::write(&layout.graph_db_path, b"existing graph store").expect("graph store");
     layout
 }
@@ -308,6 +313,278 @@ async fn enrollment_marker_without_a_store_is_still_rejected() {
         Err(error) => error,
     };
     assert_missing_enrollment_admission(&error);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_project_deletion_removes_only_its_profile_shard_and_fences_replay() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_remote_deleted");
+    // This fixture is intentionally a durable non-SQLite payload: deletion
+    // must remove the exact profile shard without attempting any operator
+    // profile path, while the retained marker must fence replay afterwards.
+    std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
+    std::fs::write(layout.data_root.join("payload.txt"), "remote payload")
+        .expect("write isolated profile payload");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote project deletion");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let deletion_owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    let receipt = engine
+        .store_administration
+        .execute_remote_deletion(
+            &deletion_owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_remote_deleted".to_owned()),
+            "tombstone.remote-deleted".to_owned(),
+        )
+        .await
+        .expect("delete isolated remote project");
+    assert_eq!(
+        receipt.removed_project_ids,
+        ["proj_remote_deleted".to_owned()]
+    );
+    assert!(receipt.tombstone_recorded);
+    assert!(receipt.pending_project_ids.is_empty());
+    assert!(!layout.data_root.exists(), "exact profile shard is removed");
+    assert!(project.exists(), "source checkout is never removed");
+
+    let conflict = engine
+        .store_administration
+        .execute_remote_deletion(
+            &deletion_owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_remote_deleted".to_owned()),
+            "tombstone.replacement".to_owned(),
+        )
+        .await
+        .expect_err("a different tombstone id must not replace the durable deletion fact");
+    assert_eq!(
+        conflict.receipt.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Failed
+    );
+    assert!(!conflict.receipt.tombstone_recorded);
+    assert_eq!(
+        conflict.receipt.failure,
+        Some(super::super::remote_deletion::RemoteDeletionFailure {
+            code: super::super::remote_deletion::RemoteDeletionFailureCode::TombstoneConflict,
+            phase: super::super::remote_deletion::RemoteDeletionPhase::PersistTombstone,
+            retryable: false,
+        })
+    );
+
+    let error = engine
+        .ensure_registered_project_route(&project, false)
+        .await
+        .expect_err("retained enrollment marker must be fenced by the tombstone");
+    assert!(matches!(
+        error,
+        TraceDecayError::ProjectRoute { ref reason_code, retryable: false, .. }
+            if reason_code == "remote_deleted"
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_project_deletion_denies_unknown_and_cross_profile_identities_without_tombstones() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let authenticated_profile = root.join("authenticated-profile");
+    let other_profile = root.join("other-profile");
+    let other_project = root.join("other-repository");
+    std::fs::create_dir_all(&other_project).expect("create other repository");
+    run_git(&other_project, &["init", "--quiet"]);
+    enroll_project_on_disk_only(&other_project, &other_profile, "proj_cross_profile");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&authenticated_profile, "remote deletion identity denial");
+    let engine = test_daemon_engine_for_profile(&authenticated_profile);
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    for (project_id, tombstone_id) in [
+        ("proj_unknown", "tombstone.unknown"),
+        ("proj_cross_profile", "tombstone.cross-profile"),
+    ] {
+        let denied = engine
+            .store_administration
+            .execute_remote_deletion(
+                &owners,
+                super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+                Some(project_id.to_owned()),
+                tombstone_id.to_owned(),
+            )
+            .await
+            .expect_err("unowned project identity must be denied");
+        assert_eq!(
+            denied.receipt.status,
+            super::super::remote_deletion::RemoteDeletionStatus::Denied
+        );
+        assert!(!denied.receipt.tombstone_recorded);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_project_deletion_denies_unprovable_corrupt_shard_before_tombstoning() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout =
+        enroll_project_on_disk_only(&project, &profile_root, "proj_remote_partial_cleanup");
+    std::fs::remove_dir_all(&layout.data_root).expect("remove synthetic project shard");
+    std::fs::write(&layout.data_root, "not a project shard")
+        .expect("replace project shard with a regular file");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "partial remote project deletion");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let deletion_owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    let error = engine
+        .store_administration
+        .execute_remote_deletion(
+            &deletion_owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_remote_partial_cleanup".to_owned()),
+            "tombstone.remote-partial".to_owned(),
+        )
+        .await
+        .expect_err("a corrupt shard without another exact authority must be denied");
+
+    assert_eq!(
+        error.receipt.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Denied
+    );
+    assert!(!error.receipt.tombstone_recorded);
+    assert_eq!(
+        error.receipt.pending_project_ids,
+        ["proj_remote_partial_cleanup".to_owned()]
+    );
+    assert_eq!(
+        error.receipt.failure,
+        Some(super::super::remote_deletion::RemoteDeletionFailure {
+            code: super::super::remote_deletion::RemoteDeletionFailureCode::TargetNotFound,
+            phase: super::super::remote_deletion::RemoteDeletionPhase::ResolveTarget,
+            retryable: false,
+        })
+    );
+    assert!(
+        layout.data_root.is_file(),
+        "invalid exact shard is preserved for operator recovery"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn remote_account_deletion_removes_all_exact_profile_shards_and_fences_replay() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let first_project = root.join("first-repository");
+    let second_project = root.join("second-repository");
+    for project in [&first_project, &second_project] {
+        std::fs::create_dir_all(project).expect("create repository");
+        run_git(project, &["init", "--quiet"]);
+    }
+    let first_layout =
+        enroll_project_on_disk_only(&first_project, &profile_root, "proj_remote_account_a");
+    let second_layout =
+        enroll_project_on_disk_only(&second_project, &profile_root, "proj_remote_account_b");
+    for layout in [&first_layout, &second_layout] {
+        std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
+        std::fs::write(
+            layout.data_root.join("payload.txt"),
+            "remote account payload",
+        )
+        .expect("write isolated profile payload");
+    }
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote account deletion");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let deletion_owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    let receipt = engine
+        .store_administration
+        .execute_remote_deletion(
+            &deletion_owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Account,
+            None,
+            "tombstone.remote-account".to_owned(),
+        )
+        .await
+        .expect("delete isolated remote account");
+
+    assert_eq!(
+        receipt.removed_project_ids,
+        [
+            "proj_remote_account_a".to_owned(),
+            "proj_remote_account_b".to_owned(),
+        ]
+    );
+    assert!(receipt.tombstone_recorded);
+    assert!(receipt.pending_project_ids.is_empty());
+    assert!(!first_layout.data_root.exists());
+    assert!(!second_layout.data_root.exists());
+    assert!(first_project.exists());
+    assert!(second_project.exists());
+    for project in [&first_project, &second_project] {
+        let error = engine
+            .ensure_registered_project_route(project, false)
+            .await
+            .expect_err("account tombstone must fence every stale project enrollment");
+        assert!(matches!(
+            error,
+            TraceDecayError::ProjectRoute { ref reason_code, retryable: false, .. }
+                if reason_code == "remote_deleted"
+        ));
+    }
+    let params = serde_json::json!({
+        "name": "tracedecay_lcm_status",
+        "arguments": {
+            "storage_scope": "user",
+            "provider": "cursor",
+            "format": "json"
+        }
+    });
+    let identity = test_client_identity_for(profile_root);
+    let projectless = super::super::projectless_tools_call_response(
+        serde_json::json!(1),
+        Some(&params),
+        &identity,
+        &engine.store_administration,
+    )
+    .await;
+    let error = projectless
+        .error
+        .expect("account tombstone must deny projectless profile-session access");
+    assert!(
+        error.message.contains("remotely deleted"),
+        "unexpected projectless denial: {}",
+        error.message
+    );
 }
 
 #[cfg(unix)]
@@ -1093,26 +1370,16 @@ async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
 }
 
 #[tokio::test]
-async fn project_open_shutdown_backstop_aborts_and_joins_noncooperative_task() {
-    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
-
-    impl Drop for DropSignal {
-        fn drop(&mut self) {
-            if let Some(signal) = self.0.take() {
-                let _ = signal.send(());
-            }
-        }
-    }
-
+async fn project_open_shutdown_retains_noncooperative_task_until_retry_joins_it() {
     let tasks = super::super::ProjectOpenTasks::default();
     let route = project_open_test_route("shutdown-backstop");
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     match tasks
         .start_cancellable(route, move |_| async move {
-            let _drop_signal = DropSignal(Some(dropped_tx));
             started_tx.send(()).expect("publish task start");
-            std::future::pending::<crate::errors::Result<()>>().await
+            release_rx.await.expect("release task");
+            Ok(())
         })
         .await
     {
@@ -1122,25 +1389,29 @@ async fn project_open_shutdown_backstop_aborts_and_joins_noncooperative_task() {
     }
     started_rx.await.expect("noncooperative task started");
 
-    let cooperative = tokio::time::timeout(
-        tokio::time::Duration::from_secs(1),
-        tasks.shutdown_with_deadline(
-            tokio::time::Duration::ZERO,
-            tokio::time::Duration::from_secs(1),
-        ),
-    )
-    .await
-    .expect("shutdown backstop must join the aborted task");
-
-    assert!(!cooperative, "noncooperative task must reach the backstop");
-    dropped_rx
-        .await
-        .expect("joined task must drop its owned resources before shutdown returns");
+    assert!(
+        !tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::ZERO,
+                tokio::time::Duration::from_millis(25),
+            )
+            .await
+    );
+    assert_eq!(tasks.tracked_route_count().await, 1);
+    release_tx.send(()).expect("release retained task");
+    assert!(
+        tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::from_secs(1),
+                tokio::time::Duration::ZERO,
+            )
+            .await
+    );
     assert_eq!(tasks.tracked_route_count().await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_open_shutdown_detaches_synchronous_work_after_abort_deadline() {
+async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
     let tasks = super::super::ProjectOpenTasks::default();
     let route = project_open_test_route("shutdown-synchronous-backstop");
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1173,11 +1444,20 @@ async fn project_open_shutdown_detaches_synchronous_work_after_abort_deadline() 
         ),
     )
     .await
-    .expect("shutdown must detach synchronous work after its abort deadline");
+    .expect("shutdown must return a settling state at its deadline");
 
     assert!(!cooperative, "synchronous work must reach the backstop");
-    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert_eq!(tasks.tracked_route_count().await, 1);
     release.store(true, std::sync::atomic::Ordering::Release);
+    assert!(
+        tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::from_secs(1),
+                tokio::time::Duration::ZERO,
+            )
+            .await
+    );
+    assert_eq!(tasks.tracked_route_count().await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
