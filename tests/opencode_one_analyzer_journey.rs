@@ -334,7 +334,10 @@ fn opencode_keeps_exactly_one_analyzer_through_install_repair_rollback_uninstall
     assert_success("uninstall", cli.run(&["uninstall", "--agent", "opencode"]));
     let uninstalled = cli.host_config();
     assert!(uninstalled.pointer("/lsp/tracedecay").is_none());
-    assert_eq!(rs_analyzer_entries(&uninstalled), vec![PRE_EXISTING_ANALYZER]);
+    assert_eq!(
+        rs_analyzer_entries(&uninstalled),
+        vec![PRE_EXISTING_ANALYZER]
+    );
     assert!(!HostAnalyzerOwnership::from_opencode_config(&uninstalled).is_engaged());
 }
 

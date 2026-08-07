@@ -249,7 +249,7 @@ impl DiagnosticBroker {
     /// Adopts a host's declared analyzer ownership, tearing down any analyzer
     /// this broker already started for a language the host now retains.
     ///
-    /// The daemon calls this with the home-level OpenCode registration; the
+    /// The daemon calls this with the home-level `OpenCode` registration; the
     /// project-level one is already read at construction. Adopting mid-session
     /// has to drop the warm clients, otherwise install/repair would leave the
     /// second analyzer running for the rest of the session and the "exactly one
@@ -270,6 +270,15 @@ impl DiagnosticBroker {
                 host_retained_analyzer_reason(&owner, &language),
             );
         }
+    }
+
+    /// The host analyzer ownership this broker currently enforces.
+    ///
+    /// Callers that learn about a second declaration level (the daemon reads
+    /// the home-level `OpenCode` registration) union it with this one and adopt
+    /// the result, so one level never silently revokes the other.
+    pub fn host_analyzer_ownership(&self) -> &HostAnalyzerOwnership {
+        &self.host_analyzer_ownership
     }
 
     /// The host-owned analyzer that already covers `language`, if any.

@@ -29,7 +29,6 @@ mod dashboard_graph;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_graph::DashboardGraphReadAdapter;
 mod dashboard_lcm;
-pub(crate) use dashboard_lcm::DashboardLcmReadAdapter;
 mod dependency_hints;
 mod dispatch_groups;
 pub mod edit;

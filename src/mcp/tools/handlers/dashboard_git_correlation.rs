@@ -52,7 +52,7 @@ impl DashboardGitCorrelationReadAdapter {
 }
 
 impl DashboardGitCorrelationReadPortV1 for DashboardGitCorrelationReadAdapter {
-    fn read<'a>(&'a self) -> DashboardGitCorrelationReadFutureV1<'a> {
+    fn read(&self) -> DashboardGitCorrelationReadFutureV1<'_> {
         Box::pin(std::future::ready(self.read_inner()))
     }
 }

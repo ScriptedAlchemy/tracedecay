@@ -1,15 +1,15 @@
 //! Host-declared analyzer ownership consumed by the analyzer broker.
 //!
 //! Plan 27 (`docs/plans/tracedecay-v2/27-cross-host-agent-plugin-bundles.md`)
-//! requires that "OpenCode conformance starts the TraceDecay custom LSP with an
+//! requires that "`OpenCode` conformance starts the `TraceDecay` custom LSP with an
 //! existing language analyzer present and proves exactly one analyzer owns that
 //! language before, during, and after install, repair, rollback, and uninstall
-//! while TraceDecay findings still project", and Plan 35
-//! (`35-daemon-lsp-gateway-and-universal-diagnostics.md`) requires OpenCode to
+//! while `TraceDecay` findings still project", and Plan 35
+//! (`35-daemon-lsp-gateway-and-universal-diagnostics.md`) requires `OpenCode` to
 //! retain "exactly one analyzer per language through install, repair, rollback,
 //! and uninstall".
 //!
-//! The OpenCode installer already records that contract in the host's own
+//! The `OpenCode` installer already records that contract in the host's own
 //! configuration — `lsp.tracedecay.initialization.tracedecay` carries
 //! `duplicateAnalyzerAvoidance` plus an `analyzerOwnership.retainedByExtension`
 //! map naming the analyzer the host already runs for each extension. This
@@ -17,11 +17,12 @@
 //! reads it and refuses to start a second analyzer for a retained language.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-/// Project-level OpenCode configuration file the installer writes.
+/// Project-level `OpenCode` configuration file the installer writes.
 ///
 /// `crates/tracedecay-agent-hosts/src/agents/opencode.rs` installs the same
 /// registration into `<project>/opencode.json` and into the home-level
@@ -33,7 +34,7 @@ pub const OPENCODE_PROJECT_CONFIG_FILE: &str = "opencode.json";
 /// One host's declaration of which analyzers it already owns.
 ///
 /// An empty value (the default) means no host declared ownership, which is the
-/// state every non-OpenCode host and every pre-install project is in. Ownership
+/// state every non-`OpenCode` host and every pre-install project is in. Ownership
 /// is only enforced when the host both asked for duplicate-analyzer avoidance
 /// and named at least one retained analyzer: a host that asks for avoidance but
 /// retains nothing has no competing analyzer to avoid.
@@ -44,8 +45,8 @@ pub struct HostAnalyzerOwnership {
 }
 
 impl HostAnalyzerOwnership {
-    /// Builds ownership from the `initialization.tracedecay` object OpenCode
-    /// hands the TraceDecay LSP registration.
+    /// Builds ownership from the `initialization.tracedecay` object `OpenCode`
+    /// hands the `TraceDecay` LSP registration.
     pub fn from_tracedecay_initialization(tracedecay: &Value) -> Self {
         let duplicate_analyzer_avoidance = tracedecay
             .get("duplicateAnalyzerAvoidance")
@@ -84,7 +85,7 @@ impl HostAnalyzerOwnership {
         }
     }
 
-    /// Builds ownership from a whole OpenCode configuration document.
+    /// Builds ownership from a whole `OpenCode` configuration document.
     pub fn from_opencode_config(config: &Value) -> Self {
         config
             .get("lsp")
@@ -95,21 +96,69 @@ impl HostAnalyzerOwnership {
             .unwrap_or_default()
     }
 
-    /// Reads the project-level OpenCode configuration, if the project has one.
+    /// Reads the project-level `OpenCode` configuration, if the project has one.
     ///
     /// A missing, unreadable, or non-JSON configuration yields no declared
-    /// ownership: this file belongs to the host, and TraceDecay cannot invent an
+    /// ownership: this file belongs to the host, and `TraceDecay` cannot invent an
     /// ownership claim the host never made. It never *relaxes* a claim either —
     /// a claim only ever comes from a parsed declaration.
     pub fn from_opencode_project_root(project_root: &Path) -> Self {
-        let path = project_root.join(OPENCODE_PROJECT_CONFIG_FILE);
-        let Ok(bytes) = std::fs::read(&path) else {
+        Self::from_opencode_config_file(&project_root.join(OPENCODE_PROJECT_CONFIG_FILE))
+    }
+
+    /// Reads one `OpenCode` configuration file, project- or home-level.
+    ///
+    /// The same refusal-to-invent rule as
+    /// [`Self::from_opencode_project_root`] applies: a missing, unreadable,
+    /// or non-JSON file declares nothing.
+    pub fn from_opencode_config_file(path: &Path) -> Self {
+        let Ok(bytes) = std::fs::read(path) else {
             return Self::default();
         };
         let Ok(config) = serde_json::from_slice::<Value>(&bytes) else {
             return Self::default();
         };
         Self::from_opencode_config(&config)
+    }
+
+    /// Reads the home-level `OpenCode` configuration of the running process
+    /// user (`$XDG_CONFIG_HOME/opencode/opencode.json`, else
+    /// `~/.config/opencode/opencode.json`).
+    ///
+    /// The installer writes the same registration to both the project and the
+    /// home level; a host that was only registered at the home level still
+    /// declared its analyzer ownership, so the broker has to honor it. A
+    /// process without a resolvable home declares nothing.
+    pub fn from_opencode_process_home() -> Self {
+        match process_home_opencode_config_path() {
+            Some(path) => Self::from_opencode_config_file(&path),
+            None => Self::default(),
+        }
+    }
+
+    /// Combines two host declarations into the ownership actually in force.
+    ///
+    /// Each side contributes only when it is individually engaged: a
+    /// declaration that retained analyzers but never asked for
+    /// duplicate-analyzer avoidance stays unenforced even when the other
+    /// level asked for avoidance over a different extension set.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        let mut merged = Self::default();
+        for side in [self, other] {
+            if !side.is_engaged() {
+                continue;
+            }
+            merged.duplicate_analyzer_avoidance = true;
+            for (extension, owners) in &side.retained_by_extension {
+                merged
+                    .retained_by_extension
+                    .entry(extension.clone())
+                    .or_default()
+                    .extend(owners.iter().cloned());
+            }
+        }
+        merged
     }
 
     /// True when the host asked for duplicate-analyzer avoidance *and* named at
@@ -141,9 +190,37 @@ impl HostAnalyzerOwnership {
     }
 }
 
+/// The home-level `OpenCode` configuration path under an explicit config root.
+///
+/// `$XDG_CONFIG_HOME` wins only when it is absolute — a relative value does
+/// not name a usable config root and `OpenCode` itself falls back to
+/// `~/.config`. This mirrors the resolution the `OpenCode` installer uses when
+/// it writes the registration, so the broker reads the same file the
+/// installer wrote.
+pub fn opencode_home_config_path(home: &Path, xdg_config_home: Option<&OsStr>) -> PathBuf {
+    xdg_config_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".config"))
+        .join("opencode")
+        .join("opencode.json")
+}
+
+/// Resolves the running process user's home-level `OpenCode` configuration
+/// path from the ambient environment, or `None` without a resolvable home.
+fn process_home_opencode_config_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+    Some(opencode_home_config_path(
+        &home,
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+    ))
+}
+
 /// Normalizes `".RS"`, `"rs"`, and `".rs"` to `"rs"`.
 ///
-/// The OpenCode registration writes dotted extensions (`".rs"`) while the
+/// The `OpenCode` registration writes dotted extensions (`".rs"`) while the
 /// analyzer adapters carry bare ones (`"rs"`), so a raw string compare would
 /// silently never match and the whole ownership contract would read as "nothing
 /// retained".
@@ -253,5 +330,102 @@ mod tests {
         .expect("write invalid project opencode.json");
 
         assert!(!HostAnalyzerOwnership::from_opencode_project_root(project.path()).is_engaged());
+    }
+
+    #[test]
+    fn the_home_config_path_prefers_an_absolute_xdg_config_home() {
+        let home = Path::new("/isolated/home");
+
+        assert_eq!(
+            opencode_home_config_path(home, None),
+            Path::new("/isolated/home/.config/opencode/opencode.json")
+        );
+        assert_eq!(
+            opencode_home_config_path(home, Some(OsStr::new("/xdg/config"))),
+            Path::new("/xdg/config/opencode/opencode.json")
+        );
+        assert_eq!(
+            opencode_home_config_path(home, Some(OsStr::new("relative/config"))),
+            Path::new("/isolated/home/.config/opencode/opencode.json"),
+            "a relative $XDG_CONFIG_HOME does not name a usable config root"
+        );
+    }
+
+    #[test]
+    fn a_home_level_config_is_read_through_the_shared_file_reader() {
+        let config_root = tempfile::tempdir().expect("config root");
+        let opencode_dir = config_root.path().join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("opencode config dir");
+        std::fs::write(
+            opencode_dir.join("opencode.json"),
+            serde_json::to_vec_pretty(&opencode_config(json!({ ".rs": ["rust-analyzer"] })))
+                .unwrap(),
+        )
+        .expect("write home opencode.json");
+
+        let path = opencode_home_config_path(
+            Path::new("/nonexistent/home"),
+            Some(config_root.path().as_os_str()),
+        );
+        let ownership = HostAnalyzerOwnership::from_opencode_config_file(&path);
+
+        assert_eq!(
+            ownership.retained_owner_for_extension("rs"),
+            Some("rust-analyzer")
+        );
+    }
+
+    #[test]
+    fn a_union_keeps_only_individually_engaged_declarations() {
+        let engaged_home = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({
+            ".ts": ["typescript"]
+        })));
+        let mut unengaged_project_config = opencode_config(json!({ ".rs": ["rust-analyzer"] }));
+        unengaged_project_config["lsp"]["tracedecay"]["initialization"]["tracedecay"]["duplicateAnalyzerAvoidance"] =
+            json!(false);
+        let unengaged_project =
+            HostAnalyzerOwnership::from_opencode_config(&unengaged_project_config);
+
+        let merged = unengaged_project.union(&engaged_home);
+
+        assert!(merged.is_engaged());
+        assert_eq!(
+            merged.retained_owner_for_extension("ts"),
+            Some("typescript")
+        );
+        assert_eq!(
+            merged.retained_owner_for_extension("rs"),
+            None,
+            "a level that never asked for avoidance keeps its retained map unenforced"
+        );
+    }
+
+    #[test]
+    fn a_union_of_two_engaged_declarations_covers_both_extension_sets() {
+        let project = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({
+            ".rs": ["rust-analyzer"]
+        })));
+        let home = HostAnalyzerOwnership::from_opencode_config(&opencode_config(json!({
+            ".ts": ["typescript"]
+        })));
+
+        let merged = project.union(&home);
+
+        assert_eq!(
+            merged.retained_owner_for_extension("rs"),
+            Some("rust-analyzer")
+        );
+        assert_eq!(
+            merged.retained_owner_for_extension("ts"),
+            Some("typescript")
+        );
+    }
+
+    #[test]
+    fn a_union_of_unengaged_declarations_stays_unengaged() {
+        let merged = HostAnalyzerOwnership::default().union(&HostAnalyzerOwnership::default());
+
+        assert!(!merged.is_engaged());
+        assert_eq!(merged, HostAnalyzerOwnership::default());
     }
 }

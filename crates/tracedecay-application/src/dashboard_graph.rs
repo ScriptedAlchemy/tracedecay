@@ -182,6 +182,7 @@ pub struct DashboardGraphPathV1 {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+#[allow(clippy::large_enum_variant)]
 pub enum DashboardGraphReadPayloadV1 {
     Overview(DashboardGraphOverviewV1),
     Search(DashboardGraphSearchV1),

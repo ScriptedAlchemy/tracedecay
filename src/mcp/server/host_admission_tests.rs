@@ -1503,8 +1503,8 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     server.shutdown().await;
     // The profile session-relation graph has exactly one writer, so every
     // retained handle must drop before a fresh-process reopen can mount it.
-    // `test_runtime` borrows the server, so it has to be released first.
-    drop(test_runtime);
+    // `test_runtime` only borrows the server, so its borrow ends here on its
+    // own; the server is the retained handle that must drop.
     drop(server);
     let _profile_pin = authority.release_runtime_for_reopen();
     let reopened = HostAdmissionTestRuntimeV1::project(&profile_root, project.path(), project_id)

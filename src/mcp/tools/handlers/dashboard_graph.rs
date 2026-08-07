@@ -727,7 +727,7 @@ impl DashboardGraphReadAdapter {
 }
 
 impl DashboardGraphReadPortV1 for DashboardGraphReadAdapter {
-    fn read<'a>(&'a self, request: DashboardGraphReadRequestV1) -> DashboardGraphReadFutureV1<'a> {
+    fn read(&self, request: DashboardGraphReadRequestV1) -> DashboardGraphReadFutureV1<'_> {
         Box::pin(self.read_inner(request))
     }
 }
