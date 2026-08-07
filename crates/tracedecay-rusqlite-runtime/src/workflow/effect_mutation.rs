@@ -45,7 +45,7 @@ fn apply_definition_registration(
     let digest = definition_digest(definition).map_err(|_| workflow_effect_codec_unavailable())?;
     let existing = query_tx(
         transaction,
-        "SELECT payload_digest FROM workflow_definitions
+        "SELECT payload_digest FROM workflow_definition_source_journal
          WHERE definition_id = ?1 AND definition_version = ?2",
         vec![
             ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
@@ -66,7 +66,7 @@ fn apply_definition_registration(
     }
     execute_tx(
         transaction,
-        "INSERT INTO workflow_definitions (
+        "INSERT INTO workflow_definition_source_journal (
              definition_id, definition_version, payload, payload_digest
          ) VALUES (?1, ?2, ?3, ?4)",
         vec![

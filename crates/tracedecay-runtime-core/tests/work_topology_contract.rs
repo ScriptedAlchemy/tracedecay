@@ -6,11 +6,13 @@ use tracedecay_domain::{
     WorkCommandId, WorkEvent, WorkEventKind, WorkVersion, WorktreeId,
 };
 use tracedecay_graph_db::{
-    GraphNamespace, GraphProjectorRevision, NeverCancelled, VerifiedGraphSnapshot,
+    GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision, NeverCancelled,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::work_topology::{
     WORK_TOPOLOGY_PROJECTOR_REVISION_V1, WorkTopologyError, WorkTopologyProjectionV1,
-    WorkTopologyStore, build_work_topology_manifest_checked, work_topology_projection_identity,
+    WorkTopologyStore, build_work_topology_manifest_checked, work_topology_idempotency_key,
+    work_topology_namespace, work_topology_projection_identity,
 };
 
 fn digest(label: char) -> ManifestDigest {
@@ -50,8 +52,8 @@ fn event(
     .expect("event")
 }
 
-fn projection() -> WorkTopologyProjectionV1 {
-    WorkTopologyProjectionV1::from_events(&[
+fn events() -> Vec<WorkEvent> {
+    vec![
         event(
             task("a"),
             1,
@@ -80,29 +82,28 @@ fn projection() -> WorkTopologyProjectionV1 {
                 dependencies: BTreeSet::from([task("b"), task("missing")]),
             },
         ),
-    ])
-    .expect("projection")
+    ]
 }
 
-fn store(projection: &WorkTopologyProjectionV1) -> WorkTopologyStore {
-    let identity =
-        work_topology_projection_identity(GraphNamespace::new("work-topology-test").expect("ns"))
-            .expect("identity");
-    let revision =
-        GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-            .expect("revision");
-    let manifest =
-        build_work_topology_manifest_checked(identity, projection, &revision, &|| Ok(()))
-            .expect("manifest");
-    let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled))
-        .expect("verified snapshot");
-    WorkTopologyStore::from_verified_snapshot(snapshot, projection).expect("store")
+fn projection() -> WorkTopologyProjectionV1 {
+    WorkTopologyProjectionV1::from_events(&events()).expect("projection")
+}
+
+fn store() -> WorkTopologyStore {
+    WorkTopologyStore::publish_from_events(&events(), &|| Ok(()), |manifest, key| {
+        assert_eq!(
+            key,
+            GraphIdempotencyKey::new(format!("publish:{}", manifest.generation.as_str()))
+                .expect("idempotency")
+        );
+        VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))
+    })
+    .expect("store")
 }
 
 #[test]
 fn work_topology_reads_blockers_order_closure_and_critical_path() {
-    let projection = projection();
-    let store = store(&projection);
+    let store = store();
     let cancellation = Arc::new(NeverCancelled);
 
     assert_eq!(
@@ -218,5 +219,29 @@ fn work_topology_rejects_cycles_and_rebuilds_byte_identically() {
         replayed
             .expected_recovered_digest(&|| Ok(()))
             .expect("replayed digest")
+    );
+}
+
+#[test]
+fn work_topology_publication_identity_is_content_addressed() {
+    let projection = projection();
+    let revision =
+        GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+            .expect("revision");
+    let namespace = work_topology_namespace(&authority()).expect("namespace");
+    let identity =
+        work_topology_projection_identity(namespace.clone()).expect("projection identity");
+    let manifest =
+        build_work_topology_manifest_checked(identity, &projection, &revision, &|| Ok(()))
+            .expect("manifest");
+
+    assert_eq!(
+        namespace,
+        work_topology_namespace(&authority()).expect("replayed namespace")
+    );
+    assert_eq!(
+        work_topology_idempotency_key(&projection, &revision).expect("idempotency"),
+        GraphIdempotencyKey::new(format!("publish:{}", manifest.generation.as_str()))
+            .expect("expected idempotency")
     );
 }

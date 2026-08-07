@@ -4,21 +4,17 @@ use std::time::Duration;
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1,
-    WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1, WorkflowEffectJournalStateV1,
-    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectProblemV1,
-    WorkflowEffectTerminalV1,
+    TaskHandoffGrant, TaskHandoffScope, WorkflowEffectAuthorityErrorV1,
+    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1,
+    WorkflowEffectJournalStateV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
+    WorkflowEffectProblemV1, WorkflowEffectTerminalV1,
 };
-use tracedecay_domain::{
-    ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
-};
+use tracedecay_domain::{ManifestDigest, UtcMicros, WorkflowDefinition, canonical_sha256};
 
 use crate::exact_sql::{
     ExactSqlError, ExactSqlError as MigrationSqlError, ExactSqlHandle, ExactSqlRows,
-    ExactSqlRows as MigrationSqlRows, ExactSqlStatement,
-    ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction, ExactSqlValue,
-    ExactSqlValue as MigrationSqlValue,
+    ExactSqlStatement, ExactSqlStatement as MigrationSqlStatement, ExactSqlTransaction,
+    ExactSqlValue, ExactSqlValue as MigrationSqlValue,
 };
 mod effect_mutation;
 mod schema;
@@ -36,7 +32,11 @@ const WORKFLOW_EFFECT_SELECT: &str = "SELECT identity_digest, state, terminal_pa
  FROM workflow_effect_journal
  WHERE idempotency_key = ?1";
 
-/// Workflow persistence on the registered writer.
+/// Workflow effect/source journals and handoffs on the registered writer.
+///
+/// Workflow definition topology is owned by the registered graph adapter. The
+/// SQL authority retains only immutable source payloads needed to make effect
+/// retries deterministic.
 #[derive(Clone)]
 pub struct WorkflowSqliteAuthority {
     storage: ExactSqlHandle,
@@ -48,6 +48,52 @@ impl WorkflowSqliteAuthority {
     ) -> Result<Self, WorkflowSqliteAuthorityBuildError> {
         require_workflow_schema(&storage)?;
         Ok(Self { storage })
+    }
+
+    pub fn load_definition_source(
+        &self,
+        definition_id: &tracedecay_domain::WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<Option<WorkflowDefinition>, WorkflowSqliteAuthorityBuildError> {
+        let version = i64::try_from(definition_version)
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+        let rows = self
+            .storage
+            .query(
+                ExactSqlStatement::new(
+                    "SELECT payload, payload_digest
+                     FROM workflow_definition_source_journal
+                     WHERE definition_id = ?1 AND definition_version = ?2"
+                        .to_owned(),
+                    vec![
+                        ExactSqlValue::Text(definition_id.as_str().to_owned()),
+                        ExactSqlValue::Integer(version),
+                    ],
+                )
+                .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
+                Duration::from_secs(5),
+            )
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
+        let Some(row) = rows.rows.first() else {
+            return Ok(None);
+        };
+        let Some(ExactSqlValue::Text(payload)) = row.values.first() else {
+            return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+        };
+        let Some(ExactSqlValue::Text(stored_digest)) = row.values.get(1) else {
+            return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+        };
+        let definition: WorkflowDefinition = serde_json::from_str(payload)
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
+        let digest = canonical_sha256(&definition)
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
+        if digest.as_str() != stored_digest
+            || definition.definition_id() != definition_id
+            || definition.definition_version() != definition_version
+        {
+            return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
+        }
+        Ok(Some(definition))
     }
 }
 
@@ -67,7 +113,7 @@ fn require_workflow_schema(
                 "SELECT name, sql FROM sqlite_master
                  WHERE type = 'table'
                    AND name IN (
-                       'workflow_definitions',
+                       'workflow_definition_source_journal',
                        'workflow_effect_journal',
                        'workflow_handoffs',
                        'workflow_schema'
@@ -162,18 +208,6 @@ fn require_columns(
     }
 }
 
-fn definition_unavailable(_: ExactSqlError) -> WorkflowDefinitionAuthorityError {
-    WorkflowDefinitionAuthorityError::Unavailable(
-        "workflow definition authority unavailable".to_owned(),
-    )
-}
-
-fn definition_codec_unavailable() -> WorkflowDefinitionAuthorityError {
-    WorkflowDefinitionAuthorityError::Unavailable(
-        "workflow definition authority unavailable".to_owned(),
-    )
-}
-
 fn handoff_unavailable(_: ExactSqlError) -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
 }
@@ -221,20 +255,12 @@ fn version_i64(version: u64) -> Result<i64, ()> {
 
 fn definition_digest(
     definition: &WorkflowDefinition,
-) -> Result<ManifestDigest, WorkflowDefinitionAuthorityError> {
-    canonical_sha256(definition).map_err(|_| definition_codec_unavailable())
+) -> Result<ManifestDigest, ()> {
+    canonical_sha256(definition).map_err(|_| ())
 }
 
-fn encode_definition(
-    definition: &WorkflowDefinition,
-) -> Result<String, WorkflowDefinitionAuthorityError> {
-    serde_json::to_string(definition).map_err(|_| definition_codec_unavailable())
-}
-
-fn decode_definition(
-    payload: &str,
-) -> Result<WorkflowDefinition, WorkflowDefinitionAuthorityError> {
-    serde_json::from_str(payload).map_err(|_| definition_codec_unavailable())
+fn encode_definition(definition: &WorkflowDefinition) -> Result<String, ()> {
+    serde_json::to_string(definition).map_err(|_| ())
 }
 
 fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, ()> {
@@ -243,14 +269,6 @@ fn encode_json<T: serde::Serialize>(value: &T) -> Result<String, ()> {
 
 fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
     serde_json::from_str(payload).map_err(|_| ())
-}
-
-fn query_handle(
-    storage: &ExactSqlHandle,
-    sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlRows, MigrationSqlError> {
-    storage.query(statement(sql, params)?, Duration::from_secs(5))
 }
 
 fn query_tx(
@@ -277,120 +295,6 @@ fn execute_tx_changed(
     transaction
         .execute(statement(sql, params)?)
         .map(|result| result.changed_rows)
-}
-
-impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
-    fn insert(
-        &self,
-        definition: &WorkflowDefinition,
-    ) -> Result<(), WorkflowDefinitionAuthorityError> {
-        let version = version_i64(definition.definition_version())
-            .map_err(|_| definition_codec_unavailable())?;
-        let payload = encode_definition(definition)?;
-        let digest = definition_digest(definition)?;
-        let transaction = self
-            .storage
-            .begin_immediate()
-            .map_err(definition_unavailable)?;
-        let existing = query_tx(
-            &transaction,
-            "SELECT payload, payload_digest FROM workflow_definitions
-             WHERE definition_id = ?1 AND definition_version = ?2",
-            vec![
-                ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
-                ExactSqlValue::Integer(version),
-            ],
-        )
-        .map_err(definition_unavailable)?;
-        if let Some(row) = existing.rows.first() {
-            let existing_digest =
-                sql_text(&row.values, 1).ok_or_else(definition_codec_unavailable)?;
-            let outcome = if existing_digest == digest.as_str() {
-                Err(WorkflowDefinitionAuthorityError::AlreadyExists)
-            } else {
-                let existing_payload =
-                    sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
-                let existing_definition = decode_definition(existing_payload)?;
-                if &existing_definition == definition {
-                    Err(WorkflowDefinitionAuthorityError::AlreadyExists)
-                } else {
-                    Err(WorkflowDefinitionAuthorityError::Conflict)
-                }
-            };
-            let _ = transaction.rollback();
-            return outcome;
-        }
-        execute_tx(
-            &transaction,
-            "INSERT INTO workflow_definitions (
-                 definition_id, definition_version, payload, payload_digest
-             ) VALUES (?1, ?2, ?3, ?4)",
-            vec![
-                ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
-                ExactSqlValue::Integer(version),
-                ExactSqlValue::Text(payload),
-                ExactSqlValue::Text(digest.as_str().to_owned()),
-            ],
-        )
-        .map_err(definition_unavailable)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(definition_unavailable)
-    }
-
-    fn load(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Option<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
-        let version =
-            version_i64(definition_version).map_err(|_| definition_codec_unavailable())?;
-        let rows = query_handle(
-            &self.storage,
-            "SELECT payload FROM workflow_definitions
-             WHERE definition_id = ?1 AND definition_version = ?2",
-            vec![
-                ExactSqlValue::Text(definition_id.as_str().to_owned()),
-                ExactSqlValue::Integer(version),
-            ],
-        )
-        .map_err(definition_unavailable)?;
-        rows.rows
-            .first()
-            .map(|row| {
-                let payload = sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
-                decode_definition(payload)
-            })
-            .transpose()
-    }
-
-    fn list(
-        &self,
-        definition_id: Option<&WorkflowDefinitionId>,
-    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
-        let (sql, params) = match definition_id {
-            Some(definition_id) => (
-                "SELECT payload FROM workflow_definitions
-                 WHERE definition_id = ?1
-                 ORDER BY definition_id, definition_version",
-                vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
-            ),
-            None => (
-                "SELECT payload FROM workflow_definitions
-                 ORDER BY definition_id, definition_version",
-                Vec::new(),
-            ),
-        };
-        let rows = query_handle(&self.storage, sql, params).map_err(definition_unavailable)?;
-        rows.rows
-            .iter()
-            .map(|row| {
-                let payload = sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
-                decode_definition(payload)
-            })
-            .collect()
-    }
 }
 
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {

@@ -6,11 +6,13 @@ use tracedecay_domain::{
     WorkflowStep, WorkflowStepId,
 };
 use tracedecay_graph_db::{
-    GraphNamespace, GraphProjectorRevision, NeverCancelled, VerifiedGraphSnapshot,
+    GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision, NeverCancelled,
+    VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::workflow_topology::{
     WORKFLOW_TOPOLOGY_PROJECTOR_REVISION_V1, WorkflowTopologyError, WorkflowTopologyStore,
-    build_workflow_topology_manifest_checked, workflow_topology_projection_identity,
+    build_workflow_topology_manifest_checked, workflow_topology_idempotency_key,
+    workflow_topology_namespace, workflow_topology_projection_identity,
 };
 
 fn digest(label: char) -> ManifestDigest {
@@ -54,19 +56,15 @@ fn definition(version: u64) -> WorkflowDefinition {
 }
 
 fn store(definition: &WorkflowDefinition) -> WorkflowTopologyStore {
-    let identity = workflow_topology_projection_identity(
-        GraphNamespace::new("workflow-topology-test").expect("namespace"),
-    )
-    .expect("identity");
-    let revision =
-        GraphProjectorRevision::try_from(WORKFLOW_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
-            .expect("revision");
-    let manifest =
-        build_workflow_topology_manifest_checked(identity, definition, &revision, &|| Ok(()))
-            .expect("manifest");
-    let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled))
-        .expect("verified snapshot");
-    WorkflowTopologyStore::from_verified_snapshot(snapshot, definition).expect("store")
+    WorkflowTopologyStore::publish_from_definition(definition, &|| Ok(()), |manifest, key| {
+        assert_eq!(
+            key,
+            GraphIdempotencyKey::new(format!("publish:{}", manifest.generation.as_str()))
+                .expect("idempotency")
+        );
+        VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))
+    })
+    .expect("store")
 }
 
 #[test]
@@ -147,4 +145,32 @@ fn workflow_topology_replay_is_exact_and_stale_definition_is_rejected() {
         WorkflowTopologyStore::from_verified_snapshot(snapshot, &definition(2)),
         Err(WorkflowTopologyError::GenerationMismatch)
     ));
+}
+
+#[test]
+fn workflow_topology_publication_identity_is_content_addressed() {
+    let current_definition = definition(1);
+    let revision =
+        GraphProjectorRevision::try_from(WORKFLOW_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+            .expect("revision");
+    let namespace = workflow_topology_namespace(&current_definition).expect("namespace");
+    let identity =
+        workflow_topology_projection_identity(namespace.clone()).expect("projection identity");
+    let manifest = build_workflow_topology_manifest_checked(
+        identity,
+        &current_definition,
+        &revision,
+        &|| Ok(()),
+    )
+    .expect("manifest");
+
+    assert_eq!(
+        namespace,
+        workflow_topology_namespace(&definition(2)).expect("next-version namespace")
+    );
+    assert_eq!(
+        workflow_topology_idempotency_key(&current_definition, &revision).expect("idempotency"),
+        GraphIdempotencyKey::new(format!("publish:{}", manifest.generation.as_str()))
+            .expect("expected idempotency")
+    );
 }

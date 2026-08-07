@@ -14,7 +14,7 @@ use tracedecay_runtime_core::db::engine::{
     Connection, Executor, QueryExecutor, TransactionBehavior, params,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
-use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
+use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1 as WORK_EVENT_JOURNAL_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
     WORKFLOW_TABLE_CONTRACTS_V1,
@@ -345,9 +345,9 @@ pub async fn ensure_registered_schema_for_admission(
                 .map_err(|error| global_db_operation_error("initialize workflow schema", error))?;
         }
         transaction
-            .execute_batch(WORK_SCHEMA_V1)
+            .execute_batch(WORK_EVENT_JOURNAL_SCHEMA_V1)
             .await
-            .map_err(|error| global_db_operation_error("initialize Work schema", error))?;
+            .map_err(|error| global_db_operation_error("initialize Work event journal", error))?;
         transaction
             .execute_batch(AUTHORIZED_SCOPE_SET_SCHEMA_V1)
             .await

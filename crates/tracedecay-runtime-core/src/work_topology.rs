@@ -12,10 +12,10 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
-    GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, SourceGeneration,
-    TraversalRequest, VerifiedGraphSnapshot,
+    GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
+    GraphWatermark, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
 
 const WORK_PROJECTION: &str = "work-topology";
@@ -179,6 +179,22 @@ pub fn work_topology_generation_id(
     GraphGenerationId::new(format!("work-topology:{}", digest.as_str())).map_err(Into::into)
 }
 
+pub fn work_topology_namespace(
+    authority: &WorkAuthority,
+) -> Result<GraphNamespace, WorkTopologyError> {
+    let digest = canonical_sha256(&("tracedecay.work-topology-namespace.v1", authority))
+        .map_err(|error| WorkTopologyError::Contract(error.to_string()))?;
+    GraphNamespace::new(format!("work-topology:{}", digest.as_str())).map_err(Into::into)
+}
+
+pub fn work_topology_idempotency_key(
+    projection: &WorkTopologyProjectionV1,
+    projector_revision: &GraphProjectorRevision,
+) -> Result<GraphIdempotencyKey, WorkTopologyError> {
+    let generation = work_topology_generation_id(projection, projector_revision)?;
+    GraphIdempotencyKey::new(format!("publish:{}", generation.as_str())).map_err(Into::into)
+}
+
 pub fn build_work_topology_manifest_checked(
     identity: GraphProjectionIdentity,
     projection: &WorkTopologyProjectionV1,
@@ -252,6 +268,28 @@ impl fmt::Debug for WorkTopologyStore {
 }
 
 impl WorkTopologyStore {
+    pub fn publish_from_events(
+        events: &[WorkEvent],
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+        publish: impl FnOnce(
+            &GraphGenerationManifest,
+            GraphIdempotencyKey,
+        ) -> Result<VerifiedGraphSnapshot, GraphDbError>,
+    ) -> Result<Self, WorkTopologyError> {
+        check()?;
+        let projection = WorkTopologyProjectionV1::from_events(events)?;
+        let revision =
+            GraphProjectorRevision::try_from(WORK_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())?;
+        let identity = work_topology_projection_identity(work_topology_namespace(
+            &projection.authority,
+        )?)?;
+        let manifest =
+            build_work_topology_manifest_checked(identity, &projection, &revision, check)?;
+        let idempotency_key = work_topology_idempotency_key(&projection, &revision)?;
+        let snapshot = publish(&manifest, idempotency_key)?;
+        Self::from_verified_snapshot(snapshot, &projection)
+    }
+
     pub fn from_verified_snapshot(
         snapshot: VerifiedGraphSnapshot,
         projection: &WorkTopologyProjectionV1,

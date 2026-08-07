@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use tracedecay_rusqlite_runtime::exact_sql::{
@@ -45,6 +46,91 @@ pub trait ProjectGraphRuntimePortV1: Send + Sync {
     ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError>;
 }
 
+#[derive(Clone)]
+pub struct RegisteredWorkTopologyV1 {
+    source: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
+    runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+}
+
+impl RegisteredWorkTopologyV1 {
+    pub fn verified_snapshot(
+        &self,
+        authority: &tracedecay_domain::WorkAuthority,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<
+        tracedecay_runtime_core::work_topology::WorkTopologyStore,
+        tracedecay_runtime_core::work_topology::WorkTopologyError,
+    > {
+        let events = self.source.load_authority_events(authority).map_err(|error| {
+            tracedecay_runtime_core::work_topology::WorkTopologyError::Unavailable(
+                error.to_string(),
+            )
+        })?;
+        let check = || {
+            if cancelled.load(Ordering::Acquire) {
+                Err(tracedecay_graph_db::GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        tracedecay_runtime_core::work_topology::WorkTopologyStore::publish_from_events(
+            &events,
+            &check,
+            |manifest, key| {
+                self.runtime
+                    .publish_verified_manifest(manifest, key, Arc::clone(&cancelled))
+            },
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct RegisteredWorkflowTopologyV1 {
+    source: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+}
+
+impl RegisteredWorkflowTopologyV1 {
+    pub fn verified_snapshot(
+        &self,
+        definition_id: &tracedecay_domain::WorkflowDefinitionId,
+        definition_version: u64,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<
+        tracedecay_runtime_core::workflow_topology::WorkflowTopologyStore,
+        tracedecay_runtime_core::workflow_topology::WorkflowTopologyError,
+    > {
+        let definition = self
+            .source
+            .load_definition_source(definition_id, definition_version)
+        .map_err(|error| {
+            tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
+                format!("{error:?}"),
+            )
+        })?
+        .ok_or_else(|| {
+            tracedecay_runtime_core::workflow_topology::WorkflowTopologyError::Unavailable(
+                "workflow definition source is missing".to_owned(),
+            )
+        })?;
+        let check = || {
+            if cancelled.load(Ordering::Acquire) {
+                Err(tracedecay_graph_db::GraphDbError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        tracedecay_runtime_core::workflow_topology::WorkflowTopologyStore::publish_from_definition(
+            &definition,
+            &check,
+            |manifest, key| {
+                self.runtime
+                    .publish_verified_manifest(manifest, key, Arc::clone(&cancelled))
+            },
+        )
+    }
+}
+
 /// Core Work command and projection services over the registered exact-SQL
 /// channel.
 pub struct RegisteredWorkApplicationServicesV1 {
@@ -53,6 +139,7 @@ pub struct RegisteredWorkApplicationServicesV1 {
     projections: tracedecay_application::WorkProjectionReadService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    topology: RegisteredWorkTopologyV1,
 }
 
 impl RegisteredWorkApplicationServicesV1 {
@@ -70,6 +157,10 @@ impl RegisteredWorkApplicationServicesV1 {
     > {
         &self.projections
     }
+
+    pub fn topology(&self) -> &RegisteredWorkTopologyV1 {
+        &self.topology
+    }
 }
 
 /// Workflow definition reads and journaled mutation authority over the
@@ -81,6 +172,7 @@ pub struct RegisteredWorkflowApplicationServicesV1 {
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
     >,
     effects: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
+    topology: RegisteredWorkflowTopologyV1,
 }
 
 impl RegisteredWorkflowApplicationServicesV1 {
@@ -94,6 +186,10 @@ impl RegisteredWorkflowApplicationServicesV1 {
 
     pub fn effects(&self) -> &tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority {
         &self.effects
+    }
+
+    pub fn topology(&self) -> &RegisteredWorkflowTopologyV1 {
+        &self.topology
     }
 }
 
@@ -471,15 +567,24 @@ impl RegisteredGlobalDb {
         &self,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkApplicationServicesV1> {
         let storage = self.work_storage()?;
+        let runtime = self.project_graph_runtime().cloned().ok_or_else(|| {
+            registered_error(
+                "attach registered Work topology",
+                "project graph runtime is not bound",
+            )
+        })?;
         Ok(RegisteredWorkApplicationServicesV1 {
             commands: tracedecay_application::WorkService::new(storage.clone()),
-            projections: tracedecay_application::WorkProjectionReadService::new(storage),
+            projections: tracedecay_application::WorkProjectionReadService::new(storage.clone()),
+            topology: RegisteredWorkTopologyV1 {
+                source: storage,
+                runtime,
+            },
         })
     }
 
-    /// Attaches the PR17 workflow-definition/task-handoff authority over the
-    /// registered Work exact-SQL handle. Installs `workflow_*` tables
-    /// idempotently through the same handle `work_storage` validates.
+    /// Attaches the workflow source and journal authority over the registered
+    /// exact-SQL handle.
     pub fn workflow_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
@@ -494,9 +599,19 @@ impl RegisteredGlobalDb {
         &self,
     ) -> tracedecay_runtime_core::errors::Result<RegisteredWorkflowApplicationServicesV1> {
         let authority = self.workflow_storage()?;
+        let runtime = self.project_graph_runtime().cloned().ok_or_else(|| {
+            registered_error(
+                "attach registered workflow topology",
+                "project graph runtime is not bound",
+            )
+        })?;
         Ok(RegisteredWorkflowApplicationServicesV1 {
             definitions: tracedecay_application::WorkflowDefinitionService::new(authority.clone()),
-            effects: authority,
+            effects: authority.clone(),
+            topology: RegisteredWorkflowTopologyV1 {
+                source: authority,
+                runtime,
+            },
         })
     }
 

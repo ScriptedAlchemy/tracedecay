@@ -1,10 +1,10 @@
-//! Workflow definition and handoff tables installed on the registered writer.
+//! Workflow source-journal, effect-journal, and handoff tables on the registered writer.
 
 use rusqlite::Connection;
 
 pub const WORKFLOW_SCHEMA_VERSION_V1: i64 = 1;
 pub const WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1: &str =
-    "sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da";
+    "sha256:f954b3be07e9397b71e6025a7635da202b8a3a89d681f90f463034133d33ffec";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkflowColumnContractV1 {
@@ -21,7 +21,7 @@ pub struct WorkflowTableContractV1 {
     pub columns: &'static [WorkflowColumnContractV1],
 }
 
-const WORKFLOW_DEFINITION_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
+const WORKFLOW_DEFINITION_SOURCE_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
     WorkflowColumnContractV1 {
         name: "definition_id",
         sql_type: "TEXT",
@@ -177,7 +177,8 @@ const WORKFLOW_SCHEMA_COLUMNS_V1: &[WorkflowColumnContractV1] = &[
     },
 ];
 
-const WORKFLOW_DEFINITIONS_SQL_V1: &str = "CREATE TABLE workflow_definitions (
+const WORKFLOW_DEFINITION_SOURCE_JOURNAL_SQL_V1: &str =
+    "CREATE TABLE workflow_definition_source_journal (
     definition_id TEXT NOT NULL,
     definition_version INTEGER NOT NULL CHECK (definition_version > 0),
     payload TEXT NOT NULL,
@@ -221,14 +222,14 @@ pub const WORKFLOW_SCHEMA_IDENTITY_V1: &str =
 VALUES (
     1,
     1,
-    'sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da'
+    'sha256:f954b3be07e9397b71e6025a7635da202b8a3a89d681f90f463034133d33ffec'
 )";
 
 pub const WORKFLOW_TABLE_CONTRACTS_V1: &[WorkflowTableContractV1] = &[
     WorkflowTableContractV1 {
-        name: "workflow_definitions",
-        sql: WORKFLOW_DEFINITIONS_SQL_V1,
-        columns: WORKFLOW_DEFINITION_COLUMNS_V1,
+        name: "workflow_definition_source_journal",
+        sql: WORKFLOW_DEFINITION_SOURCE_JOURNAL_SQL_V1,
+        columns: WORKFLOW_DEFINITION_SOURCE_COLUMNS_V1,
     },
     WorkflowTableContractV1 {
         name: "workflow_effect_journal",

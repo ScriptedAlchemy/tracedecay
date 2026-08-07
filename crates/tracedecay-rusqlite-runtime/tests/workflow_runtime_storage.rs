@@ -6,10 +6,10 @@ use tracedecay_application::{
     AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, EffectId, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId,
     ResolvedScope, TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
-    WorkflowEffectJournalStateV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
-    WorkflowEffectPreparedV1, WorkflowEffectReceiptContextV1, WorkflowEffectSuccessV1,
+    TaskHandoffGrant, TaskHandoffRedeemed, TaskHandoffScope, WorkflowEffectAuthorityPortV1,
+    WorkflowEffectIdentityV1, WorkflowEffectJournalStateV1, WorkflowEffectOperationV1,
+    WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1, WorkflowEffectReceiptContextV1,
+    WorkflowEffectSuccessV1,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
@@ -207,7 +207,7 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
             connection
                 .execute_batch(
                     "DROP TABLE workflow_handoffs;
-                 DROP TABLE workflow_definitions;
+                 DROP TABLE workflow_definition_source_journal;
                  DROP TABLE workflow_effect_journal;
                  DROP TABLE workflow_schema;",
                 )
@@ -256,7 +256,7 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
              ) VALUES (
                  2,
                  1,
-                 'sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da'
+                 'sha256:f954b3be07e9397b71e6025a7635da202b8a3a89d681f90f463034133d33ffec'
              );",
         ),
         (
@@ -279,45 +279,132 @@ fn attachment_rejects_wrong_schema_version_digest_and_definition() {
 }
 
 #[test]
-fn definitions_preserve_history_and_reject_conflicting_payloads() {
-    let store = RegisteredWorkflowStore::start("workflow-definitions");
+fn definition_effects_retain_sources_without_sql_topology_authority() {
+    let store = RegisteredWorkflowStore::start("workflow-definition-sources");
     let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     let second = definition(2, "operation.prepare.v1");
     let conflicting = definition(1, "operation.prepare.v2");
 
-    WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap_err(),
-        WorkflowDefinitionAuthorityError::AlreadyExists
+    let first_identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'f',
     );
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::insert(&authority, &conflicting).unwrap_err(),
-        WorkflowDefinitionAuthorityError::Conflict
+    let first_prepared = WorkflowEffectPreparedV1::register_definition(
+        first_identity.input_digest().clone(),
+        first.clone(),
     );
-    WorkflowDefinitionAuthorityPort::insert(&authority, &second).unwrap();
-
+    let first_record = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &first_identity,
+        &first_prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
     assert_eq!(
-        WorkflowDefinitionAuthorityPort::load(&authority, first.definition_id(), 1)
-            .unwrap()
-            .as_ref(),
-        Some(&first)
-    );
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::list(&authority, Some(first.definition_id()))
-            .unwrap()
-            .iter()
-            .map(WorkflowDefinition::definition_version)
-            .collect::<Vec<_>>(),
-        vec![1, 2]
-    );
-    assert_eq!(
-        WorkflowDefinitionAuthorityPort::list(&authority, None).unwrap(),
-        vec![first, second],
-        "definition reads must preserve immutable history"
+        WorkflowEffectAuthorityPortV1::execute_effect(
+            &authority,
+            &first_identity,
+            &first_prepared,
+            UtcMicros(30),
+        )
+        .unwrap(),
+        first_record
     );
 
-    assert_eq!(store.count("workflow_definitions"), 2);
+    let repeated_identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'g',
+    );
+    let repeated_prepared = WorkflowEffectPreparedV1::register_definition(
+        repeated_identity.input_digest().clone(),
+        first.clone(),
+    );
+    assert_eq!(
+        WorkflowEffectAuthorityPortV1::execute_effect(
+            &authority,
+            &repeated_identity,
+            &repeated_prepared,
+            UtcMicros(20),
+        )
+        .unwrap()
+        .terminal()
+        .unwrap()
+        .outcome(),
+        &WorkflowEffectOutcomeV1::Success(WorkflowEffectSuccessV1::DefinitionRegistered(
+            first.clone()
+        ))
+    );
+
+    let conflicting_identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'h',
+    );
+    let conflicting_prepared = WorkflowEffectPreparedV1::register_definition(
+        conflicting_identity.input_digest().clone(),
+        conflicting,
+    );
+    assert_eq!(
+        WorkflowEffectAuthorityPortV1::execute_effect(
+            &authority,
+            &conflicting_identity,
+            &conflicting_prepared,
+            UtcMicros(20),
+        )
+        .unwrap()
+        .terminal()
+        .unwrap()
+        .outcome(),
+        &WorkflowEffectOutcomeV1::Problem(
+            tracedecay_application::WorkflowEffectProblemV1::InvalidRequest
+        )
+    );
+
+    let second_identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'i',
+    );
+    let second_prepared = WorkflowEffectPreparedV1::register_definition(
+        second_identity.input_digest().clone(),
+        second.clone(),
+    );
+    WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &second_identity,
+        &second_prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
+
+    store.inspect(|connection| {
+        let mut statement = connection
+            .prepare(
+                "SELECT payload FROM workflow_definition_source_journal
+                 ORDER BY definition_version",
+            )
+            .unwrap();
+        let retained = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|payload| serde_json::from_str::<WorkflowDefinition>(&payload.unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(retained, vec![first, second]);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema
+                     WHERE type = 'table' AND name = 'workflow_definitions'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    });
 }
 
 #[test]
@@ -427,11 +514,26 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
 }
 
 #[test]
-fn definition_and_handoff_survive_registered_store_restart() {
+fn definition_source_journal_and_handoff_survive_registered_store_restart() {
     let store = RegisteredWorkflowStore::start("workflow-restart");
     let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
-    WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
+    let identity = effect_identity(
+        WorkflowEffectOperationV1::RegisterDefinition,
+        "actor.workflow.source",
+        'j',
+    );
+    let prepared = WorkflowEffectPreparedV1::register_definition(
+        identity.input_digest().clone(),
+        first,
+    );
+    let definition_record = WorkflowEffectAuthorityPortV1::execute_effect(
+        &authority,
+        &identity,
+        &prepared,
+        UtcMicros(20),
+    )
+    .unwrap();
 
     let scope = handoff_scope();
     let grant = TaskHandoffGrant::new(
@@ -451,11 +553,16 @@ fn definition_and_handoff_survive_registered_store_restart() {
     let store = store.restart("workflow-restart");
     let authority = WorkflowSqliteAuthority::from_registered(store.storage().clone()).unwrap();
     assert_eq!(
-        WorkflowDefinitionAuthorityPort::load(&authority, first.definition_id(), 1)
-            .unwrap()
-            .as_ref(),
-        Some(&first)
+        WorkflowEffectAuthorityPortV1::execute_effect(
+            &authority,
+            &identity,
+            &prepared,
+            UtcMicros(30),
+        )
+        .unwrap(),
+        definition_record
     );
+    assert_eq!(store.count("workflow_definition_source_journal"), 1);
     assert_eq!(
         TaskHandoffAuthorityPort::consume(&authority, grant.token_digest(), &scope, UtcMicros(12),)
             .unwrap(),
@@ -642,7 +749,10 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
     .unwrap();
 
     assert_eq!(reconciled.state(), WorkflowEffectJournalStateV1::Reconciled);
-    assert_eq!(restarted.count("workflow_definitions"), 1);
+    assert_eq!(
+        restarted.count("workflow_definition_source_journal"),
+        1
+    );
 }
 
 #[test]
@@ -711,7 +821,7 @@ fn authority_drift_cannot_alias_an_existing_effect_reservation() {
             tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
         );
     }
-    assert_eq!(store.count("workflow_definitions"), 0);
+    assert_eq!(store.count("workflow_definition_source_journal"), 0);
 }
 
 #[test]
@@ -738,7 +848,7 @@ fn prepared_input_cannot_mutate_under_another_inputs_receipt() {
         .unwrap_err(),
         tracedecay_application::WorkflowEffectAuthorityErrorV1::IdentityConflict
     );
-    assert_eq!(store.count("workflow_definitions"), 0);
+    assert_eq!(store.count("workflow_definition_source_journal"), 0);
 }
 
 #[test]
@@ -849,5 +959,5 @@ fn concurrent_exact_replays_all_return_the_committed_terminal() {
         .collect::<Vec<_>>();
 
     assert!(records.windows(2).all(|pair| pair[0] == pair[1]));
-    assert_eq!(store.count("workflow_definitions"), 1);
+    assert_eq!(store.count("workflow_definition_source_journal"), 1);
 }

@@ -1,18 +1,13 @@
 //! Concrete SQLite persistence for the application-owned Work authority.
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension};
 use tracedecay_application::{
-    WorkAppendOutcome, WorkAppendRequest, WorkProjectionPortError, WorkProjectionReadPort,
-    WorkStorageError, WorkStoragePort,
+    WorkAppendOutcome, WorkAppendRequest, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
-    ProjectionGenerationId, TaskId, WORK_PROJECTION_STATE_VERSION_V1, WorkAuthority,
-    WorkEvent, WorkProjection, WorkProjectionCoverageV1, WorkProjectionDeltaV1,
-    WorkProjectionResumeCursorV1, WorkProjectionSequenceRangeV1, WorkProjectionSequenceV1,
-    WorkProjectionSnapshotV1, WorkProjectionStateV1, WorkVersion, canonical_sha256,
+    TaskId, WorkAuthority, WorkEvent, WorkProjection, WorkVersion,
 };
 
 use crate::exact_sql::{
@@ -20,13 +15,11 @@ use crate::exact_sql::{
 };
 
 mod events;
-mod projection;
 mod schema;
 mod sql;
 
 pub use schema::{WORK_SCHEMA_V1, install_work_schema};
 
-pub(crate) use projection::*;
 pub(crate) use sql::*;
 
 /// Work persistence over the registered exact-SQL channel.
@@ -66,9 +59,11 @@ impl WorkSqliteStorage {
         u64::try_from(sequence).map_err(|_| invalid_storage("negative Work owner cursor"))
     }
 
-    pub fn resume_cursor(
-        snapshot: &WorkProjectionSnapshotV1,
-    ) -> Result<WorkProjectionResumeCursorV1, WorkProjectionPortError> {
-        projection_cursor(snapshot.generation_id().clone(), snapshot.sequence())
+    /// Loads every canonical event for one authority in topology-fold order.
+    pub fn load_authority_events(
+        &self,
+        authority: &WorkAuthority,
+    ) -> Result<Vec<WorkEvent>, WorkStorageError> {
+        events::load_registered_authority_events(&self.handle, authority)
     }
 }

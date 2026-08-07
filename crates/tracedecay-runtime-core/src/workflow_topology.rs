@@ -12,10 +12,10 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId,
-    GraphGenerationManifest, GraphGenerationRelation, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphProjectorRevision, GraphProperty, GraphPropertyName,
-    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphWatermark, SourceGeneration,
-    TraversalRequest, VerifiedGraphSnapshot,
+    GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
+    GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
+    GraphWatermark, SourceGeneration, TraversalRequest, VerifiedGraphSnapshot,
 };
 
 const WORKFLOW_PROJECTION: &str = "workflow-topology";
@@ -87,6 +87,29 @@ pub fn workflow_topology_generation_id(
     ))
     .map_err(|error| WorkflowTopologyError::Contract(error.to_string()))?;
     GraphGenerationId::new(format!("workflow-topology:{}", digest.as_str())).map_err(Into::into)
+}
+
+pub fn workflow_topology_namespace(
+    definition: &WorkflowDefinition,
+) -> Result<GraphNamespace, WorkflowTopologyError> {
+    definition
+        .validate()
+        .map_err(|error| WorkflowTopologyError::Contract(error.to_string()))?;
+    let digest = canonical_sha256(&(
+        "tracedecay.workflow-topology-namespace.v1",
+        definition.project_id(),
+        definition.definition_id(),
+    ))
+    .map_err(|error| WorkflowTopologyError::Contract(error.to_string()))?;
+    GraphNamespace::new(format!("workflow-topology:{}", digest.as_str())).map_err(Into::into)
+}
+
+pub fn workflow_topology_idempotency_key(
+    definition: &WorkflowDefinition,
+    projector_revision: &GraphProjectorRevision,
+) -> Result<GraphIdempotencyKey, WorkflowTopologyError> {
+    let generation = workflow_topology_generation_id(definition, projector_revision)?;
+    GraphIdempotencyKey::new(format!("publish:{}", generation.as_str())).map_err(Into::into)
 }
 
 pub fn build_workflow_topology_manifest_checked(
@@ -164,6 +187,26 @@ impl fmt::Debug for WorkflowTopologyStore {
 }
 
 impl WorkflowTopologyStore {
+    pub fn publish_from_definition(
+        definition: &WorkflowDefinition,
+        check: &dyn Fn() -> Result<(), GraphDbError>,
+        publish: impl FnOnce(
+            &GraphGenerationManifest,
+            GraphIdempotencyKey,
+        ) -> Result<VerifiedGraphSnapshot, GraphDbError>,
+    ) -> Result<Self, WorkflowTopologyError> {
+        check()?;
+        let revision =
+            GraphProjectorRevision::try_from(WORKFLOW_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())?;
+        let identity =
+            workflow_topology_projection_identity(workflow_topology_namespace(definition)?)?;
+        let manifest =
+            build_workflow_topology_manifest_checked(identity, definition, &revision, check)?;
+        let idempotency_key = workflow_topology_idempotency_key(definition, &revision)?;
+        let snapshot = publish(&manifest, idempotency_key)?;
+        Self::from_verified_snapshot(snapshot, definition)
+    }
+
     pub fn from_verified_snapshot(
         snapshot: VerifiedGraphSnapshot,
         definition: &WorkflowDefinition,
