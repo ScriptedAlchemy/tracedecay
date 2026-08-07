@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
@@ -228,6 +228,7 @@ pub(crate) struct TestProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     interruption: Arc<AtomicU8>,
+    commit_started: AtomicBool,
     after_commit: Option<(std::path::PathBuf, i64, LifecycleBarrier)>,
 }
 
@@ -244,6 +245,7 @@ impl TestProbe {
             cancellation: request.control().cancellation.clone(),
             deadline: request.control().deadline.clone(),
             interruption,
+            commit_started: AtomicBool::new(false),
             after_commit: None,
         })
     }
@@ -258,6 +260,7 @@ impl TestProbe {
             cancellation: request.control().cancellation.clone(),
             deadline: request.control().deadline.clone(),
             interruption,
+            commit_started: AtomicBool::new(false),
             after_commit: Some((database.path.clone(), marker_count(database), barrier)),
         })
     }
@@ -306,6 +309,14 @@ impl RuntimeRequestProbeV1 for TestProbe {
             1 => Some(RuntimeInterruptionV1::Cancelled),
             _ => Some(RuntimeInterruptionV1::DeadlineExceeded),
         }
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+            && self
+                .commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 }
 

@@ -46,6 +46,24 @@ pub trait ReaderQueryExecutor: Clone + Send + Sync + 'static {
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1>;
 }
 
+/// Reader executor for isolated runtimes that expose only the bounded exact-SQL
+/// metadata adapters. Product-domain reads stay unavailable; exact-SQL
+/// snapshots continue to use the same registered reader workers.
+#[derive(Clone, Default)]
+pub struct ExactSqlOnlyReaderV1;
+
+impl ReaderQueryExecutor for ExactSqlOnlyReaderV1 {
+    fn execute_read(
+        &mut self,
+        _snapshot: &Transaction<'_>,
+        _request: &RuntimeReadRequestV1,
+    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        Err(StorageRuntimeErrorV1::Infrastructure {
+            operation: "isolated exact-SQL runtime received a product-domain read".to_owned(),
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum ReaderWorkerError {
     WorkerClosed,

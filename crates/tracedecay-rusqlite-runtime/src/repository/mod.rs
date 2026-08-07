@@ -35,11 +35,13 @@ mod diagnostics;
 pub(crate) mod evidence_assembly;
 mod external_source;
 mod fact;
+mod graph_publication;
 mod observation;
 mod project;
 mod remote;
 mod retrieval_anchor;
 mod scope_set;
+mod semantic_vector_staging;
 mod session;
 mod support;
 
@@ -61,12 +63,16 @@ pub use evidence_assembly::EvidenceAssemblyExecutor;
 pub use evidence_assembly::tests::write_fixture_for_project;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
+pub use graph_publication::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
 pub use observation::ObservationExecutor;
 pub use project::ProjectExecutor;
 pub use retrieval_anchor::RetrievalAnchorExecutor;
 pub use scope_set::{
     AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
     AuthorizedScopeSetStoreError,
+};
+pub use semantic_vector_staging::{
+    SEMANTIC_VECTOR_STAGING_SCHEMA, SemanticVectorStagingExactSqlStorage,
 };
 pub use session::SessionExecutor;
 

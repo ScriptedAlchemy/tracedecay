@@ -13,7 +13,8 @@ pub use pool::{
     ReaderAcquireError, ReaderLease, ReaderPool, ReaderPoolSnapshot, ReaderPoolState, SnapshotLease,
 };
 pub use worker::{
-    ReaderQueryExecutor, ReaderWorkerError, StoreSizeTelemetrySample, TableSizeTelemetrySample,
+    ExactSqlOnlyReaderV1, ReaderQueryExecutor, ReaderWorkerError, StoreSizeTelemetrySample,
+    TableSizeTelemetrySample,
 };
 
 #[cfg(test)]

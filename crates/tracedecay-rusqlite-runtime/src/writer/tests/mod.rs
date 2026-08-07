@@ -298,6 +298,7 @@ struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
     interruption: AtomicU8,
+    commit_started: AtomicBool,
 }
 
 struct DelayedInterruptionProbe {
@@ -328,6 +329,10 @@ impl RuntimeRequestProbeV1 for DelayedInterruptionProbe {
             Some(self.interruption)
         }
     }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none() && self.inner.try_begin_commit()
+    }
 }
 
 impl Probe {
@@ -340,6 +345,7 @@ impl Probe {
                 Some(RuntimeInterruptionV1::Cancelled) => 1,
                 Some(RuntimeInterruptionV1::DeadlineExceeded) => 2,
             }),
+            commit_started: AtomicBool::new(false),
         }
     }
 }
@@ -358,6 +364,14 @@ impl RuntimeRequestProbeV1 for Probe {
             2 => Some(RuntimeInterruptionV1::DeadlineExceeded),
             _ => unreachable!(),
         }
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        self.interruption().is_none()
+            && self
+                .commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 }
 

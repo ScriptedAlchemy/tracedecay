@@ -191,6 +191,10 @@ impl RuntimeRequestProbeV1 for Probe {
             _ => Some(RuntimeInterruptionV1::DeadlineExceeded),
         }
     }
+
+    fn try_begin_commit(&self) -> bool {
+        false
+    }
 }
 
 enum SecondPollAction {
@@ -240,6 +244,10 @@ impl RuntimeRequestProbeV1 for SecondPollProbe {
             }
         }
         self.base.interruption()
+    }
+
+    fn try_begin_commit(&self) -> bool {
+        false
     }
 }
 
