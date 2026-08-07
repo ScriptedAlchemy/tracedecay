@@ -6,11 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    AcceptProposalCommand, AdmitExecutionCommand, ApplicationProblemKind, CancelWorkAttemptCommand,
-    CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass,
-    GenerateProposalRequest, MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, RequestId,
-    ResolvedScope, ResumeWorkAttemptsCommand, ReviewProposalCommand, StartWorkAttemptCommand,
-    WorkAppendOutcome, WorkAppendRequest, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
+    AcceptProposalCommand, AdmitExecutionCommand, ApplicationProblemKind,
+    AttachRuntimeEvidenceCommand, CancelWorkAttemptCommand, CancellationContext,
+    CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass, GenerateProposalRequest,
+    MAX_WORK_ATTEMPT_LIST_PAGE_SIZE, RequestContext, RequestId, ResolvedScope,
+    ResumeWorkAttemptsCommand, ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome,
+    WorkAppendRequest, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
     WorkAttemptListCoverageV1, WorkAttemptListCursorV1, WorkAttemptListPageV1,
     WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptProviderOutcomeV1, WorkAttemptService,
     WorkAttemptStatusRequestV1, WorkAttemptStorageError, WorkAttemptStoragePort,
@@ -19,9 +20,9 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProjectId,
-    ProjectionGenerationId, ProviderId, RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkEffectStateV1,
-    WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
+    ProjectionGenerationId, ProviderId, RefId, RepositoryId, RuntimeEvidenceRef, TaskId, UtcMicros,
+    WorkApprovalPolicy, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkEffectStateV1, WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
     WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
     WorkLeaseFenceV1, WorkProjection, WorkProjectionCoverageV1, WorkProjectionSequenceV1,
     WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
@@ -528,6 +529,53 @@ fn start_leases_once_and_replays_identical_admissions() {
     assert_eq!(status, leased);
 }
 
+/// Settling an attempt attaches its own terminal runtime evidence, which is a
+/// Work event on the same authority: it moves the projection sequence and the
+/// task version. A byte-identical replay of the admission issued after that
+/// must still return the durable attempt. Idempotency is about the content the
+/// caller supplied, not about the Work state standing still — otherwise the
+/// replay window closes the moment the attempt reports an outcome, and no
+/// client can safely retry a start it is unsure landed.
+#[test]
+fn start_replays_an_identical_admission_after_the_projection_moves() {
+    let (attempts, work, context) = fixture("project.attempt.replay-after-move");
+    admit_work(&work, &context, "task.attempt.replay");
+    let command = start_command("task.attempt.replay", "attempt.1");
+    let leased = attempts.start(&context, command.clone()).unwrap();
+    let admitted_binding = leased.projection_binding().clone();
+
+    // Exactly the append the attempt's own terminal settle performs.
+    let moved = work
+        .attach_runtime_evidence(
+            &context,
+            AttachRuntimeEvidenceCommand {
+                task_id: id("task.attempt.replay"),
+                evidence: RuntimeEvidenceRef::new(id("run.task.attempt.replay"), digest('e'), true)
+                    .unwrap(),
+                expected_version: WorkVersion::new(3).unwrap(),
+                command_id: id("command.attempt.replay.evidence"),
+                occurred_at: UtcMicros(50),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        moved.version(),
+        WorkVersion::new(4).unwrap(),
+        "the evidence append must move the task version"
+    );
+
+    let replayed = attempts.start(&context, command).unwrap();
+    assert_eq!(
+        replayed, leased,
+        "an identical admission must replay the durable attempt, not conflict"
+    );
+    assert_eq!(
+        replayed.projection_binding(),
+        &admitted_binding,
+        "the replay must return the binding pinned at admission, never a re-pin"
+    );
+}
+
 #[test]
 fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
     let (attempts, work, context) = fixture("project.attempt.cancel");
@@ -600,6 +648,7 @@ fn cancellation_ladder_reaches_cancelled_and_attaches_evidence() {
         outcome: WorkAttemptProviderOutcomeV1::Cancelled,
         stdout: None,
         stderr: None,
+        provider_fallback: None,
         observed_at: UtcMicros(90),
     };
     let cancelled = attempts.settle(&context, &identity, &evidence).unwrap();
@@ -695,6 +744,7 @@ fn resume_fences_open_attempts_and_completes_lost_cancellations() {
                 outcome: WorkAttemptProviderOutcomeV1::Exited { code: 0 },
                 stdout: None,
                 stderr: None,
+                provider_fallback: None,
                 observed_at: UtcMicros(110),
             },
         )
@@ -732,6 +782,7 @@ fn provider_unavailability_is_a_typed_terminal_journey() {
         },
         stdout: None,
         stderr: None,
+        provider_fallback: None,
         observed_at: UtcMicros(120),
     };
     let failed = attempts

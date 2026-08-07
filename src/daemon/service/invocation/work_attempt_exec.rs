@@ -6,7 +6,55 @@
 //! live process — spawn, bounded stream capture, the cancellation ladder, and
 //! terminal evidence capture. Provider resolution is fail-closed through the
 //! pinned executable-binding authority; an unresolved provider is a typed
-//! availability state, never a fallback.
+//! availability state, never an invented fallback.
+//!
+//! # The Codex app-server preference gate
+//!
+//! Plan 32 (`docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md`,
+//! "Native provider execution") states: "Codex-designated work prefers the
+//! configured app-server. Codex CLI is eligible only when app-server is
+//! unsupported or absent before session start and the pinned Plan 20 snapshot
+//! explicitly allows that fallback." The plan index adds that the fallback is
+//! "reported rather than hidden".
+//!
+//! [`select_provider`] is that gate. Three properties hold by construction:
+//!
+//! * **Preference.** A `CodexAppServer` snapshot resolves the app-server
+//!   binding first and runs the JSON-RPC transport when it resolves.
+//! * **Bounded fallback.** The Codex CLI is only ever reached through the
+//!   snapshot's own [`WorkFallbackTopology::CodexCli`] arm, which the domain
+//!   already refuses to attach to a Codex-CLI-backed snapshot. A
+//!   `Disabled` topology denies the attempt instead of inventing a route.
+//! * **Reported, never hidden.** Whenever the preferred backend loses, the
+//!   selection carries a [`WorkProviderFallbackRecordV1`] naming the preferred
+//!   backend, the typed state that disqualified it, and the fallback that took
+//!   over. That record is sealed into the terminal evidence, on the fallback
+//!   path *and* on the path where the fallback was also refused.
+//!
+//! Detection is the pinned-binding probe, not a configuration guess: the
+//! resolver re-canonicalizes the configured path, requires the binding to
+//! declare the `(backend, protocol)` capability, reads the on-disk bytes, and
+//! compares them against the snapshot's pinned artifact digest. One
+//! `canonicalize` plus one hash of an already-pinned executable is cheap, and
+//! it observes the real filesystem rather than trusting configuration text.
+//! It is deliberately *not* a live `initialize` handshake: spawning a provider
+//! to ask whether a provider can be spawned is neither cheap nor free of
+//! effect, and Plan 32 pins the negotiated capability set in the snapshot for
+//! exactly this reason.
+//!
+//! The gate runs strictly before startup. Plan 32 is explicit that "No route
+//! can change after provider startup; any later eligible fallback is a new
+//! revalidated attempt", so a protocol failure on a started app-server session
+//! seals [`WorkAttemptProviderOutcomeV1::ProtocolFailed`] and never silently
+//! re-runs on the CLI.
+//!
+//! # Known divergence
+//!
+//! The stdio transport applies `env_clear()` plus the admitted environment
+//! allowlist. The reused app-server session client
+//! (`tracedecay_sessions::runtime::codex_app_server`) does not clear the
+//! environment, so an app-server child currently inherits the daemon's. That
+//! is a gap in the shared session machinery, not in this gate.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -18,10 +66,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 use tracedecay_application::{
     WorkAttemptEvidenceRecordV1, WorkAttemptProviderOutcomeV1, WorkAttemptStreamChannelV1,
-    WorkAttemptStreamSummaryV1, WorkProviderAvailabilityV1,
+    WorkAttemptStreamSummaryV1, WorkProviderAvailabilityV1, WorkProviderFallbackRecordV1,
 };
 use tracedecay_domain::{
-    WorkAttemptIdentityV1, WorkAttemptV1, WorkProviderBackendV1, WorkProviderProtocol,
+    WorkAttemptIdentityV1, WorkAttemptV1, WorkExecutableReference, WorkFallbackTopology,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteV1,
+};
+use tracedecay_sessions::runtime::codex_app_server::{
+    CodexAppServerCancellation, CodexAppServerSummaryConfig, run_work_with_codex_app_server,
 };
 
 use crate::config::work_executable_binding::{
@@ -150,19 +202,25 @@ async fn run_attempt(
     let attempts = services.attempts();
     let identity = attempt.identity().clone();
 
-    match resolve_provider(&project_root, &attempt) {
-        Ok(resolved) => {
-            execute_provider(attempts, &context, &attempt, &resolved, cancel).await;
-        }
-        Err(availability) => {
+    match select_provider(&project_root, &attempt) {
+        Ok(selection) => match selection.provider.protocol {
+            WorkProviderProtocol::CodexAppServerJsonRpc => {
+                execute_app_server(attempts, &context, &attempt, &selection, cancel).await;
+            }
+            _ => {
+                execute_provider(attempts, &context, &attempt, &selection, cancel).await;
+            }
+        },
+        Err(denial) => {
             settle_unstarted(
                 attempts,
                 &context,
                 &identity,
                 &attempt,
                 WorkAttemptProviderOutcomeV1::ProviderUnavailable {
-                    state: availability,
+                    state: denial.state,
                 },
+                denial.fallback,
             );
         }
     }
@@ -171,38 +229,147 @@ async fn run_attempt(
 /// A provider binding resolved and digest-verified for one attempt.
 struct ResolvedProvider {
     executable: PathBuf,
+    /// The transport this binding speaks. `CodexAppServerJsonRpc` is driven
+    /// by the reused session client rather than by the stdio spawn path.
+    protocol: WorkProviderProtocol,
     arguments: Vec<&'static str>,
 }
 
-fn resolve_provider(
-    project_root: &std::path::Path,
-    attempt: &WorkAttemptV1,
-) -> Result<ResolvedProvider, WorkProviderAvailabilityV1> {
-    let snapshot = attempt.execution().execution_snapshot();
-    let arguments = match (snapshot.backend(), snapshot.protocol()) {
+/// One provider admitted for one attempt, plus the truth about how it won.
+struct ProviderSelection {
+    provider: ResolvedProvider,
+    /// The route the attempt actually runs on. It differs from the attempt's
+    /// requested route exactly when `fallback` is `Some`.
+    actual_route: WorkProviderRouteV1,
+    fallback: Option<WorkProviderFallbackRecordV1>,
+}
+
+/// A refusal to start any provider for this attempt. `fallback` is present
+/// when a configured fallback existed and was itself refused, so both denials
+/// reach the sealed evidence.
+struct ProviderDenial {
+    state: WorkProviderAvailabilityV1,
+    fallback: Option<WorkProviderFallbackRecordV1>,
+}
+
+impl ProviderDenial {
+    const fn preferred(state: WorkProviderAvailabilityV1) -> Self {
+        Self {
+            state,
+            fallback: None,
+        }
+    }
+}
+
+/// argv the stdio transport forwards for one admitted `(backend, protocol)`
+/// pair. The app-server pair carries none: its `app-server` argument belongs
+/// to the session client that owns that transport.
+fn provider_arguments(
+    backend: WorkProviderBackendV1,
+    protocol: WorkProviderProtocol,
+) -> Option<Vec<&'static str>> {
+    match (backend, protocol) {
         (WorkProviderBackendV1::ClaudeCodeCli, WorkProviderProtocol::ClaudeStreamJson) => {
-            vec!["--print", "--output-format", "stream-json", "--verbose"]
+            Some(vec!["--print", "--output-format", "stream-json", "--verbose"])
+        }
+        (WorkProviderBackendV1::CodexAppServer, WorkProviderProtocol::CodexAppServerJsonRpc) => {
+            Some(Vec::new())
         }
         (WorkProviderBackendV1::CodexCli, WorkProviderProtocol::CodexExecJson) => {
-            vec!["exec", "--json", "-"]
+            Some(vec!["exec", "--json", "-"])
         }
-        // The app-server protocol is not an admitted execution path in this
-        // runtime; that is a typed availability state, not a fallback.
-        _ => return Err(WorkProviderAvailabilityV1::Unsupported),
-    };
+        // The domain pins every protocol to exactly one backend, so a crossed
+        // pair cannot be admitted upstream; refusing it here keeps the gate
+        // total without inventing a route.
+        _ => None,
+    }
+}
+
+fn select_provider(
+    project_root: &std::path::Path,
+    attempt: &WorkAttemptV1,
+) -> Result<ProviderSelection, ProviderDenial> {
     let configuration = crate::config::cached_runtime_configuration(project_root)
-        .map_err(|_| WorkProviderAvailabilityV1::Unavailable)?;
+        .map_err(|_| ProviderDenial::preferred(WorkProviderAvailabilityV1::Unavailable))?;
     let resolver = PinnedWorkExecutableBindingResolver::from_configuration(&configuration)
-        .map_err(availability_state)?;
+        .map_err(|error| ProviderDenial::preferred(availability_state(error)))?;
+    select_with_resolver(&resolver, attempt)
+}
+
+/// The preference gate proper, over an already-built binding authority.
+fn select_with_resolver<R: WorkExecutableBindingResolver>(
+    resolver: &R,
+    attempt: &WorkAttemptV1,
+) -> Result<ProviderSelection, ProviderDenial> {
+    let snapshot = attempt.execution().execution_snapshot();
+    let preferred = resolve_binding(
+        resolver,
+        snapshot.executable(),
+        snapshot.backend(),
+        snapshot.protocol(),
+    );
+    let preferred_state = match preferred {
+        Ok(provider) => {
+            return Ok(ProviderSelection {
+                provider,
+                actual_route: snapshot.route().clone(),
+                fallback: None,
+            });
+        }
+        Err(state) => state,
+    };
+
+    // The preferred backend lost. Only the snapshot's own topology may name a
+    // successor; there is no ambient discovery here.
+    let (route, executable) = match snapshot.fallback() {
+        WorkFallbackTopology::Disabled => return Err(ProviderDenial::preferred(preferred_state)),
+        WorkFallbackTopology::CodexCli { route, executable } => (route, executable),
+    };
+    let mut report = WorkProviderFallbackRecordV1 {
+        preferred_backend: snapshot.backend(),
+        preferred_route: snapshot.route().clone(),
+        preferred_state,
+        fallback_backend: WorkProviderBackendV1::CodexCli,
+        fallback_route: route.clone(),
+        fallback_state: None,
+    };
+    match resolve_binding(
+        resolver,
+        executable,
+        WorkProviderBackendV1::CodexCli,
+        WorkProviderProtocol::CodexExecJson,
+    ) {
+        Ok(provider) => Ok(ProviderSelection {
+            provider,
+            actual_route: route.clone(),
+            fallback: Some(report),
+        }),
+        Err(fallback_state) => {
+            report.fallback_state = Some(fallback_state);
+            Err(ProviderDenial {
+                state: preferred_state,
+                fallback: Some(report),
+            })
+        }
+    }
+}
+
+/// Probes one pinned binding: capability admission, path canonicalization,
+/// and a byte-exact digest match against the snapshot's pinned artifact.
+fn resolve_binding<R: WorkExecutableBindingResolver>(
+    resolver: &R,
+    executable: &WorkExecutableReference,
+    backend: WorkProviderBackendV1,
+    protocol: WorkProviderProtocol,
+) -> Result<ResolvedProvider, WorkProviderAvailabilityV1> {
+    let arguments =
+        provider_arguments(backend, protocol).ok_or(WorkProviderAvailabilityV1::Unsupported)?;
     let resolved = resolver
-        .resolve(
-            snapshot.executable(),
-            snapshot.backend(),
-            snapshot.protocol(),
-        )
+        .resolve(executable, backend, protocol)
         .map_err(availability_state)?;
     Ok(ResolvedProvider {
         executable: resolved.canonical_path().to_path_buf(),
+        protocol,
         arguments,
     })
 }
@@ -227,6 +394,7 @@ fn settle_unstarted<S, P, W>(
     identity: &WorkAttemptIdentityV1,
     attempt: &WorkAttemptV1,
     outcome: WorkAttemptProviderOutcomeV1,
+    provider_fallback: Option<WorkProviderFallbackRecordV1>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
     P: tracedecay_application::WorkProjectionReadPort,
@@ -247,6 +415,7 @@ fn settle_unstarted<S, P, W>(
         outcome,
         stdout: None,
         stderr: None,
+        provider_fallback,
         observed_at: current_micros(),
     };
     if let Err(problem) = attempts.fail_recovery(context, identity, &evidence) {
@@ -262,7 +431,7 @@ async fn execute_provider<S, P, W>(
     attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
     context: &RequestContext,
     attempt: &WorkAttemptV1,
-    resolved: &ResolvedProvider,
+    selection: &ProviderSelection,
     cancel: Arc<Notify>,
 ) where
     S: tracedecay_application::WorkAttemptStoragePort,
@@ -271,6 +440,7 @@ async fn execute_provider<S, P, W>(
 {
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
+    let resolved = &selection.provider;
     let mut command = tokio::process::Command::new(&resolved.executable);
     command
         .args(&resolved.arguments)
@@ -302,12 +472,12 @@ async fn execute_provider<S, P, W>(
                 &identity,
                 attempt,
                 WorkAttemptProviderOutcomeV1::LaunchFailed,
+                selection.fallback.clone(),
             );
             return;
         }
     };
-    let running = match attempts.mark_running(context, &identity, attempt.requested_route().clone())
-    {
+    let running = match attempts.mark_running(context, &identity, selection.actual_route.clone()) {
         Ok(running) => running,
         Err(problem) => {
             // The lease no longer admits this task (fenced by recovery or a
@@ -373,6 +543,165 @@ async fn execute_provider<S, P, W>(
         outcome,
         stdout,
         stderr,
+        provider_fallback: selection.fallback.clone(),
+        observed_at: current_micros(),
+    };
+    if let Err(problem) = attempts.settle(context, &identity, &evidence) {
+        tracing::warn!(
+            task = identity.task_id().as_str(),
+            ?problem,
+            "work attempt terminal evidence could not be sealed"
+        );
+    }
+}
+
+/// Which arm of the app-server execution select fired. The session's own
+/// result is carried through so the terminal classification stays in one
+/// place.
+enum AppServerEnding {
+    Session(Result<Result<String, String>, tokio::task::JoinError>),
+    TimedOut,
+    Cancelled,
+}
+
+/// Runs one attempt over the Codex app-server JSON-RPC transport.
+///
+/// The transport itself is not reimplemented here: process spawn, the
+/// `initialize` handshake, ephemeral thread lifecycle, turn collection and
+/// process-tree cancellation all live in
+/// `tracedecay_sessions::runtime::codex_app_server`, which the row-56 rework
+/// already built for exactly this call
+/// ([`run_work_with_codex_app_server`] takes the cwd, wall budget and
+/// cancellation handle a Work attempt needs and had no other caller).
+///
+/// The session client is blocking, so it runs on a blocking worker while the
+/// deadline and cancellation arms stay on the runtime — the same three-armed
+/// shape the stdio path uses.
+async fn execute_app_server<S, P, W>(
+    attempts: &tracedecay_application::WorkAttemptService<S, P, W>,
+    context: &RequestContext,
+    attempt: &WorkAttemptV1,
+    selection: &ProviderSelection,
+    cancel: Arc<Notify>,
+) where
+    S: tracedecay_application::WorkAttemptStoragePort,
+    P: tracedecay_application::WorkProjectionReadPort,
+    W: tracedecay_application::WorkStoragePort,
+{
+    let identity = attempt.identity().clone();
+    let envelope = attempt.execution();
+    let snapshot = envelope.execution_snapshot();
+
+    // The launch and the protocol session are one indivisible blocking call
+    // here, so the attempt is marked Running before it starts; a launch that
+    // never happens surfaces as a typed failure on the settle path instead.
+    let running = match attempts.mark_running(context, &identity, selection.actual_route.clone()) {
+        Ok(running) => running,
+        Err(problem) => {
+            tracing::warn!(
+                task = identity.task_id().as_str(),
+                ?problem,
+                "work attempt could not be marked running; app-server was not started"
+            );
+            return;
+        }
+    };
+
+    let deadline_micros =
+        u64::try_from(envelope.deadline().0.saturating_sub(current_micros().0)).unwrap_or(0);
+    let wall = std::time::Duration::from_micros(deadline_micros);
+    let cancellation = CodexAppServerCancellation::default();
+    let config = CodexAppServerSummaryConfig {
+        codex_bin: selection.provider.executable.to_string_lossy().into_owned(),
+        model: Some(snapshot.model().to_owned()),
+        timeout: wall,
+    };
+    let prompt = envelope.instructions().to_owned();
+    let cwd = PathBuf::from(envelope.worktree_root());
+    let session_cancellation = cancellation.clone();
+    let mut session = tokio::task::spawn_blocking(move || {
+        run_work_with_codex_app_server(
+            &prompt,
+            &config,
+            "tracedecay_work_attempt",
+            &session_cancellation,
+            &cwd,
+            wall,
+        )
+        .map(|summary| summary.text)
+        .map_err(|error| error.to_string())
+    });
+
+    // The terminal arms only decide *how* the session ended; draining the
+    // blocking worker happens after the select, where the join handle is no
+    // longer borrowed by it.
+    let ending = tokio::select! {
+        joined = &mut session => AppServerEnding::Session(joined),
+        () = tokio::time::sleep(wall) => {
+            cancellation.cancel();
+            AppServerEnding::TimedOut
+        }
+        () = cancel.notified() => {
+            // The app-server has no graceful rung: cancelling terminates the
+            // whole process tree, so the ladder acknowledges and stops there
+            // rather than pretending an interrupt was survived.
+            if let Err(problem) =
+                attempts.acknowledge_cancellation(context, &identity, current_micros())
+            {
+                tracing::warn!(
+                    task = identity.task_id().as_str(),
+                    ?problem,
+                    "work attempt cancellation could not be acknowledged"
+                );
+            }
+            cancellation.cancel();
+            AppServerEnding::Cancelled
+        }
+    };
+
+    let mut text = None;
+    let outcome = match ending {
+        AppServerEnding::TimedOut => {
+            let _ = session.await;
+            WorkAttemptProviderOutcomeV1::TimedOut
+        }
+        AppServerEnding::Cancelled => {
+            let _ = session.await;
+            WorkAttemptProviderOutcomeV1::Cancelled
+        }
+        AppServerEnding::Session(Ok(Ok(answer))) => {
+            text = Some(answer);
+            WorkAttemptProviderOutcomeV1::Exited { code: 0 }
+        }
+        AppServerEnding::Session(Ok(Err(error))) => {
+            tracing::debug!(
+                task = identity.task_id().as_str(),
+                %error,
+                "codex app-server session did not reach a terminal answer"
+            );
+            WorkAttemptProviderOutcomeV1::ProtocolFailed
+        }
+        AppServerEnding::Session(Err(_)) => WorkAttemptProviderOutcomeV1::ProtocolFailed,
+    };
+
+    let stdout = stream_summary(text.map(|answer| {
+        let bytes = answer.into_bytes();
+        let total = bytes.len() as u64;
+        let cap = usize::try_from(envelope.budget().max_stdout_bytes()).unwrap_or(usize::MAX);
+        let retained = bytes[..cap.min(bytes.len())].to_vec();
+        (retained, total)
+    }));
+    let outcome = overflow_outcome(outcome, &stdout, &None);
+    let evidence = WorkAttemptEvidenceRecordV1 {
+        identity: identity.clone(),
+        requested_route: running.requested_route().clone(),
+        actual_route: running.actual_route().cloned(),
+        outcome,
+        stdout,
+        // The session client discards the app-server's stderr; there is no
+        // second channel to summarize truthfully.
+        stderr: None,
+        provider_fallback: selection.fallback.clone(),
         observed_at: current_micros(),
     };
     if let Err(problem) = attempts.settle(context, &identity, &evidence) {

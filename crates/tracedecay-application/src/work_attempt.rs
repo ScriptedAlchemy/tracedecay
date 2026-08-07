@@ -16,8 +16,9 @@ use tracedecay_domain::{
     WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
     WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1, WorkCommandId,
     WorkEffectStateV1, WorkExecutionEnvelopeV1, WorkExecutionSnapshot, WorkFenceEpochV1,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1,
-    WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkflowOperationRef, canonical_sha256,
+    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderRouteV1, WorkRecoveryStateV1,
+    WorkRestartReasonV1, WorkRuntimeContractError, WorkTerminalEvidenceV1, WorkflowOperationRef,
+    canonical_sha256,
 };
 
 use crate::work::{AttachRuntimeEvidenceCommand, WorkService, WorkStoragePort, work_authority};
@@ -132,13 +133,58 @@ pub enum WorkProviderAvailabilityV1 {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum WorkAttemptProviderOutcomeV1 {
-    Exited { code: i32 },
-    Signalled { signal: i32 },
+    Exited {
+        code: i32,
+    },
+    Signalled {
+        signal: i32,
+    },
     TimedOut,
     Cancelled,
-    ProviderUnavailable { state: WorkProviderAvailabilityV1 },
-    StreamOverflow { channel: WorkAttemptStreamChannelV1 },
+    ProviderUnavailable {
+        state: WorkProviderAvailabilityV1,
+    },
+    StreamOverflow {
+        channel: WorkAttemptStreamChannelV1,
+    },
     LaunchFailed,
+    /// The provider started but its typed protocol session did not reach a
+    /// terminal answer: a malformed, out-of-order, oversized, or lost frame.
+    /// Plan 32 requires such a stream to seal failed evidence rather than a
+    /// text-scraped success.
+    ProtocolFailed,
+}
+
+/// Why an admitted attempt did not run on the backend its pinned execution
+/// snapshot preferred.
+///
+/// Plan 32 (`docs/plans/tracedecay-v2/32-dynamic-workflow-runtime-and-sdk.md`,
+/// "Native provider execution") admits the Codex CLI "only when app-server is
+/// unsupported or absent before session start and the pinned Plan 20 snapshot
+/// explicitly allows that fallback", and the plan index requires that fallback
+/// to be "reported rather than hidden". This record is that report: it names
+/// the preferred backend, the typed state that disqualified it, and the
+/// configuration-bounded fallback that was selected, so a fallback run can
+/// never be read as a first choice.
+///
+/// It is also written when the fallback itself was refused, so a denial keeps
+/// both failures instead of collapsing them into one state.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkProviderFallbackRecordV1 {
+    /// The backend the pinned snapshot named first.
+    pub preferred_backend: WorkProviderBackendV1,
+    /// The route that backend would have run on.
+    pub preferred_route: WorkProviderRouteV1,
+    /// Why the preferred backend could not be used.
+    pub preferred_state: WorkProviderAvailabilityV1,
+    /// The backend named by the snapshot's configured fallback topology.
+    pub fallback_backend: WorkProviderBackendV1,
+    /// The route that fallback runs on.
+    pub fallback_route: WorkProviderRouteV1,
+    /// `None` when the fallback actually started; `Some(state)` when the
+    /// fallback was itself refused.
+    pub fallback_state: Option<WorkProviderAvailabilityV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -170,6 +216,9 @@ pub struct WorkAttemptEvidenceRecordV1 {
     pub outcome: WorkAttemptProviderOutcomeV1,
     pub stdout: Option<WorkAttemptStreamSummaryV1>,
     pub stderr: Option<WorkAttemptStreamSummaryV1>,
+    /// Present only when the pinned preferred backend was disqualified before
+    /// startup. `None` means the attempt ran on its first-choice backend.
+    pub provider_fallback: Option<WorkProviderFallbackRecordV1>,
     pub observed_at: UtcMicros,
 }
 
@@ -399,10 +448,19 @@ where
         // Replay before minting a lease: an identical admission returns the
         // durable attempt (whatever fence it now carries), while the same
         // identity with different content is a conflict, never a refresh.
+        //
+        // Sameness is judged on the admission content the caller supplied plus
+        // the proposal the attempt was admitted against. The stored binding's
+        // generation, sequence, and work version are not compared against
+        // freshly recomputed values: every Work event on the authority moves
+        // them, and settling this very attempt appends its own runtime
+        // evidence, so an identical replay issued after the attempt reported
+        // an outcome would otherwise be refused as a content conflict.
         match self.attempts.load(&authority, &identity) {
             Ok(existing) => {
-                return if existing.execution() == &envelope
-                    && existing.projection_binding() == &binding
+                return if existing.execution().same_admission_content(&envelope)
+                    && existing.projection_binding().accepted_proposal()
+                        == binding.accepted_proposal()
                 {
                     Ok(existing)
                 } else {
@@ -985,6 +1043,10 @@ where
             outcome: WorkAttemptProviderOutcomeV1::Cancelled,
             stdout: None,
             stderr: None,
+            // Route selection happens in the daemon runtime, which is not on
+            // this path: a cancellation observed by the authority itself
+            // never re-decides a backend.
+            provider_fallback: None,
             observed_at,
         };
         let digest = evidence.digest()?;
@@ -1039,7 +1101,8 @@ fn terminal_for_outcome(
         | WorkAttemptProviderOutcomeV1::Signalled { .. }
         | WorkAttemptProviderOutcomeV1::ProviderUnavailable { .. }
         | WorkAttemptProviderOutcomeV1::StreamOverflow { .. }
-        | WorkAttemptProviderOutcomeV1::LaunchFailed => Ok((
+        | WorkAttemptProviderOutcomeV1::LaunchFailed
+        | WorkAttemptProviderOutcomeV1::ProtocolFailed => Ok((
             WorkAttemptStateV1::Failed,
             WorkTerminalEvidenceV1::failed(digest, observed_at)?,
         )),

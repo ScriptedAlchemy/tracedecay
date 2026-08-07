@@ -10,12 +10,28 @@
 //! summarized by true byte length plus the sha256 of the retained prefix. The
 //! fixtures below therefore emit provider-shaped JSONL and assert on the
 //! byte-exact summary and the forwarded argv, never on parsed events.
+//!
+//! Gate note: the app-server preference gate is exercised against a *real*
+//! `PinnedWorkExecutableBindingResolver` over real on-disk executables, not a
+//! stub. That is deliberate — the gate's availability detection is exactly the
+//! binding probe (capability admission, path canonicalization, byte-exact
+//! digest match), so a stubbed resolver would prove nothing about whether the
+//! detection is truthful.
 
 use super::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
+
+use tracedecay_domain::configuration::{
+    ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WorkExecutableBindingV1, WorkExecutableCapabilityV1,
+};
+
+use crate::config::registry::ConfigurationRegistry;
+use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
+use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, CancelWorkAttemptCommand, CancellationContext,
@@ -39,7 +55,7 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 /// argv the module maps onto each admitted `(backend, protocol)` pair. These
-/// literals live in `resolve_provider`; the spawn tests assert the child
+/// literals live in `provider_arguments`; the spawn tests assert the child
 /// actually observed them.
 const CLAUDE_STREAM_JSON_ARGV: [&str; 4] =
     ["--print", "--output-format", "stream-json", "--verbose"];
@@ -405,6 +421,11 @@ struct SnapshotShape {
     max_stdout_bytes: u64,
     max_stderr_bytes: u64,
     deadline: UtcMicros,
+    /// The pinned executable identity the preferred backend resolves through.
+    executable: WorkExecutableReference,
+    /// The snapshot's own fallback topology. Only this may name a successor
+    /// backend; the gate never discovers one.
+    fallback: WorkFallbackTopology,
 }
 
 impl Default for SnapshotShape {
@@ -414,6 +435,12 @@ impl Default for SnapshotShape {
             max_stdout_bytes: 65_536,
             max_stderr_bytes: 65_536,
             deadline: deadline_in(120),
+            executable: WorkExecutableReference::new(
+                "executable.work-attempt-exec".to_owned(),
+                digest('e'),
+            )
+            .unwrap(),
+            fallback: WorkFallbackTopology::Disabled,
         }
     }
 }
@@ -438,11 +465,7 @@ fn crossed_execution_snapshot(
         backend,
         protocol,
         model: "model.work-attempt-exec".to_owned(),
-        executable: WorkExecutableReference::new(
-            "executable.work-attempt-exec".to_owned(),
-            digest('e'),
-        )
-        .unwrap(),
+        executable: shape.executable.clone(),
         sandbox: WorkSandboxPolicy::Required,
         approval: WorkApprovalPolicy::Never,
         filesystem: WorkFilesystemPolicy::WorkspaceWrite,
@@ -459,7 +482,7 @@ fn crossed_execution_snapshot(
         )
         .unwrap(),
         deadline: shape.deadline,
-        fallback: WorkFallbackTopology::Disabled,
+        fallback: shape.fallback.clone(),
         topology_policy_digest: digest('f'),
     })
 }
@@ -617,12 +640,106 @@ fn fake_executable(directory: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-fn resolved(executable: PathBuf, arguments: &[&'static str]) -> ResolvedProvider {
-    ResolvedProvider {
-        executable,
-        arguments: arguments.to_vec(),
+/// A first-choice selection: the preferred backend resolved, so there is
+/// nothing to report.
+fn preferred(
+    executable: PathBuf,
+    protocol: WorkProviderProtocol,
+    arguments: &[&'static str],
+    actual_route: WorkProviderRouteV1,
+) -> ProviderSelection {
+    ProviderSelection {
+        provider: ResolvedProvider {
+            executable,
+            protocol,
+            arguments: arguments.to_vec(),
+        },
+        actual_route,
+        fallback: None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pinned executable-binding fixtures (the gate's availability probe)
+// ---------------------------------------------------------------------------
+
+/// Writes a real executable and returns the pinned reference that names it:
+/// the same `(executable_id, sha256-of-bytes)` pair the resolver verifies
+/// against the on-disk bytes.
+#[cfg(unix)]
+fn pinned_executable(
+    directory: &Path,
+    name: &str,
+    executable_id: &str,
+    body: &str,
+) -> (WorkExecutableReference, PathBuf) {
+    let path = fake_executable(directory, name, body).canonicalize().unwrap();
+    let reference =
+        WorkExecutableReference::new(executable_id.to_owned(), sha256_digest(body.as_bytes()))
+            .unwrap();
+    (reference, path)
+}
+
+#[cfg(unix)]
+fn binding(
+    reference: &WorkExecutableReference,
+    path: &Path,
+    capability: WorkExecutableCapabilityV1,
+) -> WorkExecutableBindingV1 {
+    WorkExecutableBindingV1::new(reference.clone(), path.to_path_buf(), vec![capability]).unwrap()
+}
+
+/// A real `PinnedWorkExecutableBindingResolver` over exactly these bindings.
+#[cfg(unix)]
+fn resolver_over(
+    root: &Path,
+    bindings: Vec<WorkExecutableBindingV1>,
+) -> PinnedWorkExecutableBindingResolver {
+    let project_id = id::<ProjectId>(PROJECT);
+    let revision_id = id::<ConfigurationRevisionId>("configuration-revision.exec.bindings");
+    let key = SettingKey::new(WORK_EXECUTABLE_BINDINGS_SETTING_KEY).unwrap();
+    let resolution = resolve_configuration(
+        &ConfigurationRegistry::core().unwrap(),
+        &[ConfigurationLayerV1 {
+            layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            revision_id: revision_id.clone(),
+            entries: BTreeMap::from([(key, ConfigurationValueV1::WorkExecutableBindings(bindings))]),
+        }],
+    )
+    .unwrap();
+    let configuration = PinnedRuntimeConfiguration::new(
+        RuntimeConfigurationTarget {
+            project_id,
+            project_root: root.to_path_buf(),
+        },
+        revision_id,
+        resolution.snapshot,
+    )
+    .unwrap();
+    PinnedWorkExecutableBindingResolver::from_configuration(&configuration).unwrap()
+}
+
+/// The route the snapshot's Codex CLI fallback topology names.
+fn fallback_route() -> WorkProviderRouteV1 {
+    WorkProviderRouteV1::new(
+        id::<ProviderId>("provider.work.codex-cli"),
+        id::<WorkProviderRouteId>("route.work-attempt-exec.codex-cli-fallback"),
+    )
+    .unwrap()
+}
+
+fn codex_cli_fallback(executable: WorkExecutableReference) -> WorkFallbackTopology {
+    WorkFallbackTopology::CodexCli {
+        route: fallback_route(),
+        executable,
+    }
+}
+
+/// A shell provider that consumes its stdin and exits cleanly. Used wherever
+/// a binding has to be *resolvable* for the gate to have a real choice.
+const CLEAN_PROVIDER: &str = "#!/bin/sh\ncat > /dev/null\nexit 0\n";
 
 // ---------------------------------------------------------------------------
 // 1. Happy path
@@ -661,7 +778,12 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
         &fixture.attempts,
         &fixture.context,
         &fixture.attempt,
-        &resolved(executable, &CLAUDE_STREAM_JSON_ARGV),
+        &preferred(
+            executable,
+            WorkProviderProtocol::ClaudeStreamJson,
+            &CLAUDE_STREAM_JSON_ARGV,
+            requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+        ),
         Arc::new(Notify::new()),
     )
     .await;
@@ -748,7 +870,12 @@ async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success()
         &fixture.attempts,
         &fixture.context,
         &fixture.attempt,
-        &resolved(executable, &CODEX_EXEC_JSON_ARGV),
+        &preferred(
+            executable,
+            WorkProviderProtocol::CodexExecJson,
+            &CODEX_EXEC_JSON_ARGV,
+            requested_route(WorkProviderBackendV1::CodexCli),
+        ),
         Arc::new(Notify::new()),
     )
     .await;
@@ -870,7 +997,12 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
         },
     );
     let cancel = Arc::new(Notify::new());
-    let provider = resolved(executable, &CLAUDE_STREAM_JSON_ARGV);
+    let provider = preferred(
+        executable,
+        WorkProviderProtocol::ClaudeStreamJson,
+        &CLAUDE_STREAM_JSON_ARGV,
+        requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+    );
     let identity = fixture.identity().clone();
     let started_at = std::time::Instant::now();
 
@@ -935,68 +1067,376 @@ async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record(
 }
 
 // ---------------------------------------------------------------------------
-// 4. Unsupported provider/protocol pair
+// 4. The Codex app-server preference gate (Plan 32)
 // ---------------------------------------------------------------------------
 
+/// Plan 32: "Codex-designated work prefers the configured app-server."
+///
+/// The decisive part of this fixture is that the Codex CLI fallback is *also*
+/// configured and *also* resolvable. Preference therefore has to be a real
+/// choice: if the gate merely took whatever resolved, this attempt could just
+/// as well have landed on the CLI.
+#[cfg(unix)]
 #[test]
-fn the_app_server_protocol_is_typed_unsupported_before_anything_runs() {
+fn a_resolvable_app_server_is_preferred_over_an_equally_resolvable_codex_cli() {
     let directory = tempfile::TempDir::new().unwrap();
     let root = directory.path();
-    // A project root that cannot resolve configuration at all: reaching the
-    // configuration lookup would surface `Unavailable`, so `Unsupported`
-    // proves the pair was refused before any resolution, spawn, or file read.
-    let unresolvable_root = root.join("absent-project-root");
+    let (app_server, app_server_path) =
+        pinned_executable(root, "codex-app-server", "codex.app-server", CLEAN_PROVIDER);
+    let (cli, cli_path) = pinned_executable(root, "codex-cli", "codex.cli", CLEAN_PROVIDER);
+    let resolver = resolver_over(
+        root,
+        vec![
+            binding(
+                &app_server,
+                &app_server_path,
+                WorkExecutableCapabilityV1::CodexAppServerJsonRpc,
+            ),
+            binding(
+                &cli,
+                &cli_path,
+                WorkExecutableCapabilityV1::CodexCliExecJson,
+            ),
+        ],
+    );
 
     let fixture = leased_attempt(
         root,
-        "Unsupported pair.",
+        "Prefer the app-server.",
         &SnapshotShape {
             backend: WorkProviderBackendV1::CodexAppServer,
+            executable: app_server,
+            fallback: codex_cli_fallback(cli),
             ..SnapshotShape::default()
         },
     );
+    let selection = select_with_resolver(&resolver, &fixture.attempt)
+        .ok()
+        .expect("a resolvable app-server binding wins the gate");
+
     assert_eq!(
-        resolve_provider(&unresolvable_root, &fixture.attempt).err(),
-        Some(WorkProviderAvailabilityV1::Unsupported)
+        selection.provider.protocol,
+        WorkProviderProtocol::CodexAppServerJsonRpc
     );
-    // Nothing was started, so the lease is untouched.
-    assert_eq!(fixture.state(), WorkAttemptStateV1::Leased);
+    assert_eq!(selection.provider.executable, app_server_path);
+    assert_ne!(selection.provider.executable, cli_path);
     assert_eq!(
-        fixture.rows.observed_states(),
-        vec![WorkAttemptStateV1::Leased]
+        selection.actual_route,
+        requested_route(WorkProviderBackendV1::CodexAppServer)
+    );
+    // Nothing was reported because nothing was given up.
+    assert!(
+        selection.fallback.is_none(),
+        "the preferred backend ran; there is no fallback to report"
+    );
+    // Selection alone starts nothing.
+    assert_eq!(fixture.state(), WorkAttemptStateV1::Leased);
+}
+
+/// Plan 32: the Codex CLI is eligible "only when app-server is unsupported or
+/// absent before session start and the pinned Plan 20 snapshot explicitly
+/// allows that fallback", and the plan index requires the fallback to be
+/// "reported rather than hidden".
+///
+/// Here the app-server executable exists on disk but its bytes no longer match
+/// the pinned digest — the probe is a real file read, so this is a
+/// `DigestMismatch`, not a configuration guess. The CLI takes over and the
+/// handover survives all the way into the sealed terminal evidence.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_evidence() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    let (app_server, app_server_path) =
+        pinned_executable(root, "codex-app-server", "codex.app-server", CLEAN_PROVIDER);
+    let argv_marker = root.join("argv");
+    let (cli, cli_path) = pinned_executable(
+        root,
+        "codex-cli",
+        "codex.cli",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > /dev/null\nexit 0\n",
+            argv = argv_marker.display(),
+        ),
+    );
+    let resolver = resolver_over(
+        root,
+        vec![
+            binding(
+                &app_server,
+                &app_server_path,
+                WorkExecutableCapabilityV1::CodexAppServerJsonRpc,
+            ),
+            binding(
+                &cli,
+                &cli_path,
+                WorkExecutableCapabilityV1::CodexCliExecJson,
+            ),
+        ],
+    );
+    // The app-server binary is replaced after pinning. Configuration still
+    // names it; only reading the bytes can tell.
+    std::fs::write(&app_server_path, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let fixture = leased_attempt(
+        root,
+        "Fall back to the Codex CLI.",
+        &SnapshotShape {
+            backend: WorkProviderBackendV1::CodexAppServer,
+            executable: app_server,
+            fallback: codex_cli_fallback(cli),
+            ..SnapshotShape::default()
+        },
+    );
+    let selection = select_with_resolver(&resolver, &fixture.attempt)
+        .ok()
+        .expect("the configured fallback is eligible");
+
+    assert_eq!(
+        selection.provider.protocol,
+        WorkProviderProtocol::CodexExecJson
+    );
+    assert_eq!(selection.provider.executable, cli_path);
+    assert_eq!(selection.actual_route, fallback_route());
+    let report = selection
+        .fallback
+        .clone()
+        .expect("a fallback that is not reported is a hidden fallback");
+    assert_eq!(
+        report,
+        WorkProviderFallbackRecordV1 {
+            preferred_backend: WorkProviderBackendV1::CodexAppServer,
+            preferred_route: requested_route(WorkProviderBackendV1::CodexAppServer),
+            preferred_state: WorkProviderAvailabilityV1::DigestMismatch,
+            fallback_backend: WorkProviderBackendV1::CodexCli,
+            fallback_route: fallback_route(),
+            fallback_state: None,
+        }
     );
 
-    // The two admitted pairs get past the pairing arm and only then fail on
-    // the unresolvable binding — so the refusal above is the protocol arm,
-    // not a configuration failure every backend would share.
+    execute_provider(
+        &fixture.attempts,
+        &fixture.context,
+        &fixture.attempt,
+        &selection,
+        Arc::new(Notify::new()),
+    )
+    .await;
+
+    // The CLI really ran, on the CLI's own argv.
+    assert_eq!(
+        std::fs::read_to_string(&argv_marker).unwrap(),
+        CODEX_EXEC_JSON_ARGV.join(" ")
+    );
+    assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
+    let evidence = fixture.sealed_evidence();
+    assert_eq!(
+        evidence.outcome,
+        WorkAttemptProviderOutcomeV1::Exited { code: 0 }
+    );
+    // The record keeps both routes apart: what was asked for, and what ran.
+    assert_eq!(
+        evidence.requested_route,
+        requested_route(WorkProviderBackendV1::CodexAppServer)
+    );
+    assert_eq!(evidence.actual_route, Some(fallback_route()));
+    assert_eq!(evidence.provider_fallback, Some(report));
+}
+
+/// A snapshot whose topology is `Disabled` has no successor to name. Losing
+/// the app-server must deny the attempt, not reach for an ambient Codex CLI.
+#[cfg(unix)]
+#[test]
+fn a_disabled_topology_denies_instead_of_inventing_a_codex_cli_route() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    let (app_server, _) =
+        pinned_executable(root, "codex-app-server", "codex.app-server", CLEAN_PROVIDER);
+    // A perfectly usable Codex CLI is configured and resolvable — and still
+    // unreachable, because this snapshot never named it.
+    let (cli, cli_path) = pinned_executable(root, "codex-cli", "codex.cli", CLEAN_PROVIDER);
+    let resolver = resolver_over(
+        root,
+        vec![binding(
+            &cli,
+            &cli_path,
+            WorkExecutableCapabilityV1::CodexCliExecJson,
+        )],
+    );
+
+    let fixture = leased_attempt(
+        root,
+        "No configured fallback.",
+        &SnapshotShape {
+            backend: WorkProviderBackendV1::CodexAppServer,
+            executable: app_server,
+            fallback: WorkFallbackTopology::Disabled,
+            ..SnapshotShape::default()
+        },
+    );
+    let denial = select_with_resolver(&resolver, &fixture.attempt)
+        .err()
+        .expect("an unbound app-server with no configured fallback is denied");
+    assert_eq!(denial.state, WorkProviderAvailabilityV1::Absent);
+    assert!(
+        denial.fallback.is_none(),
+        "no fallback was configured, so there is nothing to report"
+    );
+    assert_eq!(fixture.state(), WorkAttemptStateV1::Leased);
+}
+
+/// When both the preferred backend and its configured fallback are refused,
+/// one typed state would erase half the truth. The denial keeps both.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fallback_that_is_also_refused_keeps_both_denials_on_the_record() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    let (app_server, app_server_path) =
+        pinned_executable(root, "codex-app-server", "codex.app-server", CLEAN_PROVIDER);
+    let (cli, cli_path) = pinned_executable(root, "codex-cli", "codex.cli", CLEAN_PROVIDER);
+    // The app-server binding declares only the CLI capability, so it is
+    // `Unsupported`; the CLI executable is gone, so it is `Unavailable`.
+    let resolver = resolver_over(
+        root,
+        vec![
+            binding(
+                &app_server,
+                &app_server_path,
+                WorkExecutableCapabilityV1::CodexCliExecJson,
+            ),
+            binding(
+                &cli,
+                &cli_path,
+                WorkExecutableCapabilityV1::CodexCliExecJson,
+            ),
+        ],
+    );
+    std::fs::remove_file(&cli_path).unwrap();
+
+    let fixture = leased_attempt(
+        root,
+        "Neither backend is eligible.",
+        &SnapshotShape {
+            backend: WorkProviderBackendV1::CodexAppServer,
+            executable: app_server,
+            fallback: codex_cli_fallback(cli),
+            ..SnapshotShape::default()
+        },
+    );
+    let denial = select_with_resolver(&resolver, &fixture.attempt)
+        .err()
+        .expect("neither backend may start");
+    assert_eq!(denial.state, WorkProviderAvailabilityV1::Unsupported);
+    assert_eq!(
+        denial.fallback,
+        Some(WorkProviderFallbackRecordV1 {
+            preferred_backend: WorkProviderBackendV1::CodexAppServer,
+            preferred_route: requested_route(WorkProviderBackendV1::CodexAppServer),
+            preferred_state: WorkProviderAvailabilityV1::Unsupported,
+            fallback_backend: WorkProviderBackendV1::CodexCli,
+            fallback_route: fallback_route(),
+            fallback_state: Some(WorkProviderAvailabilityV1::Unavailable),
+        })
+    );
+
+    // Sealed exactly as `run_attempt` seals it.
+    settle_unstarted(
+        &fixture.attempts,
+        &fixture.context,
+        fixture.identity(),
+        &fixture.attempt,
+        WorkAttemptProviderOutcomeV1::ProviderUnavailable {
+            state: denial.state,
+        },
+        denial.fallback.clone(),
+    );
+    assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
+    let evidence = fixture.sealed_evidence();
+    assert_eq!(
+        evidence.outcome,
+        WorkAttemptProviderOutcomeV1::ProviderUnavailable {
+            state: WorkProviderAvailabilityV1::Unsupported,
+        }
+    );
+    assert_eq!(evidence.provider_fallback, denial.fallback);
+}
+
+/// Every backend the domain admits now maps onto a transport. The gate is
+/// total over the pinned pairs and refuses only the crossed ones, which the
+/// domain already makes unconstructible.
+#[test]
+fn every_pinned_backend_protocol_pair_maps_onto_a_transport() {
     for backend in [
         WorkProviderBackendV1::ClaudeCodeCli,
+        WorkProviderBackendV1::CodexAppServer,
         WorkProviderBackendV1::CodexCli,
     ] {
-        let admitted = leased_attempt(
+        assert!(
+            provider_arguments(backend, pinned_protocol(backend)).is_some(),
+            "backend {backend:?} must have an admitted transport"
+        );
+    }
+    assert_eq!(
+        provider_arguments(
+            WorkProviderBackendV1::CodexAppServer,
+            WorkProviderProtocol::CodexAppServerJsonRpc,
+        ),
+        Some(Vec::new()),
+        "the app-server's `app-server` argument belongs to the session client"
+    );
+    assert!(
+        provider_arguments(
+            WorkProviderBackendV1::ClaudeCodeCli,
+            WorkProviderProtocol::CodexExecJson,
+        )
+        .is_none()
+    );
+}
+
+/// A configuration that cannot be resolved at all denies every backend with a
+/// transport-level state, and never with `Unsupported` — `Unsupported` is
+/// reserved for a pairing the runtime genuinely does not admit.
+#[test]
+fn an_unresolvable_configuration_denies_every_backend_without_claiming_unsupported() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let root = directory.path();
+    let unresolvable_root = root.join("absent-project-root");
+
+    for backend in [
+        WorkProviderBackendV1::ClaudeCodeCli,
+        WorkProviderBackendV1::CodexAppServer,
+        WorkProviderBackendV1::CodexCli,
+    ] {
+        let fixture = leased_attempt(
             root,
-            "Admitted pair.",
+            "Unresolvable configuration.",
             &SnapshotShape {
                 backend,
                 ..SnapshotShape::default()
             },
         );
-        let refusal = resolve_provider(&unresolvable_root, &admitted.attempt).err();
-        assert!(
-            refusal.is_some(),
-            "a fixture executable binding never resolves, backend {backend:?}"
-        );
+        let denial = select_provider(&unresolvable_root, &fixture.attempt)
+            .err()
+            .expect("a fixture executable binding never resolves");
         assert_ne!(
-            refusal,
-            Some(WorkProviderAvailabilityV1::Unsupported),
+            denial.state,
+            WorkProviderAvailabilityV1::Unsupported,
             "backend {backend:?} is an admitted pairing"
+        );
+        assert!(denial.fallback.is_none());
+        // Nothing was started, so the lease is untouched.
+        assert_eq!(fixture.state(), WorkAttemptStateV1::Leased);
+        assert_eq!(
+            fixture.rows.observed_states(),
+            vec![WorkAttemptStateV1::Leased]
         );
     }
 }
 
-/// `resolve_provider`'s catch-all arm can only ever see the app-server
-/// protocol: the domain pins every other protocol to exactly one backend, so a
-/// crossed pair cannot be constructed upstream in the first place.
+/// The gate's `provider_arguments` catch-all can only ever see a crossed pair:
+/// the domain pins every protocol to exactly one backend, so such a pair
+/// cannot be constructed upstream in the first place.
 #[test]
 fn crossed_backend_protocol_pairs_cannot_be_admitted_upstream() {
     let shape = SnapshotShape::default();
@@ -1041,7 +1481,12 @@ async fn a_missing_provider_executable_seals_a_typed_denial_instead_of_panicking
         &fixture.attempts,
         &fixture.context,
         &fixture.attempt,
-        &resolved(absent, &CLAUDE_STREAM_JSON_ARGV),
+        &preferred(
+            absent,
+            WorkProviderProtocol::ClaudeStreamJson,
+            &CLAUDE_STREAM_JSON_ARGV,
+            requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+        ),
         Arc::new(Notify::new()),
     )
     .await;
@@ -1083,6 +1528,7 @@ async fn an_unavailable_provider_state_is_sealed_as_denial_evidence() {
         WorkAttemptProviderOutcomeV1::ProviderUnavailable {
             state: WorkProviderAvailabilityV1::Unsupported,
         },
+        None,
     );
 
     assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
