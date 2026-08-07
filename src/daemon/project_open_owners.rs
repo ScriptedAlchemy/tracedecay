@@ -192,7 +192,19 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 observed_at,
             )
             .await
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-operation"))?;
+            .map_err(|error| {
+                // `LspRuntimeFailure` is a bounded protocol-safe class with no room for
+                // a cause, so the underlying authority error is only recoverable from the
+                // daemon log: emit it here rather than discarding it at the boundary.
+                tracing::warn!(
+                    target: "tracedecay::feedback_advisory_cycle",
+                    project_id = self.feedback_scope.project_id.as_str(),
+                    worktree_id = self.feedback_scope.worktree_id.as_str(),
+                    %error,
+                    "advisory feedback cycle could not begin its operation event"
+                );
+                LspRuntimeFailure::new("feedback-cycle-advisory-operation")
+            })?;
         let advisory = AdvisoryCycleRequest {
             feedback: invocation.request,
             github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
@@ -221,7 +233,19 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 advisory,
             )
             .await
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))?;
+            .map_err(|error| {
+                // Same boundary constraint as the operation-begin arm above: keep the
+                // contract error attributable in the daemon log before it is narrowed to
+                // an opaque runtime failure class.
+                tracing::warn!(
+                    target: "tracedecay::feedback_advisory_cycle",
+                    project_id = self.feedback_scope.project_id.as_str(),
+                    worktree_id = self.feedback_scope.worktree_id.as_str(),
+                    %error,
+                    "advisory feedback cycle execution failed"
+                );
+                LspRuntimeFailure::new("feedback-cycle-advisory-execution")
+            })?;
         Ok(ProjectOpenAdvisoryCycleExecution {
             context: invocation.context,
             outcome,
@@ -273,10 +297,18 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
                     ),
                 )
                 .await
-                .map_err(|_| {
+                .map_err(|failure| {
+                    // The runtime failure class names the stage that failed
+                    // (lsp-input, advisory-operation, advisory-execution, ...). Carrying
+                    // it into the typed problem detail is what makes an unavailable
+                    // advisory cycle attributable to a caller; the class is already
+                    // bounded and protocol-safe by `LspRuntimeFailure::new`.
                     ApplicationProblem::unavailable(SafeDiagnostic {
                         code: "feedback.advisory-cycle.execution".to_owned(),
-                        message: "The advisory feedback cycle could not execute".to_owned(),
+                        message: format!(
+                            "The advisory feedback cycle could not execute ({})",
+                            failure.class()
+                        ),
                     })
                 })?;
             advisory_cycle_invocation_result(
