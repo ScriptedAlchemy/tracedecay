@@ -2093,7 +2093,7 @@ mod tests {
     use super::{
         ExtendedPrimitivePort, OperationalPrimitiveRequest, PrimitiveCapacity, PrimitiveDispatch,
         PrimitiveRequest, StorageStatusPrimitiveRequest, pre_admission_problem,
-        valid_owned_symbol_graph_request, validate_admitted_root_uri,
+        valid_owned_primitive_request, validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
         GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
@@ -2262,7 +2262,7 @@ mod tests {
         assert!(
             requests
                 .iter()
-                .all(|request| !valid_owned_symbol_graph_request(request))
+                .all(|request| !valid_owned_primitive_request(request))
         );
     }
 }
