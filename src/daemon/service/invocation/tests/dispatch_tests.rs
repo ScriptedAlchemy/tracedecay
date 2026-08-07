@@ -60,7 +60,9 @@ async fn lsp_gateway_control_terminates_before_owner_lookup() {
     ];
 
     for (request, expected) in requests {
-        let response = service.invoke(&registry, None, None, None, None, request).await;
+        let response = service
+            .invoke(&registry, None, None, None, None, request)
+            .await;
         assert!(matches!(
             response.outcome,
             DaemonInvocationOutcome::ApplicationProblem { problem }

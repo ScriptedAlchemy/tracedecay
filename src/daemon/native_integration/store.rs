@@ -75,10 +75,7 @@ enum StoreCommand {
         Box<NativeIntegrationReceiptV1>,
         Reply<NativeIntegrationReceiptV1>,
     ),
-    PendingTransactions(
-        Option<RepositoryId>,
-        Reply<Vec<NativeIntegrationRecordV1>>,
-    ),
+    PendingTransactions(Option<RepositoryId>, Reply<Vec<NativeIntegrationRecordV1>>),
     ApprovalConsumed(NativeIntegrationApprovalId, Reply<bool>),
     QuarantineRepository(RepositoryId, NativeIntegrationTransactionId, Reply<()>),
 }
@@ -117,9 +114,7 @@ impl DaemonNativeIntegrationStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn open_engine_test(
-        database: TestConnection,
-    ) -> NativeIntegrationStoreResult<Self> {
+    pub(crate) fn open_engine_test(database: TestConnection) -> NativeIntegrationStoreResult<Self> {
         Self::open_actor(ActorDatabase::Engine(Box::new(database)))
     }
 
@@ -409,18 +404,18 @@ fn run_store_actor(
                 )));
             }
             StoreCommand::PendingTransactions(repository_id, reply) => {
-                let _ = reply.send(
-                    runtime.block_on(store.pending_transactions(repository_id.as_ref())),
-                );
+                let _ = reply
+                    .send(runtime.block_on(store.pending_transactions(repository_id.as_ref())));
             }
             StoreCommand::ApprovalConsumed(approval_id, reply) => {
                 let _ = reply.send(runtime.block_on(store.approval_consumed(&approval_id)));
             }
             StoreCommand::QuarantineRepository(repository_id, transaction_id, reply) => {
-                let _ = reply.send(
-                    runtime
-                        .block_on(store.quarantine_repository(&repository_id, &transaction_id)),
-                );
+                let _ =
+                    reply
+                        .send(runtime.block_on(
+                            store.quarantine_repository(&repository_id, &transaction_id),
+                        ));
             }
         }
     }
@@ -538,6 +533,7 @@ impl NativeIntegrationStore for SharedDaemonNativeIntegrationStore {
         repository_id: &RepositoryId,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<()> {
-        self.inner.quarantine_repository(repository_id, transaction_id)
+        self.inner
+            .quarantine_repository(repository_id, transaction_id)
     }
 }

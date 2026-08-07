@@ -3,10 +3,10 @@ use tracedecay_domain::{
     GitOidV1, GitOperationStateV1, ManifestDigest, MechanicalIntegrationModeV1,
     NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPhaseV1,
     NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId, NativeIntegrationPreviewV1,
-    NativeIntegrationReceiptV1, NativeIntegrationRepositorySnapshotV1, NativeIntegrationSelectionV1,
-    NativeIntegrationTerminalOutcomeV1, NativeIntegrationTransactionId,
-    NativeIntegrationTransactionStatusV1, ProjectId, RefId, RepositoryId, UtcMicros,
-    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+    NativeIntegrationReceiptV1, NativeIntegrationRepositorySnapshotV1,
+    NativeIntegrationSelectionV1, NativeIntegrationTerminalOutcomeV1,
+    NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
+    RepositoryId, UtcMicros, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior};
 use tracedecay_store::{
@@ -94,7 +94,10 @@ fn preview_fixture(preview_id: &str) -> NativeIntegrationPreviewV1 {
     .expect("sealed preview")
 }
 
-fn approval_fixture(approval_id: &str, preview: &NativeIntegrationPreviewV1) -> NativeIntegrationApprovalV1 {
+fn approval_fixture(
+    approval_id: &str,
+    preview: &NativeIntegrationPreviewV1,
+) -> NativeIntegrationApprovalV1 {
     NativeIntegrationApprovalV1 {
         approval_id: NativeIntegrationApprovalId::new(approval_id).expect("approval id"),
         preview_id: preview.preview_id.clone(),
@@ -375,8 +378,8 @@ async fn status_compare_and_swap_rejects_stale_revisions_and_identity_rebinds() 
     );
 
     // An unknown transaction is a typed conflict, not an empty success.
-    let unknown = NativeIntegrationTransactionId::new("transaction.native.unknown")
-        .expect("transaction id");
+    let unknown =
+        NativeIntegrationTransactionId::new("transaction.native.unknown").expect("transaction id");
     let mut orphan = record.status.clone();
     orphan.transaction_id = unknown.clone();
     orphan.phase_revision = 2;
@@ -476,7 +479,11 @@ async fn needs_inspection_quarantines_the_repository_until_recovery() {
     // The durable fence refuses new transactions for the repository.
     let next_preview = preview_with_expiry("preview.native.inspect-b", UtcMicros(3_000_000));
     let next_approval = approval_fixture("approval.native.inspect-b", &next_preview);
-    let next = prepared_record("transaction.native.inspect-b", &next_preview, &next_approval);
+    let next = prepared_record(
+        "transaction.native.inspect-b",
+        &next_preview,
+        &next_approval,
+    );
     assert_eq!(
         store.begin_or_replay(next.clone()).await,
         Err(NativeIntegrationStoreError::RepositoryQuarantined)

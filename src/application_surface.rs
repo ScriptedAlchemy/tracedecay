@@ -23,6 +23,7 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
     WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
+pub use tracedecay_application::git::NativeIntegrationApproveSurfaceRequest;
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
@@ -61,7 +62,6 @@ pub use tracedecay_application::{
     ConfigurationWireRequestV1 as ConfigurationSurfaceRequest,
     ConfigurationWriteCredentialRequestV1 as ConfigurationWriteCredentialSurfaceRequest,
 };
-pub use tracedecay_application::git::NativeIntegrationApproveSurfaceRequest;
 pub use tracedecay_application::{
     NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelSurfaceRequest,
     NativeIntegrationPreflightSurfaceRequest, NativeIntegrationStackSnapshotSurfaceRequest,

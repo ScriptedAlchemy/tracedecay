@@ -524,12 +524,14 @@ mod tests {
             NativeIntegrationTransactionId::new("transaction.native.unknown").expect("id");
         let status_owner = owner.clone();
         let status = tokio::task::spawn_blocking(move || {
-            status_owner.service().status(NativeIntegrationStatusRequestV1 {
-                transaction_id: NativeIntegrationTransactionId::new(
-                    "transaction.native.unknown",
-                )
-                .expect("id"),
-            })
+            status_owner
+                .service()
+                .status(NativeIntegrationStatusRequestV1 {
+                    transaction_id: NativeIntegrationTransactionId::new(
+                        "transaction.native.unknown",
+                    )
+                    .expect("id"),
+                })
         })
         .await
         .expect("status join")
@@ -537,10 +539,12 @@ mod tests {
         assert_eq!(status, None);
         let cancel_owner = owner.clone();
         let disposition = tokio::task::spawn_blocking(move || {
-            cancel_owner.service().cancel(NativeIntegrationCancelRequestV1 {
-                transaction_id: unknown,
-                requested_at: UtcMicros(2),
-            })
+            cancel_owner
+                .service()
+                .cancel(NativeIntegrationCancelRequestV1 {
+                    transaction_id: unknown,
+                    requested_at: UtcMicros(2),
+                })
         })
         .await
         .expect("cancel join")
@@ -567,6 +571,11 @@ mod tests {
 
         // Shutdown fences composition and resolution fail closed.
         registry.shutdown().await.expect("shutdown");
-        assert!(registry.for_repository_root(&repository_root).await.is_err());
+        assert!(
+            registry
+                .for_repository_root(&repository_root)
+                .await
+                .is_err()
+        );
     }
 }

@@ -24,6 +24,8 @@
 
 use super::*;
 
+use tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION;
+use tracedecay_application::git::NativeIntegrationApprovalProjectionV1;
 use tracedecay_application::{
     CancellationSignal, CancellationState, NativeIntegrationApplyRequestV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationContractError,
@@ -32,11 +34,9 @@ use tracedecay_application::{
     NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
     native_integration_surface_operation,
 };
-use tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION;
-use tracedecay_application::git::NativeIntegrationApprovalProjectionV1;
 use tracedecay_domain::{
-    NativeIntegrationApprovalId, NativeIntegrationApprovalV1, NativeIntegrationPreviewDispositionV1,
-    NativeIntegrationPreviewId,
+    NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
+    NativeIntegrationPreviewDispositionV1, NativeIntegrationPreviewId,
 };
 use tracedecay_store::NativeIntegrationStore;
 
@@ -147,11 +147,10 @@ async fn execute_with_owner(
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
             let resolution = snapshot.into_resolution_request(observed_at);
-            let outcome = tokio::task::spawn_blocking(move || {
-                owner.stack_snapshot(resolution, &signal)
-            })
-            .await
-            .map_err(|_| unavailable_native_integration())?;
+            let outcome =
+                tokio::task::spawn_blocking(move || owner.stack_snapshot(resolution, &signal))
+                    .await
+                    .map_err(|_| unavailable_native_integration())?;
             match outcome {
                 Ok(outcome) => NativeIntegrationSurfaceResultV1::from_stack_resolution(&outcome)
                     .map_err(|_| invalid()),
@@ -242,10 +241,9 @@ async fn execute_with_owner(
                         NativeIntegrationSurfaceUnavailableV1::Denied,
                     ));
                 }
-                let pending_digest = tracedecay_domain::canonical_sha256(
-                    &"pending native integration approval",
-                )
-                .map_err(|_| invalid_native_integration_request())?;
+                let pending_digest =
+                    tracedecay_domain::canonical_sha256(&"pending native integration approval")
+                        .map_err(|_| invalid_native_integration_request())?;
                 let approval = NativeIntegrationApprovalV1 {
                     approval_id,
                     preview_id: preview.preview_id.clone(),
@@ -323,11 +321,10 @@ async fn execute_with_owner(
             let application_request = NativeIntegrationStatusRequestV1 {
                 transaction_id: status.transaction_id,
             };
-            let outcome = tokio::task::spawn_blocking(move || {
-                owner.service().status(application_request)
-            })
-            .await
-            .map_err(|_| unavailable_native_integration())?;
+            let outcome =
+                tokio::task::spawn_blocking(move || owner.service().status(application_request))
+                    .await
+                    .map_err(|_| unavailable_native_integration())?;
             match outcome {
                 Ok(Some(status)) => Ok(NativeIntegrationSurfaceResultV1::Status(
                     NativeIntegrationStatusProjectionV1::from(&status),
@@ -343,11 +340,10 @@ async fn execute_with_owner(
                 transaction_id: cancel.transaction_id,
                 requested_at: observed_at,
             };
-            let outcome = tokio::task::spawn_blocking(move || {
-                owner.service().cancel(application_request)
-            })
-            .await
-            .map_err(|_| unavailable_native_integration())?;
+            let outcome =
+                tokio::task::spawn_blocking(move || owner.service().cancel(application_request))
+                    .await
+                    .map_err(|_| unavailable_native_integration())?;
             match outcome {
                 Ok(disposition) => Ok(NativeIntegrationSurfaceResultV1::from_cancel(disposition)),
                 Err(error) => surface_result_from_contract_error(error),
@@ -362,14 +358,12 @@ fn surface_result_from_contract_error(
     error: NativeIntegrationContractError,
 ) -> Result<NativeIntegrationSurfaceResultV1, ApplicationProblem> {
     match error {
-        NativeIntegrationContractError::Contract(_) => {
-            Err(invalid_native_integration_request())
-        }
-        NativeIntegrationContractError::Port(error) => Ok(
-            NativeIntegrationSurfaceResultV1::unavailable(
+        NativeIntegrationContractError::Contract(_) => Err(invalid_native_integration_request()),
+        NativeIntegrationContractError::Port(error) => {
+            Ok(NativeIntegrationSurfaceResultV1::unavailable(
                 NativeIntegrationSurfaceUnavailableV1::from(&error),
-            ),
-        ),
+            ))
+        }
     }
 }
 

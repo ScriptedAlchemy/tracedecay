@@ -100,23 +100,19 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         let transaction = self.begin_write().await?;
         let outcome = async {
             let transaction_id = &record.status.transaction_id;
-            if let Some(existing) = read_record_from_transaction(&transaction, transaction_id)
-                .await?
+            if let Some(existing) =
+                read_record_from_transaction(&transaction, transaction_id).await?
             {
                 if existing.preview != record.preview || existing.approval != record.approval {
                     return Err(NativeIntegrationStoreError::TransactionConflict);
                 }
                 return Ok(match existing.terminal_receipt {
                     Some(receipt) => NativeIntegrationBeginResultV1::Replay(Box::new(receipt)),
-                    None => {
-                        NativeIntegrationBeginResultV1::RecoveryRequired(Box::new(existing))
-                    }
+                    None => NativeIntegrationBeginResultV1::RecoveryRequired(Box::new(existing)),
                 });
             }
 
-            if approval_consumed_in_transaction(&transaction, &record.approval.approval_id)
-                .await?
-            {
+            if approval_consumed_in_transaction(&transaction, &record.approval.approval_id).await? {
                 return Err(NativeIntegrationStoreError::ApprovalConflict);
             }
             if let Some(issued) =
@@ -213,12 +209,8 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
             if !status_transition_matches(&current, expected_phase_revision, &replacement) {
                 return Err(NativeIntegrationStoreError::StatusConflict);
             }
-            let updated = update_status_row(
-                &transaction,
-                &replacement,
-                expected_phase_revision,
-            )
-            .await?;
+            let updated =
+                update_status_row(&transaction, &replacement, expected_phase_revision).await?;
             if updated != 1 {
                 return Err(NativeIntegrationStoreError::StatusConflict);
             }
@@ -239,11 +231,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
     ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1> {
         transaction_id.validate().map_err(invalid_domain)?;
         receipt.validate().map_err(invalid_domain)?;
-        let Some(outcome_code) = receipt
-            .status
-            .terminal_outcome
-            .map(terminal_outcome_code)
-        else {
+        let Some(outcome_code) = receipt.status.terminal_outcome.map(terminal_outcome_code) else {
             return Err(NativeIntegrationStoreError::ReceiptConflict);
         };
         if receipt.status.transaction_id != *transaction_id {
@@ -261,11 +249,8 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
                     Err(NativeIntegrationStoreError::ReceiptConflict)
                 };
             }
-            if !status_transition_matches(
-                &record.status,
-                expected_phase_revision,
-                &receipt.status,
-            ) {
+            if !status_transition_matches(&record.status, expected_phase_revision, &receipt.status)
+            {
                 return Err(NativeIntegrationStoreError::StatusConflict);
             }
             if receipt.status.terminal_outcome
@@ -279,12 +264,8 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
                 )
                 .await?;
             }
-            let updated = update_status_row(
-                &transaction,
-                &receipt.status,
-                expected_phase_revision,
-            )
-            .await?;
+            let updated =
+                update_status_row(&transaction, &receipt.status, expected_phase_revision).await?;
             if updated != 1 {
                 return Err(NativeIntegrationStoreError::StatusConflict);
             }
@@ -382,9 +363,7 @@ impl<'db> GlobalDbNativeIntegrationStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    async fn begin_write(
-        &self,
-    ) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
+    async fn begin_write(&self) -> NativeIntegrationStoreResult<GitMutationWriteTransaction<'_>> {
         self.db.begin_write().await.map_err(unavailable)
     }
 
@@ -434,10 +413,7 @@ where
             "SELECT preview_json FROM native_integration_previews
              WHERE preview_id = ?1 OR preview_digest = ?2
              ORDER BY preview_id",
-            params![
-                preview.preview_id.as_str(),
-                preview.preview_digest.as_str(),
-            ],
+            params![preview.preview_id.as_str(), preview.preview_digest.as_str(),],
         )
         .await
         .map_err(unavailable)?;
@@ -754,11 +730,7 @@ where
                 (repository_id, transaction_id, active, created_at)
              VALUES (?1, ?2, 1, ?3)
              ON CONFLICT(repository_id, transaction_id) DO NOTHING",
-            params![
-                repository_id.as_str(),
-                transaction_id.as_str(),
-                created_at,
-            ],
+            params![repository_id.as_str(), transaction_id.as_str(), created_at,],
         )
         .await
         .map(|_| ())

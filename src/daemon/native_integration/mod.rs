@@ -8,6 +8,4 @@
 mod registry;
 mod store;
 
-pub(crate) use registry::{
-    DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry,
-};
+pub(crate) use registry::{DaemonNativeIntegrationOwner, DaemonNativeIntegrationServiceRegistry};
