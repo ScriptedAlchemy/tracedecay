@@ -912,10 +912,20 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
     let before_refusal = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
     let refused = cli.run(&["uninstall", "--agent", case.id]);
     assert!(!refused.status.success());
+    // The plugin is still natively registered, so the refusal must name the
+    // host-owned removal that has to happen first — not an unrelated
+    // "capability unsupported" or "cache is stale" state.
     assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("unsupported"),
+        String::from_utf8_lossy(&refused.stderr).contains("plugin removal"),
         "Claude native-removal boundary was not reported truthfully: {}",
         String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        cli.home
+            .path()
+            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json")
+            .is_file(),
+        "a refused uninstall must not remove the staged source the live registration references"
     );
     assert_eq!(
         serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
