@@ -452,6 +452,8 @@ pub(super) struct StoreAdministration {
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
     project_server_retirements:
         Arc<tokio::sync::Mutex<Vec<project_retirement::ProjectServerRetirement>>>,
+    pub(super) retained_project_shutdown_owners:
+        Arc<tokio::sync::Mutex<Vec<RetainedProjectShutdownOwner>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
@@ -474,6 +476,14 @@ pub(super) struct StoreAdministration {
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
 }
 
+/// A project server whose shutdown attempt has not completed cleanly yet.
+/// Retained across shutdown retries so a second pass re-drives exactly the
+/// unfinished servers instead of losing them or re-shutting clean ones.
+pub(super) struct RetainedProjectShutdownOwner {
+    pub(super) server: Arc<crate::mcp::McpServer>,
+    pub(super) status: super::shutdown_coordination::ShutdownStatus,
+}
+
 impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
@@ -482,6 +492,7 @@ impl Default for StoreAdministration {
             gate: Arc::new(StoreWriterGates::default()),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             project_server_retirements: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            retained_project_shutdown_owners: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),

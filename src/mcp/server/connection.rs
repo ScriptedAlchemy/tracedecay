@@ -5,19 +5,6 @@ use super::*;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum McpShutdownStatus {
-    Clean,
-    TimedOut,
-    Failed(String),
-}
-
-impl McpShutdownStatus {
-    fn is_clean(&self) -> bool {
-        matches!(self, Self::Clean)
-    }
-}
-
 pub(in crate::mcp::server) struct McpShutdownCompletion {
     state: Arc<McpShutdownState>,
 }
@@ -25,7 +12,7 @@ pub(in crate::mcp::server) struct McpShutdownCompletion {
 #[derive(Default)]
 struct McpShutdownState {
     running: AtomicBool,
-    terminal: std::sync::Mutex<Option<McpShutdownStatus>>,
+    terminal: std::sync::Mutex<Option<crate::daemon::ShutdownStatus>>,
     coordinator_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: tokio::sync::Notify,
 }
@@ -51,9 +38,9 @@ impl McpShutdownCompletion {
         &self,
         deadline: tokio::time::Instant,
         work: Work,
-    ) -> McpShutdownStatus
+    ) -> crate::daemon::ShutdownStatus
     where
-        Work: std::future::Future<Output = McpShutdownStatus> + Send + 'static,
+        Work: std::future::Future<Output = crate::daemon::ShutdownStatus> + Send + 'static,
     {
         let mut work = Some(work);
         loop {
@@ -97,11 +84,11 @@ impl McpShutdownCompletion {
             }
 
             let Some(work) = work.take() else {
-                self.state.finish(McpShutdownStatus::Failed(
+                self.state.finish(crate::daemon::ShutdownStatus::Failed(
                     "MCP shutdown coordinator lost its work future".to_owned(),
                 ));
                 drop(coordinator_task);
-                return McpShutdownStatus::Failed(
+                return crate::daemon::ShutdownStatus::Failed(
                     "MCP shutdown coordinator lost its work future".to_owned(),
                 );
             };
@@ -111,7 +98,7 @@ impl McpShutdownCompletion {
                 let runner = tokio::spawn(work);
                 let status = match runner.await {
                     Ok(status) => status,
-                    Err(error) => McpShutdownStatus::Failed(error.to_string()),
+                    Err(error) => crate::daemon::ShutdownStatus::Failed(error.to_string()),
                 };
                 state.finish(status);
             });
@@ -137,7 +124,7 @@ impl McpShutdownCompletion {
         if let Err(error) = result {
             tracing::error!(%error, "MCP shutdown coordinator task failed after receipt");
             self.state
-                .finish(McpShutdownStatus::Failed(error.to_string()));
+                .finish(crate::daemon::ShutdownStatus::Failed(error.to_string()));
         }
     }
 
@@ -160,7 +147,7 @@ impl McpShutdownCompletion {
         }
     }
 
-    fn terminal_status(&self) -> Option<McpShutdownStatus> {
+    fn terminal_status(&self) -> Option<crate::daemon::ShutdownStatus> {
         self.state
             .terminal
             .lock()
@@ -171,7 +158,7 @@ impl McpShutdownCompletion {
     async fn wait_for_terminal_status_until(
         &self,
         deadline: tokio::time::Instant,
-    ) -> McpShutdownStatus {
+    ) -> crate::daemon::ShutdownStatus {
         loop {
             if let Some(status) = self.terminal_status() {
                 self.wait_for_finished_coordinator().await;
@@ -181,7 +168,7 @@ impl McpShutdownCompletion {
             if !self.state.running.load(Ordering::Acquire) {
                 self.wait_for_finished_coordinator().await;
                 self.join_finished_coordinator().await;
-                return McpShutdownStatus::TimedOut;
+                return crate::daemon::ShutdownStatus::TimedOut;
             }
             let notified = self.state.changed.notified();
             tokio::pin!(notified);
@@ -194,18 +181,18 @@ impl McpShutdownCompletion {
             if !self.state.running.load(Ordering::Acquire) {
                 self.wait_for_finished_coordinator().await;
                 self.join_finished_coordinator().await;
-                return McpShutdownStatus::TimedOut;
+                return crate::daemon::ShutdownStatus::TimedOut;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return McpShutdownStatus::TimedOut;
+                return crate::daemon::ShutdownStatus::TimedOut;
             }
         }
     }
 }
 
 impl McpShutdownState {
-    fn finish(&self, status: McpShutdownStatus) {
-        if status != McpShutdownStatus::TimedOut {
+    fn finish(&self, status: crate::daemon::ShutdownStatus) {
+        if status != crate::daemon::ShutdownStatus::TimedOut {
             *self
                 .terminal
                 .lock()
@@ -890,13 +877,19 @@ impl McpServer {
         }
     }
 
-    async fn shutdown_until(self: &Arc<Self>, deadline: tokio::time::Instant) -> McpShutdownStatus {
+    pub(crate) async fn shutdown_until(
+        self: &Arc<Self>,
+        deadline: tokio::time::Instant,
+    ) -> crate::daemon::ShutdownStatus {
         self.shutdown
             .coordinate_until(deadline, Arc::clone(self).run_shutdown(deadline))
             .await
     }
 
-    async fn run_shutdown(self: Arc<Self>, deadline: tokio::time::Instant) -> McpShutdownStatus {
+    async fn run_shutdown(
+        self: Arc<Self>,
+        deadline: tokio::time::Instant,
+    ) -> crate::daemon::ShutdownStatus {
         let mut failures = self.shutdown_background_tasks_until(deadline).await;
 
         let uptime = self.stats.started_at.elapsed();
@@ -960,9 +953,9 @@ impl McpServer {
                 uptime_secs = uptime.as_secs(),
                 "MCP server shutdown complete"
             );
-            McpShutdownStatus::Clean
+            crate::daemon::ShutdownStatus::Clean
         } else {
-            McpShutdownStatus::Failed(failures.join("; "))
+            crate::daemon::ShutdownStatus::Failed(failures.join("; "))
         }
     }
 
@@ -1247,7 +1240,7 @@ mod shutdown_tests {
                         first_attempts.fetch_add(1, Ordering::AcqRel);
                         first_entered.notify_one();
                         let _ = released.await;
-                        McpShutdownStatus::Clean
+                        crate::daemon::ShutdownStatus::Clean
                     },
                 )
                 .await
@@ -1273,7 +1266,7 @@ mod shutdown_tests {
             )
             .await;
 
-        assert_eq!(retry, McpShutdownStatus::Clean);
+        assert_eq!(retry, crate::daemon::ShutdownStatus::Clean);
         assert_eq!(attempts.load(Ordering::Acquire), 1);
     }
 
@@ -1298,7 +1291,7 @@ mod shutdown_tests {
                         first_attempts.fetch_add(1, Ordering::AcqRel);
                         first_entered.notify_one();
                         let _ = released.await;
-                        McpShutdownStatus::Clean
+                        crate::daemon::ShutdownStatus::Clean
                     },
                 )
                 .await
@@ -1307,7 +1300,7 @@ mod shutdown_tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(
             first.await.expect("first timed-out shutdown"),
-            McpShutdownStatus::TimedOut
+            crate::daemon::ShutdownStatus::TimedOut
         );
         assert!(
             !owner_dropped.load(Ordering::Acquire),
@@ -1331,7 +1324,7 @@ mod shutdown_tests {
 
         assert_eq!(
             retry.await.expect("retry shutdown"),
-            McpShutdownStatus::Clean
+            crate::daemon::ShutdownStatus::Clean
         );
         assert_eq!(attempts.load(Ordering::Acquire), 1);
         assert!(owner_dropped.load(Ordering::Acquire));

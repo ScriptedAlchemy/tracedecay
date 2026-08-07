@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use super::super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus};
 use super::{StoreAdministration, StoreOwnerKey};
 
 pub(super) struct ProjectServerRetirement {
@@ -13,6 +14,13 @@ struct ProjectServerRetirementFinalizer(tokio::sync::watch::Sender<bool>);
 impl Drop for ProjectServerRetirementFinalizer {
     fn drop(&mut self) {
         self.0.send_replace(true);
+    }
+}
+
+fn retirement_shutdown_owner_label(owner: &StoreOwnerKey) -> String {
+    match &owner.project_id {
+        Some(project_id) => format!("project_server_retirement[{project_id}]"),
+        None => format!("project_server_retirement[{}]", owner.store_root.display()),
     }
 }
 
@@ -63,6 +71,49 @@ impl StoreAdministration {
             .lock()
             .await
             .retain(|retirement| !*retirement.completion.borrow());
+    }
+
+    /// Bounded retirement join for daemon shutdown: every tracked retirement
+    /// is awaited up to `deadline` and reported under its owner's identity, so
+    /// a hung retirement surfaces as a typed timeout instead of a silent hang.
+    pub(crate) async fn join_project_server_retirements_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> ShutdownTaskReceipt {
+        let completions =
+            match tokio::time::timeout_at(deadline, self.project_server_retirements.lock()).await {
+                Ok(retirements) => retirements
+                    .iter()
+                    .map(|retirement| {
+                        (
+                            retirement_shutdown_owner_label(&retirement.owner),
+                            retirement.completion.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                Err(_) => {
+                    return ShutdownTaskReceipt::timed_out("project_server_retirement_registry");
+                }
+            };
+        let mut receipt = ShutdownTaskReceipt::default();
+        for (owner, completion) in completions {
+            let status = match tokio::time::timeout_at(
+                deadline,
+                wait_for_project_server_retirement(completion),
+            )
+            .await
+            {
+                Ok(()) => ShutdownTaskStatus::Clean,
+                Err(_) => ShutdownTaskStatus::TimedOut,
+            };
+            receipt.outcomes.push(ShutdownTaskOutcome { owner, status });
+        }
+        if let Ok(mut retirements) =
+            tokio::time::timeout_at(deadline, self.project_server_retirements.lock()).await
+        {
+            retirements.retain(|retirement| !*retirement.completion.borrow());
+        }
+        receipt
     }
 
     pub(super) async fn settle_project_server_retirements_for_project(

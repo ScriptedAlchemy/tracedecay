@@ -186,12 +186,16 @@ pub(crate) mod project_open_owners;
 pub(crate) mod query_authority_provider;
 mod semantic_activation_reconciler;
 mod semantic_evaluation;
+mod shutdown_coordination;
+mod shutdown_orchestration;
+mod store_shutdown;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
 pub use core_handshake::*;
 pub use core_hooks::*;
 pub(crate) use core_lifecycle::*;
+pub(crate) use shutdown_coordination::ShutdownStatus;
 pub use core_logging::*;
 pub use core_proxy::*;
 mod git_transactions;
@@ -290,8 +294,6 @@ use project_open_handshake::{
 mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
-#[cfg(not(unix))]
-use project_open_orchestration::shutdown_portable_project_open_tasks;
 use project_open_orchestration::{
     durable_enrollment_resolves_existing_store, ensure_registered_project_route,
 };
@@ -350,8 +352,6 @@ pub(crate) use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
     parse_daemon_invocation_request,
 };
-#[cfg(all(unix, test))]
-use bootstrap::drain_client_tasks;
 pub use bootstrap::run_foreground;
 pub(crate) use service::invocation::{
     BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,

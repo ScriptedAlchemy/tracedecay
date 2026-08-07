@@ -11,6 +11,9 @@
 use super::*;
 
 #[cfg(unix)]
+mod shutdown;
+
+#[cfg(unix)]
 #[derive(Clone, Default)]
 pub(super) struct DaemonEngine {
     pub(super) lifecycle: DaemonLifecycle,
@@ -847,74 +850,5 @@ impl DaemonEngine {
                 }
             })
         })
-    }
-
-    pub(super) async fn shutdown_background_tasks(&self) {
-        self.shutdown_project_open_tasks().await;
-        self.invocation.shutdown().await;
-        self.store_administration
-            .session_temporal_refresh_schedulers()
-            .shutdown()
-            .await;
-        self.shutdown_automation_schedulers().await;
-        self.shutdown_memory_repair_schedulers().await;
-        self.store_administration
-            .shutdown_retirement_reapers()
-            .await;
-        self.store_administration.shutdown_session_sync().await;
-        self.store_administration
-            .shutdown_host_admission_replay()
-            .await;
-
-        self.maintenance_coordinator.shutdown().await;
-        let watcher_shutdown = self.git_watcher.shutdown().await;
-        if !watcher_shutdown.is_clean() {
-            log_daemon_event(
-                "git_watch_shutdown_incomplete",
-                &[("failures", watcher_shutdown.failures().len().to_string())],
-            );
-        }
-        if let Some(task) = self.pr_autotrack_task.lock().await.take() {
-            task.shutdown().await;
-        }
-    }
-
-    pub(super) async fn shutdown_servers(&self) {
-        // Fence Git mutation admission and join every transaction store actor
-        // before project servers close, so no native Git work outlives the
-        // stores it journals into.
-        match self
-            .store_administration
-            .git_index_transaction_services()
-            .shutdown()
-            .await
-        {
-            Ok(receipt) => log_daemon_event(
-                "daemon_shutdown",
-                &[
-                    ("outcome", "git_transactions_joined".to_string()),
-                    ("services_closed", receipt.services_closed.to_string()),
-                    (
-                        "store_actors_joined",
-                        receipt.store_actors_joined.to_string(),
-                    ),
-                ],
-            ),
-            Err(error) => log_daemon_event(
-                "daemon_shutdown",
-                &[
-                    ("outcome", "git_transaction_shutdown_failed".to_string()),
-                    ("error", format!("{error:?}")),
-                ],
-            ),
-        }
-        shutdown_project_servers(&self.store_administration).await;
-    }
-
-    #[cfg(test)]
-    pub(super) async fn shutdown_all(&self) {
-        self.lifecycle.begin_draining();
-        self.shutdown_background_tasks().await;
-        self.shutdown_servers().await;
     }
 }

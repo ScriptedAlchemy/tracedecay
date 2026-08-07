@@ -6,7 +6,6 @@ use crate::daemon::{ProjectServerRequirement, project_server_requirement};
 #[cfg(unix)]
 use crate::errors::TraceDecayError;
 use crate::mcp::JsonRpcResponse;
-#[cfg(unix)]
 use std::process::Command;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -141,7 +140,6 @@ fn hook_event_waits_for_registered_project_authority_publication() {
     );
 }
 
-#[cfg(unix)]
 pub(super) fn run_git(root: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
@@ -2197,7 +2195,12 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         1,
         "portable initialize warmup must singleflight one project open"
     );
-    super::super::shutdown_project_servers(&store_administration).await;
+    let receipt = super::super::shutdown_project_servers(
+        tokio::time::Instant::now() + super::super::DAEMON_SHUTDOWN_DEADLINE,
+        &store_administration,
+    )
+    .await;
+    assert!(receipt.is_clean(), "{:?}", receipt.outcomes);
 }
 
 #[cfg(unix)]
