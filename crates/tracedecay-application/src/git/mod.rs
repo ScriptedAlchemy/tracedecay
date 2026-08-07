@@ -4,6 +4,7 @@ mod catalog;
 #[cfg(feature = "native-git")]
 mod historical_blob;
 mod native_integration;
+mod native_integration_surface;
 mod public_wire;
 mod read;
 mod surface_catalog;
@@ -21,6 +22,19 @@ pub use native_integration::{
     NativeIntegrationService, NativeIntegrationStackResolutionOutcomeV1,
     NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
     NativeIntegrationStatusRequestV1,
+};
+pub use native_integration_surface::{
+    NATIVE_INTEGRATION_APPLY_OPERATION, NATIVE_INTEGRATION_CANCEL_OPERATION,
+    NATIVE_INTEGRATION_PREFLIGHT_OPERATION, NATIVE_INTEGRATION_STACK_SNAPSHOT_OPERATION,
+    NATIVE_INTEGRATION_STATUS_OPERATION, NativeIntegrationApplySurfaceRequest,
+    NativeIntegrationCancelSurfaceRequest, NativeIntegrationCancellationProjectionV1,
+    NativeIntegrationEvidenceRevisionsWireV1, NativeIntegrationPreflightSurfaceRequest,
+    NativeIntegrationPreviewProjectionV1, NativeIntegrationReceiptProjectionV1,
+    NativeIntegrationSnapshotProjectionV1, NativeIntegrationStackSnapshotService,
+    NativeIntegrationStackSnapshotSurfaceRequest, NativeIntegrationStatusProjectionV1,
+    NativeIntegrationStatusSurfaceRequest, NativeIntegrationSurfaceResultV1,
+    NativeIntegrationSurfaceUnavailableV1, native_integration_surface_catalog_contribution,
+    native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
 pub use public_wire::{
     GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,

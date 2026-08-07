@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{
@@ -16,7 +17,7 @@ use super::{
 const BRANCH_STACK_REVISION_DIGEST_DOMAIN_V1: &str = "tracedecay.branch-stack.revision.v1";
 
 /// Monotonic epoch of the worktree inventory frozen into a stack revision.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, JsonSchema, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct WorktreeInventoryEpoch(u64);
 

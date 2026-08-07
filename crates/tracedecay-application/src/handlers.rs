@@ -324,6 +324,7 @@ pub fn application_handler_descriptors()
     descriptors.extend(crate::retrieval::callable_code_handler_descriptors()?);
     descriptors.extend(crate::git::git_index_handler_descriptors()?);
     descriptors.extend(crate::git::git_surface_handler_descriptors()?);
+    descriptors.extend(crate::git::native_integration_surface_handler_descriptors()?);
     descriptors.extend(crate::configuration::configuration_surface_handler_descriptors()?);
     descriptors.extend(crate::context_scout::context_scout_surface_handler_descriptors()?);
     descriptors.extend(crate::feedback::feedback_surface_handler_descriptors()?);

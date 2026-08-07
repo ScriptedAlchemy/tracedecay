@@ -4,6 +4,7 @@
 //! operations, or mutable provider state. Native Git remains authoritative;
 //! persisted values are immutable evidence used for compare-and-set.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -24,7 +25,9 @@ const APPROVAL_DIGEST_DOMAIN: &str = "tracedecay.native-integration.approval.v1"
 const RECEIPT_DIGEST_DOMAIN: &str = "tracedecay.native-integration.receipt.v1";
 
 /// Explicit direction of one integration. Stack meaning is never inferred.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeIntegrationDirectionV1 {
     PropagateDependencyToDependent,
@@ -33,7 +36,9 @@ pub enum NativeIntegrationDirectionV1 {
 }
 
 /// The only Git histories this product operation can create.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MechanicalIntegrationModeV1 {
     FastForward,
@@ -461,7 +466,7 @@ impl NativeIntegrationRepositorySnapshotV1 {
 }
 
 /// Why a preflight cannot authorize apply.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeIntegrationUnavailabilityV1 {
     PartialEvidence,
@@ -477,7 +482,7 @@ pub enum NativeIntegrationUnavailabilityV1 {
 
 /// Truthful preview classification. Only `MechanicalIntegrationEligible`
 /// carries apply-eligible evidence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub enum NativeIntegrationPreviewDispositionV1 {
     MechanicalIntegrationEligible(MechanicalIntegrationModeV1),
@@ -671,7 +676,9 @@ impl NativeIntegrationApprovalV1 {
 }
 
 /// Durable transaction phase. `RefCommitStarted` is the cancellation boundary.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeIntegrationPhaseV1 {
     Prepared,
@@ -682,7 +689,7 @@ pub enum NativeIntegrationPhaseV1 {
 }
 
 /// The only truthful terminal outcomes after recovery.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeIntegrationTerminalOutcomeV1 {
     Committed,

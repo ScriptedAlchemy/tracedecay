@@ -4,6 +4,7 @@
 //! Filesystem paths, free-form object IDs, Git arguments, commit messages,
 //! remotes, and provider mutations are intentionally unrepresentable.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
@@ -20,7 +21,7 @@ use crate::{
 
 /// Caller-visible selection proof. The topology authority resolves it into an
 /// immutable domain selection and never discovers roots or edges.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "binding", rename_all = "snake_case")]
 pub enum NativeIntegrationSelectionBindingV1 {
     DeclaredStackEdge {
