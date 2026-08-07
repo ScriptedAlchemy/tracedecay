@@ -496,7 +496,7 @@ fn finish_reserved_published(
     let replay = replay.clone();
     let locator = reservation.locator.clone();
     {
-        let mut state = database.inner.verified_generations.write().map_err(|_| {
+        let state = database.inner.verified_generations.write().map_err(|_| {
             GraphDbError::unavailable("verified graph generation state lock is poisoned")
         })?;
         if !state.retiring.contains(&locator) {

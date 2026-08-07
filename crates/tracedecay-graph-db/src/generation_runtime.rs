@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use grafeo_core::graph::{Direction, GraphStore};
+use grafeo_core::graph::Direction;
 use tracedecay_store::runtime::GraphRecoveredGenerationDigestV1;
 
 use crate::generation::verify_recovered_generation;

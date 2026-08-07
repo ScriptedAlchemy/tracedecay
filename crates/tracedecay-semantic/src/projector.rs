@@ -14,7 +14,7 @@ use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
     CodeSearchChunkId, CodeSearchChunkV1, ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProjectionReplayReasonV1, canonical_sha256,
+    ProjectionOutcomeV1, ProjectionReplayReasonV1,
 };
 
 use tracedecay_code_index::projection::{
