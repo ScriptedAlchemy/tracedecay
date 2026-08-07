@@ -229,7 +229,9 @@ impl TestProfile {
         );
 
         // Initializing a graph does not register it, and a selector resolves
-        // against the registry of the profile serving the call.
+        // against the registry of the profile serving the call. The result was
+        // previously dropped on the floor, so a fixture whose root the registry
+        // refused produced tests that failed far away from the cause.
         registry
             .upsert_code_project(
                 &project_id_text,
@@ -238,7 +240,14 @@ impl TestProfile {
                 None,
                 tracedecay::branch::current_branch(&project_root).as_deref(),
             )
-            .await;
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "register fixture project '{}' at {}: {error}",
+                    project_id_text,
+                    project_root.display()
+                )
+            });
 
         RegisteredProject {
             profile: self.clone(),

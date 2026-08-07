@@ -78,14 +78,11 @@ impl DashboardTestRuntimeV1 {
             .initialize(project_root, project_id.clone())
             .await?;
         self.profile_database
+            // Propagated: the registry's own typed refusal/conflict/database
+            // states name why the fixture root was not admitted, which the
+            // former blanket "was rejected by the registry" message erased.
             .upsert_code_project(project_id.as_str(), project_root, None, None, None)
-            .await
-            .ok_or_else(|| TraceDecayError::Config {
-                message: format!(
-                    "dashboard test project '{}' was rejected by the registry",
-                    project_root.display()
-                ),
-            })?;
+            .await?;
         Ok(graph)
     }
 
@@ -129,7 +126,7 @@ impl DashboardTestRuntimeV1 {
         git_common_dir: Option<&Path>,
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
-    ) -> Option<tracedecay_global_db::CodeProjectRecord> {
+    ) -> Result<tracedecay_global_db::CodeProjectRecord> {
         self.profile_database
             .upsert_code_project(
                 project_id,

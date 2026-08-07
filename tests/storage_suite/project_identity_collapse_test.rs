@@ -183,13 +183,29 @@ async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
         .unwrap();
     let ephemeral = TempDir::new().unwrap();
 
-    let registered = db
+    let refusal = db
         .upsert_code_project("proj_ephemeral", ephemeral.path(), None, None, None)
-        .await;
+        .await
+        .expect_err(
+            "a root under the OS temp directory must not become a durable project authority",
+        );
 
+    let (reason_code, retryable, detail) = refusal.project_route_context().unwrap_or_else(|| {
+        panic!("admission refusal must be a typed project-route state: {refusal:?}")
+    });
+    assert_eq!(
+        reason_code,
+        tracedecay::project_registry::EPHEMERAL_PROJECT_ROOT_REASON_CODE,
+        "the refusal must name the ephemeral-root policy, not a generic failure"
+    );
     assert!(
-        registered.is_none(),
-        "a root under the OS temp directory must not become a durable project authority"
+        !retryable,
+        "an ephemeral root is refused by policy, so retrying cannot help"
+    );
+    assert!(
+        detail.contains(&ephemeral.path().display().to_string())
+            || detail.contains("temporary directory"),
+        "the refusal must say which root it refused: {detail}"
     );
     assert!(
         db.project_registry_context_by_alias(ephemeral.path())
@@ -211,12 +227,9 @@ async fn ephemeral_project_root_is_allowed_by_a_hermetic_profile() {
     let project = dir.path().join("fixture-project");
     std::fs::create_dir_all(&project).unwrap();
 
-    assert!(
-        db.upsert_code_project("proj_hermetic", &project, None, None, None)
-            .await
-            .is_some(),
-        "a throwaway profile must still accept throwaway project fixtures"
-    );
+    db.upsert_code_project("proj_hermetic", &project, None, None, None)
+        .await
+        .expect("a throwaway profile must still accept throwaway project fixtures");
 }
 
 #[tokio::test]
