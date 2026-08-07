@@ -765,7 +765,6 @@ async fn memory_store_persists_vectors_and_repairs_missing_vectors() {
         2,
         "fresh and recomputed vectors should be marked as f32 precision with compact blobs"
     );
-
 }
 
 #[tokio::test]

@@ -322,10 +322,7 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
             "retired table {retired} must not be created"
         );
     }
-    for table in [
-        "memory_v2_operation_receipts",
-        "memory_v2_feedback_history",
-    ] {
+    for table in ["memory_v2_operation_receipts", "memory_v2_feedback_history"] {
         assert!(table_exists(&conn, table).await, "missing table {table}");
     }
     for column in [

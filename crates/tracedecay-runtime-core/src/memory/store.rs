@@ -517,7 +517,6 @@ impl<'a> MemoryStore<'a> {
             .map_err(|e| db_error(operation, e))?;
         Ok(())
     }
-
 }
 
 fn merge_entities(content: &str, explicit: &[String]) -> Vec<String> {

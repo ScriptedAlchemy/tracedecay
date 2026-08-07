@@ -540,7 +540,8 @@ fn dashboard_compatibility_memory_bank_from_row(
             row_i64(row, 4, PROJECT_MEMORY_READ_OPERATION)?,
             "dashboard bank bundled fact count",
         )?,
-        row_optional_i64(row, 2, PROJECT_MEMORY_READ_OPERATION)?.and_then(compatibility_legacy_micros),
+        row_optional_i64(row, 2, PROJECT_MEMORY_READ_OPERATION)?
+            .and_then(compatibility_legacy_micros),
     )
     .map_err(Into::into)
 }

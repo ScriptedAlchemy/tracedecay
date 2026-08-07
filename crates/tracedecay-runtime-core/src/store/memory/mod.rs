@@ -526,9 +526,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactCurationBatchV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1> {
         self.project_memory_write(move |transaction| {
-            Box::pin(async move {
-                apply_project_memory_fact_curation_tx(transaction, &request).await
-            })
+            Box::pin(
+                async move { apply_project_memory_fact_curation_tx(transaction, &request).await },
+            )
         })
         .await
     }
@@ -707,9 +707,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         request: ProjectMemoryFactProposalPromotionV1,
     ) -> ProjectMemoryResult<ProjectMemoryFactProposalRecordV1> {
         self.project_memory_write(move |transaction| {
-            Box::pin(async move {
-                promote_project_memory_fact_proposal_tx(transaction, &request).await
-            })
+            Box::pin(
+                async move { promote_project_memory_fact_proposal_tx(transaction, &request).await },
+            )
         })
         .await
     }

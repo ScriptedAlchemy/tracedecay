@@ -35,8 +35,8 @@ use crate::db::engine::params;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tracedecay_domain::{
-    ActorId, Confidence, FactCurationActionV1, FactEventId, FactId,
-    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, PayloadAccessState, UtcMicros,
+    ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
     FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactCurationBatchV1,
@@ -107,8 +107,13 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
             }
             ProjectMemoryFactCurationOperationV1::AddAlias(operation) => {
                 changed.extend(
-                    project_memory_add_entity_alias_tx(transaction, request.owner(), operation, now)
-                        .await?,
+                    project_memory_add_entity_alias_tx(
+                        transaction,
+                        request.owner(),
+                        operation,
+                        now,
+                    )
+                    .await?,
                 );
                 aliases_added = aliases_added.saturating_add(1);
             }

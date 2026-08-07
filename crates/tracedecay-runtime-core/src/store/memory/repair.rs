@@ -27,8 +27,7 @@ use super::envelope::{
 };
 use super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp,
-    compatibility_source_store_id, project_memory_now, row_string, storage_error,
-    storage_message,
+    compatibility_source_store_id, project_memory_now, row_string, storage_error, storage_message,
 };
 use super::projection::project_memory_required_mapping_tx;
 
@@ -244,4 +243,3 @@ pub(super) async fn compatibility_repair_missing_vectors_tx(
     }
     Ok(repaired)
 }
-

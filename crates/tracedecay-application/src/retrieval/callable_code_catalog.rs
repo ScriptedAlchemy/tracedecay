@@ -6,8 +6,8 @@ use tracedecay_tool_catalog::{
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
     ExecutableSchemaAuthority, IdempotencyContract, LifecycleClass, PaginationContract,
     PrivacyClass, ProfileId, ProtocolRevisionRange, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension,
-    ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
+    RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1, SurfaceBindingV1,
     SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
@@ -164,7 +164,11 @@ fn callable_code_executable_schemas(
             >(contribution, CallableCodeOperationKind::$kind)?)
         };
     }
-    add!(ExactOccurrence, ExactOccurrenceRequest, ExactOccurrenceRecord);
+    add!(
+        ExactOccurrence,
+        ExactOccurrenceRequest,
+        ExactOccurrenceRecord
+    );
     add!(
         PhraseSearch,
         PhraseSearchSurfaceRequest,
