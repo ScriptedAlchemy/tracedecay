@@ -2066,6 +2066,27 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     );
     drop(runtime);
 
+    // Store-resolution evidence for the final assertion: a rewritten sentinel
+    // means migrations re-ran, and the stats below distinguish "the same
+    // store file was recreated" (created/length drift on one path) from "a
+    // different store file answered" (the seeded file left untouched).
+    let sessions_db = tracedecay::storage::resolve_project_session_db_path(dir.path())
+        .expect("resolve the project's sessions db path");
+    let stat_sessions_db = |label: &str| match std::fs::metadata(&sessions_db) {
+        Ok(meta) => format!(
+            "{label}: path={} len={} created={:?} modified={:?}",
+            sessions_db.display(),
+            meta.len(),
+            meta.created().ok(),
+            meta.modified().ok(),
+        ),
+        Err(error) => format!(
+            "{label}: path={} unavailable: {error}",
+            sessions_db.display()
+        ),
+    };
+    let seeded_stat = stat_sessions_db("after-seed");
+
     // A second serve session over the same project in the same process. The
     // LCM mutation tools are daemon-internal now, so the status reads are the
     // remaining serve-mode calls that would re-run migrations if the
@@ -2112,6 +2133,8 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             .await
             .unwrap(),
         Some(123),
-        "repeated serve-mode LCM calls must not re-run the LCM migrations"
+        "repeated serve-mode LCM calls must not re-run the LCM migrations\n  \
+         {seeded_stat}\n  {}",
+        stat_sessions_db("after-second-serve"),
     );
 }
