@@ -1339,11 +1339,15 @@ fn split_combined_diff_output(output: Vec<u8>) -> Result<(String, String), GitIn
         .position(|window| window == b"\0\0diff --");
     let (raw, patch) = match separator {
         Some(position) => (&output[..=position], &output[position + 2..]),
-        None if output.is_empty() => (&[][..], &[][..]),
+        // The separator exists only when a patch section follows the raw
+        // records. An empty diff, and a diff whose every entry is unmerged
+        // (native git emits combined raw records and no patch for those),
+        // legitimately carry no patch section.
+        None if !output.starts_with(b"diff --") => (&output[..], &[][..]),
         None => {
             return Err(GitIntelligenceError::MalformedOutput {
                 operation: "diff",
-                detail: "combined raw/patch output had no section separator".to_owned(),
+                detail: "combined output had a patch section but no raw records".to_owned(),
             });
         }
     };
@@ -1371,17 +1375,29 @@ fn parse_diff_raw(text: &str) -> Result<Vec<RawFileEntry>, GitIntelligenceError>
     let mut entries = Vec::new();
     let mut records = text.split('\0').filter(|record| !record.is_empty());
     while let Some(record) = records.next() {
-        let Some(meta) = record.strip_prefix(':') else {
+        let Some(mut meta) = record.strip_prefix(':') else {
             return Err(malformed(format!(
                 "raw record without ':' prefix: {record:?}"
             )));
         };
+        // A merge in progress emits combined records — one extra leading ':'
+        // per additional parent, with parents+1 modes and blobs — for its
+        // unmerged paths (`git diff --raw` during a conflict).
+        let mut parents = 1usize;
+        while let Some(rest) = meta.strip_prefix(':') {
+            parents += 1;
+            meta = rest;
+        }
         let fields: Vec<&str> = meta.split_whitespace().collect();
-        if fields.len() < 5 {
+        if fields.len() < 2 * (parents + 1) + 1 {
             return Err(malformed(format!("short raw record {record:?}")));
         }
-        let status = fields[4];
-        let change = parse_status_char(status.chars().next().unwrap_or('.'));
+        let status = fields[2 * (parents + 1)];
+        let change = if parents > 1 {
+            GitChangeKindV1::Unmerged
+        } else {
+            parse_status_char(status.chars().next().unwrap_or('.'))
+        };
         let is_rename_like = matches!(change, GitChangeKindV1::Renamed | GitChangeKindV1::Copied);
 
         // --raw -z emits `:<meta>\0<path>\0`; for a rename/copy it emits the
@@ -1421,9 +1437,9 @@ fn parse_diff_raw(text: &str) -> Result<Vec<RawFileEntry>, GitIntelligenceError>
             original_path,
             change,
             old_mode: mode(fields[0])?,
-            new_mode: mode(fields[1])?,
-            old_blob: blob(fields[2])?,
-            new_blob: blob(fields[3])?,
+            new_mode: mode(fields[parents])?,
+            old_blob: blob(fields[parents + 1])?,
+            new_blob: blob(fields[2 * parents + 1])?,
         });
     }
     Ok(entries)
@@ -1834,7 +1850,9 @@ mod tests {
             read();
             GIT_SUBPROCESS_COUNT.get()
         };
-        assert_eq!(count(&|| drop(adapter.status().unwrap())), 1);
+        // Status is served natively by the repository authority; no
+        // subprocess is spawned at all since the porcelain cutover.
+        assert_eq!(count(&|| drop(adapter.status().unwrap())), 0);
         assert_eq!(
             count(&|| drop(adapter.diff(&GitDiffScopeV1::WorkingTree).unwrap())),
             1
@@ -1847,6 +1865,8 @@ mod tests {
             count(&|| drop(adapter.history(&GitHistoryRequest::default()).unwrap())),
             0
         );
+        // Path-filtered history is also served by the repository authority's
+        // in-process traversal; no `git log` child remains on any history path.
         assert_eq!(
             count(&|| {
                 drop(
@@ -1858,7 +1878,7 @@ mod tests {
                         .unwrap(),
                 );
             }),
-            1
+            0
         );
         assert_eq!(
             count(&|| {
