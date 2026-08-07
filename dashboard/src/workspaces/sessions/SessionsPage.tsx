@@ -15,6 +15,7 @@ import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
+  assertNever,
   LcmOverviewPayloadV1Schema,
   LcmTimelinePayloadV1Schema,
 } from '../../contracts/generated.ts';
@@ -329,6 +330,8 @@ function timelineTokenLabel(
       return `~${tokenCount.toLocaleString()} tokens · o200k approximate`;
     case 'unavailable':
       return undefined;
+    default:
+      return assertNever(provenance);
   }
 }
 

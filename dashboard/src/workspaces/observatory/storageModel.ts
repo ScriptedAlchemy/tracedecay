@@ -151,6 +151,11 @@ export function growthPresentation(growth: StoreGrowthDimensionV1): DimensionPre
         summary: 'growth could not be determined',
         notes: [growth.reason],
       };
+    // The wire union holds one state today; a variant added to
+    // `StoreGrowthDimensionV1` must fail compilation here rather than
+    // returning a silent `undefined` presentation.
+    default:
+      return assertNever(growth.state);
   }
 }
 

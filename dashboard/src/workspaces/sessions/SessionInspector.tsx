@@ -28,6 +28,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
+  assertNever,
   LcmSessionPayloadV1Schema,
   type LcmMessageV1,
   type LcmSessionPayloadV1,
@@ -498,7 +499,12 @@ function messageTokenLabel(message: LcmMessageV1): string | null {
   switch (message.token_count_provenance) {
     case 'o200k_approximate':
       return `~${message.token_count.toLocaleString()} tokens · o200k approximate`;
-    default:
+    // A count whose provenance the store disclaims is not a measurement to
+    // print. `null` on the wire means the store recorded no provenance at all.
+    case 'unavailable':
+    case null:
       return null;
+    default:
+      return assertNever(message.token_count_provenance);
   }
 }
