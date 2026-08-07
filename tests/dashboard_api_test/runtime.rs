@@ -31,6 +31,13 @@ impl DashboardTestRuntimeV1 {
         let profile_root = profile_root.as_ref();
         let project_root = project_root.as_ref();
         std::fs::create_dir_all(project_root)?;
+        // Production projects gain a repository identity marker at
+        // registration (`lifecycle::registry`); the dashboard resolves its
+        // exact application scope ONCE from that marker when the server state
+        // is built. A fixture without it would serve every scope-bound read
+        // (delivery, explorer, storage telemetry, provider usage) as typed
+        // unavailable, which is not the journey these tests prove.
+        initialize_fixture_repository_identity(project_root, &project_id)?;
         tracedecay::storage::write_enrollment_marker(
             project_root,
             &tracedecay::storage::EnrollmentMarker {
@@ -415,4 +422,42 @@ async fn load_registered_raw_message(
     tracedecay::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
         .await
         .expect("dashboard test raw-message load must not hide database or receipt failure")
+}
+
+/// Gives the fixture root the same registered-repository identity a
+/// production project gains at registration: a real git repository whose
+/// common directory carries the authoritative repository identity marker.
+/// The dashboard's exact scope resolution (and every read bound to it)
+/// requires both; without them the fixture would only ever exercise the
+/// typed-unavailable paths.
+fn initialize_fixture_repository_identity(
+    project_root: &Path,
+    project_id: &ProjectId,
+) -> Result<()> {
+    if !project_root.join(".git").exists() {
+        let output = std::process::Command::new(crate::common::git_program())
+            .args(["init", "-b", "main"])
+            .current_dir(project_root)
+            .output()
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("dashboard fixture git init failed to spawn: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "dashboard fixture git init failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+            });
+        }
+    }
+    if !tracedecay::storage::write_repository_identity_marker(project_root, project_id.as_str())? {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "dashboard fixture repository identity marker was not written for '{}'",
+                project_root.display()
+            ),
+        });
+    }
+    Ok(())
 }

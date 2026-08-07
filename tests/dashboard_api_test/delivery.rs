@@ -7,19 +7,11 @@ fn delivery_overview_serves_real_git_reads_and_typed_missing_authorities() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
+        // The fixture root is already a registered git repository carrying
+        // the authoritative identity marker; the server resolved its exact
+        // scope from it at startup. This test only adds real history.
         let mut fixture = start_dashboard_fixture_without_memory().await;
         let project_root = fixture.project_root.clone();
-        git(&project_root, &["init", "-b", "main"]);
-        tracedecay::storage::write_repository_identity_marker(&project_root, "dashboard_fixture")
-            .unwrap_or_else(|error| panic!("write delivery repository identity: {error}"));
-        write_enrollment_marker(
-            &project_root,
-            &EnrollmentMarker {
-                project_id: "dashboard_fixture".to_owned(),
-                storage_mode: StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap_or_else(|error| panic!("enroll delivery fixture: {error}"));
         write_file(
             &project_root.join("src/lib.rs"),
             "pub fn delivery_fixture() -> &'static str { \"initial\" }\n",

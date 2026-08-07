@@ -344,9 +344,15 @@ fn managed_skills_are_dashboard_controllable_with_explicit_approval() {
         let claude_md = home.join(".claude/CLAUDE.md");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         std::fs::write(&claude_md, "# Claude rules\n").unwrap();
+        // A global Claude install is detected through the deployed plugin
+        // marketplace manifest (the `tracedecay install` signal), not through
+        // a raw mcpServers entry.
+        let marketplace_manifest =
+            home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json");
+        std::fs::create_dir_all(marketplace_manifest.parent().unwrap()).unwrap();
         std::fs::write(
-            home.join(".claude.json"),
-            r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
+            &marketplace_manifest,
+            r#"{"name":"tracedecay","owner":{"name":"tracedecay"},"plugins":[]}"#,
         )
         .unwrap();
         let local_claude_md = project_root.join(".claude/CLAUDE.md");
