@@ -7,8 +7,9 @@ use tracedecay_application::{
     ObservabilityFuture, now_micros,
 };
 use tracedecay_domain::{
-    AdoptionEligibilityObservedV1, AdoptionOutcomeLinkedV1, CoverageStateV1,
-    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
+    AdoptionEligibilityObservedV1, AdoptionOutcomeLinkedV1, ContextOutcomeObservedV1,
+    CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
+    ObservabilityTerminalResultV1,
 };
 use tracedecay_global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
 
@@ -248,6 +249,130 @@ fn accumulate(cells: &mut BTreeMap<CellKey, CellAccumulator>, event: &Observabil
             )
             .observe(event, (1, 1, answered, 0, 0, answered as f64));
         }
+        ObservabilityPayloadV1::RetrievalPlanner(value) => {
+            // Requested lanes are the denominator; admitted lanes are the
+            // numerator. A deferred lane is a real planner decision, so it
+            // lowers the numerator without becoming censored or unknown.
+            let requested = value.requested_lanes.len() as u64;
+            let admitted = value.admitted_lanes.len() as u64;
+            accumulator(
+                cells,
+                CellKey {
+                    metric: AggregateShareMetricV1::RetrievalLanesAdmitted,
+                    unit: AggregateShareUnitV1::Events,
+                    capability: AggregateCapabilityV1::Retrieval,
+                },
+            )
+            .observe(
+                event,
+                (requested, requested, admitted, 0, 0, admitted as f64),
+            );
+        }
+        ObservabilityPayloadV1::Retriever(value) => {
+            // Returned candidates are the denominator a lane can be held to.
+            // Its requested budget is not: an under-filled budget is a lane
+            // finding less, not a lane failing.
+            let returned = value.returned_candidates;
+            let unique = value.unique_contributions;
+            accumulator(
+                cells,
+                CellKey {
+                    metric: AggregateShareMetricV1::RetrieverUniqueContributions,
+                    unit: AggregateShareUnitV1::Events,
+                    capability: AggregateCapabilityV1::Retrieval,
+                },
+            )
+            .observe(event, (returned, returned, unique, 0, 0, unique as f64));
+        }
+        ObservabilityPayloadV1::RetrievalSynthesis(value) => {
+            accumulator(
+                cells,
+                CellKey {
+                    metric: AggregateShareMetricV1::RetrievalContextSelected,
+                    unit: AggregateShareUnitV1::Events,
+                    capability: AggregateCapabilityV1::Retrieval,
+                },
+            )
+            .observe(
+                event,
+                (
+                    value.candidate_count,
+                    value.candidate_count,
+                    value.context_count,
+                    0,
+                    0,
+                    value.context_count as f64,
+                ),
+            );
+        }
+        ObservabilityPayloadV1::RetrievalSource(value) => {
+            // Denied sources are censored, unresolved ones are unknown, and
+            // neither is allowed to collapse into "searched and found
+            // nothing". Both keep the cell out of `Known` coverage.
+            accumulator(
+                cells,
+                CellKey {
+                    metric: AggregateShareMetricV1::RetrievalSourcesSearched,
+                    unit: AggregateShareUnitV1::Events,
+                    capability: AggregateCapabilityV1::Retrieval,
+                },
+            )
+            .observe(
+                event,
+                (
+                    value.eligible,
+                    value.eligible,
+                    value.observed,
+                    value.denied,
+                    value.unknown,
+                    value.observed as f64,
+                ),
+            );
+        }
+        ObservabilityPayloadV1::ContextOutcome(value) => {
+            accumulate_context_outcome(cells, event, value);
+        }
+        ObservabilityPayloadV1::RetrievalAblation(value) => {
+            // A share cell must be denominated in a unit the packet can
+            // publish. Ablations measured in seconds or bytes have no share
+            // unit, so they stay local detail rather than being rescaled into
+            // a unit they were not measured in.
+            if let Some(unit) = match value.unit.as_str() {
+                "ratio" => Some(AggregateShareUnitV1::Ratio),
+                "microseconds" => Some(AggregateShareUnitV1::Microseconds),
+                "events" => Some(AggregateShareUnitV1::Events),
+                _ => None,
+            } {
+                accumulator(
+                    cells,
+                    CellKey {
+                        metric: AggregateShareMetricV1::RetrievalAblationDelta,
+                        unit,
+                        capability: AggregateCapabilityV1::Retrieval,
+                    },
+                )
+                .observe(
+                    event,
+                    (1, 1, 1, 0, 0, value.candidate_value - value.baseline_value),
+                );
+            }
+        }
+        ObservabilityPayloadV1::AnalyticsConsent(value) => {
+            // Opting out stops egress. A transition that leaves sharing
+            // unauthorized is a local receipt only and never contributes a
+            // shared cell, even though the export itself is authorized.
+            if value.current == tracedecay_domain::AnalyticsModeV1::AggregateShare {
+                accumulator(
+                    cells,
+                    CellKey {
+                        metric: AggregateShareMetricV1::AnalyticsConsentChanges,
+                        unit: AggregateShareUnitV1::Events,
+                        capability: AggregateCapabilityV1::Analytics,
+                    },
+                )
+                .observe(event, (1, 1, 1, 0, 0, 1.0));
+            }
+        }
         ObservabilityPayloadV1::AdoptionEligibility(value) => {
             accumulate_adoption_eligibility(cells, event, value);
         }
@@ -333,6 +458,47 @@ fn accumulate_telemetry_drop(
         },
     )
     .observe(event, (1, 1, 1, 0, 0, dropped as f64));
+}
+
+/// One supplied context packet, resolved into exactly one of completed,
+/// censored, or unknown.
+///
+/// Only an independently observed verified use may enter the numerator: Plan
+/// 26 forbids a worker self-report from producing an accepted outcome. Every
+/// other resolved linkage (supplied, cited, no use observed) is a real
+/// observation that simply is not a verified use, so it stays in the
+/// denominator without inflating the numerator or being reported as unknown.
+fn accumulate_context_outcome(
+    cells: &mut BTreeMap<CellKey, CellAccumulator>,
+    event: &ObservabilityEnvelopeV1,
+    value: &ContextOutcomeObservedV1,
+) {
+    let (completed, censored, unknown) = if value.censored {
+        (0, 1, 0)
+    } else if value.outcome == "unknown"
+        || matches!(
+            event.terminal_result,
+            None | Some(ObservabilityTerminalResultV1::Unknown)
+        )
+    {
+        (0, 0, 1)
+    } else if value.independently_observed && value.outcome == "independently_verified_use" {
+        (1, 0, 0)
+    } else {
+        (0, 0, 0)
+    };
+    accumulator(
+        cells,
+        CellKey {
+            metric: AggregateShareMetricV1::ContextIndependentlyVerifiedUse,
+            unit: AggregateShareUnitV1::Events,
+            capability: AggregateCapabilityV1::Retrieval,
+        },
+    )
+    .observe(
+        event,
+        (1, 1, completed, censored, unknown, completed as f64),
+    );
 }
 
 fn accumulate_adoption_eligibility(

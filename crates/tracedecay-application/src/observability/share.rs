@@ -16,6 +16,24 @@ pub const AGGREGATE_SHARE_MAX_CELLS_V1: usize = 256;
 pub enum AggregateShareMetricV1 {
     RetrievalQueries,
     RetrievalAnswered,
+    /// Lanes the planner admitted, denominated by the lanes it requested.
+    RetrievalLanesAdmitted,
+    /// Final ranked candidates a lane reached, denominated by what it returned.
+    RetrieverUniqueContributions,
+    /// Candidates promoted into context, denominated by candidates composed.
+    RetrievalContextSelected,
+    /// Cataloged sources actually searched, denominated by eligible sources.
+    /// Denied and unresolved sources stay in the censored/unknown columns so a
+    /// denial can never be read back as an absence.
+    RetrievalSourcesSearched,
+    /// Context packets whose use was independently verified, denominated by
+    /// packets supplied. Self-reports never enter the numerator.
+    ContextIndependentlyVerifiedUse,
+    /// Summed baseline-to-candidate delta of one frozen retrieval ablation.
+    RetrievalAblationDelta,
+    /// Consent transitions that left sharing authorized. Transitions into
+    /// `Off`/`LocalOnly` are local receipts and never enter the share.
+    AnalyticsConsentChanges,
     AdoptionEligible,
     AdoptionIndependentlyUseful,
     OperationLatency,
@@ -44,6 +62,8 @@ pub enum AggregateCapabilityV1 {
     Runtime,
     Storage,
     Index,
+    /// The analytics capability observing itself: consent lifecycle only.
+    Analytics,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
